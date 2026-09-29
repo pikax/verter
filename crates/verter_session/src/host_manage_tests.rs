@@ -11379,7 +11379,7 @@ fn host_resolution_populates_no_host_side_route_memo() {
 /// edges are `export *` wildcards (`export * from './missing'; export * from
 /// './present';`) is a wildcard-only provider: its wildcards resolve into a
 /// local `dep_edges` map and are NOT published into `import_routes`, so
-/// `import_route_witness_for_specifiers(owner, ..)` returns `None`. The hole-2
+/// the wildcard rooting produced no witness (`None`). The hole-2
 /// rooting loop fed that `None` through `?`, dropping the WHOLE route entry —
 /// so a valid result resolved via the LATER wildcard (`./present`) was returned
 /// as `None` (no value served at all). "Do not admit to cache" was wrongly
@@ -11455,7 +11455,7 @@ fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcar
 /// Two independent rails enforce this, and the test guards the end-to-end
 /// behaviour rather than isolating either:
 /// - The coverage-checked `ImportRoute` admission
-///   (`import_route_witness_for_specifiers`): the rooting
+///   (the route walk's own witness scope): the rooting
 ///   loop admits an `ImportRoute` fact ONLY when the produced hash covers
 ///   EVERY unresolved wildcard source the traversal hit; a partial table that
 ///   omits `./missing` yields no fact, so the `Miss` is returned with EMPTY

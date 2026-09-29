@@ -152,7 +152,6 @@ impl VerterHost {
         target: &crate::resolver_core::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        unresolved_edge_owners: &mut rustc_hash::FxHashSet<(String, String)>,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
@@ -175,7 +174,6 @@ impl VerterHost {
                         import_target.imported_name.as_str(),
                         active,
                         participants,
-                        unresolved_edge_owners,
                         route_shallow_cache,
                     );
                 }
@@ -202,7 +200,6 @@ impl VerterHost {
                     original_name.as_str(),
                     active,
                     participants,
-                    unresolved_edge_owners,
                     route_shallow_cache,
                 )
             }
@@ -443,7 +440,6 @@ impl VerterHost {
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        unresolved_edge_owners: &mut rustc_hash::FxHashSet<(String, String)>,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
@@ -491,23 +487,11 @@ impl VerterHost {
                                 owner.as_str(),
                                 specifier.as_str(),
                             ) else {
-                                // The wildcard's source specifier does not
-                                // resolve under the current workspace. The
-                                // Miss this may produce depends on that
-                                // unresolved edge re-resolving when the file
-                                // set changes — record the owner AND the
-                                // unresolved source specifier so the route
-                                // entry roots it on the resolve-domain
-                                // witness rail. Neither the owner's
-                                // `FileWholeHash` nor its `Route` digest
-                                // observes a known-miss specifier, so
-                                // without this the cached Miss is served
-                                // stale after the target appears. The SOURCE
-                                // identity is threaded (not just the owner)
-                                // so the rooting loop can verify the
-                                // produced witness actually covers this
-                                // exact wildcard source.
-                                unresolved_edge_owners.insert((owner.clone(), specifier.clone()));
+                                // The wildcard's source specifier does not resolve.
+                                // Its transaction's witness — the exhausted probe set
+                                // for the miss — is already in the witness scope the
+                                // route build holds open around this walk, which
+                                // roots the Miss on the edge re-resolving.
                                 continue;
                             };
                             // A wildcard hop that lands on an ACTIVE
@@ -539,7 +523,6 @@ impl VerterHost {
                             target,
                             active,
                             participants,
-                            unresolved_edge_owners,
                             route_shallow_cache,
                         );
                     }
@@ -565,7 +548,6 @@ impl VerterHost {
                                 &target,
                                 active,
                                 participants,
-                                unresolved_edge_owners,
                                 route_shallow_cache,
                             );
                         }
@@ -644,7 +626,6 @@ impl VerterHost {
     )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
-        let mut unresolved_edge_owners = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
         // PATH-PRECISE resolution witness. Every hop this walk takes
         // resolves a specifier through the sealed transaction, and each
@@ -660,7 +641,8 @@ impl VerterHost {
         // `.d.ts` companion appearing beside an already-resolving `.js`
         // retargets a hop without moving a single byte of any file in the
         // walk — invisible to every parse fact, visible to this witness.
-        let (route_result, traversal_witness) = {
+        let (route_result, traversal_witness, refused_edge) = {
+            let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
             let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
             let route_result = self.resolve_named_type_export_route_uncached(
                 ctx,
@@ -668,11 +650,10 @@ impl VerterHost {
                 requested_name,
                 &mut active,
                 &mut touched_canonical_ids,
-                &mut unresolved_edge_owners,
                 &mut route_shallow_cache,
             );
             let collected = scope.collected();
-            (route_result?, collected)
+            (route_result?, collected, refusals.observed().is_some())
         };
 
         // ReturnOnly never publishes — fenced-participant arm. A walk that
@@ -709,68 +690,31 @@ impl VerterHost {
             }
         }
 
-        // Root any unresolved `export *` wildcard edge the traversal hit
-        // on the resolve-domain witness rail. The owner's
-        // `FileWholeHash` + `Route` facts do NOT observe a known-miss
-        // specifier, so a Miss caused by an unresolvable wildcard would be
-        // served stale after the target appears. Resolving the wildcard
-        // sources through the shared route-edge policy fans the sealed
-        // transactions' observations — including the exhausted probe set
-        // for the miss — so the recorded witness fails the moment the
-        // edge resolves.
+        // Every unresolved `export *` wildcard edge the traversal hit is
+        // already rooted on the resolve-domain witness rail: the walk
+        // resolved each one through the shared route-edge policy INSIDE
+        // the witness scope above, so the admitted transaction's witness —
+        // the decision that includes the exhausted probe set for the miss —
+        // is in `traversal_witness`, and the recorded route fails the
+        // moment the edge resolves. The owner's `FileWholeHash` + `Route`
+        // facts alone would not observe a known-miss specifier.
         //
-        // The witness is built FROM the traversed sources, so coverage is
-        // structural: every unresolved wildcard source this traversal hit
-        // is necessarily observed. A REFUSED resolution (the transaction
-        // could not admit a complete signature) is the unrootable case:
-        // we must NOT admit a fact-validated entry — a cached value could
-        // stale-serve once the target appears. But we must equally NOT
-        // DROP a valid result: returning `None` here makes `RouteDb` serve
-        // no value at all, which silently discards a route that resolved
-        // through a LATER wildcard (never conflate "refuse to cache" with
-        // "no result"). Instead, return the resolved route surface with
-        // EMPTY facts: `RouteDb`'s strict admission treats an empty fact
-        // signature as the negative-cache pattern — the value is returned
-        // to the caller but never persisted — so the next query
-        // re-resolves cold against the live workspace.
-        let mut owner_sources: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for (owner, source) in unresolved_edge_owners {
-            owner_sources.entry(owner).or_default().push(source);
+        // Coverage is structural: an edge is decided only by the walk that
+        // resolved it, so the witness is never rebuilt by resolving the same
+        // specifiers again.
+        //
+        // A REFUSED edge resolution (the transaction could not admit a
+        // complete signature) left no witness, so the route is unrootable.
+        // The refusal already marked every enclosing traced cold compute
+        // non-cacheable where it happened; the entry must still not be
+        // fact-validated, and must not be DROPPED either — `None` would make
+        // `RouteDb` serve no value at all and discard a route that resolved
+        // through a LATER wildcard. Serve the resolved surface with EMPTY
+        // facts: strict admission treats that as the negative-cache pattern,
+        // so the value reaches the caller and the next query re-resolves.
+        if refused_edge {
+            return Some((route_result, Vec::new()));
         }
-        for (owner, sources) in owner_sources {
-            let Some(witness) = self.import_route_witness_for_specifiers(
-                ctx.resolution_overlay(),
-                owner.as_str(),
-                &sources,
-            ) else {
-                // The empty-facts signal alone only protects the caches
-                // that inspect route facts directly (`RouteDb` /
-                // `ImportedRootDb` strict admission, the owner-import-
-                // surface producer's per-binding check). An ENCLOSING
-                // traced cold compute (a semantic-memo build, a
-                // component-meta proof producer) observes NOTHING from
-                // an empty fact list — its own stamps validate against
-                // the live view while the folded route silently
-                // retargets when the wildcard target appears. Mark cache
-                // non-admission by hand, exactly as the route-singleflight
-                // follower fallback does for an adopted unrootable route —
-                // the leader-produced unrootable route must refuse the same
-                // admissions. This is a VALID (Complete) unrootable route,
-                // NOT a partial result — cache non-admission only, never
-                // request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
-                );
-                return Some((route_result, Vec::new()));
-            };
-            for fact in witness {
-                if seen.insert(fact.clone()) {
-                    facts.push(fact);
-                }
-            }
-        }
-
         Some((route_result, facts))
     }
 

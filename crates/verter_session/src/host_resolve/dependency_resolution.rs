@@ -254,6 +254,18 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
+        #[cfg(test)]
+        if self
+            .test_force
+            .force_type_route_refusal_for_specifier
+            .lock()
+            .as_deref()
+            == Some(import_source)
+        {
+            return verter_workspace::ResolutionPublication::refused(
+                verter_audit::NonAdmissionReason::SignatureOverflow,
+            );
+        }
         match self.resolve_dependency_lane(
             overlay,
             owner_canonical,

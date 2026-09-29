@@ -345,9 +345,12 @@ takes the snapshot as a parameter (`None` for the workspace view) and owns
 lane selection (`TypeImport`, then the `EsmImport` fallback), declaration
 companion normalization and refusal propagation for both views. Every
 resolver context answers its publication through `type_route_answer`, which
-marks a refusal non-cacheable rather than a "not found". The witness
-builder for an unresolved wildcard edge resolves through the context's
-snapshot too, and a request's witness memo keys on the snapshot's identity.
+marks a refusal non-cacheable rather than a "not found". Witness building
+reuses the decisions a walk already admitted instead of resolving again: the
+route walk resolves an unresolved wildcard edge inside its witness scope, so
+that scope's observations root the edge, and the owner import surface roots a
+skipped import with the witness of the very resolution that skipped it, in
+the same view.
 
 ### What the filesystem backend is not
 

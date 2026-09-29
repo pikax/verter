@@ -131,8 +131,7 @@ pub(crate) struct ImportRouteObservation {
 }
 
 /// The identity of one witness build within a request: the host, the
-/// owner, the specifier lanes resolved, the resolution snapshot they resolved
-/// through, and the generations a load or an
+/// owner, the specifier lanes resolved, and the generations a load or an
 /// edit advances, so a build after either resolves again.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ImportRouteObservationKey {
@@ -142,8 +141,6 @@ pub(crate) struct ImportRouteObservationKey {
         String,
         Option<verter_semantic::resolver_core::ResolveRequestKind>,
     )>,
-    /// The request overlay's snapshot id, `0` for the workspace view.
-    overlay: u64,
     load_generation: u64,
     store_view_epoch: u64,
 }
@@ -338,32 +335,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<Vec<FactVersionRef>> {
         let specifiers = self.authored_import_specifiers(canonical_id)?;
-        self.import_route_witness_for_lanes(None, canonical_id, &specifiers)
-    }
-
-    /// Coverage-checked variant: the witness for an EXPLICIT specifier
-    /// set (the unresolved-wildcard rooting loop supplies the sources it
-    /// actually traversed).
-    ///
-    /// Every listed specifier is resolved, so the returned witness
-    /// necessarily observes each one. A refusal on any of them yields
-    /// `None` — the old coverage check ("is this source present in the
-    /// hashed table?") is structural here rather than a lookup, because
-    /// the witness is built FROM the requested sources.
-    pub(crate) fn import_route_witness_for_specifiers(
-        &self,
-        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
-        canonical_id: &str,
-        specifiers: &[String],
-    ) -> Option<Vec<FactVersionRef>> {
-        let lanes: Vec<(
-            String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
-        )> = specifiers
-            .iter()
-            .map(|specifier| (specifier.clone(), None))
-            .collect();
-        self.import_route_witness_for_lanes(overlay, canonical_id, &lanes)
+        self.import_route_witness_for_lanes(canonical_id, &specifiers)
     }
 
     /// Lane-aware witness builder. `None` selects the shared type-route
@@ -375,7 +347,6 @@ impl VerterHost {
     /// a re-push advances.
     fn import_route_witness_for_lanes(
         &self,
-        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         canonical_id: &str,
         specifiers: &[(
             String,
@@ -390,7 +361,7 @@ impl VerterHost {
         {
             return self.decline_import_route_witness();
         }
-        let witness = self.observed_import_route_witness(overlay, canonical_id, specifiers)?;
+        let witness = self.observed_import_route_witness(canonical_id, specifiers)?;
         if witness.len() > verter_workspace::FACT_SIGNATURE_CAP {
             // Overflow: the witness cannot represent the complete
             // observation set, so it is not rootable. Never represented
@@ -410,14 +381,13 @@ impl VerterHost {
     /// is exercising instead of asserting the `None` both produce.
     fn observed_import_route_witness(
         &self,
-        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         canonical_id: &str,
         specifiers: &[(
             String,
             Option<verter_semantic::resolver_core::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
-        let observation = self.import_route_observation(overlay, canonical_id, specifiers);
+        let observation = self.import_route_observation(canonical_id, specifiers);
         if observation.refused {
             return self.decline_import_route_witness();
         }
@@ -443,7 +413,6 @@ impl VerterHost {
     /// or a fresh one the request keeps.
     fn import_route_observation(
         &self,
-        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         canonical_id: &str,
         specifiers: &[(
             String,
@@ -455,7 +424,6 @@ impl VerterHost {
             host: self as *const Self as usize,
             canonical: std::sync::Arc::from(canonical_id),
             specifiers: specifiers.to_vec(),
-            overlay: overlay.map_or(0, verter_workspace::ResolutionOverlaySnapshot::id),
             load_generation: self.current_load_generation(),
             store_view_epoch: self.store_view_epoch(),
         });
@@ -475,7 +443,7 @@ impl VerterHost {
             let mut refused = false;
             for (specifier, lane) in specifiers {
                 match self.generation_current_route_resolution_in(
-                    overlay,
+                    None,
                     canonical_id,
                     specifier,
                     *lane,
@@ -541,7 +509,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<usize> {
         let specifiers = self.authored_import_specifiers(canonical_id)?;
-        self.observed_import_route_witness(None, canonical_id, &specifiers)
+        self.observed_import_route_witness(canonical_id, &specifiers)
             .map(|witness| witness.len())
     }
 
