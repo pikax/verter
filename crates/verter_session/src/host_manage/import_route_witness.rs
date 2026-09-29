@@ -162,6 +162,107 @@ pub(crate) struct ImportRouteObservationMemo(
     >,
 );
 
+/// One analysis-canonical normalization a request made: the canonical it
+/// normalized to (`None`: to itself), whether a resolution it drove was
+/// refused, and every observation those resolutions recorded.
+#[derive(Debug)]
+pub(crate) struct NormalizedCanonical {
+    pub(crate) normalized: Option<std::sync::Arc<str>>,
+    pub(crate) refused: bool,
+    observed: Vec<FactVersionRef>,
+}
+
+/// The identity of one normalization within a request: the host, the
+/// canonical, and the generations a load or an edit advances, so a
+/// normalization after either probes again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct NormalizedCanonicalKey {
+    host: usize,
+    canonical: std::sync::Arc<str>,
+    load_generation: u64,
+    store_view_epoch: u64,
+}
+
+/// A request's analysis-canonical normalizations, so every consumer that
+/// normalizes the same canonical in the request shares one run of its
+/// declaration-companion probes (a normalization is rooting evidence
+/// exactly like a witness build: its observations are replayed into the
+/// witness scopes open around each consumer, and a refusal is re-noted).
+/// Owned by the [`crate::request_context::RequestContext`] and dropped
+/// with it; bounded by the canonicals the request normalizes.
+#[derive(Debug, Default)]
+pub(crate) struct NormalizedCanonicalMemo(
+    parking_lot::Mutex<
+        rustc_hash::FxHashMap<NormalizedCanonicalKey, std::sync::Arc<NormalizedCanonical>>,
+    >,
+);
+
+#[cfg(test)]
+thread_local! {
+    /// How many normalizations ran their probes on this thread; test-only.
+    static NORMALIZATION_BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many normalizations ran their probes on this thread so far
+/// (test-only).
+#[cfg(test)]
+pub(crate) fn normalization_builds_for_tests() -> usize {
+    NORMALIZATION_BUILDS.with(Cell::get)
+}
+
+impl VerterHost {
+    /// `canonical`'s normalization: the one the active request already
+    /// made under the same generations — its observations replayed into
+    /// the open witness scopes and its refusal re-noted — or `normalize()`
+    /// run once and kept for the request. `normalize` answers the
+    /// canonical it normalizes to (`None`: itself) and whether a resolution
+    /// it drove was refused, noting that refusal itself.
+    pub(crate) fn request_normalized_canonical(
+        &self,
+        canonical: &str,
+        normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool),
+    ) -> std::sync::Arc<NormalizedCanonical> {
+        let request = crate::request_context::current_request_context();
+        let key = request.as_ref().map(|_| NormalizedCanonicalKey {
+            host: self as *const Self as usize,
+            canonical: std::sync::Arc::from(canonical),
+            load_generation: self.current_load_generation(),
+            store_view_epoch: self.store_view_epoch(),
+        });
+        if let (Some(request), Some(key)) = (request.as_ref(), key.as_ref()) {
+            let hit = request.normalized_canonicals.0.lock().get(key).cloned();
+            if let Some(hit) = hit {
+                replay_resolution_witness(&hit.observed);
+                if hit.refused {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    );
+                }
+                return hit;
+            }
+        }
+        #[cfg(test)]
+        NORMALIZATION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let normalization = {
+            let scope = ResolutionWitnessScope::enter();
+            let (normalized, refused) = normalize();
+            std::sync::Arc::new(NormalizedCanonical {
+                normalized,
+                refused,
+                observed: scope.collected(),
+            })
+        };
+        if let (Some(request), Some(key)) = (request, key) {
+            request
+                .normalized_canonicals
+                .0
+                .lock()
+                .insert(key, std::sync::Arc::clone(&normalization));
+        }
+        normalization
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// How many witness builds resolved their specifiers on this thread;

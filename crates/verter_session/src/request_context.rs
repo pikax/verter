@@ -788,6 +788,11 @@ pub struct RequestContext {
     /// request-scoped, dropped with the context.
     pub(crate) import_route_observations:
         crate::host_manage::import_route_witness::ImportRouteObservationMemo,
+    /// The request's analysis-canonical normalizations
+    /// ([`crate::host_manage::import_route_witness::NormalizedCanonicalMemo`]):
+    /// request-scoped, dropped with the context.
+    pub(crate) normalized_canonicals:
+        crate::host_manage::import_route_witness::NormalizedCanonicalMemo,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1401,6 +1406,7 @@ impl RequestContext {
             scheduler_audit: Mutex::new(None),
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             import_route_observations: Default::default(),
+            normalized_canonicals: Default::default(),
             type_resolution_hops: AtomicU64::new(0),
             type_resolution_navigations: AtomicU64::new(0),
             type_resolution_expansions: AtomicU64::new(0),
