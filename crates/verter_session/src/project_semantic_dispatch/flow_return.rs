@@ -1608,6 +1608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         spread: argument.spread,
                         context_sensitive: argument.context_sensitive,
                         const_view: None,
+                        first_pass: None,
                         literal_mode: indexed_argument_literal_mode(
                             argument.literal_mode,
                             argument_value.fresh,
@@ -6539,7 +6540,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
     ) -> bool {
         let graph = self.graph();
-        let source_object_like = !self.may_be_below_a_primitive(source, 0);
+        let source_object_like = !self.may_be_below_a_primitive(source);
         let target_data = graph.node_data(target);
         let primitive_like_target = matches!(
             target_data.as_deref(),
@@ -6576,47 +6577,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// primitive part: an object, array, tuple, signature or mapped type,
     /// a lib global interface's terminal carrier (`Promise<T>` — an async
     /// body's result — `Date`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Error`,
-    /// `Function`), a union of only such types, or an intersection none of
-    /// whose members has a primitive part. Other declaration carriers are
-    /// read through what they name.
-    fn may_be_below_a_primitive(&self, node: SemanticNodeId, level: usize) -> bool {
-        /// Nesting read before the question is left open.
-        const LEVELS: usize = 8;
-        if level > LEVELS {
-            return true;
-        }
-        let resolved = self.resolved_reduction_view(node);
-        let graph = self.graph();
-        let data = graph.node_data(resolved);
-        match data.as_deref() {
-            Some(
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. }
-                | SemanticNodeData::Mapped { .. }
-                | SemanticNodeData::ClassExpressionInstance { .. },
-            ) => false,
-            Some(SemanticNodeData::Union(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .all(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(SemanticNodeData::Intersection(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .any(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(
-                SemanticNodeData::DeclRef { identity }
-                | SemanticNodeData::InstantiationRef { base: identity, .. },
-            ) => self.runtime_nominal_identity(identity).is_none(),
-            _ => true,
-        }
+    /// `Function`), a union with such a member (a union is below a
+    /// primitive only when each of its members is), or an intersection none
+    /// of whose members has a primitive part. Other declaration carriers
+    /// are read through what they name.
+    ///
+    /// Unions and intersections are read through, however they nest, from a
+    /// work list; one that contains itself is left open.
+    pub(super) fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        crate::graph_walk::classify(node, |node| {
+            let resolved = self.resolved_reduction_view(node);
+            let graph = self.graph();
+            let data = graph.node_data(resolved);
+            Verdict::Leaf(Some(match data.as_deref() {
+                Some(
+                    SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                ) => false,
+                Some(SemanticNodeData::Union(members)) => return Verdict::All(members.to_vec()),
+                Some(SemanticNodeData::Intersection(members)) => {
+                    return Verdict::Any(members.to_vec())
+                }
+                Some(
+                    SemanticNodeData::DeclRef { identity }
+                    | SemanticNodeData::InstantiationRef { base: identity, .. },
+                ) => self.runtime_nominal_identity(identity).is_none(),
+                _ => true,
+            }))
+        })
+        .unwrap_or(true)
     }
 
     /// The type a generic reduction SOURCE relates as, the checker's
@@ -10079,6 +10073,9 @@ struct ObjectEvalFrame<'e> {
     offset: u32,
     assignment_fresh: bool,
     contextual: Option<SemanticNodeId>,
+    /// Each context-sensitive member reads as the non-inferring `any`
+    /// (a call's first inference pass, `SkipContextSensitive`).
+    skips_context_sensitive: bool,
     surface_members: Vec<crate::semantic_query::SurfaceMember>,
     unwidened_members: Vec<crate::semantic_query::SurfaceMember>,
     unwidened_differs: bool,
@@ -10296,9 +10293,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
+        let frame = self.object_eval_frame(entries, offset, assignment_fresh, contextual);
+        self.drive_object_literal(frame)
+    }
+
+    /// A context-sensitive object literal as a call's first inference pass
+    /// reads it (`checkExpressionWithContextualType` under
+    /// `SkipContextSensitive`): each context-sensitive member is the
+    /// non-inferring `any` (the checker's `anyFunctionType`), every other
+    /// member its own value.
+    pub(super) fn eval_object_literal_first_pass(
+        &mut self,
+        entries: &[crate::flow_slice_content::SliceObjectEntry],
+        offset: u32,
+    ) -> Positional<SemanticNodeId> {
+        let mut frame = self.object_eval_frame(entries, offset, false, None);
+        frame.skips_context_sensitive = true;
+        self.drive_object_literal(frame)
+    }
+
+    /// Run an object literal's frame with each child evaluated in place.
+    fn drive_object_literal(&mut self, frame: ObjectEvalFrame<'_>) -> Positional<SemanticNodeId> {
         // [`Self::eval_expr`] steps an object literal from its own stack;
         // here the same steps run with each child evaluated in place.
-        let mut frame = self.object_eval_frame(entries, offset, assignment_fresh, contextual);
+        let mut frame = frame;
         let mut delivered = None;
         loop {
             match self.object_eval_step(&mut frame, delivered.take()) {
@@ -10361,6 +10379,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             });
         let enclosing_receiver = std::mem::replace(&mut self.receiver, receiver.clone());
         ObjectEvalFrame {
+            skips_context_sensitive: false,
             entries,
             offset,
             assignment_fresh,
@@ -10481,6 +10500,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         while let Some(entry) = frame.entries.get(frame.next) {
             frame.next += 1;
+            if let crate::flow_slice_content::SliceObjectEntry::Member(member) = entry {
+                if frame.skips_context_sensitive && member.context_sensitive {
+                    let any = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                    if let Some(step) = self.object_eval_member_valued(
+                        frame,
+                        member,
+                        &member.value,
+                        self.holds.len(),
+                        false,
+                        Positional::Value(any),
+                    ) {
+                        return step;
+                    }
+                    continue;
+                }
+            }
             if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
                 (frame.receiver.as_ref(), entry)
             {
@@ -24168,6 +24206,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
     }
 
+    /// Whether a signature of `callee` reads its own type parameters in
+    /// its return: a declared return naming one, or a return the body
+    /// derives (which the lane cannot inspect before it runs, so it is
+    /// read as naming one). A callee whose signatures cannot be listed
+    /// is read as reading its clause.
+    fn undecided_call_return_reads_clause(&self, callee: SemanticNodeId) -> bool {
+        let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(callee) else {
+            return true;
+        };
+        let graph = self.dispatch.graph();
+        call_sigs
+            .iter()
+            .chain(construct_sigs.iter())
+            .any(|signature| {
+                let Some(data) = graph.node_data(*signature) else {
+                    return true;
+                };
+                let SemanticNodeData::Signature {
+                    type_parameters,
+                    return_carrier,
+                    ..
+                } = data.as_ref()
+                else {
+                    return false;
+                };
+                if type_parameters.is_empty() {
+                    return false;
+                }
+                let crate::semantic_query::SignatureReturnCarrier::Declared(declared) =
+                    return_carrier
+                else {
+                    return true;
+                };
+                let clause: rustc_hash::FxHashSet<SemanticNodeId> = type_parameters
+                    .iter()
+                    .map(|declared| declared.param)
+                    .collect();
+                let mut seen: rustc_hash::FxHashSet<SemanticNodeId> =
+                    rustc_hash::FxHashSet::default();
+                let mut stack = vec![*declared];
+                while let Some(node) = stack.pop() {
+                    if clause.contains(&node) {
+                        return true;
+                    }
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    if let Some(child) = graph.node_data(node) {
+                        let _ = child.for_each_child(|next| stack.push(next));
+                    }
+                }
+                false
+            })
+    }
+
     /// Whether `signature`'s value depends on the receiver it is called
     /// through: a polymorphic `this` in its signature positions
     /// (`self(): this`), or a `this` parameter its own type parameters are
@@ -24253,7 +24346,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return answer;
         }
         let step = self.resolve_call_step(callee, site, arguments);
-        self.fold_resolve_call_step(step, site)
+        self.fold_resolve_call_step(step, callee, site)
     }
 
     /// Fold a call's executor route `step` into the frame's vocabulary
@@ -24261,6 +24354,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn fold_resolve_call_step(
         &mut self,
         step: Option<Positional<super::call_resolve::ResolveCallStep>>,
+        callee: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
     ) -> Option<Positional<CallValue>> {
         let step = match step {
@@ -24328,13 +24422,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ) => Some(self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
-            // falls back to this rail's own read of the same call, which
-            // is never worse than the answer it gave without the
-            // executor.
+            // falls back to this rail's own read of the same call. That
+            // read instantiates a generic callee's clause at its fallback
+            // (a declared default, else `unknown`), which is the checker's
+            // answer only for a call supplying no inference evidence: a
+            // call that supplies it, over a signature whose return reads
+            // its own clause, is the typed `UnrepresentableCallee` gap
+            // (`id(p)` over an argument the relation cannot read is not
+            // `unknown`).
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::Undecidable
                 | crate::semantic_query::ResolveCallFailure::Budget,
-            ) => None,
+            ) => ((site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
+                && self.undecided_call_return_reads_clause(callee))
+            .then(|| self.degraded_unrepresentable_callee()),
         }
     }
 

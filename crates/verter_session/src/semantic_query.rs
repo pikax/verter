@@ -2143,6 +2143,11 @@ pub enum CallArgKey {
         /// which a `const` type parameter the argument is passed to infers
         /// from (`isConstContext`). `None` for any other argument.
         const_view: Option<SemanticNodeId>,
+        /// A context-sensitive object literal as the call's first inference
+        /// pass reads it (`SkipContextSensitive`): its context-sensitive
+        /// members read as the non-inferring `any`, so its other members
+        /// infer before those are typed. `None` for any other argument.
+        first_pass: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).
@@ -5022,6 +5027,14 @@ impl PartialReasonSet {
     /// `props: {…}` / `emits: […]` option objects, `get_component_meta`)
     /// is missing members it cannot name and must fail closed.
     pub const FLOW_RETURN_NO_SURFACE: Self = Self(1 << 16);
+    /// A conditional type over operands the checker decides (neither holds
+    /// a type variable the checker defers on) whose branch the lane could
+    /// not select: the relation it asks is undecided (`Unknown`, a budget,
+    /// a coinductive assumption), or the `extends` pattern is one the lane
+    /// does not infer from. The conditional shell it publishes is a typed
+    /// gap, never the checker's answer; a conditional the checker itself
+    /// defers (a generic operand) is complete.
+    pub const UNDECIDED_CONDITIONAL: Self = Self(1 << 17);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -5126,11 +5139,13 @@ pub enum PartialReason {
     FlowReturnUnverified,
     /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`].
     FlowReturnNoSurface,
+    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`].
+    UndecidedConditional,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -5148,6 +5163,7 @@ impl PartialReason {
         Self::FlowReturnUninferred,
         Self::FlowReturnUnverified,
         Self::FlowReturnNoSurface,
+        Self::UndecidedConditional,
     ];
 
     /// The single-reason set this variant names.
@@ -5171,6 +5187,7 @@ impl PartialReason {
             Self::FlowReturnUninferred => PartialReasonSet::FLOW_RETURN_UNINFERRED,
             Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+            Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
         }
     }
 
@@ -5197,6 +5214,7 @@ impl PartialReason {
             Self::FlowReturnUninferred => "flowReturnUninferred",
             Self::FlowReturnUnverified => "flowReturnUnverified",
             Self::FlowReturnNoSurface => "flowReturnNoSurface",
+            Self::UndecidedConditional => "undecidedConditional",
         }
     }
 }

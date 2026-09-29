@@ -298,10 +298,15 @@ fn arrays(depth: usize) -> String {
 /// Read from a loop: the checker-print comparison descends a bounded depth
 /// of its own.
 fn array_nest_on_a_small_stack(source: String) -> (usize, bool) {
+    array_nest_of_on_a_small_stack(source, RETURN)
+}
+
+/// [`array_nest_on_a_small_stack`] for `probe`.
+fn array_nest_of_on_a_small_stack(source: String, probe: &'static str) -> (usize, bool) {
     std::thread::Builder::new()
         .stack_size(1 << 20)
         .spawn(move || {
-            super::checker_probe_lane_tests::with_probe(&source, RETURN, |dispatch, node| {
+            super::checker_probe_lane_tests::with_probe(&source, probe, |dispatch, node| {
                 let graph = dispatch.graph();
                 let mut node = node;
                 let mut depth = 0;
@@ -359,6 +364,32 @@ fn arrays_nested_10000_deep_return_on_production_stacks() {
 #[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested array literals"]
 fn arrays_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(array_nest_on_a_small_stack(arrays(DEPTH)), (DEPTH, true));
+}
+
+fn module_const_arrays(depth: usize) -> String {
+    format!("export const x = {};\n", wrap(depth, "[", "]"))
+}
+
+/// A module-level `const` initialized with array literals nested 65 deep
+/// declares `number` under 65 array dimensions, as the checker's
+/// declaration does (TypeScript 7.0.2, all four settings): the shallow
+/// declaration inference infers the nest from its explicit stacks.
+#[test]
+fn module_const_arrays_nested_65_deep_answer_on_production_stacks() {
+    assert_eq!(
+        array_nest_of_on_a_small_stack(module_const_arrays(65), "typeof x"),
+        (65, true)
+    );
+}
+
+/// A thousand levels, within the inference's work budget: no level costs a
+/// native one.
+#[test]
+fn module_const_arrays_nested_1000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        array_nest_of_on_a_small_stack(module_const_arrays(1_000), "typeof x"),
+        (1_000, true)
+    );
 }
 
 #[test]
@@ -1329,6 +1360,100 @@ const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
 fn alias_chains_20_long_keep_a_top_level_deposit() {
     assert_eq!(
         evaluated_mismatches_on_a_worker_stack(alias_chain(20), ALIAS_CHAIN_ROWS),
+        Vec::<String>::new()
+    );
+}
+
+/// `{name}0 = {base}`, then `{name}{n} = {name}{n - 1}` up to `length`.
+fn named_chain(name: &str, length: usize, base: &str) -> String {
+    let mut source = format!("type {name}0 = {base};\n");
+    for level in 1..=length {
+        source.push_str(&format!("type {name}{level} = {name}{};\n", level - 1));
+    }
+    source
+}
+
+/// A target signature whose result names `void` through a chain of twelve
+/// aliases accepts any source result: `(() => number) extends (() => V12)`
+/// is `1` (TypeScript 7.0.2, all four settings). The chain is followed to
+/// its end, however long.
+#[test]
+fn a_void_result_through_a_12_alias_chain_accepts_any_result() {
+    let source = named_chain("V", 12, "void");
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(
+            source,
+            &[("(() => number) extends (() => V12) ? 1 : 2", "1")]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// A rest element names its array through a declaration and through a
+/// chain of twelve aliases: `[string, 1, 2]` is assignable to
+/// `[string, ...R]` for `type R = number[]` and for `R12` down to it
+/// (TypeScript 7.0.2, all four settings).
+#[test]
+fn a_rest_element_names_its_array_through_aliases() {
+    for source in [
+        "type R = number[];\ntype T = [string, ...R];\n".to_owned(),
+        format!(
+            "{}type T = [string, ...R12];\n",
+            named_chain("R", 12, "number[]")
+        ),
+    ] {
+        assert_eq!(
+            evaluated_mismatches_on_a_worker_stack(
+                source,
+                &[("[string, 1, 2] extends T ? 1 : 2", "1")]
+            ),
+            Vec::<String>::new()
+        );
+    }
+}
+
+/// A base class whose instance type is an intersection nested twelve times
+/// through aliases (`I{n} = I{n - 1} & { k{n}: n }`) is a valid base: its
+/// derived class reads every member (TypeScript 7.0.2, all four settings).
+#[test]
+fn a_base_through_12_nested_intersections_is_valid() {
+    let mut source = String::from("type I0 = { k0: 0 };\n");
+    for level in 1..=12 {
+        source.push_str(&format!(
+            "type I{level} = I{} & {{ k{level}: {level} }};\n",
+            level - 1
+        ));
+    }
+    source.push_str("declare const Base: new () => I12;\nexport class C extends Base {}\n");
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(source, &[("C[\"k0\"]", "0"), ("C[\"k12\"]", "12")]),
+        Vec::<String>::new()
+    );
+}
+
+/// An index of named key unions nested twelve times
+/// (`K{n} = K{n - 1} | "k{n}"`) enumerates every key:
+/// `Box[K12]` reads all thirteen members (TypeScript 7.0.2, all four
+/// settings).
+#[test]
+#[ignore = "an index by a named key union that names another key union evaluates to no value"]
+fn an_index_through_12_nested_key_unions_enumerates_every_key() {
+    let mut source = String::from("type Box = {");
+    for level in 0..=12 {
+        source.push_str(&format!(" k{level}: {level};"));
+    }
+    source.push_str(" };\ntype K0 = \"k0\";\n");
+    for level in 1..=12 {
+        source.push_str(&format!("type K{level} = K{} | \"k{level}\";\n", level - 1));
+    }
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(
+            source,
+            &[(
+                "Box[K12]",
+                "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12"
+            )]
+        ),
         Vec::<String>::new()
     );
 }

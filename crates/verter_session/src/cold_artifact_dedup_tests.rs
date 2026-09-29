@@ -4294,3 +4294,42 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
          refuse every owner with an unresolvable import)",
     );
 }
+
+/// The augmentation probe walks a side-effect import's re-export chain to
+/// its end, however long: an owner importing `./b0`, where each barrel
+/// re-exports the next and the tenth re-exports a module augmenter of
+/// `./target`, depends on that augmentation — every canonical is walked
+/// once, so a re-export cycle ends the walk instead of a depth bound.
+#[test]
+fn augmentation_probe_walks_a_barrel_chain_of_any_length() {
+    const BARRELS: usize = 10;
+    let host = make_host(&[]);
+    upsert(
+        &host,
+        "/workspace/src/target.ts",
+        "export interface T { base: 1 }\n",
+    );
+    upsert(
+        &host,
+        "/workspace/src/aug.ts",
+        "declare module \"./target\" { interface T { extra: 1 } }\nexport {};\n",
+    );
+    for barrel in 0..BARRELS {
+        let next = if barrel + 1 == BARRELS {
+            "./aug".to_owned()
+        } else {
+            format!("./b{}", barrel + 1)
+        };
+        upsert(
+            &host,
+            &format!("/workspace/src/b{barrel}.ts"),
+            &format!("export * from \"{next}\";\n"),
+        );
+    }
+    let owner = "/workspace/src/owner.ts";
+    upsert(&host, owner, "import './b0';\nexport type Owner = 1;\n");
+    assert!(
+        host.owner_has_module_augmentation_dependency(owner),
+        "the augmenter at the end of a {BARRELS}-barrel re-export chain is found"
+    );
+}

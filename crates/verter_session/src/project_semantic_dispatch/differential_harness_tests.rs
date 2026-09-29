@@ -646,6 +646,9 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         Ok(result) => Arc::clone(result),
         Err(error) => return Observed::NoValue(format!("{error:?}")),
     };
+    // The probe's type is read as a consumer reads it: under a request for
+    // the probe file, so every judgement takes that project's options.
+    let _request = crate::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -704,7 +707,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             crate::semantic_query::PrimitiveKind::BigInt => "bigint".to_owned(),
             other => format!("{other:?}").to_ascii_lowercase(),
         },
-        SemanticNodeData::Literal(LiteralValue::String(value)) => format!("\"{value}\""),
+        SemanticNodeData::Literal(LiteralValue::String(value)) => checker_string_literal(value),
         SemanticNodeData::Literal(LiteralValue::Number(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::Boolean(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::BigInt(value)) => format!("{value}n"),
@@ -762,7 +765,11 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
                 ));
             }
             for member in surface.positive_members().iter() {
-                let name = member.key.as_string().unwrap_or("<key>");
+                let name = match member.key.cloned_known() {
+                    Some(verter_type_expr::PropertyKey::String(name)) => name.to_string(),
+                    Some(verter_type_expr::PropertyKey::Number(index)) => index.to_string(),
+                    _ => "<key>".to_owned(),
+                };
                 let optional = if member.optional { "?" } else { "" };
                 match member.method_kind {
                     Some(verter_type_expr::ObjectMethodKind::Method) => members.push(format!(
@@ -819,7 +826,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
         } => {
             let mut text = String::from("`");
             for (index, quasi) in quasis.iter().enumerate() {
-                text.push_str(quasi);
+                verter_type_expr::push_template_quasi(&mut text, quasi);
                 if let Some(expression) = expressions.get(index) {
                     text.push_str(&format!("${{{}}}", at(*expression)));
                 }
@@ -857,6 +864,36 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             format!("<unrendered {text}>")
         }
     }
+}
+
+/// A string literal type as the checker prints it: double-quoted, with a
+/// backslash, a double quote, every control character and U+2028 / U+2029 /
+/// U+0085 escaped.
+fn checker_string_literal(value: &str) -> String {
+    let mut text = String::from("\"");
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => text.push_str("\\\\"),
+            '"' => text.push_str("\\\""),
+            '\n' => text.push_str("\\n"),
+            '\t' => text.push_str("\\t"),
+            '\r' => text.push_str("\\r"),
+            '\u{8}' => text.push_str("\\b"),
+            '\u{c}' => text.push_str("\\f"),
+            '\u{b}' => text.push_str("\\v"),
+            '\0' if characters.peek().is_some_and(char::is_ascii_digit) => {
+                text.push_str("\\x00");
+            }
+            '\0' => text.push_str("\\0"),
+            control @ ('\u{1}'..='\u{1f}' | '\u{2028}' | '\u{2029}' | '\u{85}') => {
+                text.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => text.push(other),
+        }
+    }
+    text.push('"');
+    text
 }
 
 /// `node` printed as an operand of `|`, `&`, `[]` or `keyof`:
@@ -1285,6 +1322,26 @@ fn the_canonical_spelling_sorts_members_and_folds_booleans() {
     assert_eq!(
         canonical_text("{ a: string | number; b: [1, (2 | undefined)?]; }"),
         canonical_text("{ b: [1, 2?]; a: number | string; }")
+    );
+    assert_eq!(
+        canonical_text("[a: string, b?: number | undefined]"),
+        canonical_text("[a: string, b?: number]")
+    );
+    assert_eq!(
+        canonical_text("{ a: 1; b?: 2 | undefined; }"),
+        canonical_text("{ b?: 2; a: 1; }")
+    );
+    assert_ne!(
+        canonical_text("{ b?: undefined; }"),
+        canonical_text("{ b?: 2; }")
+    );
+    assert_ne!(
+        canonical_text("{ b: 2 | undefined; }"),
+        canonical_text("{ b: 2; }")
+    );
+    assert_ne!(
+        canonical_text("[a: string, b?: number]"),
+        canonical_text("[a: string, b: number]")
     );
     assert_eq!(
         canonical_text("(x: string | null) => number | undefined"),

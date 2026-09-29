@@ -116,7 +116,6 @@ impl ProjectSemanticDispatch<'_> {
                 quasis,
                 expressions,
             }) if quasis.len() == expressions.len() + 1
-                && quasis.iter().all(|quasi| !quasi.contains('\\'))
                 && expressions.iter().any(|hole| is_infer(*hole))
                 && expressions
                     .iter()
@@ -183,15 +182,13 @@ impl ProjectSemanticDispatch<'_> {
 
     /// A settled template literal type's parts: every hole a placeholder
     /// the reducer keeps (`string`, `number`, `bigint`, `any`, a string
-    /// mapping over one). `None` for any other node, or a template whose
-    /// quasis are not comparable raw text.
+    /// mapping over one). `None` for any other node.
     fn template_parts(&self, node: SemanticNodeId) -> Option<TemplateParts> {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
             }) if quasis.len() == expressions.len() + 1
-                && quasis.iter().all(|quasi| !quasi.contains('\\'))
                 && expressions.iter().all(|hole| self.is_template_hole(*hole)) =>
             {
                 Some(TemplateParts {

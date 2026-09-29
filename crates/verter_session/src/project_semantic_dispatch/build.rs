@@ -3983,7 +3983,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => return None,
                 };
                 let settled = self.resolve_signature_source_carrier(instance, context);
-                self.is_valid_base_type(settled, 0).then_some(instance)
+                self.is_valid_base_type(settled).then_some(instance)
             });
         Some(ClassValueBase {
             constructor_type,
@@ -3994,45 +3994,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// TypeScript's `isValidBaseType` over a settled node: an object type
     /// (an object surface, array, tuple, signature, class or interface
-    /// instance), `object`, `any`, or an intersection of those. A union or
-    /// a primitive is not a base type.
-    fn is_valid_base_type(&self, node: SemanticNodeId, depth: usize) -> bool {
-        const MAX_NESTING: usize = 8;
-        if depth > MAX_NESTING {
-            return false;
-        }
-        let Some(data) = self.graph().node_data(node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Object(_)
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::Signature { .. }
-            | SemanticNodeData::ClassExpressionInstance { .. }
-            | SemanticNodeData::MergedDecl { .. }
-            | SemanticNodeData::Primitive(PrimitiveKind::Object | PrimitiveKind::Any) => true,
-            SemanticNodeData::DeclRef { identity }
-            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
-                self.prepared_decl_kind(identity),
-                Some(
-                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
-                )
-            ),
-            SemanticNodeData::Intersection(arms) => {
-                let arms = arms.members_arc();
-                drop(data);
-                arms.iter().all(|arm| {
-                    let settled = self.resolve_signature_source_carrier(
-                        *arm,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                    );
-                    self.is_valid_base_type(settled, depth + 1)
-                })
+    /// instance), `object`, `any`, or an intersection of those, each arm
+    /// settled through its carriers, at any nesting. A union or a primitive
+    /// is not a base type, and neither is an intersection that contains
+    /// itself.
+    /// [`Self::is_valid_base_type`], for the tests beside this module.
+    #[cfg(test)]
+    pub(super) fn is_valid_base_type_for_tests(&self, node: SemanticNodeId) -> bool {
+        self.is_valid_base_type(node)
+    }
+
+    fn is_valid_base_type(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        // The nodes already settled: the start, and each arm's settlement.
+        let mut settled: FxHashSet<SemanticNodeId> = FxHashSet::from_iter([node]);
+        crate::graph_walk::classify(node, |node| {
+            if settled.insert(node) {
+                let resolved = self.resolve_signature_source_carrier(
+                    node,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                );
+                if resolved != node {
+                    settled.insert(resolved);
+                    return Verdict::As(resolved);
+                }
             }
-            _ => false,
-        }
+            let Some(data) = self.graph().node_data(node) else {
+                return Verdict::Leaf(Some(false));
+            };
+            Verdict::Leaf(Some(match data.as_ref() {
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. }
+                | SemanticNodeData::MergedDecl { .. }
+                | SemanticNodeData::Primitive(PrimitiveKind::Object | PrimitiveKind::Any) => true,
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                    self.prepared_decl_kind(identity),
+                    Some(
+                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                    )
+                ),
+                SemanticNodeData::Intersection(arms) => {
+                    return Verdict::All(arms.members_arc().to_vec());
+                }
+                _ => false,
+            }))
+        })
+        .unwrap_or(false)
     }
 
     /// The static-side contribution of a class value base: the base
@@ -4821,48 +4833,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
         );
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let binding_scope = DeclarationBindingScope {
+            scope: &scope,
+            scope_payload: scope_payload.as_ref(),
+            shadowing: &shadowing,
+            authored_resolution_debt: authored_resolution_debt.as_ref(),
+        };
+        let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
+            // Skeleton mode preserves open generics: an unbound
+            // parameter binds a TypeParam shell so body lowering
+            // produces TypeParam graph nodes (instead of resolving
+            // T-refs to Opaque(Miss)). The relation engine treats
+            // TypeParam as deferred → Conditional branches stay live
+            // → the cycle gate's ref collector walks both → recursive
+            // refs through nested mapped/template-literal/conditional
+            // bodies become visible to the cycle gate. Every other mode
+            // leaves it unbound, so `Opaque(Miss)` propagates through
+            // the body; callers that genuinely need open-generic access
+            // must explicitly request Skeleton mode.
+            (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
+                let decl_identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(decl_canonical),
+                    owner: decl_owner,
+                    whole_hash: decl_whole_hash,
+                    decl_name: Arc::clone(decl_name),
+                };
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::TypeParam {
+                        decl: decl_identity,
+                        param_index: index as u16,
+                        constraint: None,
+                        default: None,
+                        display_name: Arc::from(param.name.as_str()),
+                    },
+                    scope.clone(),
+                )
+            })
+        };
         let (env, _bindings) = self.bind_declared_type_arguments(
             &prepared,
             args,
-            &DeclarationBindingScope {
-                scope: &scope,
-                scope_payload: scope_payload.as_ref(),
-                shadowing: &shadowing,
-                authored_resolution_debt: authored_resolution_debt.as_ref(),
-            },
+            &binding_scope,
             &mut substitutions,
             context,
-            |index, param| {
-                // Skeleton mode preserves open generics: an unbound
-                // parameter binds a TypeParam shell so body lowering
-                // produces TypeParam graph nodes (instead of resolving
-                // T-refs to Opaque(Miss)). The relation engine treats
-                // TypeParam as deferred → Conditional branches stay live
-                // → the cycle gate's ref collector walks both → recursive
-                // refs through nested mapped/template-literal/conditional
-                // bodies become visible to the cycle gate. Every other mode
-                // leaves it unbound, so `Opaque(Miss)` propagates through
-                // the body; callers that genuinely need open-generic access
-                // must explicitly request Skeleton mode.
-                (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
-                    let decl_identity = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(decl_canonical),
-                        owner: decl_owner,
-                        whole_hash: decl_whole_hash,
-                        decl_name: Arc::clone(decl_name),
-                    };
-                    self.graph().intern_node_with_scope(
-                        SemanticNodeData::TypeParam {
-                            decl: decl_identity,
-                            param_index: index as u16,
-                            constraint: None,
-                            default: None,
-                            display_name: Arc::from(param.name.as_str()),
-                        },
-                        scope.clone(),
-                    )
-                })
-            },
+            unbound_parameter,
         );
 
         // 5. Shallow-lower the body. Collects substitution facts for
@@ -4961,6 +4975,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context,
             authored_resolution_debt.as_ref(),
         );
+
+        // The checker's tail loop (`getConditionalType`): a generic body
+        // whose selected branch is this declaration applied to OTHER
+        // arguments is the next step of one tail run, evaluated here in
+        // place of a nested instantiation, and counted by the checker
+        // compatibility policy. The run fails with TS2589 at the checker's tail limit, or
+        // at once when the arguments come round again (the run can then
+        // never reach a value, so the checker's count is certain to run
+        // out). Each step is charged to the connected-work ledger; a trip
+        // leaves the step's back-edge as a typed partial.
+        let mut tail = crate::semantic_query::checker_policy::ConditionalTail::resumed(0);
+        let mut tail_arguments: Vec<Arc<[SemanticNodeId]>> = vec![Arc::clone(args)];
+        let generic = !prepared.type_parameters.is_empty();
+        while let Some(next) = generic
+            .then(|| self.conditional_tail_arguments(result, decl_canonical, decl_owner, decl_name))
+            .flatten()
+        {
+            if tail_arguments.contains(&next) || !tail.step() {
+                result = crate::semantic_query::checker_policy::checker_recovery(
+                    self.graph(),
+                    crate::semantic_query::CheckerDiagnostic {
+                        code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                        operation: crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail,
+                    },
+                    None,
+                );
+                break;
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                break;
+            }
+            tail_arguments.push(Arc::clone(&next));
+            substitutions.clear();
+            let (next_env, _) = self.bind_declared_type_arguments(
+                &prepared,
+                &next,
+                &binding_scope,
+                &mut substitutions,
+                context,
+                unbound_parameter,
+            );
+            result = self.lower_decl_body_with_provenance(
+                &prepared,
+                &next_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+                authored_resolution_debt.as_ref(),
+            );
+            result = self.backfill_member_index_surface(
+                result,
+                &prepared,
+                &next_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+                authored_resolution_debt.as_ref(),
+            );
+        }
 
         // Cross-file declaration augmentation (`declare module "X"` /
         // `declare global` interface merging from sibling files). Fold every
@@ -8632,6 +8710,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
 
             // ---- Identity utility ----
+            // `NoInfer<T>` over a generic operand is the compiler's
+            // `NoInfer` application (no inference site for a call's type
+            // parameters); over any other operand it is the operand
+            // (`getNoInferType`).
+            "NoInfer" if args.len() == 1 && self.type_is_generic(args[0]) => {
+                let result = graph.intern_node(
+                    SemanticNodeData::intrinsic_application(
+                        crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer,
+                        Arc::clone(args),
+                    )
+                    .expect("one operand"),
+                );
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence, false)
+            }
             "NoInfer" if args.len() == 1 => {
                 let source = args[0];
                 let result = graph.intern_node(SemanticNodeData::Alias(source));
@@ -10205,7 +10298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         readonly: bool,
     ) -> NormalizedTupleShape {
         let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
-        self.splice_tuple_elements(elements, &mut out, 0);
+        self.splice_tuple_elements(elements, &mut out);
         // Non-trailing optional reconciliation (reverse scan: a slot's
         // conversion depends only on LATER elements; a converted slot is
         // itself required and forces conversion of earlier optionals).
@@ -10255,58 +10348,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
         NormalizedTupleShape::Tuple(out)
     }
 
-    /// Recursive splice body for [`Self::normalize_tuple_spread`].
+    /// The splice body of [`Self::normalize_tuple_spread`]: every rest
+    /// element whose value settles on a tuple is replaced by that tuple's
+    /// elements, spliced in turn, so `[...[...[1, 2]]]` is `[1, 2]` at any
+    /// nesting. The tuples being spliced are read from a work list; a tuple
+    /// spread into itself (a cycle) keeps its rest element as it is.
     fn splice_tuple_elements(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         out: &mut Vec<crate::semantic_query::TupleElement>,
-        depth: u32,
     ) {
-        /// Nested `[...[...T]]` splice ceiling — real-world nesting is
-        /// 1–2 levels; the bound is a runaway fuse.
-        const SPLICE_DEPTH_BUDGET: u32 = 8;
-        for element in elements {
-            if element.rest && depth < SPLICE_DEPTH_BUDGET {
-                let inner_tuple = self.settled_node_through_aliases(element.value, |data| {
-                    matches!(data, SemanticNodeData::Tuple { .. })
-                });
-                if let Some(tuple_node) = inner_tuple {
-                    if let Some(SemanticNodeData::Tuple {
-                        elements: inner, ..
-                    }) = self.graph().node_data(tuple_node).as_deref()
-                    {
-                        let inner = Arc::clone(inner);
-                        self.splice_tuple_elements(&inner, out, depth + 1);
-                        continue;
-                    }
+        // Each level: the elements it splices, the next one, and the tuple
+        // it came from (none for the outermost).
+        let mut levels: Vec<(
+            Arc<[crate::semantic_query::TupleElement]>,
+            usize,
+            Option<SemanticNodeId>,
+        )> = vec![(Arc::from(elements), 0, None)];
+        let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        while let Some((elements, next, _)) = levels.last_mut() {
+            let Some(element) = elements.get(*next).cloned() else {
+                if let Some((_, _, Some(tuple))) = levels.pop() {
+                    splicing.remove(&tuple);
+                }
+                continue;
+            };
+            *next += 1;
+            if element.rest {
+                let inner = self
+                    .settled_node_through_aliases(element.value, |data| {
+                        matches!(data, SemanticNodeData::Tuple { .. })
+                    })
+                    .filter(|tuple| !splicing.contains(tuple))
+                    .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
+                        Some(SemanticNodeData::Tuple {
+                            elements: inner, ..
+                        }) => Some((tuple, Arc::clone(inner))),
+                        _ => None,
+                    });
+                if let Some((tuple, inner)) = inner {
+                    splicing.insert(tuple);
+                    levels.push((inner, 0, Some(tuple)));
+                    continue;
                 }
             }
-            out.push(element.clone());
+            out.push(element);
         }
     }
 
-    /// Unwrap transparent `Alias` hops (bounded) and return the settled
-    /// node iff its data matches `predicate`. `None` for open /
-    /// unresolved carriers — callers preserve those verbatim.
+    /// Follow `node`'s transparent `Alias` redirects, however long the
+    /// chain, and return the settled node iff its data matches `predicate`.
+    /// `None` for open / unresolved carriers and for an alias cycle —
+    /// callers preserve those verbatim.
     fn settled_node_through_aliases(
         &self,
         node: SemanticNodeId,
         predicate: impl Fn(&SemanticNodeData) -> bool,
     ) -> Option<SemanticNodeId> {
-        let mut current = node;
-        // bounded-loop: at most 8 transparent Alias hops.
-        for _ in 0..8 {
-            let data = self.graph().node_data(current)?;
-            match &*data {
-                SemanticNodeData::Alias(target) => {
-                    let next = *target;
-                    drop(data);
-                    current = next;
-                }
-                other => return predicate(other).then_some(current),
-            }
+        let graph = self.graph();
+        match graph.alias_chain_end(node, |_| {}) {
+            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
+                .node_data(settled)
+                .is_some_and(|data| predicate(&data))
+                .then_some(settled),
+            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
+            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
         }
-        None
     }
 
     /// Build a tuple node whose elements are the function's parameter
@@ -10469,7 +10576,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => {}
         }
-        let keys = self.finite_index_keys(resolved, 0)?;
+        let keys = self.finite_index_keys(resolved)?;
         if keys.is_empty() {
             return None;
         }
@@ -10561,125 +10668,233 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   resolves first) is those keys — `Box[keyof Box]` reads every
     ///   property;
     /// - an intersection is the keys common to every arm, in the first
-    ///   arm's order — `'opt' & keyof Box` is `'opt'`.
+    ///   arm's order — `'opt' & keyof Box` is `'opt'`;
+    /// - a named key type (`type K = keyof Box`) is the keys its declaration
+    ///   resolves to.
+    ///
+    /// Composites nest to any depth: they are read from a work list, and a
+    /// key type that contains itself is not finite.
+    /// [`Self::finite_index_keys`], for the tests beside this module.
+    #[cfg(test)]
+    pub(super) fn finite_index_keys_for_tests(
+        &self,
+        index: SemanticNodeId,
+    ) -> Option<Vec<crate::semantic_query::IndexKey>> {
+        self.finite_index_keys(index)
+    }
+
     fn finite_index_keys(
         &self,
         index: SemanticNodeId,
-        depth: usize,
     ) -> Option<Vec<crate::semantic_query::IndexKey>> {
         use crate::semantic_query::IndexKey;
-        const MAX_INDEX_NESTING: usize = 8;
-        if depth > MAX_INDEX_NESTING {
-            return None;
+        /// A key type waiting on its parts' keys.
+        enum Pending {
+            /// A union: every member's keys, first occurrence first — the
+            /// keys kept so far deduplicated through a set, since a scan of
+            /// them made a long key union quadratic.
+            Union {
+                node: SemanticNodeId,
+                members: Arc<[SemanticNodeId]>,
+                next: usize,
+                keys: Vec<IndexKey>,
+                seen: FxHashSet<IndexKey>,
+            },
+            /// An intersection: the keys common to every member, in the
+            /// first member's order.
+            Intersection {
+                node: SemanticNodeId,
+                members: Arc<[SemanticNodeId]>,
+                next: usize,
+                common: Option<Vec<IndexKey>>,
+            },
+            /// A named key type: its declaration's keys.
+            Named { node: SemanticNodeId },
         }
-        let data = self.graph().node_data(index)?;
-        match data.as_ref() {
-            SemanticNodeData::Union(members) => {
-                let members = members.members_arc();
-                drop(data);
-                // First occurrence order, deduplicated through a set: a
-                // scan of the keys kept so far made a long key union
-                // quadratic.
-                let mut keys = Vec::with_capacity(members.len());
-                let mut seen: FxHashSet<IndexKey> = FxHashSet::default();
-                for member in members.iter() {
-                    for key in self.finite_index_keys(*member, depth + 1)? {
-                        if first_index_key(&mut seen, &key) {
-                            keys.push(key);
-                        }
-                    }
-                }
-                Some(keys)
-            }
-            SemanticNodeData::Intersection(members) => {
-                let members = members.members_arc();
-                drop(data);
-                let mut common: Option<Vec<IndexKey>> = None;
-                for member in members.iter() {
-                    let keys = self.finite_index_keys(*member, depth + 1)?;
-                    common = Some(match common {
-                        None => keys,
-                        Some(common) => {
-                            let mut present: FxHashSet<IndexKey> = FxHashSet::default();
-                            for key in &keys {
-                                first_index_key(&mut present, key);
-                            }
-                            common
-                                .into_iter()
-                                .filter(|key| index_key_present(&present, key))
-                                .collect()
-                        }
-                    });
-                }
-                common
-            }
-            SemanticNodeData::KeyOf { base } => {
-                let base = *base;
-                drop(data);
-                let settled = self.resolve_signature_source_carrier(
-                    base,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Expanded,
-                    ),
-                );
-                let names = self.key_names_from_base_node(settled)?;
-                Some(
-                    names
-                        .into_iter()
-                        .map(|name| match name {
-                            crate::semantic_query::PropertyKey::String(text) => {
-                                IndexKey::String(text)
-                            }
-                            crate::semantic_query::PropertyKey::Number(number) => {
-                                IndexKey::Number(number)
-                            }
-                            crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
-                                IndexKey::UniqueSymbol(identity)
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            SemanticNodeData::Literal(_) => {
-                drop(data);
-                Some(vec![match self.normalized_index_key_node(index) {
-                    key @ (IndexKey::String(_)
-                    | IndexKey::Number(_)
-                    | IndexKey::UniqueSymbol(_)) => key,
-                    IndexKey::Computed(resolved) => {
-                        match self.graph().node_data(resolved).as_deref() {
-                            Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
-                                IndexKey::Computed(resolved)
-                            }
-                            _ => return None,
-                        }
-                    }
-                }])
-            }
-            // A named key type (`type K = keyof Box`) is the keys its
-            // declaration resolves to.
-            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
-                drop(data);
-                let context = crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                );
-                let settled = self.resolve_signature_source_carrier(index, context);
-                if settled == index {
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut open: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut visit = Some(index);
+        loop {
+            // The keys of the node visited, when it has no parts.
+            let mut keys: Option<Vec<IndexKey>> = None;
+            // The set `keys` are deduplicated through, when a union handed
+            // them up: a union whose first member is a union adopts both,
+            // so a nest of unions hashes each key once, not once per level.
+            let mut keys_seen: Option<FxHashSet<IndexKey>> = None;
+            if let Some(node) = visit.take() {
+                if open.contains(&node) {
                     return None;
                 }
-                let settled = self
-                    .evaluate_deferred_semantic_node_with_context(settled, context)
-                    .into_active_query_build_node(self);
-                self.finite_index_keys(settled, depth + 1)
-            }
-            _ => {
-                drop(data);
-                match self.normalized_index_key_node(index) {
-                    key @ (IndexKey::String(_)
-                    | IndexKey::Number(_)
-                    | IndexKey::UniqueSymbol(_)) => Some(vec![key]),
-                    IndexKey::Computed(_) => None,
+                let data = self.graph().node_data(node)?;
+                match data.as_ref() {
+                    SemanticNodeData::Union(members) => {
+                        let members = members.members_arc();
+                        drop(data);
+                        open.insert(node);
+                        pending.push(Pending::Union {
+                            node,
+                            keys: Vec::with_capacity(members.len()),
+                            members,
+                            next: 0,
+                            seen: FxHashSet::default(),
+                        });
+                    }
+                    SemanticNodeData::Intersection(members) => {
+                        let members = members.members_arc();
+                        drop(data);
+                        open.insert(node);
+                        pending.push(Pending::Intersection {
+                            node,
+                            members,
+                            next: 0,
+                            common: None,
+                        });
+                    }
+                    SemanticNodeData::KeyOf { base } => {
+                        let base = *base;
+                        drop(data);
+                        let settled = self.resolve_signature_source_carrier(
+                            base,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Expanded,
+                            ),
+                        );
+                        let names = self.key_names_from_base_node(settled)?;
+                        keys = Some(
+                            names
+                                .into_iter()
+                                .map(|name| match name {
+                                    crate::semantic_query::PropertyKey::String(text) => {
+                                        IndexKey::String(text)
+                                    }
+                                    crate::semantic_query::PropertyKey::Number(number) => {
+                                        IndexKey::Number(number)
+                                    }
+                                    crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
+                                        IndexKey::UniqueSymbol(identity)
+                                    }
+                                })
+                                .collect(),
+                        );
+                    }
+                    SemanticNodeData::Literal(_) => {
+                        drop(data);
+                        keys = Some(vec![match self.normalized_index_key_node(node) {
+                            key @ (IndexKey::String(_)
+                            | IndexKey::Number(_)
+                            | IndexKey::UniqueSymbol(_)) => key,
+                            IndexKey::Computed(resolved) => {
+                                match self.graph().node_data(resolved).as_deref() {
+                                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
+                                        IndexKey::Computed(resolved)
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                        }]);
+                    }
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. } => {
+                        drop(data);
+                        let context = crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Expanded,
+                        );
+                        let settled = self.resolve_signature_source_carrier(node, context);
+                        if settled == node {
+                            return None;
+                        }
+                        let settled = self
+                            .evaluate_deferred_semantic_node_with_context(settled, context)
+                            .into_active_query_build_node(self);
+                        open.insert(node);
+                        pending.push(Pending::Named { node });
+                        visit = Some(settled);
+                        continue;
+                    }
+                    _ => {
+                        drop(data);
+                        keys = Some(match self.normalized_index_key_node(node) {
+                            key @ (IndexKey::String(_)
+                            | IndexKey::Number(_)
+                            | IndexKey::UniqueSymbol(_)) => vec![key],
+                            IndexKey::Computed(_) => return None,
+                        });
+                    }
                 }
+            }
+            // Deliver `keys` to the innermost waiting key type, closing each
+            // one its parts complete.
+            loop {
+                let Some(top) = pending.last_mut() else {
+                    return keys;
+                };
+                match top {
+                    Pending::Union {
+                        members,
+                        next,
+                        keys: collected,
+                        seen,
+                        ..
+                    } => {
+                        match (keys.take(), keys_seen.take()) {
+                            (Some(delivered), Some(delivered_seen)) if collected.is_empty() => {
+                                *collected = delivered;
+                                *seen = delivered_seen;
+                            }
+                            (delivered, _) => {
+                                for key in delivered.into_iter().flatten() {
+                                    if first_index_key(seen, &key) {
+                                        collected.push(key);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(member) = members.get(*next) {
+                            *next += 1;
+                            visit = Some(*member);
+                            break;
+                        }
+                        keys = Some(std::mem::take(collected));
+                        keys_seen = Some(std::mem::take(seen));
+                    }
+                    Pending::Intersection {
+                        members,
+                        next,
+                        common,
+                        ..
+                    } => {
+                        keys_seen = None;
+                        if let Some(delivered) = keys.take() {
+                            *common = Some(match common.take() {
+                                None => delivered,
+                                Some(common) => {
+                                    let mut present: FxHashSet<IndexKey> = FxHashSet::default();
+                                    for key in &delivered {
+                                        first_index_key(&mut present, key);
+                                    }
+                                    common
+                                        .into_iter()
+                                        .filter(|key| index_key_present(&present, key))
+                                        .collect()
+                                }
+                            });
+                        }
+                        if let Some(member) = members.get(*next) {
+                            *next += 1;
+                            visit = Some(*member);
+                            break;
+                        }
+                        // An intersection of no members has no key set.
+                        keys = Some(common.take()?);
+                    }
+                    Pending::Named { .. } => {}
+                }
+                let closed = match pending.pop().expect("the waiting key type") {
+                    Pending::Union { node, .. }
+                    | Pending::Intersection { node, .. }
+                    | Pending::Named { node } => node,
+                };
+                open.remove(&closed);
             }
         }
     }
@@ -11395,18 +11610,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if !seen.insert(key.clone()) {
                 continue;
             }
-            let literal = match &key {
-                PropertyKey::String(name) => LiteralValue::String(name.as_ref().to_string()),
-                PropertyKey::Number(number) => LiteralValue::Number(number.get() as f64),
-                // The semantic graph has no nominal unique-symbol literal leaf.
-                // Preserve the typed surface and defer `keyof` rather than
-                // lowering the identity to text.
-                PropertyKey::UniqueSymbol(_) => return None,
+            let node = match &key {
+                PropertyKey::String(name) => {
+                    self.graph()
+                        .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                            name.as_ref().to_string(),
+                        )))
+                }
+                PropertyKey::Number(number) => {
+                    self.graph()
+                        .intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                            number.get() as f64,
+                        )))
+                }
+                PropertyKey::UniqueSymbol(identity) => self.unique_symbol_key_type(identity),
             };
-            member_literals.push((
-                self.graph().intern_node(SemanticNodeData::Literal(literal)),
-                key,
-            ));
+            member_literals.push((node, key));
         }
         for (lit_id, key) in &member_literals {
             self.graph().record_origin_edge(
@@ -11424,6 +11643,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Canonical construction: the enumerated `keyof` key union (empty
         // folds to `never`, singleton to the lone key — the canonical folds).
         Some(self.intern_normalized_union_or_intersection(&ids, true))
+    }
+
+    /// The type a mapped type's binder takes for one key of its domain: the
+    /// key's literal, or a `unique symbol` key's nominal type
+    /// ([`Self::unique_symbol_key_type`]).
+    pub(super) fn key_domain_binder(
+        &self,
+        key: &super::enumerate::KeyDomainKey,
+    ) -> Option<SemanticNodeId> {
+        match (&key.literal, &key.key) {
+            (Some(literal), _) => Some(
+                self.graph()
+                    .intern_node(SemanticNodeData::Literal(literal.clone())),
+            ),
+            (None, PropertyKey::UniqueSymbol(identity)) => {
+                Some(self.unique_symbol_key_type(identity))
+            }
+            (None, _) => None,
+        }
+    }
+
+    /// The type of a `unique symbol` property key: the nominal `typeof`
+    /// carrier of the symbol's declaration, headed by that declaration's own
+    /// name (the nominal relation compares the declaring identity, so it is
+    /// the symbol's type wherever it was written). Interned once per
+    /// declaration, and released with the declaring file
+    /// (`payload_binds_canonical` reads the identity).
+    pub(super) fn unique_symbol_key_type(
+        &self,
+        identity: &verter_type_expr::facts::ValueDeclIdentityPart,
+    ) -> SemanticNodeId {
+        let value_root = crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId::file(
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+            ),
+            name: Arc::clone(&identity.symbol),
+        };
+        let path: Arc<[Arc<str>]> = identity
+            .member_path
+            .iter()
+            .map(|segment| Arc::from(segment.as_str()))
+            .collect();
+        self.graph()
+            .intern_node(SemanticNodeData::new_nominal_typeof(
+                value_root,
+                path,
+                identity.clone(),
+            ))
     }
 
     pub(super) fn uses_synthetic_mapped_key_names(&self, members: &[SurfaceMember]) -> bool {
@@ -12572,11 +12840,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 shared_value.expect("initialised immediately above")
             } else {
-                let Some(literal) = key.literal.as_ref() else {
+                let Some(binder) = self.key_domain_binder(key) else {
                     remap_defers = true;
                     break;
                 };
-                self.materialize_mapped_member_value_for_key(mapper, literal, context)
+                self.materialize_mapped_member_value_for_key(mapper, binder, context)
             };
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
@@ -12763,13 +13031,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn materialize_mapped_member_value_for_key(
         &self,
         mapper: &crate::semantic_query::MapperKey,
-        key_literal: &LiteralValue,
+        key_arg: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
-        let key_arg = self
-            .graph()
-            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
         // Instrumentation — classify this per-K call as
         // unique or repeated based on the identity tuple a typed
         // mapped-member materialization cache would key on. The
@@ -13173,12 +13438,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ORIGINAL literal (probe12: `{ [K in 1 as K extends number ?
         // "n" : "s"]: K }` = `{ n: 1 }` — a stringified K would select
         // the wrong branch).
-        let Some(key_literal) = key.literal.as_ref() else {
+        let Some(key_literal) = self.key_domain_binder(key) else {
             return MappedKeyRemapOutcome::DeferCarrier;
         };
-        let key_literal = self
-            .graph()
-            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
         let evaluated_remap = self
@@ -13379,7 +13641,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if mapper.name_remap == Some(mapper.parameter_node) {
             let mut matched: Vec<super::enumerate::KeyDomainKey> = Vec::new();
             for key in domain {
-                key.literal.as_ref()?;
+                self.key_domain_binder(&key)?;
                 if key.key.element_access_collides(demanded) {
                     matched.push(key);
                 }
@@ -13534,6 +13796,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // names reduce to (`1 & ReturnType<typeof anyf>` is `any`).
         let check = self.composite_over_resolved_arms(check).unwrap_or(check);
         let check = self.union_as_constructed(check);
+        // The type a declared check names decides absorption and
+        // distribution (a reference to `type Nv = never` distributes as
+        // `never`), while the selected branch binds the check as written
+        // (`O extends infer K ? K : 2` is `O`).
+        let declared_check = self.declared_operand_where_written(check);
+        let declared_check = self.union_as_constructed(declared_check);
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -13542,7 +13810,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `ThisParameterType<F>`'s branch); one still open stays itself.
         let check = self.reduced_conditional_operand(check);
         let extends = self.reduced_conditional_operand(extends);
-        let absorbed_check = self.indexed_access_where_written(check);
+        let declared_check = self.reduced_conditional_operand(declared_check);
+        let check = self.checker_error_operand(check).unwrap_or(check);
+        let extends = self.checker_error_operand(extends).unwrap_or(extends);
+        let declared_check = self
+            .checker_error_operand(declared_check)
+            .unwrap_or(declared_check);
+        let absorbed_check = self.indexed_access_where_written(declared_check);
         if let Some(absorbed) =
             self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
                 self.apply_conditional_branch_pending(
@@ -13555,25 +13829,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return absorbed;
         }
         if distributive {
-            if let Some(output) = self.distribute_conditional(check, extends, &mut |member| {
-                self.conditional_query_output(SemanticQueryKey::Conditional {
-                    check: member,
-                    extends,
-                    true_branch,
-                    false_branch,
-                    distributive: false,
-                    pending: pending.as_ref().map(|pending| {
-                        pending
-                            .distributed_over(member)
-                            .map_or_else(|| Arc::clone(pending), Arc::new)
-                    }),
+            if let Some(output) =
+                self.distribute_conditional(declared_check, extends, &mut |member| {
+                    self.conditional_query_output(SemanticQueryKey::Conditional {
+                        check: member,
+                        extends,
+                        true_branch,
+                        false_branch,
+                        distributive: false,
+                        pending: pending.as_ref().map(|pending| {
+                            pending
+                                .distributed_over(member)
+                                .map_or_else(|| Arc::clone(pending), Arc::new)
+                        }),
+                    })
                 })
-            }) {
+            {
                 return output;
             }
         }
         let (selection, infer) = self.conditional_branch_selection(check, extends);
-        if selection != ConditionalBranchSelection::Deferred {
+        if matches!(
+            selection,
+            ConditionalBranchSelection::True | ConditionalBranchSelection::False
+        ) {
             let take_true = selection == ConditionalBranchSelection::True;
             let original = if take_true { true_branch } else { false_branch };
             let winner =
@@ -13621,8 +13900,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             fence.clone(),
         );
         self.graph().record_conditional_deferred();
-        super::walk::QueryBuildOutput::from((QueryResult::Value(node), fence))
-            .with_observed_self_roots(suspended_roots)
+        let mut output = super::walk::QueryBuildOutput::from((QueryResult::Value(node), fence))
+            .with_observed_self_roots(suspended_roots);
+        // A conditional the checker decides and the lane could not is a
+        // typed gap: the shell stands where the checker's answer should be,
+        // so it is never published complete or warm-admitted.
+        if selection == ConditionalBranchSelection::Undecided {
+            output.result_is_partial = true;
+            output.cache_suppress = true;
+            output.partial_reasons = output
+                .partial_reasons
+                .union(crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL);
+        }
+        output
     }
 
     /// Transient lowering ingress. Only selected syntax is lowered; no
@@ -13640,6 +13930,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let check = self.composite_over_resolved_arms(check).unwrap_or(check);
         let check = self.union_as_constructed(check);
+        // The type a declared check names decides absorption and
+        // distribution (a reference to `type Nv = never` distributes as
+        // `never`), while the selected branch binds the check as written
+        // (`O extends infer K ? K : 2` is `O`).
+        let declared_check = self.declared_operand_where_written(check);
+        let declared_check = self.union_as_constructed(declared_check);
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -13648,16 +13944,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `ThisParameterType<F>`'s branch); one still open stays itself.
         let check = self.reduced_conditional_operand(check);
         let extends = self.reduced_conditional_operand(extends);
-        let absorbed_check = self.indexed_access_where_written(check);
+        let declared_check = self.reduced_conditional_operand(declared_check);
+        let check = self.checker_error_operand(check).unwrap_or(check);
+        let extends = self.checker_error_operand(extends).unwrap_or(extends);
+        let declared_check = self
+            .checker_error_operand(declared_check)
+            .unwrap_or(declared_check);
+        let absorbed_check = self.indexed_access_where_written(declared_check);
         if let Some(output) =
             self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
         {
             return output;
         }
         if distributive {
-            if let Some(output) = self.distribute_conditional(check, extends, &mut |member| {
-                self.build_conditional_from_lowering(member, extends, false, lower_branch)
-            }) {
+            if let Some(output) =
+                self.distribute_conditional(declared_check, extends, &mut |member| {
+                    self.build_conditional_from_lowering(member, extends, false, lower_branch)
+                })
+            {
                 return output;
             }
         }
@@ -13670,7 +13974,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let winner = lower_branch(selection == ConditionalBranchSelection::True);
                 self.commit_conditional_winner(check, extends, winner, selection, infer)
             }
-            ConditionalBranchSelection::Deferred => {
+            ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
                 let true_branch = lower_branch(true);
                 if self.ctx.is_cancelled() {
                     return self.cancelled_build_output();
@@ -13686,6 +13990,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
             }
         }
+    }
+
+    /// The checker's error type a conditional operand stands for: the
+    /// checker instantiates a conditional's check and extends types before
+    /// it relates them, so a name for its error type (the recovery from a
+    /// diagnostic the name's own instantiation raised) IS that error type
+    /// there, and so is a union or intersection with such a member, or an
+    /// intersection whose cross product the checker refuses. The error type
+    /// then dominates the conditional. `None` for any other operand.
+    fn checker_error_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.graph().node_data(operand).as_deref() {
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. },
+            ) => {}
+            // The error type dominates a union or an intersection it is a
+            // member of, and an intersection whose cross product the checker
+            // refuses is its error type.
+            Some(SemanticNodeData::Intersection(arms)) => {
+                let arms = arms.members_arc();
+                return self
+                    .intersection_too_complex(operand)
+                    .or_else(|| arms.iter().find_map(|arm| self.checker_error_operand(*arm)));
+            }
+            Some(SemanticNodeData::Union(arms)) => {
+                let arms = arms.members_arc();
+                return arms.iter().find_map(|arm| self.checker_error_operand(*arm));
+            }
+            _ => return None,
+        }
+        let resolved = self
+            .normalize_node_for_structural_fact_demand(
+                operand,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()?;
+        matches!(
+            self.peek_special(resolved),
+            Some((super::absorb::SpecialKind::Error, _))
+        )
+        .then_some(resolved)
     }
 
     /// The one typed `Cancelled` build output — shared by every builder
@@ -13813,7 +14159,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph.record_branch_selection_false();
                 BranchSelection::False
             }
-            ConditionalBranchSelection::Deferred => {
+            ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
                 unreachable!("only decided winners are committed")
             }
         };
@@ -13901,6 +14247,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         union_members_of(resolved)
     }
 
+    /// The type a conditional operand denotes when it is a reference to a
+    /// declaration: a type alias is the type it names, so `IsStr<U2>` with
+    /// `type U2 = "a" | 1` distributes over `"a"` and `1`, `IsStr<Nv>` with
+    /// `type Nv = never` is `never`, and `any extends Un` with `type Un =
+    /// unknown` selects its true branch alone (the checker's operand is the
+    /// resolved type, never the name). A reference the structural demand
+    /// cannot resolve completely, and every other operand, is itself.
+    pub(super) fn declared_operand_where_written(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let identity = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                owner,
+                name,
+                whole_hash,
+            })) => crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
+                whole_hash: *whole_hash,
+                decl_name: Arc::clone(name),
+            },
+            _ => return node,
+        };
+        // An interface or a class names an object type, which no lattice
+        // row or distribution reads.
+        if !matches!(
+            self.prepared_decl_kind(&identity),
+            Some(verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+        ) {
+            return node;
+        }
+        self.normalize_node_for_structural_fact_demand(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+        .into_complete_node()
+        .unwrap_or(node)
+    }
+
     /// The type an operand denotes where it is written. The checker
     /// instantiates a conditional's check and branch types eagerly, so an
     /// indexed access over a type that is not generic IS the property type
@@ -13924,7 +14309,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .into_active_query_build_node(self)
     }
 
-    /// Tri-state conditional branch selection — THE shared oracle for
+    /// Conditional branch selection — THE shared oracle for
     /// every consumer that must decide which branch a conditional
     /// semantically takes: [`Self::build_conditional`]'s reduction path
     /// AND the key-domain closedness classifiers in `raise.rs` (the
@@ -13937,27 +14322,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// binding substitution and the classifiers can bind branch infer
     /// names to the same check-derived identities.
     ///
-    /// Decision order mirrors the historical ladder exactly:
+    /// `Deferred` is the checker's own deferral and `Undecided` a
+    /// conditional the checker decides and the lane cannot. Decision order:
     ///
     /// 1. an `error` check DOMINATES the whole conditional — no branch
     ///    is selected ⇒ `Deferred` (in `build_conditional` this row is
     ///    pre-absorbed by `absorb_conditional`; the guard makes the
     ///    oracle safe for classifier callers, which have no absorber in
     ///    front of them);
-    /// 2. infer routing: a BARE-infer extends (`T extends infer X`) binds
+    /// 2. a generic operand ⇒ `Deferred` ([`Self::conditional_is_deferred`]);
+    /// 3. infer routing: a BARE-infer extends (`C extends infer X`) binds
     ///    `X := check` through the relation for ANY check, so it precedes
-    ///    the `any` guard; an out-of-scope deep infer pattern defers
-    ///    (never an unbound substitution);
-    /// 3. an `any` check semantically uses BOTH branches
-    ///    (`any extends T ? X : Y` ⇒ `X | Y`) ⇒ `Deferred` (likewise
-    ///    pre-absorbed in build for non-infer extends);
-    /// 4. the SOLE relation authority (`execute(SemanticQueryKey::Relate)`
+    ///    the `any` guard; an out-of-scope deep infer pattern is decided
+    ///    only when its permissive instantiation fails
+    ///    ([`Self::permissive_conditional_selection`]);
+    /// 4. an `any` check against an infer pattern, which the checker reads
+    ///    as the union of both branches with the pattern inferred from
+    ///    `any` ⇒ `Undecided` (every other `any` check is absorbed in
+    ///    build before this oracle);
+    /// 5. the SOLE relation authority (`execute(SemanticQueryKey::Relate)`
     ///    via [`Self::execute_relate_pair`]): an in-scope infer pattern
     ///    binds THROUGH the relation (object property, tuple head/tail,
     ///    function inference); a plain pair decides through the same
-    ///    authority; `Unknown` ⇒ `Deferred`. The O(tag) prefilter lives
-    ///    INSIDE the authority — it is never consulted here (never a
-    ///    parallel truth source).
+    ///    authority; a failure whose permissive instantiation still relates
+    ///    ⇒ `Deferred`; an undecided step (`Unknown`, a budget, an
+    ///    assumption) ⇒ `Undecided`. The O(tag) prefilter lives INSIDE the
+    ///    authority — it is never consulted here (never a parallel truth
+    ///    source).
     pub(super) fn conditional_branch_selection(
         &self,
         check: SemanticNodeId,
@@ -13970,6 +14361,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.peek_special(check),
             Some((super::absorb::SpecialKind::Error, _))
         ) {
+            return (ConditionalBranchSelection::Deferred, None);
+        }
+        // The checker defers a conditional whose check or extends type is
+        // generic (`getConditionalType`'s `isDeferredType`) before relating
+        // or inferring anything: `T extends unknown ? [T] : never` stays a
+        // conditional until `T` is known, and distributes over the union it
+        // receives; `T extends infer X ? A : B` too.
+        if self.conditional_is_deferred(check, extends) {
             return (ConditionalBranchSelection::Deferred, None);
         }
         let route = self.conditional_infer_route(extends);
@@ -13991,22 +14390,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 super::dispatch_txn::RelationStep::NotAssignable => {
                     (ConditionalBranchSelection::False, None)
                 }
-                _ => (ConditionalBranchSelection::Deferred, None),
+                _ => (ConditionalBranchSelection::Undecided, None),
             };
         }
         if matches!(
             self.peek_special(check),
             Some((super::absorb::SpecialKind::Any, _))
         ) {
-            return (ConditionalBranchSelection::Deferred, None);
-        }
-        // The checker defers a conditional whose check or extends type is
-        // generic (`getConditionalType`'s `isDeferredType`) before relating
-        // anything: `T extends unknown ? [T] : never` stays a conditional
-        // until `T` is known, and distributes over the union it receives.
-        // (A bare `infer` pattern above binds the check whatever it is.)
-        if self.conditional_is_deferred(check, extends) {
-            return (ConditionalBranchSelection::Deferred, None);
+            return (ConditionalBranchSelection::Undecided, None);
         }
         // The full relation authority — the SAME `execute(Relate)` path
         // every consumer rides. A binding-producing judgement's returned
@@ -14021,10 +14412,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 (ConditionalBranchSelection::True, infer)
             }
+            // The checker's definitely-false test reads the operands with
+            // every type parameter as `any` (`getPermissiveInstantiation`):
+            // an operand holding a rigid type parameter that fails the
+            // relation may still hold for some instantiation, and the
+            // conditional then stays deferred (`Foo<T> extends { items:
+            // number }`).
             super::dispatch_txn::RelationStep::NotAssignable => {
-                (ConditionalBranchSelection::False, None)
+                match self.permissive_relation_fails(check, extends) {
+                    true => (ConditionalBranchSelection::False, None),
+                    false => (ConditionalBranchSelection::Deferred, None),
+                }
             }
-            _ => (ConditionalBranchSelection::Deferred, None),
+            _ => (ConditionalBranchSelection::Undecided, None),
         }
     }
 
@@ -14058,6 +14458,117 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The written union's files are what the reduced one was read from.
         self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([node]));
         constructed
+    }
+
+    /// Whether `check` fails to relate to `extends` with every type
+    /// parameter in either read as `any` (the checker's permissive
+    /// instantiation): `true` straight away when neither holds one.
+    fn permissive_relation_fails(&self, check: SemanticNodeId, extends: SemanticNodeId) -> bool {
+        let params = self.type_params_within(&[check, extends]);
+        if params.is_empty() {
+            return true;
+        }
+        let any = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let permissive = |node: SemanticNodeId| {
+            params.iter().fold(node, |node, param| {
+                self.substitute_semantic_type_param(node, *param, any)
+            })
+        };
+        matches!(
+            self.execute_relate_pair(permissive(check), permissive(extends)),
+            super::dispatch_txn::RelationStep::NotAssignable
+        )
+    }
+
+    /// The type an alias application names, instantiated as the checker
+    /// instantiates it where it is written and not reduced further: the
+    /// substituted declared body (a conditional over a type variable stays
+    /// the deferred conditional). `None` when the instantiation does not
+    /// complete.
+    fn alias_application_instantiated(
+        &self,
+        base: &crate::semantic_query::DeclIdentity,
+        args: &Arc<[SemanticNodeId]>,
+    ) -> Option<SemanticNodeId> {
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            self.type_slot_for(
+                Arc::clone(&base.canonical_id),
+                base.owner,
+                Arc::clone(&base.decl_name),
+            ),
+            Arc::clone(args),
+            self.instantiate_context_for(
+                &base.canonical_id,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ),
+        ));
+        let read = self.execute_read(key);
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// Whether `node` holds a type variable free in it: a type parameter no
+    /// signature within declares, or a reference to an enclosing `infer`.
+    fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
+        if !self.type_params_within(&[node]).is_empty() {
+            return true;
+        }
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if matches!(data.as_ref(), SemanticNodeData::InferRef { .. }) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
+    }
+
+    /// The free type parameters `roots` hold anywhere below them — not
+    /// those a generic signature within declares (instantiating a signature
+    /// maps its own type parameters to fresh ones) — read from an explicit
+    /// stack.
+    fn type_params_within(&self, roots: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut bound: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = roots.to_vec();
+        let mut params = Vec::new();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::TypeParam { .. } => {
+                    params.push(node);
+                    continue;
+                }
+                SemanticNodeData::Signature {
+                    type_parameters, ..
+                } => bound.extend(type_parameters.iter().map(|declared| declared.param)),
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        params.retain(|param| !bound.contains(param));
+        params
     }
 
     /// Whether the checker defers the conditional `check extends extends`
@@ -14099,7 +14610,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// reference, an indexed access, `keyof`, conditional or intrinsic
     /// application over one, a mapped type over a generic source, a template
     /// literal type with a generic hole, a tuple with a generic variadic
-    /// element, or a union or intersection holding one. Read from an
+    /// element, or a union or intersection holding one. An alias
+    /// application over a type variable is the type it names (the checker
+    /// instantiates it where it is written): `MessageBase<T>` over a
+    /// conditional alias is generic, `Box<T>` over an object type is not;
+    /// a builtin utility is generic in the operands its result is generic
+    /// in (`NonNullable<T[K]>` is, `Pick<T, "a">` is not). Read from an
     /// explicit stack.
     pub(super) fn type_is_generic(&self, node: SemanticNodeId) -> bool {
         let graph = self.graph();
@@ -14112,6 +14628,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some(data) = graph.node_data(node) else {
                 continue;
             };
+            if let SemanticNodeData::InstantiationRef { base, args } = &*data {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                drop(data);
+                if !args
+                    .iter()
+                    .any(|arg| self.mentions_free_type_variable(*arg))
+                {
+                    continue;
+                }
+                if base.canonical_id.as_ref() == "__builtin__" {
+                    // A builtin utility is generic in the operands its result
+                    // is generic in: a mapped utility in its key domain
+                    // (`Pick<T, "a">` is an object type, `Partial<T>` maps
+                    // `keyof T`), every other one (a conditional, an
+                    // intersection, a string mapping) in any operand.
+                    let generic_in: &[usize] = match base.decl_name.as_ref() {
+                        "Pick" => &[1],
+                        "Record" => &[0],
+                        "Partial" | "Required" | "Readonly" => &[0],
+                        _ => &[],
+                    };
+                    if generic_in.is_empty() {
+                        pending.extend(args.iter().copied());
+                    } else {
+                        pending.extend(generic_in.iter().filter_map(|index| args.get(*index)));
+                    }
+                    continue;
+                }
+                match self.alias_application_instantiated(&base, &args) {
+                    Some(named) if named == node => return true,
+                    Some(named) => pending.push(named),
+                    None => {}
+                }
+                continue;
+            }
             match &*data {
                 SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. } => {
                     return true;
@@ -14165,9 +14717,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// — the checker's definitely-false test over the permissive
     /// instantiation (`getConditionalType`), which no inference can turn
     /// true (`string extends { then(cb: (v: infer V) => void): void }` is
-    /// false) — and deferred otherwise. A pattern holding a nested
+    /// false). Otherwise the checker infers from the check and relates the
+    /// inferred pattern, which the lane does not model here: the
+    /// conditional is undecided, as is a pattern holding a nested
     /// conditional or mapped type, whose binders scope their own `infer`
-    /// declarations, stays deferred.
+    /// declarations.
     fn permissive_conditional_selection(
         &self,
         check: SemanticNodeId,
@@ -14175,7 +14729,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> ConditionalBranchSelection {
         let scan = self.infer_scan(extends, true);
         if scan.binder_scope || scan.infers.is_empty() {
-            return ConditionalBranchSelection::Deferred;
+            return ConditionalBranchSelection::Undecided;
         }
         let any = self
             .graph()
@@ -14184,11 +14738,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.substitute_semantic_type_param(pattern, *infer, any)
         });
         if self.subtree_contains_infer(permissive) {
-            return ConditionalBranchSelection::Deferred;
+            return ConditionalBranchSelection::Undecided;
         }
         match self.execute_relate_pair(check, permissive) {
-            super::dispatch_txn::RelationStep::NotAssignable => ConditionalBranchSelection::False,
-            _ => ConditionalBranchSelection::Deferred,
+            super::dispatch_txn::RelationStep::NotAssignable
+                if self.permissive_relation_fails(check, permissive) =>
+            {
+                ConditionalBranchSelection::False
+            }
+            _ => ConditionalBranchSelection::Undecided,
         }
     }
 
@@ -15618,6 +16176,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ) =>
             {
                 Some(args[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// The arguments of the next step of a generic declaration's tail run:
+    /// `result`, its body as lowered, is an application of this very
+    /// declaration (`canonical`, `owner`, `name`) — as the recursive
+    /// back-edge the lowering mints while the declaration is being
+    /// instantiated, or as the application carrier a carrier-preserving
+    /// demand keeps. A generic declaration whose type is an application of
+    /// itself is a conditional that selected that branch; a non-generic
+    /// one names itself directly, which the checker reports as a circular
+    /// alias, and its back-edge stays the recursive reference. `None` for
+    /// any other result, an application nested inside a type included.
+    fn conditional_tail_arguments(
+        &self,
+        result: SemanticNodeId,
+        canonical: &Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        let graph = self.graph();
+        match graph.node_data(result).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name: edge, args })) => {
+                let declared_here = matches!(
+                    graph.node_scope(result),
+                    Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
+                        if canonical_id == *canonical && edge_owner == owner
+                );
+                (edge == name && declared_here).then(|| Arc::clone(args))
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)
+                    .then(|| Arc::clone(args))
             }
             _ => None,
         }

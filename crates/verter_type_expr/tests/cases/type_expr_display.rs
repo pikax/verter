@@ -325,13 +325,6 @@ fn rejects_internal_or_malformed_carriers_instead_of_rendering_unknown() {
         Err(TypeExprDisplayError::StandaloneRestType)
     );
     assert_eq!(
-        render_type_expr_display(&TypeExpr::TemplateLiteral {
-            quasis: vec!["unescaped`delimiter".into()],
-            expressions: Arc::from([]),
-        }),
-        Err(TypeExprDisplayError::InvalidTemplateLiteralQuasi { index: 0 })
-    );
-    assert_eq!(
         render_type_expr_display(&TypeExpr::ImportType {
             specifier: Arc::from("pkg"),
             qualifier: Arc::from([]),
@@ -374,6 +367,26 @@ fn renders_remaining_terminal_and_constructor_forms_without_invalid_empty_operat
     assert_eq!(
         render_type_expr_display(&expression).unwrap().text,
         "(new (..._arg0: Array<string>) => void) & (true) & -12.5 & typeof import('pkg') & never & unknown"
+    );
+}
+
+/// A template literal type's quasis are cooked text, printed escaped as the
+/// checker prints the type: tsc 7.0.2 prints `` `x${string}\\` ``,
+/// `` `a\t${string}` `` and a line feed as it is, and the printed template
+/// reads back as the same cooked text.
+#[test]
+fn renders_cooked_template_quasis_escaped_as_template_source() {
+    let template = TypeExpr::TemplateLiteral {
+        quasis: vec![
+            "a`b${c\\d\te\nf\r\ng\u{8}\u{1}".into(),
+            "\0".into(),
+            "\u{0}1\u{2028}$".into(),
+        ],
+        expressions: Arc::from([reference("T"), reference("U")]),
+    };
+    assert_eq!(
+        render_type_expr_display(&template).unwrap().text,
+        "`a\\`b\\${c\\\\d\\te\nf\\r\\ng\\b\\u0001${T}\\0${U}\\x001\\u2028$`"
     );
 }
 

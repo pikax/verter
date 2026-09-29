@@ -2,7 +2,7 @@ use super::type_eval::*;
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
-    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_DEPTH, MAX_SEMANTIC_INFERENCE_WORK,
+    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_WORK,
 };
 use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use crate::analysis::types::{
@@ -1533,8 +1533,8 @@ fn static_class_method_return_inference_normal_control_is_exact() {
 }
 
 #[test]
-fn static_class_method_return_inference_budget_unavailable_is_exact() {
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+fn static_class_method_return_of_a_deep_body_is_its_served_position() {
+    let expression = nested_object_expression(72);
     let env = parse_and_build_env(&format!(
         "class Service {{ static deep() {{ return {expression}; }} }}"
     ));
@@ -1542,7 +1542,7 @@ fn static_class_method_return_inference_budget_unavailable_is_exact() {
 
     assert!(
         matches!(fact.return_source, FunctionReturnSource::Flow(_)),
-        "a budget-stopped body still names its served position"
+        "a deep body names its served position"
     );
 }
 
@@ -1649,57 +1649,118 @@ fn nested_arrow_expression(depth: usize) -> String {
     expression
 }
 
-fn assert_initializer_inference_unavailable(source: &str, name: &str) {
-    let parts = lowered(source);
-    let declaration = parts.value_decl(name).expect("lowered value");
-    assert_eq!(declaration.type_annotation, None);
+/// Initializers nested a thousand levels deep, which the inference visits
+/// within its work budget and which a native level per nesting level would
+/// overflow a 1 MiB thread at: the shallow inference infers every nest from
+/// its explicit stacks, bounded only by its work. TypeScript 7.0.2 infers
+/// the same module-level nests (72 levels of objects, arrays and arrows, and
+/// a 70-term `&&` chain) in all four strictNullChecks × noImplicitAny
+/// settings.
+const DEEP_INITIALIZER: usize = 1_000;
+
+/// `source`'s value declaration `name`, lowered on a 1 MiB thread: its
+/// inferred type and its unavailable-inference reason.
+fn initializer_on_a_small_stack(
+    source: String,
+    name: &'static str,
+) -> (Option<TypeExpr>, Option<InferenceUnavailableReason>) {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let parts = lowered(&source);
+            let declaration = parts.value_decl(name).expect("lowered value");
+            (
+                declaration.type_annotation.clone(),
+                declaration.inference_unavailable,
+            )
+        })
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the lowering returns")
+}
+
+/// How many single-member objects, arrays and function results `ty` nests,
+/// and the type innermost — read from a loop.
+fn nesting_of(ty: &TypeExpr) -> (usize, &TypeExpr) {
+    let mut levels = 0;
+    let mut current = ty;
+    loop {
+        current = match current {
+            TypeExpr::Object(object) => match object.properties.as_slice() {
+                [ObjectMember::Property(property)] => &property.ty,
+                _ => break,
+            },
+            TypeExpr::Array { element, .. } => element,
+            TypeExpr::Function(function) => match function.return_type.as_deref() {
+                Some(return_type) => return_type,
+                None => break,
+            },
+            _ => break,
+        };
+        levels += 1;
+    }
+    (levels, current)
+}
+
+#[test]
+fn deep_object_initializers_infer() {
+    let expression = nested_object_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
     assert_eq!(
-        declaration.inference_unavailable,
-        Some(InferenceUnavailableReason::DepthBudgetExceeded)
+        nesting_of(&ty),
+        (
+            DEEP_INITIALIZER,
+            &TypeExpr::Primitive(PrimitiveName::Number)
+        )
     );
+}
 
-    let env = parse_and_build_env(source);
+#[test]
+fn deep_array_initializers_infer() {
+    let expression = nested_array_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
     assert_eq!(
-        env.value_symbols[name]
-            .primary()
-            .type_annotation
-            .classification,
-        ValueAnnotationClass::InferenceUnavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
-    );
-    assert!(
-        env.value_symbols[name]
-            .primary()
-            .type_annotation
-            .annotation
-            .is_none(),
-        "unavailable inference must not publish a narrowed source"
+        nesting_of(&ty),
+        (
+            DEEP_INITIALIZER,
+            &TypeExpr::Primitive(PrimitiveName::Number)
+        )
     );
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_object_initializer() {
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+fn deep_function_initializers_infer() {
+    let expression = nested_arrow_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
+    assert_eq!(nesting_of(&ty).0, DEEP_INITIALIZER);
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_array_initializer() {
-    let expression = nested_array_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+fn long_logical_chain_initializers_infer() {
+    let chain = vec!["x === 1"; DEEP_INITIALIZER].join(" && ");
+    let (ty, unavailable) = initializer_on_a_small_stack(
+        format!("declare const x: number;\nconst chain = {chain};"),
+        "chain",
+    );
+    assert_eq!(unavailable, None);
+    assert_eq!(ty, Some(TypeExpr::Primitive(PrimitiveName::Boolean)));
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_function_initializer() {
-    let expression = nested_arrow_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
-}
-
-#[test]
-fn semantic_inference_budget_deep_return_expression_stays_a_served_position() {
+fn semantic_inference_deep_return_expression_stays_a_served_position() {
     // The extraction carries no return carrier for an unannotated body —
-    // the budget edge of a deeply nested return expression surfaces at the
-    // whole-function producer's evaluation, not at signature extraction.
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    // the whole-function producer evaluates a deeply nested return
+    // expression, not signature extraction.
+    let expression = nested_object_expression(72);
     let source = format!("function deep() {{ return {expression}; }}");
     let parts = lowered(&source);
     let signature = &parts

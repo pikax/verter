@@ -61,6 +61,7 @@ mod intern_table;
 mod interner;
 mod member_index;
 mod nodes;
+pub(crate) use nodes::AliasChainEnd;
 mod observability;
 mod origin_edges;
 mod prepared;

@@ -2625,6 +2625,66 @@ function graphPrimitiveName(tag: number): Parameters<typeof primitive>[0] {
   }
 }
 
+/**
+ * A template literal type's quasi is its cooked text; printed back into
+ * template source it is escaped as the checker prints the type (a
+ * backslash, a backtick and `${` escaped, every control character but the
+ * line feed and U+2028 / U+2029 / U+0085 as an escape).
+ */
+export function escapeTemplateQuasi(cooked: string): string {
+  let out = "";
+  for (let i = 0; i < cooked.length; i += 1) {
+    const ch = cooked[i];
+    const next = cooked[i + 1];
+    switch (ch) {
+      case "\\":
+        out += "\\\\";
+        break;
+      case "`":
+        out += "\\`";
+        break;
+      case "$":
+        out += next === "{" ? "\\$" : "$";
+        break;
+      case "\n":
+        out += "\n";
+        break;
+      case "\r":
+        if (next === "\n") {
+          out += "\\r\\n";
+          i += 1;
+        } else {
+          out += "\\r";
+        }
+        break;
+      case "\t":
+        out += "\\t";
+        break;
+      case "\b":
+        out += "\\b";
+        break;
+      case "\f":
+        out += "\\f";
+        break;
+      case "\v":
+        out += "\\v";
+        break;
+      case "\0":
+        out += next !== undefined && next >= "0" && next <= "9" ? "\\x00" : "\\0";
+        break;
+      default: {
+        const code = ch.charCodeAt(0);
+        if (code < 0x20 || code === 0x2028 || code === 0x2029 || code === 0x85) {
+          out += "\\u" + code.toString(16).toUpperCase().padStart(4, "0");
+        } else {
+          out += ch;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 function graphTypeExprToString(expr: GraphTypeExprRef): string {
   const node = expr.graph.getNode(expr.nodeId);
   // Every graph node kind renders to a
@@ -2708,7 +2768,7 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
       );
       let out = "`";
       for (let i = 0; i < quasis.length; i += 1) {
-        out += quasis[i];
+        out += escapeTemplateQuasi(quasis[i]);
         if (i < exprs.length) {
           out += "${" + exprs[i] + "}";
         }

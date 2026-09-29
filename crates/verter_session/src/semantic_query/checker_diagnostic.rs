@@ -142,4 +142,7 @@ pub enum CheckerDiagnosticOperation {
     ObjectSpread,
     /// A tuple spread into a tuple type (`createNormalizedTupleType`).
     TupleSpread,
+    /// One tail run of a conditional alias (`getConditionalType`): its
+    /// selected branch applying the alias again.
+    ConditionalTail,
 }

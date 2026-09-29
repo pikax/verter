@@ -68,6 +68,23 @@ pub(super) fn with_probe_on_host<R>(
     probe: &str,
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
+    with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
+        let node = outcome
+            .into_complete_node()
+            .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+        read(dispatch, node)
+    })
+}
+
+/// [`with_probe_on_host`] handing `read` the published demand's outcome,
+/// a partial one included.
+pub(super) fn with_probe_outcome_on_host<R>(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, super::evaluate::StructuralFactDemandOutcome) -> R,
+) -> R {
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \
@@ -91,14 +108,11 @@ pub(super) fn with_probe_on_host<R>(
     let _demand_scope = project.ambient_lib.map(|_| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
     });
-    let node = dispatch
-        .normalize_node_keeping_declaration_refs_for_tests(
-            result.return_type(),
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-        )
-        .into_complete_node()
-        .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
-    read(&dispatch, node)
+    let outcome = dispatch.normalize_node_keeping_declaration_refs_for_tests(
+        result.return_type(),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    read(&dispatch, outcome)
 }
 
 /// The degradation the body-derived return of `function` in a module of

@@ -5143,6 +5143,11 @@ pub(crate) mod foundations_guards {
         // has no business minting or reading one.
         "pub(crate) mod flow_completion_inventory",
         "pub(crate) mod flow_slice_content",
+        // Existential and three-valued questions about a type answered
+        // through its parts from a work list (`reaches` / `classify`).
+        // Crate-private: generic walk machinery for the dispatch and
+        // meta-resolve helpers.
+        "pub(crate) mod graph_walk",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).
         // Crate-private: the materialise closure and the memo are its
