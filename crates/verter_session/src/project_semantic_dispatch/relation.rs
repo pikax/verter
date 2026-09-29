@@ -10613,6 +10613,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Instantiate a decl identity carrier into its concrete shape for
     /// relation dispatch through `execute(Instantiate{…})` — the shared
     /// dispatch, never a private instantiation path.
+    /// `node` through its transparent aliases, merged declarations and
+    /// declaration carriers, one step at a time
+    /// ([`Self::unwrap_identity_carrier_one_step`]) however long the chain:
+    /// the first node that is none of them. `None` when a carrier cannot be
+    /// resolved — a carrier read the connected ledger refuses included, so a
+    /// chain that grows without end stops on the ledger's trip — or when the
+    /// chain returns to a node it passed.
+    pub(super) fn settle_through_carriers(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let mut current = node;
+        let mut passed = FxHashSet::default();
+        loop {
+            if !passed.insert(current) {
+                return None;
+            }
+            match self.unwrap_identity_carrier_one_step(current) {
+                IdentityCarrierUnwrap::Concrete(next) if next == current => return Some(current),
+                IdentityCarrierUnwrap::Concrete(next) => current = next,
+                IdentityCarrierUnwrap::Unresolvable => return None,
+            }
+        }
+    }
+
     pub(super) fn unwrap_identity_carrier_one_step(
         &self,
         id: SemanticNodeId,
@@ -11482,14 +11504,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|element| {
                 if element.rest {
-                    let mut current = element.value;
-                    // bounded-loop: at most 8 transparent Alias hops.
-                    for _ in 0..8 {
-                        match graph.node_data(current).as_deref() {
-                            Some(SemanticNodeData::Alias(inner)) => current = *inner,
-                            _ => break,
-                        }
-                    }
+                    // A rest element names its array through any chain of
+                    // aliases and declarations (`type R = number[]`,
+                    // `[string, ...R]`).
+                    let current = self
+                        .settle_through_carriers(element.value)
+                        .unwrap_or(element.value);
                     return match graph.node_data(current).as_deref() {
                         Some(SemanticNodeData::Array { element: inner, .. }) => TupleSlot {
                             kind: TupleSlotKind::Rest,
@@ -12551,12 +12571,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// are followed (`type V = void` is `void` itself); a union such as
     /// `void | undefined` is not `void`, and a carrier that cannot be
     /// resolved is not assumed to be.
+    ///
+    /// The chain is followed to its end, however long: it ends at a node it
+    /// passed (a cycle is not `void`), and a carrier read the connected
+    /// ledger refuses resolves nothing.
     fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
-        /// Alias and declaration-carrier hops followed before giving up.
-        const RESULT_CARRIER_HOPS: usize = 8;
         let mut current = result;
-        // bounded-loop: RESULT_CARRIER_HOPS alias / declaration-carrier hops.
-        for _ in 0..RESULT_CARRIER_HOPS {
+        let mut passed = FxHashSet::default();
+        while passed.insert(current) {
             // The node read ends here, before any carrier resolution runs.
             let alias_target = match self.graph().node_data(current).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Any)) => {

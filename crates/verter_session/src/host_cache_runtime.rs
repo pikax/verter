@@ -338,16 +338,11 @@ impl VerterHost {
             // `declare module "vue"`). Walk each side-effect-imported
             // canonical and its re-export edges iteratively so the
             // augmenter is discovered regardless of whether it lives at
-            // the import target or deeper in the re-export chain.
-            //
-            // `REEXPORT_WALK_DEPTH` bounds the chain length; a barrel
-            // re-exporting through a few internal modules is normal,
-            // but unbounded recursion would let a pathological re-export
-            // cycle stall the probe.
-            const REEXPORT_WALK_DEPTH: usize = 8;
+            // the import target or at any depth of the re-export chain;
+            // each canonical is walked once, so a re-export cycle ends
+            // the walk.
             let mut visited: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-            let mut queue: std::collections::VecDeque<(Arc<str>, usize)> =
-                std::collections::VecDeque::new();
+            let mut queue: std::collections::VecDeque<Arc<str>> = std::collections::VecDeque::new();
             for import in &indexed.snapshot.imports {
                 if !import.bindings.is_empty() {
                     continue;
@@ -359,13 +354,10 @@ impl VerterHost {
                 if resolved_canonical.is_empty() {
                     continue;
                 }
-                queue.push_back((resolved_canonical, 0));
+                queue.push_back(resolved_canonical);
             }
-            while let Some((resolved_canonical, depth)) = queue.pop_front() {
+            while let Some(resolved_canonical) = queue.pop_front() {
                 if !visited.insert(Arc::clone(&resolved_canonical)) {
-                    continue;
-                }
-                if depth >= REEXPORT_WALK_DEPTH {
                     continue;
                 }
                 // Materialise the resolved dep so the augmenter's
@@ -464,7 +456,7 @@ impl VerterHost {
                 // here lets the per-fact probe see the augmenter at
                 // the next BFS level. The same iterative walk also
                 // covers chained barrels (a barrel re-exporting a
-                // barrel) up to `REEXPORT_WALK_DEPTH`.
+                // barrel), however long the chain.
                 //
                 // The shallow routing surface names AUTHORED specifiers
                 // only. Each barrel edge resolves through
@@ -480,7 +472,7 @@ impl VerterHost {
                         if let Some(c) = resolver(&resolved_canonical, &wildcard.source_specifier)
                             .filter(|c| !c.is_empty())
                         {
-                            queue.push_back((c, depth + 1));
+                            queue.push_back(c);
                         }
                     }
                     for target in walk_indexed.shallow_state.exports.values() {
@@ -491,7 +483,7 @@ impl VerterHost {
                             if let Some(c) = resolver(&resolved_canonical, source_specifier)
                                 .filter(|c| !c.is_empty())
                             {
-                                queue.push_back((c, depth + 1));
+                                queue.push_back(c);
                             }
                         }
                     }

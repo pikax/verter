@@ -4274,6 +4274,8 @@ mod differential_type_operator_tests;
 #[cfg(test)]
 mod enum_literal_tests;
 #[cfg(test)]
+mod helper_depth_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
