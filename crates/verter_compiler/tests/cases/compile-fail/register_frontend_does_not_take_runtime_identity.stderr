@@ -5,10 +5,6 @@ error[E0599]: no associated function or constant named `new` found for struct `C
    |                          ^^^ associated function or constant not found in `CatalogIdentity`
    |
 help: there is a method `ne` with a similar name, but with different arguments
-  --> $RUST/core/src/cmp.rs
-   |
-   |     fn ne(&self, other: &Rhs) -> bool {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0624]: associated function `new` is private
   --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:28:31
