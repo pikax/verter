@@ -224,10 +224,12 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         import_source: &str,
     ) -> Option<String> {
         let overlay = self.inner.resolution_overlay_snapshot(self.view);
-        self.inner.resolve_type_dependency_canonical_with_overlay(
-            &overlay,
-            owner_canonical,
-            import_source,
+        crate::resolver_core::resolver_context::type_route_answer(
+            self.inner.resolve_type_dependency_canonical_in(
+                Some(&overlay),
+                owner_canonical,
+                import_source,
+            ),
         )
     }
 }

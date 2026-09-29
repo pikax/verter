@@ -1938,7 +1938,7 @@ fn concurrent_resolutions_across_content_transitions_do_not_deadlock() {
 /// The healing tests below are parameterised over this and NOT over the bare
 /// workspace reader, because three consecutive review rounds landed an
 /// evidence fix on one reader while production used another: the session path
-/// (`VerterHost::resolve_for_persistent_state_with_overlay`) enters through
+/// (`VerterHost::resolve_for_persistent_state_in` with an overlay) enters through
 /// `resolve_import_outcome_with_overlay`, which composes an
 /// `OverlaySnapshotReader` over the recorder. A test that exercises only
 /// `resolve_import_outcome` stays green with that path completely broken.

@@ -155,3 +155,78 @@ fn a_session_route_answer_never_serves_the_workspace_view() {
         "the workspace still has the helper, whatever the session cached"
     );
 }
+
+/// The overlay type-route resolves an ESM fallback to its declaration
+/// companion exactly as the workspace type-route does: one policy, whether
+/// or not the overlay is empty.
+#[test]
+fn the_overlay_type_route_normalizes_an_esm_fallback_like_the_workspace_one() {
+    let owner = "/workspace/index.ts";
+    let (workspace, host) = make_host(&[
+        (owner, "export {}\n"),
+        ("/workspace/runtime.js", "export const runtime = true\n"),
+        ("/workspace/runtime.d.ts", "export type Runtime = boolean\n"),
+    ]);
+    workspace.set_exact_resolutions(
+        owner,
+        vec![verter_workspace::ExactResolution {
+            specifier: "runtimedep".to_string(),
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
+            possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
+        }],
+    );
+    let workspace_route = match host.resolve_type_dependency_canonical(owner, "runtimedep") {
+        verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+        verter_workspace::ResolutionPublication::Refused(refusal) => {
+            panic!("precondition: the workspace type-route admits: {refusal:?}")
+        }
+    };
+    assert_eq!(
+        workspace_route.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "precondition: the workspace type-route normalizes to the companion"
+    );
+    // Through a session context: once with no overlay at all, once with an
+    // overlay that touches nothing the route reads.
+    for overlays in [&[][..], &[("/workspace/unrelated.ts", "export {}\n")][..]] {
+        assert_eq!(
+            type_route_through_session(&host, overlays, owner, "runtimedep"),
+            workspace_route,
+            "the session type-route is the workspace policy (overlay: {overlays:?})"
+        );
+    }
+}
+
+/// The type-route target of `specifier` from `owner`, read through a
+/// session context over `overlays`.
+fn type_route_through_session(
+    host: &Arc<VerterHost>,
+    overlays: &[(&str, &str)],
+    owner: &str,
+    specifier: &str,
+) -> Option<String> {
+    let mut sources: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    let mut hashes = FxHashMap::default();
+    for (canonical, source) in overlays {
+        sources.insert((*canonical).to_string(), Arc::from(*source));
+        hashes.insert(
+            (*canonical).to_string(),
+            crate::hash::hash_16(source.as_bytes()),
+        );
+    }
+    let deleted = std::collections::HashSet::new();
+    let view = OverlaidViewRef::new(host, &sources, &hashes, &deleted);
+    let store_view = host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .with_session_overlay(host, &view);
+    let ctx = SessionResolverContext::new(
+        host,
+        &view,
+        &store_view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+    ctx.resolve_type_dependency_canonical(owner, specifier)
+}
