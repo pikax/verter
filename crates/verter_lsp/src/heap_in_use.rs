@@ -59,6 +59,9 @@ mod platform {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 mod platform {
+    use std::ffi::{c_char, c_void};
+    use std::sync::OnceLock;
+
     /// `struct mallinfo2` from `malloc.h` (glibc 2.33+).
     #[repr(C)]
     struct Mallinfo2 {
@@ -74,12 +77,34 @@ mod platform {
         keepcost: usize,
     }
 
+    #[link(name = "dl")]
     unsafe extern "C" {
-        fn mallinfo2() -> Mallinfo2;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    type Mallinfo2Fn = unsafe extern "C" fn() -> Mallinfo2;
+
+    /// `mallinfo2`, looked up at run time rather than linked: it only exists
+    /// from glibc 2.33, and the release cross-builds link against an older
+    /// glibc (`aarch64-unknown-linux-gnu` through cargo-zigbuild), where a
+    /// direct reference is an undefined symbol. On an older glibc the figure
+    /// is unavailable, as on any platform without one.
+    fn mallinfo2() -> Option<Mallinfo2Fn> {
+        static RESOLVED: OnceLock<Option<Mallinfo2Fn>> = OnceLock::new();
+        *RESOLVED.get_or_init(|| {
+            // SAFETY: a null handle is glibc's `RTLD_DEFAULT` (the global
+            // symbol scope), and the name is NUL-terminated.
+            let symbol = unsafe { dlsym(std::ptr::null_mut(), c"mallinfo2".as_ptr()) };
+            // SAFETY: a non-null `mallinfo2` is the glibc function of this
+            // signature (`struct mallinfo2 mallinfo2(void)`).
+            (!symbol.is_null())
+                .then(|| unsafe { std::mem::transmute::<*mut c_void, Mallinfo2Fn>(symbol) })
+        })
     }
 
     /// In-use bytes in the main arena plus mmapped allocations.
     pub(super) fn heap_in_use_bytes() -> Option<u64> {
+        let mallinfo2 = mallinfo2()?;
         // SAFETY: `mallinfo2` takes no arguments and returns by value.
         let info = unsafe { mallinfo2() };
         Some((info.uordblks + info.hblkhd) as u64)

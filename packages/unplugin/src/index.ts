@@ -33,8 +33,17 @@ import {
   type VerterRenderProfile,
   type BundlerWarn,
 } from "./core/compiler";
+import {
+  resolveThroughBundler,
+  type BundlerResolution,
+  type ResolveHook,
+} from "./core/bundler-resolve";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
-import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
+import {
+  evictHydratedPath,
+  findPackageSubpathDeclarationFile,
+  hydrateMacroTypeDeps,
+} from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { copyCapturedBlockContentEcho, preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
@@ -179,26 +188,6 @@ async function fileExistsThroughWorkspaceOrDisk(pathname: string): Promise<boole
   }
 }
 
-type ResolveHook = (
-  source: string,
-  importer: string,
-  options: { skipSelf: true },
-) => Promise<unknown> | unknown;
-
-function resolvedIdFromHookResult(result: unknown): string | null {
-  if (!result) return null;
-  if (typeof result === "string") {
-    return result.startsWith("\0") || result.includes("?") ? null : result;
-  }
-  if (typeof result !== "object") return null;
-
-  const resolved = result as { id?: unknown; external?: unknown };
-  if (resolved.external) return null;
-  if (typeof resolved.id !== "string") return null;
-  if (resolved.id.startsWith("\0") || resolved.id.includes("?")) return null;
-  return resolved.id;
-}
-
 /**
  * Resolves external sources and type-dependency imports from an upsert result.
  * Shared between `transform()` and `buildStart()` (preCompile).
@@ -222,15 +211,17 @@ async function resolveUpsertDependencies(
       // Let the bundler choose the bytes when it can resolve this specifier,
       // while keeping the host-minted canonical ID as the VFS identity.
       const absPath = path.resolve(path.dirname(filename), specifier);
-      const hookReadId = resolveId
-        ? resolvedIdFromHookResult(await resolveId(specifier, filename, { skipSelf: true }))
+      const hookResolution = resolveId
+        ? await resolveThroughBundler(resolveId, specifier, filename)
         : null;
+      const hookReadId = hookResolution?.id ?? null;
       let extSource = hookReadId
         ? await readTextFileThroughWorkspaceOrDisk(hookReadId)
         : await readTextFileThroughWorkspaceOrDisk(absPath);
       if (extSource === null && hookReadId && hookReadId !== absPath) {
         extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
       }
+      if (extSource === null && hookResolution?.failure) throw hookResolution.failure.error;
       if (extSource !== null) {
         host.upsert({
           inputId: resolvedId,
@@ -261,13 +252,29 @@ async function resolveUpsertDependencies(
   );
   if (dependencySpecifiers.length > 0) {
     const path = await import("path");
-    const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
+    const exts = [
+      "",
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      ".mts",
+      ".mjs",
+      ".d.ts",
+      ".d.mts",
+      ".d.cts",
+      "/index.ts",
+      "/index.d.ts",
+      "/index.d.mts",
+      "/index.d.cts",
+    ];
     for (const specifier of dependencySpecifiers) {
+      let bundlerFailure: BundlerResolution["failure"] = null;
       // Try bundler resolve hook first (if available)
       if (resolveId) {
-        const resolvedId = resolvedIdFromHookResult(
-          await resolveId(specifier, filename, { skipSelf: true }),
-        );
+        const resolution = await resolveThroughBundler(resolveId, specifier, filename);
+        bundlerFailure = resolution.failure;
+        const resolvedId = resolution.id;
         if (resolvedId) {
           if (resolvedId.endsWith(".vue")) {
             resolutions.push({ specifier, resolvedCanonicalId: normalizePath(resolvedId) });
@@ -289,15 +296,35 @@ async function resolveUpsertDependencies(
         // resolveId returned null or read failed — fall through for relative specifiers
       }
 
-      // Filesystem probing fallback for relative specifiers
-      if (!specifier.startsWith(".")) continue;
+      if (!specifier.startsWith(".")) {
+        // A package sub-path with no runtime target (exported only under the
+        // `types` condition) makes the bundler throw; its declaration file is
+        // the dependency. Any other resolver failure is the real cause.
+        if (bundlerFailure) {
+          const declaration = findPackageSubpathDeclarationFile(
+            specifier,
+            filename,
+            getWorkspace(),
+          );
+          const declarationSource = declaration
+            ? await readTextFileThroughWorkspaceOrDisk(declaration)
+            : null;
+          if (declaration === null || declarationSource === null) throw bundlerFailure.error;
+          host.upsert({ inputId: declaration, source: declarationSource, fileKind: "non_sfc" });
+          resolutions.push({ specifier, resolvedCanonicalId: declaration });
+        }
+        continue;
+      }
 
+      // Filesystem probing fallback for relative specifiers
       const absBase = path.resolve(path.dirname(filename), specifier);
+      let probed = false;
       for (const ext of exts) {
         const fullPath = absBase + ext;
         const normalizedFullPath = normalizePath(fullPath);
         if (fullPath.endsWith(".vue") && (await fileExistsThroughWorkspaceOrDisk(fullPath))) {
           resolutions.push({ specifier, resolvedCanonicalId: normalizedFullPath });
+          probed = true;
           break;
         }
         if (fullPath.endsWith(".vue")) continue;
@@ -309,9 +336,11 @@ async function resolveUpsertDependencies(
             fileKind: "non_sfc",
           });
           resolutions.push({ specifier, resolvedCanonicalId: normalizedFullPath });
+          probed = true;
           break;
         }
       }
+      if (!probed && bundlerFailure) throw bundlerFailure.error;
     }
   }
   // Also include external src="..." blocks that were resolved during upsert
