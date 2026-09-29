@@ -2375,8 +2375,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         keep_origin: bool,
     ) -> Option<CompositeReduction> {
         use crate::semantic_query::composite::CompositeOriginCategory as Category;
+        let mut re_decidable = true;
         let (arms, is_union) = match self.graph().node_data(node)?.as_ref() {
-            SemanticNodeData::Union(members) => (members.members_arc(), true),
+            SemanticNodeData::Union(members) => {
+                re_decidable = matches!(
+                    members.origin_category(),
+                    Category::Canonical(_) | Category::CanonicalUnproven | Category::AuthoredShell
+                );
+                (members.members_arc(), true)
+            }
             SemanticNodeData::Intersection(members)
                 if matches!(
                     members.origin_category(),
@@ -2387,7 +2394,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => return None,
         };
-        if !arms.iter().any(|arm| self.is_composite_name(*arm)) {
+        // A union without a name still reduces as the checker's union does
+        // (`"a" | string` is `string`) when its arm list is one the
+        // canonical authority may re-decide; an intersection without one has
+        // nothing to resolve.
+        if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
         if self.carrier_normalizing.borrow().contains(&node) {
@@ -2532,7 +2543,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return Some(recovery);
             }
         }
-        if views.as_slice() == arms {
+        if !reduction.is_union && views.as_slice() == arms {
             return None;
         }
         let is_opaque = |view: SemanticNodeId| {
@@ -2555,7 +2566,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if views.iter().any(|view| is_opaque(*view)) {
             return None;
         }
+        // A template literal arm is the type its construction builds
+        // (`${string}${string}` is `string`), as the checker holds it
+        // before the union reduces.
+        let views: Vec<SemanticNodeId> = views
+            .iter()
+            .map(|view| match graph.node_data(*view).as_deref() {
+                Some(SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                }) => {
+                    let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+                        pattern: Arc::clone(quasis),
+                        args: Arc::clone(expressions),
+                        context: self.template_literal_reduce_context(),
+                    });
+                    match read.value {
+                        QueryResult::Value(built) if !read.result_is_partial => built,
+                        _ => *view,
+                    }
+                }
+                _ => *view,
+            })
+            .collect();
+        let views = views.as_slice();
         let reduced = self.intern_normalized_union_or_intersection(views, true);
+        // Arms read as written whose every member the union's reduction
+        // keeps: the union stays as written, in its written order.
+        if views == arms {
+            let kept = match graph.node_data(reduced).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm))
+                }
+                _ => false,
+            };
+            if kept {
+                return None;
+            }
+        }
         let type_set: Vec<SemanticNodeId> = match graph.node_data(reduced).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => {

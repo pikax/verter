@@ -1080,9 +1080,11 @@ fn canonicalize_with(
     }
 
     // 3. Union literal subsumption, mirroring the checker's `getUnionType`
-    //    reduction: a literal arm whose base primitive the union already
-    //    carries adds no inhabitant (`string | "a"` is `string`). Structural
-    //    (node-data) — never text — and scope-insensitive by construction.
+    //    reduction (`removeRedundantLiteralTypes`): a literal arm whose base
+    //    primitive the union already carries adds no inhabitant (`string |
+    //    "a"` is `string`), and neither does a template literal type or a
+    //    string mapping beside `string`. Structural (node-data) — never
+    //    text — and scope-insensitive by construction.
     if is_union {
         // Four base primitives can subsume literal arms. Collect their presence
         // once; a literal-only union must not rescan every other literal.
@@ -1113,6 +1115,12 @@ fn canonicalize_with(
                 }
                 let base = match graph.node_data(*member).as_deref() {
                     Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
+                    Some(SemanticNodeData::TemplateLiteral { .. }) => 1,
+                    Some(_)
+                        if super::template_relation::string_mapping(graph, *member).is_some() =>
+                    {
+                        1
+                    }
                     // An enum member's literal is a literal of its value's
                     // kind; a member whose value is not a constant is not a
                     // literal and stays.
@@ -1149,6 +1157,49 @@ fn canonicalize_with(
                 folded = true;
                 *arm = boolean;
                 true
+            });
+            if let [only] = arms.as_slice() {
+                return CanonicalComposite {
+                    node: *only,
+                    evidence,
+                };
+            }
+        }
+    }
+
+    // 3c. A string literal that a pattern literal type in the union already
+    //     matches adds no inhabitant
+    //     (`removeStringLiteralsMatchedByTemplateLiterals`): `"a1" |
+    //     `a${number}`` is `` `a${number}` ``. A string enum member is a string
+    //     literal here too.
+    if is_union {
+        let patterns: Vec<SemanticNodeId> = arms
+            .iter()
+            .copied()
+            .filter(|arm| super::template_relation::is_pattern_literal(graph, *arm))
+            .collect();
+        if !patterns.is_empty() {
+            let string_text = |member: SemanticNodeId| -> Option<String> {
+                match graph.node_data(member).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                        Some(text.clone())
+                    }
+                    Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                        match graph.node_data(enum_literal.base).as_deref() {
+                            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            arms.retain(|arm| match string_text(*arm) {
+                Some(text) => !patterns.iter().any(|pattern| {
+                    super::template_relation::string_literal_matches_pattern(graph, &text, *pattern)
+                }),
+                None => true,
             });
             if let [only] = arms.as_slice() {
                 return CanonicalComposite {
