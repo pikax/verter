@@ -43,6 +43,14 @@ pub(crate) const CONDITIONAL_TAIL_STEPS: u32 = 1000;
 /// many constituents fails with TS2590 before a constituent is built.
 pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 
+/// The checker's relation-complexity allowance for one relation check
+/// (`checkTypeRelatedTo`'s `relationCount`): it starts at `(16,000,000 -
+/// relation cache size) >> 3` and falls by one for each structured
+/// comparison result the check records; at zero the relation is false with
+/// TS2859. The cache term only lowers the start, so its value over an empty
+/// cache, this, is the most the checker ever allows.
+pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
+
 /// The checker's error type after `diagnostic`: the typed recovery carrier,
 /// with `beyond` the type Verter names past the checker's limit, if any.
 pub(crate) fn checker_recovery(
@@ -102,6 +110,28 @@ impl ConditionalTail {
     pub(crate) fn step(&mut self) -> bool {
         self.steps += 1;
         self.steps < CONDITIONAL_TAIL_STEPS
+    }
+}
+
+/// The structured comparisons one relation check has recorded. Reaching
+/// [`RELATION_COMPARISONS`] is the TS2859 fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RelationComplexity {
+    recorded: u32,
+}
+
+impl RelationComplexity {
+    /// Record one structured comparison: the TS2859 fact when the check
+    /// has none left.
+    pub(crate) fn record(&mut self) -> Result<(), CheckerDiagnostic> {
+        if self.recorded >= RELATION_COMPARISONS {
+            return Err(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::RelationTooComplex,
+                operation: CheckerDiagnosticOperation::Relation,
+            });
+        }
+        self.recorded += 1;
+        Ok(())
     }
 }
 
@@ -191,6 +221,24 @@ mod tests {
             ]),
             ts2590
         );
+    }
+
+    /// A relation check records 2,000,000 structured comparisons and is
+    /// refused the next.
+    #[test]
+    fn a_relation_check_records_the_checkers_comparisons() {
+        let mut check = RelationComplexity::default();
+        for _ in 0..RELATION_COMPARISONS {
+            assert_eq!(check.record(), Ok(()));
+        }
+        assert_eq!(
+            check.record(),
+            Err(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::RelationTooComplex,
+                operation: CheckerDiagnosticOperation::Relation,
+            })
+        );
+        assert_eq!(RELATION_COMPARISONS, 2_000_000);
     }
 
     /// A tail run fails at its 1000th step; a run resumed with steps already

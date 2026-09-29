@@ -3030,23 +3030,16 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
 
 /// A call has no quota on its accepted inference deposits: the checker
 /// infers from every tuple position. `f<T>(xs: [T, …, T]): T` over 1,025
-/// positions, called with as many `1`s, selects `T := number`; the deposits
-/// are charged to the connected-work ledger as work.
+/// and 5,000 positions, called with as many `1`s, selects `T := number`;
+/// the deposits, like the relation's own steps, are charged to the
+/// connected-work ledger as work.
 ///
 /// Measured on TypeScript 7.0.2 (`declare function f<T>(xs: [T, …]): T;
 /// const r = f([1, …])`, all four `strictNullChecks` × `noImplicitAny`
 /// settings agree): `typeof r` is `number` at 1,025 and at 5,000 positions.
 #[test]
 fn inference_deposits_have_no_call_quota() {
-    deposits_select_number(&[1025]);
-}
-
-/// The same call over 5,000 positions: the checker answers `number` (see
-/// [`inference_deposits_have_no_call_quota`]).
-#[test]
-#[ignore = "the relation work allowance, derived from the graph size, stops a 5,000-element tuple relation"]
-fn five_thousand_inference_deposits_select_the_checkers_answer() {
-    deposits_select_number(&[5000]);
+    deposits_select_number(&[1025, 5000]);
 }
 
 /// `f<T>(xs: [T, …, T]): T` over each of `counts` positions, called with as

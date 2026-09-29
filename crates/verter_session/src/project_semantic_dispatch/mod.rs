@@ -4347,6 +4347,8 @@ mod relation_operand_tests;
 #[cfg(test)]
 mod relation_variance_tests;
 #[cfg(test)]
+mod relation_work_tests;
+#[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]
 mod string_mapping_template_tests;
