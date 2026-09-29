@@ -1895,6 +1895,43 @@ enum ObjectStep<'e, 'x> {
     Done(Box<SliceExpr>),
 }
 
+/// An array literal's lowering in progress, stepped by
+/// [`Lowerer::array_step`]: the elements lowered so far, the next
+/// element, and the element the literal waits on (with whether it is a
+/// spread's argument).
+struct ArrayFrame<'e, 'x> {
+    array: &'e oxc_ast::ast::ArrayExpression<'x>,
+    policy: ObjectMemberPolicy,
+    elements: Vec<SliceArrayElement>,
+    next: usize,
+    awaiting: Option<(&'e Expression<'x>, bool)>,
+}
+
+impl<'e, 'x> ArrayFrame<'e, 'x> {
+    fn new(array: &'e oxc_ast::ast::ArrayExpression<'x>, policy: ObjectMemberPolicy) -> Self {
+        Self {
+            array,
+            policy,
+            elements: Vec::with_capacity(array.elements.len()),
+            next: 0,
+            awaiting: None,
+        }
+    }
+}
+
+/// What an [`ArrayFrame`] needs next: an element lowered (in the const
+/// context, or as any value), or nothing — its value.
+enum ArrayStep<'e, 'x> {
+    Descend(&'e Expression<'x>, bool),
+    Done(Box<SliceExpr>),
+}
+
+/// The mode an array literal's element lowers in: its fresh literal kept,
+/// for the literal's own policy to widen or pin.
+const ARRAY_ELEMENT_MODE: ExprMode = ExprMode::BindingInit {
+    preserve_literal: true,
+};
+
 /// A conditional's lowering waiting on its branches (see
 /// [`Lowerer::conditional_start`]).
 struct ConditionalStart {
@@ -15065,7 +15102,8 @@ impl<'a> Lowerer<'a> {
         //
         // An object literal lowers as a frame of the same stack
         // (`Task::Object`), which resumes with each child it asks for: a
-        // member value nested in a member value costs no native level.
+        // member value nested in a member value costs no native level. An
+        // array literal does too (`Task::Array`), element by element.
         enum Task<'e, 'a> {
             Lower(&'e Expression<'a>, ExprMode),
             /// [`Lowerer::lower_in_const_context`]'s lowering.
@@ -15073,6 +15111,7 @@ impl<'a> Lowerer<'a> {
             Build(OperatorShape),
             Branches(ConditionalStart),
             Object(ObjectFrame<'e, 'a>),
+            Array(ArrayFrame<'e, 'a>),
             /// A call recording its whole-value arguments
             /// ([`Lowerer::record_call_step`]), waiting on the one it
             /// asked for last.
@@ -15172,6 +15211,10 @@ impl<'a> Lowerer<'a> {
                     }
                     if let Some((object, whole, policy)) = self.object_literal_lowering(expr) {
                         tasks.push(Task::Object(ObjectFrame::new(object, whole, mode, policy)));
+                        continue;
+                    }
+                    if let Some((array, policy)) = self.array_literal_lowering(expr) {
+                        tasks.push(Task::Array(ArrayFrame::new(array, policy)));
                         continue;
                     }
                     // An `await x` lowers its operand through its own arm
@@ -15394,9 +15437,28 @@ impl<'a> Lowerer<'a> {
                             mode,
                             ObjectMemberPolicy::ConstAssert,
                         ))),
-                        ValueDescent::Array(array) => values
-                            .push(self.lower_array_literal(array, ObjectMemberPolicy::ConstAssert)),
+                        ValueDescent::Array(array) => tasks.push(Task::Array(ArrayFrame::new(
+                            array,
+                            ObjectMemberPolicy::ConstAssert,
+                        ))),
                         _ => tasks.push(Task::Lower(expr, mode)),
+                    }
+                }
+                Task::Array(mut frame) => {
+                    let delivered = frame
+                        .awaiting
+                        .is_some()
+                        .then(|| values.pop().expect("the element the literal asked for"));
+                    match self.array_step(&mut frame, delivered) {
+                        ArrayStep::Done(value) => values.push(*value),
+                        ArrayStep::Descend(child, const_context) => {
+                            tasks.push(Task::Array(frame));
+                            tasks.push(if const_context {
+                                Task::LowerConst(child, ARRAY_ELEMENT_MODE)
+                            } else {
+                                Task::Lower(child, ARRAY_ELEMENT_MODE)
+                            });
+                        }
                     }
                 }
                 Task::Object(mut frame) => {
@@ -16468,31 +16530,86 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Lower an array literal to [`SliceExpr::Array`] under an object
-    /// literal's member policy. Every element is its own evaluated
-    /// position — the planner opened each one (a spread's argument for a
-    /// spread) as a child site of the array — so an element outside the
-    /// demand selection rides the typed `Elided` carrier, exactly as an
-    /// object member value does. A fresh element literal widens (the
-    /// element slot is mutable) unless the policy keeps literals or a
-    /// const assertion pins that element; under `as const` a nested
-    /// object or array literal is in the const context too.
+    /// literal's member policy ([`Self::array_step`]).
     fn lower_array_literal(
         &mut self,
         array: &oxc_ast::ast::ArrayExpression<'_>,
         policy: ObjectMemberPolicy,
     ) -> SliceExpr {
-        let const_asserted = policy == ObjectMemberPolicy::ConstAssert;
-        let mode = ExprMode::BindingInit {
-            preserve_literal: true,
-        };
-        let mut elements = Vec::with_capacity(array.elements.len());
-        for element in &array.elements {
+        // [`Self::lower_expr`] steps an array literal from its own stack;
+        // here the same steps run with each element lowered in place.
+        let mut frame = ArrayFrame::new(array, policy);
+        let mut delivered = None;
+        loop {
+            match self.array_step(&mut frame, delivered.take()) {
+                ArrayStep::Done(value) => return *value,
+                ArrayStep::Descend(expression, const_context) => {
+                    delivered = Some(if const_context {
+                        self.lower_in_const_context(expression, ARRAY_ELEMENT_MODE)
+                    } else {
+                        self.lower_expr(expression, ARRAY_ELEMENT_MODE)
+                    });
+                }
+            }
+        }
+    }
+
+    /// The array literal [`Self::lower_expr`] lowers as a frame of its
+    /// stack, with its element policy: the literal itself (widening its
+    /// elements), or a type carrier over one whose policy decides its
+    /// elements' literals. `None` for every other expression — the same
+    /// decisions [`Self::lower_expr_level`] reaches the literal through,
+    /// exactly as [`Self::object_literal_lowering`]'s.
+    fn array_literal_lowering<'e, 'x>(
+        &self,
+        expr: &'e Expression<'x>,
+    ) -> Option<(&'e oxc_ast::ast::ArrayExpression<'x>, ObjectMemberPolicy)> {
+        match value_descent(expr) {
+            ValueDescent::Array(array) => Some((array, ObjectMemberPolicy::Widen)),
+            ValueDescent::TypeCarrier(inner) => {
+                if matches!(
+                    value_descent(unwrap_parenthesized(inner)),
+                    ValueDescent::Object(_) | ValueDescent::Array(_)
+                ) && satisfies_target(expr).is_some()
+                {
+                    return None;
+                }
+                let policy = member_literal_policy(expr, self.source)?;
+                match value_descent(inner) {
+                    ValueDescent::Array(array) => Some((array, policy)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Step an array literal's lowering until it needs an element lowered
+    /// or is done, with the element it asked for last `delivered`. Every
+    /// element is its own evaluated position — the planner opened each
+    /// one (a spread's argument for a spread) as a child site of the
+    /// array — so an element outside the demand selection rides the typed
+    /// `Elided` carrier, exactly as an object member value does.
+    fn array_step<'e, 'x>(
+        &mut self,
+        frame: &mut ArrayFrame<'e, 'x>,
+        delivered: Option<SliceExpr>,
+    ) -> ArrayStep<'e, 'x> {
+        if let Some(value) = delivered {
+            let (expression, spread) = frame
+                .awaiting
+                .take()
+                .expect("an element delivered to no request");
+            self.push_array_element(frame, expression, spread, value);
+        }
+        while let Some(element) = frame.array.elements.get(frame.next) {
+            frame.next += 1;
             let (expression, spread) = match element {
                 oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                     (&spread.argument, true)
                 }
                 oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
-                    elements.push(SliceArrayElement::Elision);
+                    frame.elements.push(SliceArrayElement::Elision);
                     continue;
                 }
                 other => match other.as_expression() {
@@ -16500,41 +16617,56 @@ impl<'a> Lowerer<'a> {
                     None => continue,
                 },
             };
-            let value = if !self.value_span_selected(expression.span()) {
+            if !self.value_span_selected(expression.span()) {
                 // The elided element still RUNS at the literal's
                 // evaluation: its effects take the fail-closed scan.
                 self.scan_unmodeled_position_effects(expression);
-                SliceExpr::Elided
-            } else if const_asserted {
-                self.lower_in_const_context(expression, mode)
-            } else {
-                self.lower_expr(expression, mode)
-            };
-            if spread {
-                elements.push(SliceArrayElement::Spread { source: value });
+                self.push_array_element(frame, expression, spread, SliceExpr::Elided);
                 continue;
             }
-            let pinned = !policy.widens_member_literals()
-                || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                    expression,
-                    self.source,
-                );
-            let (value, pre_widening) = if pinned || !widens_mutable_slot_literals(&value) {
-                (value, None)
-            } else {
-                let widened = widen_mutable_slot_literals(value.clone());
-                (widened, Some(Box::new(value)))
-            };
-            elements.push(SliceArrayElement::Value {
-                value,
-                freshness: expression_freshness(expression),
-                pre_widening,
-            });
+            frame.awaiting = Some((expression, spread));
+            return ArrayStep::Descend(expression, frame.policy == ObjectMemberPolicy::ConstAssert);
         }
-        SliceExpr::Array {
-            elements: Arc::from(elements.into_boxed_slice()),
-            const_asserted,
+        ArrayStep::Done(Box::new(SliceExpr::Array {
+            elements: Arc::from(std::mem::take(&mut frame.elements).into_boxed_slice()),
+            const_asserted: frame.policy == ObjectMemberPolicy::ConstAssert,
+        }))
+    }
+
+    /// Add an element's lowered `value` to the literal: a spread's source
+    /// as it is, and a value with its freshness — a fresh element literal
+    /// widens (the element slot is mutable) unless the policy keeps
+    /// literals or a const assertion pins that element; under `as const`
+    /// a nested object or array literal is in the const context too.
+    fn push_array_element(
+        &self,
+        frame: &mut ArrayFrame<'_, '_>,
+        expression: &Expression<'_>,
+        spread: bool,
+        value: SliceExpr,
+    ) {
+        if spread {
+            frame
+                .elements
+                .push(SliceArrayElement::Spread { source: value });
+            return;
         }
+        let pinned = !frame.policy.widens_member_literals()
+            || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                expression,
+                self.source,
+            );
+        let (value, pre_widening) = if pinned || !widens_mutable_slot_literals(&value) {
+            (value, None)
+        } else {
+            let widened = widen_mutable_slot_literals(value.clone());
+            (widened, Some(Box::new(value)))
+        };
+        frame.elements.push(SliceArrayElement::Value {
+            value,
+            freshness: expression_freshness(expression),
+            pre_widening,
+        });
     }
 
     /// Whether an initializer is a bare `null` or a FREE `undefined`,

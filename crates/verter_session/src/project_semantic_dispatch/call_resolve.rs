@@ -29,11 +29,64 @@ use crate::semantic_query::{
 
 pub(super) const MAX_APPLICABILITY_RELATIONS: usize = 1_024;
 const MAX_INFERENCE_DEPOSITS: usize = 1_024;
-/// Recursion bound for the call-boundary deposit walk: top-level union /
-/// intersection constituents plus one-level alias-instantiation
-/// expansions. Running out answers NOT-top-level (the deposit widens —
-/// the superset direction).
-const DEPOSIT_WALK_FUEL: u8 = 16;
+
+/// Whether a fresh-literal deposit's binder occurs at the top level of a
+/// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BinderReach {
+    /// The structure is the binder, or has it as a constituent.
+    Present,
+    /// Every constituent the structure reaches was read, and none is the
+    /// binder.
+    Absent,
+    /// None read is the binder, but an alias instantiation on the way
+    /// could not be read in full: whether the binder occurs is unknown.
+    Incomplete,
+}
+
+/// One alias instantiation read through the shared `Instantiate` demand
+/// ([`ProjectSemanticDispatch::alias_instantiation_expansion`]).
+enum AliasExpansion {
+    /// The node the instantiation expands to, one level down.
+    Expanded(SemanticNodeId),
+    /// The instantiation expands to nothing else: a terminal nominal, a
+    /// declaration the demand serves no expansion for, or the node itself.
+    Terminal,
+    /// The demand's answer is partial, a recursion hold, or an operational
+    /// failure: the expansion is unknown.
+    Incomplete,
+}
+
+/// Whether an `Instantiate` demand failing with `error` failed for want of
+/// resources, time or a current operand — not because the declaration has
+/// no expansion — so the expansion is unknown, not absent. Exhaustive, so
+/// a new failure kind is classified here.
+fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
+    match error {
+        QueryError::BudgetExceeded(_)
+        | QueryError::Cancelled
+        | QueryError::UnstableState { .. }
+        | QueryError::SignatureOverflow
+        | QueryError::ForeignSemanticOperand
+        | QueryError::StaleSemanticOperand
+        | QueryError::IncompleteSemanticOperand { .. } => true,
+        QueryError::Miss
+        | QueryError::UnsupportedIntrinsic { .. }
+        | QueryError::AliasCycle { .. }
+        | QueryError::RecursiveRef { .. }
+        | QueryError::Other(_)
+        | QueryError::DeclPlaceholder { .. }
+        | QueryError::ValueDomainMismatch { .. }
+        | QueryError::RaiseAliasCycle
+        | QueryError::TypeParamCycle
+        | QueryError::RaiseMiss
+        | QueryError::UnrepresentableSurface
+        | QueryError::UnrepresentableSurfaceMember
+        | QueryError::UnmodeledPosition
+        | QueryError::OpenSurface
+        | QueryError::CheckerRecovery(_) => false,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum ResolveCallStep {
@@ -2526,18 +2579,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // still carries the binder, so top-levelness is read off
                 // the binder occurrence — an authored sibling arm
                 // spelling the deposit's literal value never matches.
-                self.collect_union_top_level_fresh_bounds(
-                    session_id,
-                    *declared,
-                    &substitution,
-                    &mut fresh_literal_returns,
-                );
-                let widened = match self.fresh_widened_substitution_outside_top_level(
-                    session_id,
-                    &substitution,
-                    Some(*declared),
-                ) {
-                    Some(widened) => match self.rederive_defaults_under(
+                let widened = match self
+                    .collect_union_top_level_fresh_bounds(
+                        session_id,
+                        *declared,
+                        &substitution,
+                        &mut fresh_literal_returns,
+                    )
+                    .and_then(|()| {
+                        self.fresh_widened_substitution_outside_top_level(
+                            session_id,
+                            &substitution,
+                            Some(*declared),
+                        )
+                    }) {
+                    Err(failure) => {
+                        self.abandon_session(session_id);
+                        return CandidateVerdict::Degraded(failure);
+                    }
+                    Ok(Some(widened)) => match self.rederive_defaults_under(
                         widened,
                         &defaulted,
                         budget,
@@ -2549,7 +2609,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             return CandidateVerdict::Degraded(failure);
                         }
                     },
-                    None => None,
+                    Ok(None) => None,
                 };
                 let instantiated =
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
@@ -2680,12 +2740,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 }
                             };
                             if let Some(binder_structure) = binder_structure {
-                                self.collect_union_top_level_fresh_bounds(
+                                if let Err(failure) = self.collect_union_top_level_fresh_bounds(
                                     session_id,
                                     binder_structure,
                                     &substitution,
                                     &mut fresh_literal_returns,
-                                );
+                                ) {
+                                    self.abandon_session(session_id);
+                                    return CandidateVerdict::Degraded(failure);
+                                }
                             }
                             // The callee's OWN authored fresh literal
                             // arms (its sealed per-constituent freshness)
@@ -2704,13 +2767,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     fresh_literal_returns.push(*arm);
                                 }
                             }
-                            if let Some(widened_substitution) = self
+                            let widened_substitution = match self
                                 .fresh_widened_substitution_outside_top_level(
                                     session_id,
                                     &substitution,
                                     binder_structure,
-                                )
-                            {
+                                ) {
+                                Ok(widened_substitution) => widened_substitution,
+                                Err(failure) => {
+                                    self.abandon_session(session_id);
+                                    return CandidateVerdict::Degraded(failure);
+                                }
+                            };
+                            if let Some(widened_substitution) = widened_substitution {
                                 let widened_substitution = match self.rederive_defaults_under(
                                     widened_substitution,
                                     &defaulted,
@@ -2991,7 +3060,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .collect(),
         );
         let inferred = self
-            .fresh_widened_substitution_outside_top_level(session_id, &inferred, return_structure)
+            .fresh_widened_substitution_outside_top_level(session_id, &inferred, return_structure)?
             .unwrap_or(inferred);
         let contextual = self.substitute_canonical(target, &inferred);
         let contextual = match self.shared_signature_nodes(contextual, SignatureKind::Call) {
@@ -3248,8 +3317,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// therefore always hand this walk a structure the binder still
     /// occurs in — the declared annotation, or the callee's
     /// uninstantiated flow return — never an instantiated result.
-    fn deposit_at_top_level(&self, structure: SemanticNodeId, param: SemanticNodeId) -> bool {
-        self.deposit_walk_reaches_binder(structure, param, false, DEPOSIT_WALK_FUEL)
+    fn deposit_at_top_level(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+    ) -> BinderReach {
+        self.deposit_binder_reach(structure, param, false)
+    }
+
+    /// [`Self::deposit_at_top_level`], for the tests beside this module.
+    #[cfg(test)]
+    pub(super) fn deposit_at_top_level_for_tests(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+    ) -> BinderReach {
+        self.deposit_at_top_level(structure, param)
     }
 
     /// The shared walk behind [`Self::deposit_at_top_level`] and
@@ -3257,36 +3340,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// intersection constituents (the union half's measured rule). An
     /// alias instantiation at top level is TRANSPARENT: `type UA<T> =
     /// T | undefined` keeps `fu<T>(v: T): UA<T>`'s deposit exactly as
-    /// the spelled-out union does (measured), so the walk expands one
-    /// level through the shared `Instantiate` demand and continues.
-    /// `fuel` bounds alias chains and degenerate structures; running out
-    /// answers NOT-top-level, which widens — the superset direction.
-    fn deposit_walk_reaches_binder(
+    /// the spelled-out union does (measured), so the walk expands it one
+    /// level through the shared `Instantiate` demand and continues, down
+    /// a chain of aliases of any length.
+    ///
+    /// The walk runs from a work list and visits each node once, so a
+    /// cycle of aliases or constituents ends it. A binder found answers
+    /// [`BinderReach::Present`] whatever else is unread; otherwise an
+    /// expansion it could not read answers [`BinderReach::Incomplete`],
+    /// never [`BinderReach::Absent`].
+    fn deposit_binder_reach(
         &self,
         structure: SemanticNodeId,
         param: SemanticNodeId,
         union_only: bool,
-        fuel: u8,
-    ) -> bool {
-        if self.nodes_are_same_binder(structure, param) {
-            return true;
+    ) -> BinderReach {
+        let mut pending = vec![structure];
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut incomplete = false;
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            if self.nodes_are_same_binder(node, param) {
+                return BinderReach::Present;
+            }
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    pending.extend(members.iter().rev().copied());
+                }
+                Some(SemanticNodeData::Intersection(members)) if !union_only => {
+                    pending.extend(members.iter().rev().copied());
+                }
+                Some(SemanticNodeData::InstantiationRef { .. }) => {
+                    match self.alias_instantiation_expansion(node) {
+                        AliasExpansion::Expanded(expanded) => pending.push(expanded),
+                        AliasExpansion::Terminal => {}
+                        AliasExpansion::Incomplete => incomplete = true,
+                    }
+                }
+                _ => {}
+            }
         }
-        let Some(fuel) = fuel.checked_sub(1) else {
-            return false;
-        };
-        match self.graph().node_data(structure).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members
-                .iter()
-                .any(|member| self.deposit_walk_reaches_binder(*member, param, union_only, fuel)),
-            Some(SemanticNodeData::Intersection(members)) if !union_only => members
-                .iter()
-                .any(|member| self.deposit_walk_reaches_binder(*member, param, union_only, fuel)),
-            Some(SemanticNodeData::InstantiationRef { .. }) => self
-                .expand_alias_instantiation_one_level(structure)
-                .is_some_and(|expanded| {
-                    self.deposit_walk_reaches_binder(expanded, param, union_only, fuel)
-                }),
-            _ => false,
+        if incomplete {
+            BinderReach::Incomplete
+        } else {
+            BinderReach::Absent
         }
     }
 
@@ -3344,16 +3443,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// call-boundary deposit walk (an alias to a union is transparent to
     /// the top-level exemption) and the flow return join's union
     /// flattening. `None` when the demand does not produce a distinct
-    /// node; callers keep the carrier (the walk answers NOT-top-level
-    /// and the deposit widens).
+    /// node; the join keeps the carrier.
     pub(super) fn expand_alias_instantiation_one_level(
         &self,
         structure: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
+        match self.alias_instantiation_expansion(structure) {
+            AliasExpansion::Expanded(expanded) => Some(expanded),
+            AliasExpansion::Terminal | AliasExpansion::Incomplete => None,
+        }
+    }
+
+    /// [`Self::expand_alias_instantiation_one_level`]'s read, telling an
+    /// instantiation that expands to nothing else from one whose
+    /// expansion the demand could not read in full.
+    fn alias_instantiation_expansion(&self, structure: SemanticNodeId) -> AliasExpansion {
         let graph = self.graph();
         let data = graph.node_data(structure);
         let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
-            return None;
+            return AliasExpansion::Terminal;
         };
         // The lib `Function` global's carrier is a TERMINAL nominal, not
         // an alias instantiation: its `__builtin__` base names no
@@ -3363,7 +3471,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.runtime_nominal_identity(base)
             == Some(crate::intrinsic_registry::RuntimeNominal::Function)
         {
-            return None;
+            return AliasExpansion::Terminal;
         }
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
@@ -3383,9 +3491,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         ));
         crate::request_context::observe_component_meta_read_suppress(&read);
+        if read.result_is_partial {
+            return AliasExpansion::Incomplete;
+        }
         match read.value {
-            QueryResult::Value(id) if id != structure => Some(id),
-            _ => None,
+            QueryResult::Value(id) if id != structure => AliasExpansion::Expanded(id),
+            QueryResult::Value(_) => AliasExpansion::Terminal,
+            QueryResult::Recursive(_) => AliasExpansion::Incomplete,
+            QueryResult::Error(error) if error_leaves_expansion_unknown(&error) => {
+                AliasExpansion::Incomplete
+            }
+            QueryResult::Error(_) => AliasExpansion::Terminal,
         }
     }
 
@@ -3400,13 +3516,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the literal (measured: `{ a: andD("x") }` for `andD<T>(x: T):
     /// T & {}` keeps `"x"` where `{ a: unionD("x") }` for
     /// `unionD<T>(x: T): T | null` widens to `string | null`).
+    ///
+    /// A fresh deposit whose binder's reach is unknown
+    /// ([`BinderReach::Incomplete`]) leaves the call undecided.
     fn collect_union_top_level_fresh_bounds(
         &self,
         session_id: SessionId,
         structure: SemanticNodeId,
         substitution: &CanonicalTypeSubstitution,
         fresh_literal_returns: &mut Vec<SemanticNodeId>,
-    ) {
+    ) -> Result<(), ResolveCallFailure> {
         let graph = self.graph();
         for (param, bound) in substitution.bindings() {
             // A bound is one candidate, or several combined into a union
@@ -3419,24 +3538,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
                 _ => continue,
             };
-            if !self.deposit_at_union_top_level(structure, *param) {
+            let fresh: Vec<SemanticNodeId> = candidates
+                .into_iter()
+                .filter(|candidate| {
+                    super::enum_type::is_literal_type(graph, *candidate)
+                        && self.binding_is_fresh_literal_deposit(session_id, *param, *candidate)
+                })
+                .collect();
+            if fresh.is_empty() {
                 continue;
             }
-            for candidate in candidates {
-                if super::enum_type::is_literal_type(graph, candidate)
-                    && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
-                    && !fresh_literal_returns.contains(&candidate)
-                {
+            match self.deposit_at_union_top_level(structure, *param) {
+                BinderReach::Present => {}
+                BinderReach::Absent => continue,
+                BinderReach::Incomplete => return Err(ResolveCallFailure::Undecidable),
+            }
+            for candidate in fresh {
+                if !fresh_literal_returns.contains(&candidate) {
                     fresh_literal_returns.push(candidate);
                 }
             }
         }
+        Ok(())
     }
 
     /// The UNION-only half of [`Self::deposit_at_top_level`] — the same
     /// binder-identity walk, excluding intersection constituents.
-    fn deposit_at_union_top_level(&self, structure: SemanticNodeId, param: SemanticNodeId) -> bool {
-        self.deposit_walk_reaches_binder(structure, param, true, DEPOSIT_WALK_FUEL)
+    fn deposit_at_union_top_level(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+    ) -> BinderReach {
+        self.deposit_binder_reach(structure, param, true)
     }
 
     /// The substitution with every FRESH-deposited literal binding the
@@ -3492,58 +3625,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Ok(CanonicalTypeSubstitution::new(bindings))
     }
 
+    /// The widened substitution described above; a fresh deposit whose
+    /// binder's reach is unknown ([`BinderReach::Incomplete`]) answers
+    /// [`ResolveCallFailure::Undecidable`] instead.
     fn fresh_widened_substitution_outside_top_level(
         &self,
         session_id: SessionId,
         substitution: &CanonicalTypeSubstitution,
         return_structure: Option<SemanticNodeId>,
-    ) -> Option<CanonicalTypeSubstitution> {
+    ) -> Result<Option<CanonicalTypeSubstitution>, ResolveCallFailure> {
         let graph = self.graph();
         let mut any_widened = false;
-        let widened_bindings: Vec<(SemanticNodeId, SemanticNodeId)> = substitution
-            .bindings()
-            .iter()
-            .map(|(param, bound)| {
-                // One candidate widens when it is a fresh literal deposit.
-                let widen_fresh = |candidate: SemanticNodeId| {
-                    if super::enum_type::is_literal_type(graph, candidate)
-                        && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
+        let mut widened_bindings: Vec<(SemanticNodeId, SemanticNodeId)> =
+            Vec::with_capacity(substitution.bindings().len());
+        for (param, bound) in substitution.bindings() {
+            // Whether one candidate is a fresh literal deposit.
+            let is_fresh = |candidate: SemanticNodeId| {
+                super::enum_type::is_literal_type(graph, candidate)
+                    && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
+            };
+            // One candidate widens when it is a fresh literal deposit.
+            let widen_fresh = |candidate: SemanticNodeId| {
+                if is_fresh(candidate) {
+                    self.widened_literal(candidate)
+                } else {
+                    candidate
+                }
+            };
+            // Only a binding with a fresh deposit can widen, so only its
+            // binder's reach is read. A reach that is unknown leaves the
+            // call undecided: it never widens, and never keeps.
+            let has_fresh = match graph.node_data(*bound).as_deref() {
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                    is_fresh(*bound)
+                }
+                Some(SemanticNodeData::Union(members)) => {
+                    members.iter().any(|member| is_fresh(*member))
+                }
+                _ => false,
+            };
+            let kept = match return_structure {
+                Some(structure) if has_fresh => {
+                    match self.deposit_at_top_level(structure, *param) {
+                        BinderReach::Present => true,
+                        BinderReach::Absent => false,
+                        BinderReach::Incomplete => return Err(ResolveCallFailure::Undecidable),
+                    }
+                }
+                _ => false,
+            };
+            let widened = match graph.node_data(*bound).as_deref() {
+                _ if kept => *bound,
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
+                    widen_fresh(*bound)
+                }
+                // Several candidates combined into a union (the
+                // arguments of a rest parameter): each fresh arm
+                // widens, then the arms combine again.
+                Some(SemanticNodeData::Union(members)) => {
+                    let arms: Vec<SemanticNodeId> =
+                        members.iter().map(|arm| widen_fresh(*arm)).collect();
+                    if arms
+                        .iter()
+                        .zip(members.iter())
+                        .any(|(arm, member)| arm != member)
                     {
-                        self.widened_literal(candidate)
+                        self.relation_combine_candidates(&arms, VariancePhase::Covariant)
                     } else {
-                        candidate
+                        *bound
                     }
-                };
-                let kept = return_structure
-                    .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
-                let widened = match graph.node_data(*bound).as_deref() {
-                    _ if kept => *bound,
-                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => {
-                        widen_fresh(*bound)
-                    }
-                    // Several candidates combined into a union (the
-                    // arguments of a rest parameter): each fresh arm
-                    // widens, then the arms combine again.
-                    Some(SemanticNodeData::Union(members)) => {
-                        let arms: Vec<SemanticNodeId> =
-                            members.iter().map(|arm| widen_fresh(*arm)).collect();
-                        if arms
-                            .iter()
-                            .zip(members.iter())
-                            .any(|(arm, member)| arm != member)
-                        {
-                            self.relation_combine_candidates(&arms, VariancePhase::Covariant)
-                        } else {
-                            *bound
-                        }
-                    }
-                    _ => *bound,
-                };
-                any_widened |= widened != *bound;
-                (*param, widened)
-            })
-            .collect();
-        any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+                }
+                _ => *bound,
+            };
+            any_widened |= widened != *bound;
+            widened_bindings.push((*param, widened));
+        }
+        Ok(any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings)))
     }
 
     /// A covariant inference as the checker widens it (`getWidenedType` in
