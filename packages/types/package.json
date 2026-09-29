@@ -29,9 +29,7 @@
       "default": "./dist/tsx-string-export.js"
     },
     "./audit.generated": {
-      "types": "./audit.generated.ts",
-      "import": "./audit.generated.ts",
-      "default": "./audit.generated.ts"
+      "types": "./audit.generated.ts"
     }
   },
   "scripts": {
