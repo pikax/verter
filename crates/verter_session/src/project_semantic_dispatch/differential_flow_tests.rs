@@ -786,3 +786,88 @@ fn returns_past_a_path_the_checker_proves_dead_contribute() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A body-derived return the lane evaluates APPROXIMATELY (`writeWhile`: the
+/// write in the loop test is unapplied, so the lane reads `number` where the
+/// checker reads `string | number`), read through type positions; and a
+/// proven return (`okNumber`) whose value is the same primitive node.
+/// Answers measured with tsc 7.0.2, alike under all four settings.
+const APPROXIMATE_RETURNS: &str = r##"
+export function writeWhile(c: boolean) { let x: string | number = 1; while (c && (x = "s")) { return x; } return x; }
+export function okNumber() { const n: number = 1; return n; }
+export class G<T> { m(c: boolean, t: T) { let x: T | number = 1; while (c && (x = t)) { return x; } return x; } }
+export class K { m(c: boolean) { let x: string | number = 1; while (c && (x = "s")) { return x; } return x; } n() { return 1; } }
+"##;
+
+/// Two occurrences of one primitive node keep their own completeness: the
+/// proven `ReturnType<typeof okNumber>` reads `number` clean, while the
+/// approximate `ReturnType<typeof writeWhile>` (the same `number` node) is
+/// never published as a clean `number`.
+#[test]
+fn a_proven_and_an_approximate_return_sharing_a_node_keep_their_own_completeness() {
+    let matrix = Matrix::new(APPROXIMATE_RETURNS);
+    let mut failures = matrix.types(&[("ReturnType<typeof okNumber>", "number")]);
+    let rows = [(
+        Read::Type("ReturnType<typeof writeWhile>"),
+        vec!["string | number"; 4],
+    )];
+    failures.extend(
+        matrix
+            .verdicts(&rows)
+            .into_iter()
+            .flatten()
+            .filter(|verdict| verdict.matched || verdict.class != "GAP")
+            .map(|verdict| verdict.lane),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An approximate body-derived return keeps its evidence through every type
+/// position that reads it: the function's own type, a conditional deciding
+/// on it, an indexed access through an object holding it, a class member's
+/// signature and its return.
+///
+/// What the lane gives, in this row order (the answers depend on the
+/// host's warm state — the request-scoped degraded-read counter sees only a
+/// COLD read of the utility, so a read that follows a warming one
+/// publishes clean; run first on a fresh host, `ReturnType<typeof
+/// writeWhile>` is `number` degraded by PartialInterior):
+/// - `typeof writeWhile`: wrong-but-clean: the lane measured `{ (c: boolean):
+///   number; }`.
+/// - `[ReturnType<typeof writeWhile>] extends [number] ? "narrow" : "wide"`:
+///   the lane measured `"narrow"` degraded by PartialInterior (wrong-but-clean
+///   when a prior read warmed the utility).
+/// - `{ r: ReturnType<typeof writeWhile> }['r']`: wrong-but-clean: the lane
+///   measured `number`.
+/// - `ReturnType<typeof writeWhile>`: wrong-but-clean: the lane measured
+///   `number`.
+/// - `ReturnType<G<string>['m']>`, `K['m']`, `ReturnType<K['m']>` and
+///   `ReturnType<K['n']>` (whose own member is exact): the lane reduced to a
+///   partial demand (the class evaluates every member body).
+///
+/// The public TypeInfo route (`evaluate_type_expression_with_audit` then the
+/// raise) publishes `number`, `(c: boolean) => number`, `"narrow"` and
+/// `number` for the first four with no completeness at all: the host type
+/// resolution result is a bare node.
+#[test]
+#[ignore = "an approximate body-derived return keeps its evidence through every type position"]
+fn an_approximate_return_keeps_its_evidence_through_every_type_position() {
+    let matrix = Matrix::new(APPROXIMATE_RETURNS);
+    let failures = matrix.types(&[
+        ("typeof writeWhile", "(c: boolean) => string | number"),
+        (
+            "[ReturnType<typeof writeWhile>] extends [number] ? \"narrow\" : \"wide\"",
+            "\"wide\"",
+        ),
+        (
+            "{ r: ReturnType<typeof writeWhile> }['r']",
+            "string | number",
+        ),
+        ("ReturnType<typeof writeWhile>", "string | number"),
+        ("ReturnType<G<string>['m']>", "string | number"),
+        ("K['m']", "(c: boolean) => string | number"),
+        ("ReturnType<K['m']>", "string | number"),
+        ("ReturnType<K['n']>", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

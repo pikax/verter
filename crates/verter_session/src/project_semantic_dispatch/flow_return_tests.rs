@@ -11653,3 +11653,77 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     assert_eq!(acquisitions(1), vec![1], "one caller");
     assert_eq!(acquisitions(4), vec![1; 4], "four callers");
 }
+
+/// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
+/// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
+/// finalizer's verdict is partial (an obligation left pending, or a typed
+/// gap), so the `FlowReturn` read is `ReturnOnly` with
+/// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`] —
+/// while the host flow-return boundary publishes the value clean, because
+/// the value itself carries no typed degradation.
+const UNPROVEN_CORRECT_RETURNS: &str = r#"
+declare function f<T>(x: T): T;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+declare function assertString(x: unknown): asserts x is string;
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+export function dpArrow(cb = () => 7) { return cb; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+"#;
+
+/// A correct flow answer closes with its proof: the `FlowReturn` read is
+/// complete, so a publication boundary that honours the verdict keeps it
+/// clean. The completeness design keeps every correct clean answer clean
+/// and admits no unproven one as exact, so these proofs must close before
+/// the boundary surfaces a partial verdict.
+///
+/// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
+/// - `wContextual` (`1`): verdict partial, `IncompleteObligations`.
+/// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
+/// - `p12` (`string`): verdict partial, `IncompleteObligations`.
+/// - `inSequence` (`string | number`): verdict partial,
+///   `IncompleteObligations`.
+///
+/// The same holds for `pReject` (`Promise<never>`, library-backed, in
+/// `differential_global_library_tests`), `guardedInSequence` and
+/// `sig_classStaticBlockAssigns`.
+#[test]
+#[ignore = "a correct flow answer closes with its proof"]
+fn a_correct_flow_answer_closes_with_its_proof() {
+    const FILE: &str = "/ws/unproven.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(FILE.to_string()),
+        input_id: FILE.to_string(),
+        source: Arc::from(UNPROVEN_CORRECT_RETURNS),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let mut unproven = Vec::new();
+    for name in ["wContextual", "dpArrow", "p12", "inSequence"] {
+        with_dispatch(&host, |dispatch| {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(FILE),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(FILE),
+                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: crate::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+            if read.result_is_partial {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            }
+        });
+    }
+    assert!(unproven.is_empty(), "{}", unproven.join("\n"));
+}
