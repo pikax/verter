@@ -10287,6 +10287,36 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
     );
 }
 
+/// The fact-rail drain reaches an entry through a consumed result's
+/// receipt however deep the edited canonical sits: a change to the file a
+/// 1,024-level receipt chain bottoms out in reaches the entry holding its
+/// top, and a file no level names does not.
+#[test]
+fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
+    use crate::resolver_core::FactVersionRef;
+    let whole = |canonical: String| FactVersionRef::FileWholeHash {
+        canonical_id: canonical,
+        hash: [7u8; 16],
+    };
+    let mut receipt = verter_workspace::ResultReceipt::new(vec![whole("/deep/0.ts".into())]);
+    for level in 1..1_024 {
+        receipt = verter_workspace::ResultReceipt::new(vec![
+            FactVersionRef::Receipt(receipt),
+            whole(format!("/deep/{level}.ts")),
+        ]);
+    }
+    let facts = [FactVersionRef::Receipt(receipt)];
+    assert!(
+        carrier_facts_reference_canonical(&facts, "/deep/0.ts"),
+        "the deepest level's canonical must reach the entry"
+    );
+    assert!(carrier_facts_reference_canonical(&facts, "/deep/1023.ts"));
+    assert!(
+        !carrier_facts_reference_canonical(&facts, "/deep/unrelated.ts"),
+        "a canonical no level names must not reach the entry"
+    );
+}
+
 /// Skeleton demand-slot isolation: a `StructuralTransit(Skeleton)` demand
 /// and a `Published(Skeleton)` demand never share a memo slot. The warm
 /// gates (`cached_satisfies` + `validate`) are demand-blind, so slot
