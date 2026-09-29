@@ -11729,6 +11729,51 @@ fn an_annotated_declarations_initializer_runs_and_closes_its_proof() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// An `asserts` call applied as a sequence operand, a sequence arm or an
+/// initializer operand is evaluated where it narrows: the narrow records
+/// the call's evidence, decided exactly as a predicate call's narrow is,
+/// and the proof closes. TypeScript 7.0.2, all four settings: `p12` is
+/// `string`, `inSequence` `string | number`, `guardedInSequence` `never`,
+/// `initAssert` `string`, `stmtTruthy` and `seqTruthy` `string`.
+const ASSERTION_CALLS: &str = r#"
+declare function assertString(x: unknown): asserts x is string;
+declare function ok(v: unknown): asserts v;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+export function guardedInSequence(x: string | number | boolean) { const y = (typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)), x); return y; }
+export function initAssert(v: string | number) { const x: 1 = ((0, assertString(v)), 1); return v; }
+export function stmtTruthy(v: string | undefined) { ok(v); return v; }
+export function seqTruthy(v: string | undefined) { return ((0, ok(v)), v); }
+"#;
+
+#[test]
+fn an_assertion_call_evidences_its_own_narrow() {
+    let mut failures = flow_reads_without_proof(
+        ASSERTION_CALLS,
+        &[
+            "p12",
+            "inSequence",
+            "guardedInSequence",
+            "initAssert",
+            "stmtTruthy",
+            "seqTruthy",
+        ],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ASSERTION_CALLS).returns(&[
+            ("p12", "string"),
+            ("inSequence", "string | number"),
+            ("guardedInSequence", "never"),
+            ("initAssert", "string"),
+            ("stmtTruthy", "string"),
+            ("seqTruthy", "string"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
 /// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
 /// finalizer's verdict is partial (an obligation left pending, or a typed
@@ -11737,12 +11782,7 @@ fn an_annotated_declarations_initializer_runs_and_closes_its_proof() {
 /// while the host flow-return boundary publishes the value clean, because
 /// the value itself carries no typed degradation.
 const UNPROVEN_CORRECT_RETURNS: &str = r#"
-function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
-function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
-declare function assertString(x: unknown): asserts x is string;
 export function dpArrow(cb = () => 7) { return cb; }
-export function p12(x: string | number) { return ((0, assertString(x)), x); }
-export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
 "#;
 
 /// A correct flow answer closes with its proof: the `FlowReturn` read is
@@ -11753,17 +11793,12 @@ export function inSequence(x: string | number | boolean, c: boolean) { const y =
 ///
 /// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
 /// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
-/// - `p12` (`string`): verdict partial, `IncompleteObligations`.
-/// - `inSequence` (`string | number`): verdict partial,
-///   `IncompleteObligations`.
 ///
 /// The same holds for `pReject` (`Promise<never>`, library-backed, in
-/// `differential_global_library_tests`), `guardedInSequence` and
-/// `sig_classStaticBlockAssigns`.
+/// `differential_global_library_tests`) and `sig_classStaticBlockAssigns`.
 #[test]
 #[ignore = "a correct flow answer closes with its proof"]
 fn a_correct_flow_answer_closes_with_its_proof() {
-    let unproven =
-        flow_reads_without_proof(UNPROVEN_CORRECT_RETURNS, &["dpArrow", "p12", "inSequence"]);
+    let unproven = flow_reads_without_proof(UNPROVEN_CORRECT_RETURNS, &["dpArrow"]);
     assert!(unproven.is_empty(), "{}", unproven.join("\n"));
 }

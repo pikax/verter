@@ -15373,11 +15373,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         target: Option<&crate::flow_slice_content::GatedType>,
+        call: verter_span::Span,
     ) {
         self.capture_throw_point();
+        // The assertion call's evidence, with the same discipline a
+        // predicate call's narrowing takes: the call was evaluated, and
+        // its relation decided (or not) the narrow it established. A
+        // target the narrow cannot consume at all deposits nothing, so the
+        // demand stays unproven.
         let fact = match target {
-            Some(target) => self.narrow_to_predicate_target(subject, target, false),
-            None => self.narrow_truthy(subject, false),
+            Some(target) => {
+                let (fact, consumption) =
+                    self.narrow_to_predicate_target_consuming(subject, target, false);
+                match consumption {
+                    PredicateNarrowConsumption::NotConsumed => {}
+                    PredicateNarrowConsumption::Decided | PredicateNarrowConsumption::Undecided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: call,
+                            relations_decided: matches!(
+                                consumption,
+                                PredicateNarrowConsumption::Decided
+                            ),
+                        });
+                    }
+                }
+                fact
+            }
+            None => {
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.narrow_truthy(subject, false)
+            }
         };
         match fact {
             GuardNarrowing::Narrowed(subject, node) => {
@@ -15417,8 +15445,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &crate::flow_slice_content::SliceStatement) {
         match effect {
-            crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
-                self.apply_assertion(subject, target.as_ref());
+            crate::flow_slice_content::SliceStatement::Assertion {
+                subject,
+                target,
+                call,
+            } => {
+                self.apply_assertion(subject, target.as_ref(), *call);
             }
             crate::flow_slice_content::SliceStatement::If {
                 guard,
@@ -21602,7 +21634,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
+                crate::flow_slice_content::SliceStatement::Assertion {
+                    subject,
+                    target,
+                    call,
+                } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -21612,7 +21648,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref());
+                    self.apply_assertion(subject, target.as_ref(), *call);
                 }
                 crate::flow_slice_content::SliceStatement::CalleeEffect {
                     callee,
@@ -22905,7 +22941,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                            self.apply_assertion(
+                                &assertion.subject,
+                                assertion.target.as_ref(),
+                                assertion.call,
+                            );
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -23531,7 +23571,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                    self.apply_assertion(
+                        &assertion.subject,
+                        assertion.target.as_ref(),
+                        assertion.call,
+                    );
                 }
                 outcome
             }
