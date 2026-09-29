@@ -225,6 +225,7 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             ClosedLiteralDomainUnresolvedReason::Fault,
         ),
         QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::ForeignSemanticOperand => (
             QueryErrorDisposition::Failure,

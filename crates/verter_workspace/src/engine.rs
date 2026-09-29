@@ -1136,6 +1136,8 @@ impl Engine {
         );
         self.resolution_epoch
             .store(stable.wrapping_add(1), Ordering::Release);
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::WorldWriteHeld);
 
         struct RestoreEpoch<'a> {
             epoch: &'a AtomicU64,
@@ -3584,6 +3586,8 @@ impl Engine {
         let mut flight_lease = None;
         loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
+            #[cfg(test)]
+            resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
             let captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)

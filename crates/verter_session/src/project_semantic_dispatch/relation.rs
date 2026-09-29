@@ -76,6 +76,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, select_inference_candidates,
     CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
@@ -311,11 +312,9 @@ impl InferPatternInfo {
 }
 
 /// The relation-payload bindings a binding-producing judgement fixed at
-/// session close, plus the pattern shape that produced them (the
-/// closedness classifiers widen non-`Bare` shapes to `Deferred`).
+/// session close.
 #[derive(Debug, Clone)]
 pub(crate) struct RelationInferBindings {
-    pub(crate) shape: InferPatternShape,
     pub(crate) bindings: Arc<[InferBinding]>,
 }
 
@@ -5752,20 +5751,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } => {
                     let conditional_shadows =
                         self.extends_pattern_declares_infer(*extends, base_infer);
-                    let (selection, _) = self.conditional_branch_selection(*check, *extends);
-                    if matches!(
-                        selection,
-                        super::ConditionalBranchSelection::True
-                            | super::ConditionalBranchSelection::False
-                    ) {
-                        if let Some(Some(selected)) = self.reduce_relation_conditional(node) {
-                            stack.push((
-                                selected,
-                                shadowed
-                                    || (conditional_shadows
-                                        && selection == super::ConditionalBranchSelection::True),
-                            ));
-                        }
+                    if let ConditionalOutcome::Reduced(selected) = self.conditional_outcome(node) {
+                        // Only the true branch is in the scope of the
+                        // pattern's `infer` declarations: an answer that is
+                        // not the false branch may hold it.
+                        let false_branch = self.apply_conditional_branch_pending(
+                            *false_branch_ref,
+                            pending.as_deref(),
+                            false,
+                        );
+                        stack.push((
+                            selected,
+                            shadowed || (conditional_shadows && selected != false_branch),
+                        ));
                         continue;
                     }
                     stack.push((*check, shadowed));
@@ -6949,19 +6947,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(spec) = reverse_spec {
             return self.relate_reverse_homomorphic(key.source, &spec, bindings);
         }
-        match self.reduce_relation_conditional(key.source) {
-            Some(Some(reduced)) => {
-                return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
-            }
-            Some(None) => return RelationResult::Unknown,
-            None => {}
+        let source_conditional = self.conditional_outcome(key.source);
+        if let ConditionalOutcome::Reduced(reduced) = source_conditional {
+            return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
         }
-        match self.reduce_relation_conditional(key.target) {
-            Some(Some(reduced)) => {
-                return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+        let target_conditional = self.conditional_outcome(key.target);
+        if let ConditionalOutcome::Reduced(reduced) = target_conditional {
+            return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+        }
+        let (source_deferred, target_deferred) = match (source_conditional, target_conditional) {
+            (ConditionalOutcome::Undecided, _) | (_, ConditionalOutcome::Undecided) => {
+                return RelationResult::Unknown;
             }
-            Some(None) => return RelationResult::Unknown,
-            None => {}
+            (source, target) => (source.into_deferred(), target.into_deferred()),
+        };
+        if let Some(result) = self.relate_deferred_conditionals(
+            key.source,
+            source_deferred.as_ref(),
+            key.target,
+            target_deferred.as_ref(),
+            bindings,
+        ) {
+            return result;
         }
         // The binding root's bare-`Infer` arm: `check extends infer X`
         // binds `X := check` for any check through the active session.
@@ -7579,35 +7586,330 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Reduce one conditional shell through the canonical conditional query.
-    /// The outer option distinguishes a non-conditional node; the inner
-    /// option distinguishes a decided reduction from an undecided shell.
-    fn reduce_relation_conditional(&self, node: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
-        let data = self.graph().node_data(node)?;
-        let SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            distributive,
-            pending,
-        } = data.as_ref()
-        else {
+    /// A deferred conditional source related to `target`
+    /// (`structuredTypeRelatedTo`): against a conditional of the same
+    /// `extends` type and a related check, branch to branch; otherwise
+    /// through its default constraint, the union of its branches, and for a
+    /// distributive conditional through the conditional instantiated at its
+    /// check type's constraint. It relates when one of those does, and not
+    /// when each is decided against it. A conditional whose `extends`
+    /// declares an `infer` has no default constraint the lane reads.
+    fn relate_deferred_conditional_source(
+        &self,
+        source: &super::conditional_decision::DeferredConditional,
+        target: SemanticNodeId,
+        target_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        if let Some(target_conditional) = target_conditional {
+            if source.extends == target_conditional.extends {
+                let checks = match self.relate_member(
+                    source.check,
+                    target_conditional.check,
+                    bindings,
+                    InferPosition::Covariant,
+                ) {
+                    RelationResult::NotAssignable => self.relate_member(
+                        target_conditional.check,
+                        source.check,
+                        bindings,
+                        InferPosition::Covariant,
+                    ),
+                    related => related,
+                };
+                if let RelationResult::Assignable { .. } = checks {
+                    let branches = result_and(
+                        self.relate_member(
+                            source.true_branch,
+                            target_conditional.true_branch,
+                            bindings,
+                            InferPosition::Covariant,
+                        ),
+                        self.relate_member(
+                            source.false_branch,
+                            target_conditional.false_branch,
+                            bindings,
+                            InferPosition::Covariant,
+                        ),
+                    );
+                    if let RelationResult::Assignable { .. } = branches {
+                        return branches;
+                    }
+                }
+            }
+        }
+        if self.subtree_contains_infer(source.extends) {
+            return RelationResult::Unknown;
+        }
+        let default_constraint = self.intern_normalized_union_or_intersection(
+            &[source.true_branch, source.false_branch],
+            true,
+        );
+        let by_default = self.relate_member(
+            default_constraint,
+            target,
+            bindings,
+            InferPosition::Covariant,
+        );
+        if let RelationResult::Assignable { .. } = by_default {
+            return by_default;
+        }
+        let by_distribution = match self.distributive_constraint_of(source) {
+            Some(constrained) if target_conditional.is_none() => {
+                self.relate_member(constrained, target, bindings, InferPosition::Covariant)
+            }
+            _ => RelationResult::NotAssignable,
+        };
+        match (by_default, by_distribution) {
+            (_, related @ RelationResult::Assignable { .. }) => related,
+            (RelationResult::NotAssignable, RelationResult::NotAssignable) => {
+                RelationResult::NotAssignable
+            }
+            _ => RelationResult::Unknown,
+        }
+    }
+
+    /// A distributive conditional over a type parameter with a constraint,
+    /// instantiated at that constraint (`getConstraintOfDistributiveConditionalType`)
+    /// when that changes it and does not make it `never`.
+    fn distributive_constraint_of(
+        &self,
+        source: &super::conditional_decision::DeferredConditional,
+    ) -> Option<SemanticNodeId> {
+        if !source.distributive {
             return None;
+        }
+        let constraint = match self.graph().node_data(source.check).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
         };
         let key = SemanticQueryKey::Conditional {
-            check: *check,
-            extends: *extends,
-            true_branch: *true_branch_ref,
-            false_branch: *false_branch_ref,
-            distributive: *distributive,
-            pending: pending.clone(),
+            check: constraint,
+            extends: source.extends,
+            true_branch: self.substitute_semantic_type_param(
+                source.true_branch,
+                source.check,
+                constraint,
+            ),
+            false_branch: self.substitute_semantic_type_param(
+                source.false_branch,
+                source.check,
+                constraint,
+            ),
+            distributive: true,
+            pending: None,
         };
-        drop(data);
-        Some(match self.execute_type_node(key) {
-            QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => Some(value),
+        let read = self.execute_read(key);
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(value)
+                if !matches!(
+                    self.graph().node_data(value).as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Primitive(PrimitiveKind::Never)
+                    )
+                ) =>
+            {
+                Some(value)
+            }
             _ => None,
-        })
+        }
+    }
+
+    /// A relation with a deferred conditional on either side, as
+    /// `structuredTypeRelatedTo` takes it: the rule for a conditional target
+    /// first, then the rules for a conditional source; the pair relates when
+    /// either does. `None` when neither side is a deferred conditional, or
+    /// when the target's rule fails for a source that is neither a
+    /// conditional nor a closed type, so the relation goes on as for any
+    /// other target (a type parameter's constraint, say).
+    fn relate_deferred_conditionals(
+        &self,
+        source: SemanticNodeId,
+        source_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        target: SemanticNodeId,
+        target_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if source_conditional.is_none() && target_conditional.is_none() {
+            return None;
+        }
+        // A conditional over a type parameter the enclosing call is still
+        // inferring is not the type the checker relates: the relation both
+        // infers into it and waits on its instantiation.
+        let inferring = |conditional: &super::conditional_decision::DeferredConditional| {
+            let txn = self.dispatch_txn.borrow();
+            self.type_params_within(&[
+                conditional.check,
+                conditional.extends,
+                conditional.true_branch,
+                conditional.false_branch,
+            ])
+            .into_iter()
+            .any(|param| txn.collecting_session_infers(param))
+        };
+        if source_conditional.is_some_and(inferring) || target_conditional.is_some_and(inferring) {
+            return None;
+        }
+        // `never` relates to every type, and `any` to every type but
+        // `never` (`isSimpleTypeRelatedTo`), a conditional among them.
+        if matches!(
+            self.graph().node_data(source).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Never | PrimitiveKind::Any
+            ))
+        ) {
+            return Some(assignable(bindings));
+        }
+        let by_target = match target_conditional {
+            Some(conditional) => self.relate_deferred_conditional_target(
+                source,
+                source_conditional,
+                conditional,
+                bindings,
+            ),
+            None => RelationResult::NotAssignable,
+        };
+        if let RelationResult::Assignable { .. } = by_target {
+            return Some(by_target);
+        }
+        match source_conditional {
+            Some(conditional) => Some(result_or(
+                by_target,
+                self.relate_deferred_conditional_source(
+                    conditional,
+                    target,
+                    target_conditional,
+                    bindings,
+                ),
+            )),
+            // A closed source relates to a conditional only by its rule.
+            None if self.relation_source_is_closed(source) => Some(by_target),
+            None => match by_target {
+                RelationResult::NotAssignable => None,
+                undecided => Some(undecided),
+            },
+        }
+    }
+
+    /// Whether `node` is a type no constraint or reduction stands behind: a
+    /// primitive, a literal, or an object, array, tuple or function type.
+    fn relation_source_is_closed(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+            )
+        )
+    }
+
+    /// `source` related to a deferred conditional target
+    /// (`structuredTypeRelatedTo`): when the target declares no `infer`,
+    /// its branches do not depend on the distribution and the source is not
+    /// the same conditional, `source` relates when it relates to each
+    /// branch the target may still take: the true branch unless the
+    /// permissive instantiation fails, the false branch unless the
+    /// restrictive instantiation holds. Otherwise the rule does not relate
+    /// the pair.
+    ///
+    /// Whether a distributive conditional depends on its distribution is
+    /// read by the checker off the syntax it was written in
+    /// (`isTypeParameterPossiblyReferenced`: a block between the type
+    /// parameter's declaration and the conditional counts as a reference),
+    /// which the conditional's type does not carry; nor does it carry which
+    /// declaration it instantiates. Where either is not known, the rule's
+    /// failure still stands (the rule only ever relates a pair), and its
+    /// success is undecided.
+    fn relate_deferred_conditional_target(
+        &self,
+        source: SemanticNodeId,
+        source_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        target: &super::conditional_decision::DeferredConditional,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        if self.subtree_contains_infer(target.extends) || self.distribution_dependent(target) {
+            return RelationResult::NotAssignable;
+        }
+        let applies = !target.distributive
+            && !source_conditional.is_some_and(|source| {
+                source.extends == target.extends
+                    && source.true_branch == target.true_branch
+                    && source.false_branch == target.false_branch
+            });
+        let params = self.type_params_within(&[target.check, target.extends]);
+        let skip_true = match self.permissive_relation(target.check, target.extends, &params) {
+            super::dispatch_txn::RelationStep::NotAssignable => true,
+            super::dispatch_txn::RelationStep::Assignable { .. } => false,
+            _ => return RelationResult::Unknown,
+        };
+        let skip_false = !skip_true
+            && match self.restrictive_relation(target.check, target.extends, &params) {
+                super::dispatch_txn::RelationStep::Assignable { .. } => true,
+                super::dispatch_txn::RelationStep::NotAssignable => false,
+                _ => return RelationResult::Unknown,
+            };
+        let mut related = assignable(bindings);
+        for (skip, branch) in [
+            (skip_true, target.true_branch),
+            (skip_false, target.false_branch),
+        ] {
+            if !skip {
+                related = result_and(
+                    related,
+                    self.relate_member(source, branch, bindings, InferPosition::Covariant),
+                );
+                if let RelationResult::NotAssignable = related {
+                    return related;
+                }
+            }
+        }
+        match related {
+            RelationResult::Assignable { .. } if !applies => RelationResult::Unknown,
+            related => related,
+        }
+    }
+
+    /// Whether a distributive conditional's branches or `extends` type read
+    /// its check type parameter (`isDistributionDependent`, the references
+    /// the conditional's type shows).
+    fn distribution_dependent(
+        &self,
+        conditional: &super::conditional_decision::DeferredConditional,
+    ) -> bool {
+        if !conditional.distributive {
+            return false;
+        }
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = vec![
+            conditional.extends,
+            conditional.true_branch,
+            conditional.false_branch,
+        ];
+        while let Some(node) = stack.pop() {
+            if node == conditional.check {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(data) = graph.node_data(node) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
     }
 
     /// The checker's TS2590 recovery for the intersection `node` when it
@@ -7878,6 +8180,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // The error-type wildcard fires BEFORE the `(_, Never)` bottom
             // arm — `error` relates bidirectionally like `any` (the same
             // arm order the structural reducer applies).
+            // The permissive wildcard's rule, read from its owner.
+            (from, to) if super::conditional_decision::wildcard_relates(from, to) => {
+                ShallowRelation::Assignable
+            }
             // `any` and the error type are assignable to everything but
             // `never`.
             (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))
@@ -9658,6 +9964,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Top / bottom + error-type wildcard ─────────────────────────
         match (&*source_data, &*target_data) {
+            // The permissive wildcard's rule, read from its owner.
+            (from, to) if super::conditional_decision::wildcard_relates(from, to) => {
+                results.push(assignable(bindings));
+                return;
+            }
             // `any` and the error type are assignable to everything but
             // `never`.
             (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))

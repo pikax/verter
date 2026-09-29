@@ -46,8 +46,8 @@ use crate::semantic_query::{
 use super::ProjectSemanticDispatch;
 
 /// A lattice-extreme operand the §22 absorption table reacts to.
-/// `pub(super)` so the shared conditional branch-selection oracle
-/// (`build.rs::conditional_branch_selection`) can route `any` / `error`
+/// `pub(super)` so the conditional branch selection
+/// (`conditional_decision.rs::conditional_branch_selection`) can route `any` / `error`
 /// checks — which semantically use BOTH branches / dominate — to
 /// `Deferred` instead of letting the relation table select a branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +286,13 @@ impl ProjectSemanticDispatch<'_> {
             (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
             // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
             //     would be involved (then fall through to the infer path).
-            (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
+            // A conditional the checker defers over a generic operand
+            // (`any extends T ? 1 : 2`) keeps its shell: `getConditionalType`
+            // reads an `any` check only once neither operand is generic.
+            (SpecialKind::Any, _)
+                if !self.extends_is_infer_pattern(extends)
+                    && !self.conditional_is_deferred(check, extends) =>
+            {
                 let true_branch = force_branch(true);
                 // An `any` or `unknown` extends type admits every check
                 // type, so the false branch never joins: `any extends

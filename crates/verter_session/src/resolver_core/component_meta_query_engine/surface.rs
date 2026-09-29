@@ -521,6 +521,7 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     match err {
         QueryError::Miss => spell::SEMANTIC_MISS.to_string(),
         QueryError::Other(text) => text.as_ref().to_string(),
+        QueryError::PermissiveWildcard => "permissiveWildcard".to_string(),
         QueryError::UnsupportedIntrinsic { name } => {
             format!("{}{name})", spell::UNSUPPORTED_INTRINSIC_PREFIX)
         }
