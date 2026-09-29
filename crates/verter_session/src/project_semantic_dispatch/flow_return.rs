@@ -63,10 +63,6 @@ use verter_semantic::analysis::flow::{
     FlowBindingMap, FlowBindingRef as FlowProductSubject, FunctionBodySkeleton, SkeletonBindingId,
 };
 
-/// The combinations [`ProjectSemanticDispatch::distribute_intersection`]
-/// distributes before it keeps the undistributed intersection.
-const INTERSECTION_DISTRIBUTION_CAP: usize = 64;
-
 /// A distributed intersection and whether one combination's collapse was
 /// left undecided (kept, as a superset).
 pub(super) struct DistributedIntersection {
@@ -996,8 +992,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// prints as the checker prints it. An `ordered` intersection (one
     /// whose members may carry call signatures, where member order is
     /// overload order) keeps every combination, and the origin, in factor
-    /// order. `None` when the combinations exceed
-    /// [`INTERSECTION_DISTRIBUTION_CAP`].
+    /// order.
+    ///
+    /// The combinations are the checker's ([`Self::intersection_parts`]): a
+    /// cross product the checker refuses is its TS2590 recovery, holding
+    /// the undistributed intersection as the type beyond the checker's
+    /// limit. `None` when every factor is empty, or when the connected-work
+    /// ledger stops the distribution (the demand is then partial).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1005,14 +1006,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
         nullability: crate::semantic_query::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
-        use super::relation::ComparabilityVerdict;
-        let combinations = factors
-            .iter()
-            .try_fold(1usize, |count, arms| count.checked_mul(arms.len()))?;
-        if combinations == 0 || combinations > INTERSECTION_DISTRIBUTION_CAP {
+        if factors.iter().any(Vec::is_empty) {
             return None;
         }
         let graph = self.graph();
+        let mut undecided = false;
+        let parts =
+            match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
+                Ok(Some(parts)) => parts,
+                Ok(None) => return None,
+                Err(diagnostic) => {
+                    let beyond = self.intern_intersection_members(origin, ordered);
+                    return Some(DistributedIntersection {
+                        node: crate::semantic_query::checker_policy::checker_recovery(
+                            graph,
+                            diagnostic,
+                            Some(beyond),
+                        ),
+                        undecided,
+                    });
+                }
+            };
+        let origin_count: usize = origin
+            .iter()
+            .map(|node| self.constituent_count(*node))
+            .sum();
+        let distributed: usize = parts.iter().map(|part| self.constituent_count(*part)).sum();
+        let node = if parts.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        } else if distributed > origin_count
+            && parts.iter().any(|part| {
+                matches!(
+                    graph.node_data(*part).as_deref(),
+                    Some(SemanticNodeData::Intersection(_))
+                )
+            })
+        {
+            self.intern_intersection_members(origin, ordered)
+        } else {
+            self.intern_normalized_union(&parts, nullability)
+        };
+        Some(DistributedIntersection { node, undecided })
+    }
+
+    /// The combinations of `factors` that survive, each interned, in the
+    /// checker's order: three or more factors divide in half, each half
+    /// distributed on its own and the two results distributed over each
+    /// other; two or fewer take the cross product, checked against the
+    /// checker's limit before a combination is formed
+    /// ([`checker_policy::cross_product_union`](crate::semantic_query::checker_policy::cross_product_union)).
+    /// `Err` is the TS2590 fact; `Ok(None)` a connected-work trip, folded
+    /// into the demand as partial. Every combination is charged to the
+    /// connected-work ledger.
+    fn intersection_parts(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        divided: bool,
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+        undecided: &mut bool,
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::CheckerDiagnostic> {
+        use super::relation::ComparabilityVerdict;
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let graph = self.graph();
+        if factors.len() >= 3 {
+            let middle = factors.len() / 2;
+            let mut halves: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(2);
+            for half in [&factors[..middle], &factors[middle..]] {
+                let parts = match half {
+                    [only] => only.clone(),
+                    _ => match self.intersection_parts(
+                        half,
+                        false,
+                        nullability,
+                        ordered,
+                        undecided,
+                    )? {
+                        Some(parts) => parts,
+                        None => return Ok(None),
+                    },
+                };
+                // The half is a union: identical constituents are one.
+                let mut seen = rustc_hash::FxHashSet::default();
+                halves.push(
+                    parts
+                        .into_iter()
+                        .filter(|part| seen.insert(*part))
+                        .collect(),
+                );
+            }
+            return self.intersection_parts(&halves, true, nullability, ordered, undecided);
+        }
+        let combinations = cross_product_union(
+            factors.iter().map(|arms| match arms.len() {
+                0 => ProductFactor::Never,
+                1 => ProductFactor::Single,
+                width => ProductFactor::Union(width),
+            }),
+            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
+        )?;
         let nullish = |node: SemanticNodeId| {
             matches!(
                 graph.node_data(node).as_deref(),
@@ -1036,64 +1128,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => false,
             }
         };
-        let mut undecided = false;
+        // A part of a `divided` half is an intersection: its members join
+        // the combination.
+        let members_of = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Intersection(members)) if divided => {
+                members.iter().copied().collect()
+            }
+            _ => vec![node],
+        };
+        // Whether one pair collapses the intersection it meets in (and whether
+        // that was left undecided), asked once per pair: every combination
+        // that holds the pair shares the answer.
+        let mut pair_verdicts: rustc_hash::FxHashMap<
+            (SemanticNodeId, SemanticNodeId),
+            (bool, bool),
+        > = rustc_hash::FxHashMap::default();
+        let mut collapses_pair = |left: SemanticNodeId, right: SemanticNodeId| {
+            *pair_verdicts.entry((left, right)).or_insert_with(|| {
+                if nullability.is_strict()
+                    && ((nullish(left) && object_type(right))
+                        || (nullish(right) && object_type(left)))
+                {
+                    return (true, false);
+                }
+                match self.nodes_comparable(left, right) {
+                    ComparabilityVerdict::Disjoint(proof)
+                        if proof.checker_reduces_intersection_to_never() =>
+                    {
+                        (true, false)
+                    }
+                    ComparabilityVerdict::Undecided => (false, true),
+                    _ => (false, false),
+                }
+            })
+        };
         let mut parts: Vec<SemanticNodeId> = Vec::new();
-        let mut combination: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
+        // Each member with the factor it came from: members of one part of a
+        // divided half were paired when that part was formed.
+        let mut combination: Vec<(usize, SemanticNodeId)> = Vec::with_capacity(factors.len());
+        let mut members: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
         for mut index in 0..combinations {
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                return Ok(None);
+            }
             combination.clear();
-            for arms in factors {
-                combination.push(arms[index % arms.len()]);
+            for (factor, arms) in factors.iter().enumerate() {
+                combination.extend(
+                    members_of(arms[index % arms.len()])
+                        .into_iter()
+                        .map(|member| (factor, member)),
+                );
                 index /= arms.len();
             }
             let mut collapses = false;
-            'pairs: for (position, left) in combination.iter().enumerate() {
-                for right in &combination[position + 1..] {
-                    if left == right {
+            'pairs: for (position, (left_factor, left)) in combination.iter().enumerate() {
+                for (right_factor, right) in &combination[position + 1..] {
+                    if left == right || left_factor == right_factor {
                         continue;
                     }
-                    if nullability.is_strict()
-                        && ((nullish(*left) && object_type(*right))
-                            || (nullish(*right) && object_type(*left)))
-                    {
+                    let (collapsed, pair_undecided) = collapses_pair(*left, *right);
+                    *undecided |= pair_undecided;
+                    if collapsed {
                         collapses = true;
                         break 'pairs;
-                    }
-                    match self.nodes_comparable(*left, *right) {
-                        ComparabilityVerdict::Disjoint(proof)
-                            if proof.checker_reduces_intersection_to_never() =>
-                        {
-                            collapses = true;
-                            break 'pairs;
-                        }
-                        ComparabilityVerdict::Undecided => undecided = true,
-                        _ => {}
                     }
                 }
             }
             if !collapses {
-                parts.push(self.intern_intersection_members(&combination, ordered));
+                members.clear();
+                members.extend(combination.iter().map(|(_, member)| *member));
+                parts.push(self.intern_intersection_members(&members, ordered));
             }
         }
-        let origin_count: usize = origin
-            .iter()
-            .map(|node| self.constituent_count(*node))
-            .sum();
-        let distributed: usize = parts.iter().map(|part| self.constituent_count(*part)).sum();
-        let node = if parts.is_empty() {
-            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-        } else if distributed > origin_count
-            && parts.iter().any(|part| {
-                matches!(
-                    graph.node_data(*part).as_deref(),
-                    Some(SemanticNodeData::Intersection(_))
-                )
-            })
-        {
-            self.intern_intersection_members(origin, ordered)
-        } else {
-            self.intern_normalized_union(&parts, nullability)
-        };
-        Some(DistributedIntersection { node, undecided })
+        Ok(Some(parts))
     }
 
     /// One intersection of `members`: canonical, or, when `ordered`, the

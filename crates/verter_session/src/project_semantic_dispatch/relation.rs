@@ -7545,6 +7545,103 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// The checker's TS2590 recovery for the intersection `node` when it
+    /// refuses the intersection's cross product (`getIntersectionType`),
+    /// holding `node` as the type beyond the checker's limit; `None` when
+    /// the checker builds it.
+    ///
+    /// The arms are read as the checker holds them: a nested intersection
+    /// flattens and a name stands for the type it resolves to, so an
+    /// intersection of union aliases is weighed by those unions. A product
+    /// taken whole under the checker's limit stays under it however the
+    /// checker divides it, so only a product at the limit is weighed as the
+    /// checker weighs it
+    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)).
+    pub(super) fn intersection_too_complex(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let graph = self.graph();
+        let mut arms: Vec<SemanticNodeId> = Vec::new();
+        let mut stack: Vec<SemanticNodeId> = vec![node];
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut any_union = false;
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let resolved = if current == node {
+                current
+            } else {
+                match graph.node_data(current).as_deref() {
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::Alias(_)
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+                    ) => match self.unwrap_identity_carrier_for_relation(current) {
+                        IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                        IdentityCarrierUnwrap::Unresolvable => current,
+                    },
+                    _ => current,
+                }
+            };
+            match graph.node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Intersection(members)) if resolved == current => {
+                    stack.extend(members.iter().rev().copied());
+                }
+                Some(SemanticNodeData::Intersection(_)) => stack.push(resolved),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic, ..
+                })) if diagnostic.code
+                    == crate::semantic_query::CheckerDiagnosticCode::UnionTooComplex =>
+                {
+                    return Some(crate::semantic_query::checker_policy::checker_recovery(
+                        graph,
+                        *diagnostic,
+                        Some(node),
+                    ));
+                }
+                Some(SemanticNodeData::Union(_)) => {
+                    any_union = true;
+                    arms.push(resolved);
+                }
+                _ => arms.push(resolved),
+            }
+        }
+        if !any_union {
+            return None;
+        }
+        let whole = cross_product_union(
+            arms.iter()
+                .map(|arm| match graph.node_data(*arm).as_deref() {
+                    Some(SemanticNodeData::Union(members)) => ProductFactor::Union(members.len()),
+                    _ => ProductFactor::Single,
+                }),
+            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
+        );
+        if whole.is_ok() {
+            return None;
+        }
+        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+            self.dispatch_txn
+                .borrow()
+                .relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_null_checks,
+        );
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let refused = super::canonical_algebra::intersection_cross_product_refused(
+            graph,
+            &arms,
+            nullability,
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        refused.map(|diagnostic| {
+            crate::semantic_query::checker_policy::checker_recovery(graph, diagnostic, Some(node))
+        })
+    }
+
     /// The pair a relation decides in place of `(source, target)` when
     /// either side is a written intersection whose canonical intersection
     /// differs from it (`getIntersectionType`: `string & ('a' | 1)` IS
@@ -7562,6 +7659,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if !is_intersection(source) && !is_intersection(target) {
             return None;
+        }
+        // An intersection whose cross product the checker refuses is its
+        // TS2590 recovery, which relates as `any`.
+        let source_recovery = if is_intersection(source) {
+            self.intersection_too_complex(source)
+        } else {
+            None
+        };
+        let target_recovery = if source == target {
+            source_recovery
+        } else if is_intersection(target) {
+            self.intersection_too_complex(target)
+        } else {
+            None
+        };
+        if source_recovery.is_some() || target_recovery.is_some() {
+            return Some((
+                source_recovery.unwrap_or(source),
+                target_recovery.unwrap_or(target),
+            ));
         }
         let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
             self.dispatch_txn

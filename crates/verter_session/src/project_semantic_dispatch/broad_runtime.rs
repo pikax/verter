@@ -770,9 +770,9 @@ impl ProjectSemanticDispatch<'_> {
 fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReasonSet> {
     match error {
         // The checker's recovered error type is a complete answer.
-        QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::CheckerRecovery(_) => {
-            None
-        }
+        QueryError::Miss
+        | QueryError::DeclPlaceholder { .. }
+        | QueryError::CheckerRecovery { .. } => None,
         QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
             Some(PartialReasonSet::BUDGET_EXCEEDED)
         }
