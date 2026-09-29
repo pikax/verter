@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell as TestCell;
 
 use imbl::{HashMap, HashSet};
 use parking_lot::Mutex;
@@ -125,7 +125,10 @@ struct UnderlyingWorldIdentity {
 }
 
 #[cfg(test)]
-static OVERLAY_LOOKUP_NORMALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Per-thread, so tests running in parallel never count each other.
+    static OVERLAY_LOOKUP_NORMALIZE_CALLS: TestCell<usize> = const { TestCell::new(0) };
+}
 
 impl ResolutionOverlaySnapshot {
     /// A request overlay with no live domain behind it: its resident
@@ -275,7 +278,7 @@ impl ResolutionOverlaySnapshot {
             return None;
         }
         #[cfg(test)]
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.entries
             .get(&verter_semantic::resolver_core::normalize_canonical_id(
                 canonical_id,
@@ -3161,11 +3164,11 @@ mod transaction_contract_tests {
     use super::*;
 
     fn reset_overlay_lookup_normalize_calls() {
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.store(0, Ordering::Relaxed);
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(0));
     }
 
     fn overlay_lookup_normalize_calls() -> usize {
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.load(Ordering::Relaxed)
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(TestCell::get)
     }
 
     #[test]
