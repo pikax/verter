@@ -1,15 +1,18 @@
-//! Resilient TypeProvider wrapper — delegates to `verter_type_runtime`.
+//! The provider lifecycle owner — delegates to `verter_type_runtime`.
 //!
-//! This module re-exports the `ResilientProvider` and `ResilientBackend` from
-//! `verter_type_runtime::resilient`, and provides the LSP-specific `LspNotifier`
-//! that bridges `tower_lsp_server::Client` → `ProviderNotifier`.
+//! This module re-exports the shared [`ProviderHub`] surface from
+//! `verter_type_runtime::provider_hub`, and provides the LSP-specific
+//! `LspNotifier` that bridges `tower_lsp_server::Client` → `ProviderNotifier`.
 
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tower_lsp_server::Client;
+use verter_type_runtime::provider_hub::EngineStart;
 
-// Re-export the shared resilient provider
-pub(crate) use verter_type_runtime::resilient::{ResilientBackend, ResilientProvider};
+// Re-export the shared lifecycle owner.
+pub(crate) use verter_type_runtime::provider_hub::{
+    EstablishFuture, HubPolicy, ProviderEstablisher, ProviderHub,
+};
 
 /// LSP-specific notifier that uses `client.show_message()` / `client.log_message()`.
 pub(crate) struct LspNotifier {
@@ -17,17 +20,41 @@ pub(crate) struct LspNotifier {
     /// The provider kind (`tsserver` / `tsgo`) carried on the structural
     /// respawn notification, matching the backend's own user label.
     kind: &'static str,
+    /// Whether an [`EngineStart::Initial`] establishment is announced on the
+    /// wire. A route that attests its managed engine stays cold (shared-tsgo:
+    /// "managed TSGO remains cold until an observed attach failure") keeps the
+    /// fallback's first serve off the `$/verter/typeProviderStarted` channel
+    /// the attestation is asserted over; a crash REPLACEMENT is still
+    /// announced so the editor's pid tracking follows the fresh child.
+    announce_initial_starts: bool,
 }
 
 impl LspNotifier {
+    /// A notifier that announces every engine start on the wire — the policy
+    /// of every route whose engine is editor-visible from its first serve.
     pub fn new(client: Arc<OnceCell<Client>>, kind: &'static str) -> Self {
-        Self { client, kind }
+        Self {
+            client,
+            kind,
+            announce_initial_starts: true,
+        }
+    }
+
+    /// A notifier that announces only crash replacements — the policy of the
+    /// shared route's managed fallback, whose attested promise is that the
+    /// managed engine stays cold.
+    pub fn recovery_only(client: Arc<OnceCell<Client>>, kind: &'static str) -> Self {
+        Self {
+            client,
+            kind,
+            announce_initial_starts: false,
+        }
     }
 }
 
-impl verter_type_runtime::resilient::ProviderNotifier for LspNotifier {
-    fn notify(&self, severity: verter_type_runtime::resilient::NotifySeverity, message: String) {
-        use verter_type_runtime::resilient::NotifySeverity;
+impl verter_type_runtime::provider_hub::ProviderNotifier for LspNotifier {
+    fn notify(&self, severity: verter_type_runtime::provider_hub::NotifySeverity, message: String) {
+        use verter_type_runtime::provider_hub::NotifySeverity;
 
         let client = self.client.clone();
         // Spawn a task to send the notification (ProviderNotifier::notify is sync)
@@ -43,7 +70,16 @@ impl verter_type_runtime::resilient::ProviderNotifier for LspNotifier {
         });
     }
 
-    fn provider_started(&self, pid: Option<u32>) {
+    fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
+        if start == EngineStart::Initial && !self.announce_initial_starts {
+            tracing::info!(
+                kind = self.kind,
+                ?pid,
+                "managed engine began serving; its initial start stays off the wire \
+                 (the route attests the managed engine stays cold)"
+            );
+            return;
+        }
         // No pid, no notification: the contract carries a real child process
         // id, and fabricating one would make a restart look like a fresh start
         // against a process that does not exist.

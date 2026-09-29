@@ -59,7 +59,8 @@ use crate::tsgo::overlay_core::{
 };
 use crate::tsgo::project_binding::{self, AdmissionEpoch, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
-use crate::tsgo::transport_cell::{EstablishedTransport, TransportEpoch};
+use verter_type_runtime::provider_hub::EstablishedTransport;
+use verter_type_runtime::provider_hub::ProviderEpoch;
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
 /// editor tsgo cannot stall a carrier diagnostics query beyond this — on elapse the
@@ -67,7 +68,7 @@ use crate::tsgo::transport_cell::{EstablishedTransport, TransportEpoch};
 /// (fail-closed). Concurrent queries during establishment reuse the one bounded
 /// attempt (singleflight); a failed attempt re-arms on a fresh advertisement/editor
 /// generation OR a fresh workspace/config generation (see
-/// [`LazyTransport`](crate::tsgo::transport_cell::LazyTransport)). Establishment is
+/// [`LazyTransport`](verter_type_runtime::provider_hub::LazyTransport)). Establishment is
 /// reached only from a query path, never the managed lifecycle path — so opting into
 /// SHARED never trips the managed
 /// foreground-sync budget.
@@ -129,7 +130,7 @@ pub(crate) struct SharedEngageFailure {
     source: String,
     config: String,
     generation: u64,
-    transport_epoch: Option<TransportEpoch>,
+    transport_epoch: Option<ProviderEpoch>,
     sync_state: Option<OverlaySyncState>,
 }
 
@@ -194,7 +195,7 @@ struct EngagedSharedProvider {
     source: String,
     config: String,
     generation: u64,
-    transport_epoch: TransportEpoch,
+    transport_epoch: ProviderEpoch,
     sync_state: OverlaySyncState,
 }
 
@@ -208,7 +209,7 @@ enum FeatureProviderSelection {
         managed: Arc<dyn TypeProvider>,
         core: Arc<OverlayInner>,
         provider_path: String,
-        transport_epoch: TransportEpoch,
+        transport_epoch: ProviderEpoch,
     },
 }
 
@@ -247,7 +248,7 @@ impl FeatureProviderSelection {
 async fn invoke_epoch_bound<T, R, SharedCall, SharedFuture, ManagedCall, ManagedFuture>(
     core: &LazyOverlayCore<T>,
     provider_path: &str,
-    transport_epoch: TransportEpoch,
+    transport_epoch: ProviderEpoch,
     shared_call: SharedCall,
     managed_call: ManagedCall,
 ) -> Result<R, TypeProviderError>
@@ -282,7 +283,7 @@ where
 async fn observe_epoch_bound<T, R, SharedCall, SharedFuture>(
     core: &LazyOverlayCore<T>,
     provider_path: &str,
-    transport_epoch: TransportEpoch,
+    transport_epoch: ProviderEpoch,
     shared_call: SharedCall,
 ) -> Result<R, OverlaySyncState>
 where

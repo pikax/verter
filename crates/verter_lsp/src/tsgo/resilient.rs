@@ -1,30 +1,33 @@
-//! Resilient wrapper around `TsgoTypeProvider` with crash detection and auto-restart.
+//! The OWNED tsgo establishment strategy for the shared provider hub.
 //!
-//! The restart mechanics live in `verter_type_runtime::resilient`; this module only
-//! supplies the TSGO-specific respawn strategy and the LSP `Client` bridge.
+//! Establishment, crash recovery, desired-state replay and the serving epoch
+//! live in `verter_type_runtime::provider_hub`; this module only supplies how
+//! one owned dual-surface tsgo engine is spawned and the LSP `Client` bridge.
 
 use std::sync::Arc;
 
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::Client;
 
-use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
+use crate::resilient_provider::{
+    EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
+};
 use crate::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
 use crate::type_provider::protocol::TypeProviderError;
 use crate::type_provider::traits::TypeProvider;
 
-/// The OWNED dual-surface respawn strategy: each (re)spawn produces a
-/// [`TsgoOwnedProvider`] — a fresh `tsgo --lsp` process WITH the `--api` checker
-/// re-attached over its minted pipe. So a crash recovery restores BOTH surfaces on
-/// the new process (no second spawn, no stale attach). The `--api` checker stores no
-/// configured project — the owning tsconfig is supplied per query — so a restart
-/// re-establishes the PROCESS ONLY; there is no per-project state to restore.
+/// Each establishment produces a [`TsgoOwnedProvider`] — a fresh `tsgo --lsp`
+/// process WITH the version-gated `--api` checker attached over its minted pipe,
+/// so a recovery restores BOTH surfaces on the new process (no second spawn, no
+/// stale attach). The `--api` checker stores no configured project — the owning
+/// tsconfig is supplied per query — so an establishment creates the PROCESS
+/// ONLY; the hub replays the editor state.
 struct TsgoOwnedBackend {
     tsgo_bin: String,
     root_uri: String,
 }
 
-impl ResilientBackend<TsgoOwnedProvider> for TsgoOwnedBackend {
+impl ProviderEstablisher<TsgoOwnedProvider> for TsgoOwnedBackend {
     fn log_name(&self) -> &'static str {
         "TSGO(owned)"
     }
@@ -37,54 +40,81 @@ impl ResilientBackend<TsgoOwnedProvider> for TsgoOwnedBackend {
         "tsgo is restarting"
     }
 
-    fn spawn<'a>(
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
+    fn establish<'a>(
         &'a self,
-        crash_notify: Arc<Notify>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<TsgoOwnedProvider, TypeProviderError>>
-                + Send
-                + 'a,
-        >,
-    > {
+        crash_signal: Arc<Notify>,
+    ) -> EstablishFuture<'a, TsgoOwnedProvider> {
         Box::pin(async move {
-            let inner = TsgoTypeProvider::spawn_with_crash_signal(
+            let lsp = TsgoTypeProvider::spawn_with_crash_signal(
                 &self.tsgo_bin,
                 &self.root_uri,
-                Some(crash_notify),
+                Some(crash_signal),
             )
-            .await?;
-            let inner = Arc::new(inner);
-            match TsgoOwnedProvider::attach(Arc::clone(&inner), &self.tsgo_bin).await {
-                Ok(provider) => Ok(provider),
+            .await
+            .map_err(|error| TypeProviderError::new(format!("spawn/initialize failed: {error}")))?;
+            let lsp = Arc::new(lsp);
+            // A probe / wire-gate / attach failure fails closed rather than
+            // silently degrading the typecheck oracle, and never orphans the
+            // `--lsp` child it spawned.
+            match TsgoOwnedProvider::attach(Arc::clone(&lsp), &self.tsgo_bin).await {
+                Ok(provider) => Ok(Arc::new(provider)),
                 Err(error) => {
-                    let _ = inner.shutdown().await;
-                    Err(error)
+                    let teardown = lsp.shutdown().await;
+                    Err(TypeProviderError::new(format!(
+                        "spawned --lsp, but the version-gated --api attach failed: {error}; \
+                         managed child teardown: {}",
+                        teardown
+                            .err()
+                            .map_or_else(|| "reaped".to_string(), |error| error.to_string())
+                    )))
                 }
             }
         })
     }
 }
 
-/// Build the production OWNED dual-surface tsgo provider wrapped in the resilient
-/// respawn layer: ONE `tsgo --lsp` with the `--api` checker attached, re-attached
-/// on every crash recovery. The `--api` checker stores no configured project — the
-/// owning tsconfig is supplied per query — so a restart re-establishes the PROCESS
-/// ONLY.
-pub fn new_owned(
-    provider: TsgoOwnedProvider,
-    crash_notify: Arc<Notify>,
+/// The wire policy for the owned engine's structural start announcements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedStartAnnouncements {
+    /// Announce every engine start (`$/verter/typeProviderStarted`). The
+    /// policy of every route whose managed engine is editor-visible from its
+    /// first serve — the tsgo route, and the tsserver override reclassified
+    /// onto it.
+    All,
+    /// Announce only crash replacements. The policy of the shared route's
+    /// managed fallback: the route attests "managed TSGO remains cold until an
+    /// observed attach failure", and that attestation is asserted over the
+    /// started-announcement channel, so the fallback's first serve must stay
+    /// off it. See [`LspNotifier::recovery_only`].
+    RecoveryOnly,
+}
+
+/// Establish the production OWNED dual-surface tsgo engine through its hub:
+/// ONE `tsgo --lsp` with the `--api` checker attached, recovered (re-spawned,
+/// re-attached, replayed) by the hub on every crash within `max_restarts`.
+///
+/// # Errors
+/// Returns the establishment failure; the hub leaves nothing running.
+pub async fn establish_owned(
     tsgo_bin: String,
     root_uri: String,
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
-) -> impl TypeProvider {
-    let notifier = Arc::new(LspNotifier::new(client, "tsgo"));
-    ResilientProvider::new(
-        provider,
-        crash_notify,
+    announcements: OwnedStartAnnouncements,
+) -> Result<ProviderHub<TsgoOwnedProvider>, TypeProviderError> {
+    let notifier = match announcements {
+        OwnedStartAnnouncements::All => LspNotifier::new(client, "tsgo"),
+        OwnedStartAnnouncements::RecoveryOnly => LspNotifier::recovery_only(client, "tsgo"),
+    };
+    let hub = ProviderHub::new(
         TsgoOwnedBackend { tsgo_bin, root_uri },
-        notifier,
-        max_restarts,
-    )
+        Arc::new(notifier),
+        HubPolicy::explicit(max_restarts),
+    );
+    hub.establish().await?;
+    Ok(hub)
 }

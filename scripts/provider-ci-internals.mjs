@@ -65,9 +65,9 @@ export const PROVIDER_LIVE_SELECTORS = Object.freeze([
     package: "verter_type_runtime",
     kind: "exact",
     values: Object.freeze([
-      "resilient::resilient_tests::failed_respawn_retries_within_budget_and_recovers",
+      "provider_hub::hub_tests::failed_respawn_retries_within_budget_and_recovers",
     ]),
-    label: "real tsserver recovery test embedded in the resilient-provider module",
+    label: "real tsserver recovery test embedded in the provider-hub module",
   },
   {
     lane: "tsgo",

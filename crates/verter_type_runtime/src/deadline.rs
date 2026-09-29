@@ -44,6 +44,14 @@ pub async fn with_deadline_at<F: std::future::Future>(
     REQUEST_DEADLINE.scope(at, future).await
 }
 
+/// The ambient deadline as an absolute instant, or `None` when the caller
+/// opened no scope. Work that crosses a task boundary captures this once and
+/// re-opens it on the far side with [`with_deadline_at`], so the deadline
+/// travels with the work instead of being re-derived (or lost) per hop.
+pub fn current() -> Option<tokio::time::Instant> {
+    REQUEST_DEADLINE.try_with(|at| *at).ok()
+}
+
 /// Time left on the ambient deadline, or `None` when the caller opened no
 /// scope. A deadline already in the past yields `Some(Duration::ZERO)` — an
 /// expired budget, distinct from an absent one.

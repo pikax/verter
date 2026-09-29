@@ -13,7 +13,7 @@ use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::traits::ProviderFuture;
 
 use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport};
-use crate::tsgo::transport_cell::EstablishedTransport;
+use verter_type_runtime::provider_hub::EstablishedTransport;
 
 /// A transport double: records each injection/retraction and reports controllable
 /// liveness. No real relay/engine. `inject_fails` models a barrier error (a failed

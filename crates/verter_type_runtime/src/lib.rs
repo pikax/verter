@@ -6,13 +6,14 @@
 //! - Process spawning and IPC transport
 //! - Backend discovery (`find_tsserver`, `find_node`)
 //! - File sync into backend sessions
-//! - Minimal session lifecycle (start, shutdown, reconnect)
+//! - The provider lifecycle owner ([`provider_hub::ProviderHub`]): establishment,
+//!   crash recovery, desired-state replay and the serving `ProviderEpoch`
 //! - Backend-specific query helpers
 //!
 //! It does NOT own:
 //! - Semantic expansion request/result types (→ `verter_session::resolver_core`)
 //! - SFC-origin request contracts (→ `verter_session::resolver_core`)
-//! - Editor restart policy (→ `verter_lsp`)
+//! - Editor notification wiring and engine-chain selection (→ `verter_lsp`)
 //! - Background workspace sync policy (→ `verter_lsp`)
 //! - Merged diagnostics strategy (→ `verter_lsp`)
 //!
@@ -25,7 +26,7 @@
 //!
 //! `verter_type_runtime` does NOT depend on `verter_session::resolver_core` or `verter_session`.
 
-// The resilient single-writer actor never holds a synchronous lock across an
+// The provider hub single-writer actor never holds a synchronous lock across an
 // `.await` or channel send; denying this lint keeps that discipline enforced
 // crate-wide so a held-lock restart/backpressure stall cannot reappear.
 #![deny(clippy::await_holding_lock)]
@@ -41,7 +42,7 @@ pub mod discovery;
 mod pending;
 pub mod protocol;
 pub mod provider_adapter;
-pub mod resilient;
+pub mod provider_hub;
 pub mod semantic_tokens;
 pub mod trace;
 pub mod traits;

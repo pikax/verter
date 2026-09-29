@@ -26,10 +26,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::OnceCell;
 use tower_lsp_server::Client;
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
-use verter_lsp::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::type_provider::traits::TypeProvider;
 use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::{HostConfig, VerterHost};
@@ -409,26 +408,16 @@ async fn vue_only_owner_preserves_managed_lsp_mutation_diagnostics() {
     let companion = norm(&companion);
     let root_uri = file_uri(&root);
     let host = host_for_vue_specific_fixture(&tmp, &tsconfig);
-    let crash_notify = Arc::new(Notify::new());
     let tsgo_bin = exe.to_string_lossy().into_owned();
-    let lsp = TsgoTypeProvider::spawn_with_crash_signal(
-        &tsgo_bin,
-        &root_uri,
-        Some(Arc::clone(&crash_notify)),
-    )
-    .await
-    .expect("spawn real tsgo --lsp");
-    let owned = TsgoOwnedProvider::attach(Arc::new(lsp), &tsgo_bin)
-        .await
-        .expect("attach production owned checker");
-    let resilient = verter_lsp::tsgo::resilient::new_owned(
-        owned,
-        crash_notify,
+    let resilient = verter_lsp::tsgo::resilient::establish_owned(
         tsgo_bin,
         root_uri,
         Arc::new(OnceCell::<Client>::new()),
         3,
-    );
+        verter_lsp::tsgo::resilient::OwnedStartAnnouncements::All,
+    )
+    .await
+    .expect("establish the production owned tsgo engine");
     let composite = TsgoCompositeProvider::new(Arc::new(resilient), host, None);
 
     let clean = "export const value: string = \"ok\";\n";

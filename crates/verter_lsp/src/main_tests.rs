@@ -248,8 +248,13 @@ async fn configured_workspace_admits_then_spawns() {
         cache_root: None,
         host_exe: None,
     };
-    let result =
-        try_spawn_tsgo_with_request(&root.to_string_lossy(), &client_cell, Some(request)).await;
+    let result = try_spawn_tsgo_with_request(
+        &root.to_string_lossy(),
+        &client_cell,
+        Some(request),
+        tsgo_resilient::OwnedStartAnnouncements::All,
+    )
+    .await;
     // The two assertions below fail on different worlds. `log.exists()` is the
     // primary claim — admission passed and the resolver THEN spawned — and it
     // already catches a tier-1 leak by itself: a leaked engine validates before
@@ -511,6 +516,34 @@ fn an_unexecutable_install_refusal_reaches_the_startup_warning() {
     assert!(
         !matches!(error, TsserverSpawnError::NativeFamily { .. }),
         "an unexecutable install is a refusal, not a route reclassification"
+    );
+}
+
+// ── Structural start announcements: which managed routes announce their
+//    engine's INITIAL start on `$/verter/typeProviderStarted` (so the
+//    editor's pid set tracks that child for orphan cleanup) and which keep
+//    it off the wire because the route attests a cold managed engine. ────
+
+/// Only a session holding the editor rendezvous attests that the managed
+/// engine stays cold until an observed attach failure; every no-rendezvous
+/// managed route (auto without facts, `shared-tsgo` without a rendezvous,
+/// `editor-tsserver` without an attestation) has no editor-owned engine and
+/// MUST announce its initial start — a blanket replacements-only policy
+/// leaves the first managed TSGO process out of the editor's pid set, so it
+/// is never cleaned up on restart.
+#[test]
+fn managed_fallback_start_announcements_follow_the_rendezvous_attestation() {
+    assert_eq!(
+        managed_fallback_start_announcements(true),
+        tsgo_resilient::OwnedStartAnnouncements::RecoveryOnly,
+        "the attested shared route keeps the fallback's initial start off the \
+         started-announcement channel"
+    );
+    assert_eq!(
+        managed_fallback_start_announcements(false),
+        tsgo_resilient::OwnedStartAnnouncements::All,
+        "a managed route with no editor-owned engine announces its initial start \
+         for pid tracking"
     );
 }
 

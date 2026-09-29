@@ -47,7 +47,8 @@ use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 use verter_workspace::{AdmittedGeneratedUnits, CanonicalPath};
 
 use crate::tsgo::shared::TsgoSharedProvider;
-use crate::tsgo::transport_cell::{EstablishedTransport, LazyTransport, TransportEpoch};
+use verter_type_runtime::provider_hub::ProviderEpoch;
+use verter_type_runtime::provider_hub::{EstablishedTransport, LazyTransport};
 
 /// The bound on a compensating retract issued from the query-time injection path — both
 /// the inject transaction's own not-committed-safe cleanup and the sweep's flip-to-unsafe
@@ -145,7 +146,7 @@ impl OverlayTransport for TsgoSharedProvider {
 /// in-flight injection from marking a NEW epoch synced.
 struct InjectedRecord {
     content: Arc<str>,
-    epoch: TransportEpoch,
+    epoch: ProviderEpoch,
 }
 
 /// The cached shadow-safety decision for a carrier at a workspace content generation —
@@ -186,7 +187,7 @@ struct ContentRecord {
 struct OverlayState {
     /// The epoch of the transport the recorded markers are injected against — set from
     /// the established transport's identity; a change to it resets every marker.
-    active_epoch: Option<TransportEpoch>,
+    active_epoch: Option<ProviderEpoch>,
     /// The recorded content per carrier companion path.
     content: HashMap<String, ContentRecord>,
 }
@@ -205,7 +206,7 @@ struct OverlayState {
 /// observes the still-set marker mid-retract sees `{safe:false}` here and fails closed. No
 /// shadow-safety cache (a never-evaluated carrier) or a cached-SAFE decision leaves the
 /// injected-content + epoch condition as the sole synced gate (a safe carrier is unchanged).
-fn record_is_synced(rec: &ContentRecord, active_epoch: Option<TransportEpoch>) -> bool {
+fn record_is_synced(rec: &ContentRecord, active_epoch: Option<ProviderEpoch>) -> bool {
     rec.shadow_safety.as_ref().is_none_or(|c| c.safe)
         && rec.injected.as_ref().is_some_and(|inj| {
             inj.content.as_ref() == rec.content.as_ref() && Some(inj.epoch) == active_epoch
@@ -224,8 +225,8 @@ pub(crate) enum OverlaySyncState {
     NoActiveTransport,
     /// The transport captured by this query is no longer the active transport.
     TransportEpochMismatch {
-        expected: TransportEpoch,
-        active: TransportEpoch,
+        expected: ProviderEpoch,
+        active: ProviderEpoch,
     },
     /// A real-file/shadow conflict vetoed this companion at the named content generation.
     ShadowUnsafe { generation: u64 },
@@ -233,8 +234,8 @@ pub(crate) enum OverlaySyncState {
     NeverInjected,
     /// The last committed injection belongs to another transport instance.
     InjectedIntoDifferentEpoch {
-        expected: TransportEpoch,
-        injected: TransportEpoch,
+        expected: ProviderEpoch,
+        injected: ProviderEpoch,
     },
     /// The recorded content advanced after the last committed injection.
     ContentDirty,
@@ -388,7 +389,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     fn cache_shadow_decision(
         &self,
         path: &str,
-        run_epoch: TransportEpoch,
+        run_epoch: ProviderEpoch,
         generation: u64,
         safe: bool,
     ) {
@@ -426,7 +427,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// late observe must NOT regress `active_epoch` E2→E1 or reset the fresh markers. The
     /// shadow-safety caches are LEFT intact: they are keyed on the workspace content
     /// generation, orthogonal to the transport epoch.
-    fn observe_transport_identity(&self, epoch: TransportEpoch) {
+    fn observe_transport_identity(&self, epoch: ProviderEpoch) {
         let mut state = self.state.lock();
         let adopt = match state.active_epoch {
             None => true,
@@ -552,7 +553,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     async fn inject_dirty_bound(
         &self,
         transport: &Arc<T>,
-        run_epoch: TransportEpoch,
+        run_epoch: ProviderEpoch,
         path: &str,
         generation: u64,
         carrier_gate: &Arc<AsyncMutex<()>>,
@@ -690,7 +691,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     async fn retract_unsafe_bound(
         &self,
         transport: &Arc<T>,
-        run_epoch: TransportEpoch,
+        run_epoch: ProviderEpoch,
         path: &str,
         generation: u64,
         carrier_gate: &Arc<AsyncMutex<()>>,
@@ -975,7 +976,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     pub(crate) fn sync_state_for_epoch(
         &self,
         path: &str,
-        expected_epoch: TransportEpoch,
+        expected_epoch: ProviderEpoch,
     ) -> OverlaySyncState {
         let state = self.state.lock();
         let Some(rec) = state.content.get(path) else {
