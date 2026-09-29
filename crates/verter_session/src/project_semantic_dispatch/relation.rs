@@ -202,6 +202,9 @@ pub(crate) enum InferPatternShape {
     /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
     /// template literal pattern.
     TemplateLiteral,
+    /// `T extends Box<infer P>` — `Infer` sites among the type arguments
+    /// of a reference to a generic declaration.
+    Reference,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -4211,6 +4214,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
+                // A reference infers from its type arguments.
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 _ if self.subtree_contains_infer(node) => return None,
                 _ => {}
             }
@@ -4290,6 +4297,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // `infer` placeholders an element reaches through
+                        // structure or a reference (`[PE<infer M, any>]`)
+                        // are sites of the same pattern.
+                        for node in self
+                            .structural_infer_sites(element.value)
+                            .unwrap_or_default()
+                        {
+                            if let Some(SemanticNodeData::Infer { name, .. }) =
+                                graph.node_data(node).as_deref()
+                            {
+                                sites.push(InferParamSite {
+                                    node,
+                                    name: Arc::clone(name),
+                                    priority: InferenceCandidatePriority::Argument,
+                                });
+                            }
+                        }
                     }
                 }
                 (!sites.is_empty())
@@ -4388,6 +4413,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
+            }
+            Some(SemanticNodeData::InstantiationRef { .. }) => {
+                let sites: Vec<InferParamSite> = self
+                    .structural_infer_sites(target)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|node| match graph.node_data(node).as_deref() {
+                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                            node,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::Argument,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::Reference, sites, None))
             }
             Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
                 let sites: Vec<InferParamSite> = expressions
@@ -8336,8 +8378,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
-        // Two references to one generic declaration relate by their type
-        // arguments' variance before any structural comparison.
+        // Two references to one generic declaration infer from, and relate
+        // by, their type arguments' variance before any structural
+        // comparison.
+        if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            return result;
+        }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }

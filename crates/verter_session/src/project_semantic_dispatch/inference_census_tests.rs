@@ -369,19 +369,19 @@ fn conditional_inference() {
             read: Read::Type(r#"Box<"a"> extends Box<infer P> ? P : 0"#),
             tsc: [r#""a""#, r#""a""#, r#""a""#, r#""a""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"[Box<"a">] extends [Box<infer P>] ? P : 0"#),
             tsc: [r#""a""#, r#""a""#, r#""a""#, r#""a""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"F<PE<"m", 1>>"#),
             tsc: [r#""m""#, r#""m""#, r#""m""#, r#""m""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"MV<{ a: "x"; b: (x: string) => void }>"#),

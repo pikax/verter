@@ -1524,7 +1524,13 @@ impl ProjectSemanticDispatch<'_> {
                     ) {
                         direct = true;
                     } else if self.subtree_contains_infer(element.value) {
-                        return ConditionalInferRoute::OutOfScope;
+                        // A placeholder an element reaches through structure
+                        // or a reference is deposited by the relation of the
+                        // element; any other nesting is not.
+                        if self.structural_infer_sites(element.value).is_none() {
+                            return ConditionalInferRoute::OutOfScope;
+                        }
+                        direct = true;
                     }
                 }
                 if direct {
@@ -1620,6 +1626,17 @@ impl ProjectSemanticDispatch<'_> {
                     ConditionalInferRoute::OutOfScope
                 } else {
                     ConditionalInferRoute::None
+                }
+            }
+            // A reference to a generic declaration infers from its type
+            // arguments (`Box<infer P>`), and through any structure there.
+            SemanticNodeData::InstantiationRef { .. } => {
+                match self.structural_infer_sites(extends) {
+                    Some(sites) if !sites.is_empty() => ConditionalInferRoute::InScopePattern(
+                        super::relation::InferPatternShape::Reference,
+                    ),
+                    Some(_) => ConditionalInferRoute::None,
+                    None => ConditionalInferRoute::OutOfScope,
                 }
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
