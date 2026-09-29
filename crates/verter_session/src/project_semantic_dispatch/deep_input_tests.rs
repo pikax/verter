@@ -1282,3 +1282,53 @@ fn an_access_by_a_key_union_dedups_in_linear_work() {
     assert!(short > 0);
     assert_eq!(work(400), 2 * short);
 }
+
+/// A chain of `length` aliases down to `T | undefined`, a generic
+/// function declared to return its end, and the call's result kept as a
+/// `const` and joined with a pinned `"ok"` in a return.
+fn alias_chain(length: usize) -> String {
+    let mut source = String::from("type A0<T> = T | undefined;\n");
+    for level in 1..=length {
+        source.push_str(&format!("type A{level}<T> = A{}<T>;\n", level - 1));
+    }
+    source.push_str(&format!(
+        "declare function f<T>(x: T): A{length}<T>;\n\
+         export const c = f(\"ok\");\n\
+         export function gj(b: boolean) {{ if (b) {{ return f(\"ok\"); }} return \"ok\" as const; }}\n"
+    ));
+    source
+}
+
+/// The evaluated mismatches of `rows` over `source`, read on an 8 MiB
+/// thread, a declaration-lowering worker's: instantiating an alias whose
+/// body applies another alias still opens the next instantiation one
+/// native query deeper, so a chain of aliases takes native stack per alias
+/// (the connected demand's query-depth cap bounds how many).
+fn evaluated_mismatches_on_a_worker_stack(
+    source: String,
+    rows: &'static [(&'static str, &'static str)],
+) -> Vec<String> {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || super::checker_probe_lane_tests::evaluated_mismatches(&source, rows))
+        .expect("spawn the probing thread")
+        .join()
+        .expect("the probe answers")
+}
+
+const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
+    ("typeof c", "\"ok\" | undefined"),
+    ("ReturnType<typeof gj>", "\"ok\" | undefined"),
+];
+
+/// A fresh `"ok"` deposited for `T` is kept at the call when `T` is at
+/// the top level of the declared return, through any number of aliases:
+/// the binder walk reads the chain from a work list, one alias
+/// instantiation at a time, however long it is.
+#[test]
+fn alias_chains_20_long_keep_a_top_level_deposit() {
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(alias_chain(20), ALIAS_CHAIN_ROWS),
+        Vec::<String>::new()
+    );
+}
