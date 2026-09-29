@@ -29740,21 +29740,16 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // instantiation mints a FRESH node id (`type Grow<T> = Grow<[T]>` — each step
     // wraps the arg in a new tuple, so `Grow<string>` → `Grow<[string]>` →
     // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
-    // can NEVER match) DEFEATS visited-ID cycle detection. The demand primitive
-    // instantiates each residual `InstantiationRef` and re-evaluates; because the
-    // ids never repeat, the regrowth is bounded EXACTLY by the connected-demand
-    // work budget (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
-    // (`SAME_PATH_RECURSION`), which would only fire if the growth had FOLDED.
-    // The outcome types `Partial` — never a fabricated concrete type, never a
-    // hang.
-    //
-    // This test proves BOTH discriminating facts codex required: (1) distinct
-    // instantiated node ids per level (fresh-node growth, below), and (2) the
-    // reason is the connected work budget, NOT same-path recursion.
-    //
-    // The demand runs inside an enclosing taint frame, so the operational
-    // truncation ALSO refuses warm admission (`result_is_partial` +
-    // `cache_suppress`).
+    // can NEVER match) DEFEATS visited-ID cycle detection. Under a ledger too
+    // small for the checker's tail run the regrowth is bounded by the
+    // connected-demand work budget (`PROJECTION_WORK_LIMIT`) — NOT the
+    // `visited`-ID guard (`SAME_PATH_RECURSION`), which would only fire if the
+    // growth had FOLDED — and types `Partial`, never a fabricated concrete
+    // type, never a hang. The demand runs inside an enclosing taint frame, so
+    // the operational truncation ALSO refuses warm admission
+    // (`result_is_partial` + `cache_suppress`). Under the production ledger,
+    // sized above the checker's limits, the checker's tail limit is reached
+    // first and `Grow<string>` is the checker's recovery.
     let host = host();
     upsert_ts(&host, "/grow.ts", "export type Grow<T> = Grow<[T]>;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -29789,66 +29784,10 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
             .as_deref()
     );
 
-    // DISTINCT-NODE-ID EVIDENCE. Manually drive two instantiation levels of the
-    // SAME `Grow` decl: each mints a STRUCTURALLY-DISTINCT `InstantiationRef`
-    // (`Grow<[string]>` then `Grow<[[string]]>`), i.e. a FRESH node id per level.
-    // This is precisely what defeats the demand loop's `visited`-ID cycle
-    // detection — a same-id back-edge would be CAUGHT (`SAME_PATH_RECURSION`),
-    // but these ids never repeat, so ONLY the connected work budget can bound
-    // the regrowth.
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let (base0, args0) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
-        other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
-    };
-    let slot0 = dispatch.type_slot_for(
-        Arc::clone(&base0.canonical_id),
-        base0.owner,
-        Arc::clone(&base0.decl_name),
-    );
-    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
-    let level1 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Grow<string> must instantiate to its grown body, got {other:?}"),
-    };
-    let (base1, args1) = match graph.node_data(level1).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
-        other => panic!(
-            "level-1 instantiation of Grow<string> must GROW to a fresh Grow<[string]> \
-             InstantiationRef (not terminate), got {other:?}"
-        ),
-    };
-    let slot1 = dispatch.type_slot_for(
-        Arc::clone(&base1.canonical_id),
-        base1.owner,
-        Arc::clone(&base1.decl_name),
-    );
-    let level2 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot1, args1, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("level-1 must instantiate to its grown body, got {other:?}"),
-    };
-    assert!(
-        matches!(
-            graph.node_data(level2).as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        ),
-        "level-2 instantiation must GROW to a fresh Grow<[[string]]> InstantiationRef, got {:?}",
-        graph.node_data(level2).as_deref()
-    );
-    assert_ne!(
-        level1, level2,
-        "each Grow instantiation level MUST mint a DISTINCT node id (fresh-node growth) — equal \
-         ids would mean the growth folded and the visited-ID guard could catch it"
-    );
-    assert_ne!(
-        carrier, level1,
-        "the level-1 grown body is a DISTINCT node id from the Grow<string> carrier (fresh growth)"
-    );
-
+    // THE LEDGER BOUNDS THE GROWTH. Each tail step mints a fresh
+    // `Grow<[…]>` node id, which the demand loop's `visited`-ID cycle
+    // detection never matches, so under a ledger too small for the checker's
+    // tail run only the connected work budget stops it.
     let guard =
         crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
     dispatch.set_connected_limits_for_tests(256, 24);
@@ -29883,6 +29822,44 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
         frame.result_is_partial && frame.cache_suppress,
         "the build-enclosed growing-generic partial MUST refuse warm admission \
          (result_is_partial + cache_suppress on the frame)"
+    );
+
+    // THE CHECKER'S FACT UNDER THE PRODUCTION LEDGER. Instantiated there,
+    // `Grow<string>` applies itself once per tail step until the checker's
+    // tail limit, and is the checker's recovery, which reads as `any`.
+    // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
+    // is `any` (the checker reports the alias circular, TS2456).
+    dispatch.set_connected_limits_for_tests(
+        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+        super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (base0, args0) = match graph.node_data(carrier).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
+    };
+    let slot0 = dispatch.type_slot_for(
+        Arc::clone(&base0.canonical_id),
+        base0.owner,
+        Arc::clone(&base0.decl_name),
+    );
+    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
+    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Grow<string> must instantiate to the checker's answer, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(instantiated).as_deref(),
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.recovery() == Some(PrimitiveKind::Any)
+        ),
+        "Grow<string> is the checker's recovery, read as `any`, got {:?}",
+        graph.node_data(instantiated).as_deref()
     );
 
     // SCOPE (honest): this characterises fresh-node growth at the DEMAND-PRIMITIVE

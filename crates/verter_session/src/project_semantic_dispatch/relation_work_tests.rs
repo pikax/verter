@@ -4,7 +4,7 @@
 //! never a verdict. There is no allowance of the relation's own below the
 //! checker's relation-complexity limit.
 
-use super::checker_probe_lane_tests::with_probe;
+use super::checker_probe_lane_tests::{mismatches, with_probe};
 use super::dispatch_txn::RelationStep;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
@@ -39,17 +39,18 @@ fn pair(
     }
 }
 
-/// Forty object arms against forty: each arm of `S` tries the arms of `T`
-/// up to its own, 820 alternatives in all, and holds. Every alternative is
+/// Forty object arms against the same forty written in reverse: no arm of
+/// `S` holds at its own position, so each scans the arms of `T` up to its
+/// partner, 820 alternatives in all, and holds. Every alternative is
 /// charged to the ledger; a ledger that cannot pay for them ends the
 /// relation on the typed budget outcome, never on a verdict.
 ///
 /// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings agree): `[S] extends [T] ? 1 : 2` is `1` over
-/// 600, 1,800 and 3,200 arms each.
+/// 600 and 1,800 reversed arms each.
 #[test]
 fn a_union_targets_alternatives_are_connected_work() {
-    let source = object_unions(40);
+    let source = reversed_object_unions(40);
     with_probe(&source, "[S, T]", |dispatch, node| {
         let (s, t) = pair(dispatch, node);
         dispatch.set_connected_limits_for_tests(256, 24);
@@ -75,4 +76,83 @@ fn a_union_targets_alternatives_are_connected_work() {
             dispatch.connected_demand.work_used_for_tests()
         );
     });
+}
+
+/// `object_unions` with `T`'s arms written in reverse, so no arm of `S`
+/// finds its partner at its own position.
+fn reversed_object_unions(count: usize) -> String {
+    let source: Vec<String> = (0..count).map(|i| format!("{{ p{i}: {i} }}")).collect();
+    let target: Vec<String> = (0..count)
+        .rev()
+        .map(|i| format!("{{ p{i}: number }}"))
+        .collect();
+    format!(
+        "type S = {};\ntype T = {};\n",
+        source.join(" | "),
+        target.join(" | ")
+    )
+}
+
+/// A union source relates each arm first to the target arm at its own
+/// position (`eachTypeRelatedToType`), so aligned unions of 200 arms take
+/// about one structured comparison per arm: they hold within an allowance
+/// of 3 × 200 comparisons. Reversed, every arm scans the target, about
+/// 200² / 2 comparisons: past the same allowance the check overflows and is
+/// the checker's false (TS2859) — a complete answer, not a budget refusal.
+///
+/// Measured on TypeScript 7.0.2 (all four settings agree), through `[S]
+/// extends [T] ? 1 : 2`: aligned, `1` over 600, 1,800 and 3,200 arms each;
+/// reversed, `1` over 600 and 1,800 arms and `2` under TS2859 ("Excessive
+/// complexity comparing types '[S]' and '[T]'") over 2,100 and 3,200 — the
+/// checker's 2,000,000 recorded comparisons.
+#[test]
+fn a_union_source_relates_each_arm_to_its_position_first() {
+    let relate = "[S] extends [T] ? 1 : 2";
+    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
+        let aligned = mismatches(&object_unions(200), &[(relate, "1")]);
+        assert!(aligned.is_empty(), "{}", aligned.join("\n"));
+        let reversed = mismatches(&reversed_object_unions(200), &[(relate, "2")]);
+        assert!(reversed.is_empty(), "{}", reversed.join("\n"));
+    });
+    let reversed = mismatches(&reversed_object_unions(200), &[(relate, "1")]);
+    assert!(reversed.is_empty(), "{}", reversed.join("\n"));
+}
+
+/// Aligned unions of 600, 1,800 and 3,200 arms relate within the production
+/// ledger, as the checker relates them (see
+/// [`a_union_source_relates_each_arm_to_its_position_first`]).
+#[test]
+fn aligned_object_unions_relate_in_linear_work() {
+    for count in [600, 1800, 3200] {
+        let failures = mismatches(&object_unions(count), &[("[S] extends [T] ? 1 : 2", "1")]);
+        assert!(failures.is_empty(), "{count} arms: {}", failures.join("\n"));
+    }
+}
+
+/// A structured comparison the relation records costs it at most
+/// `RELATION_UNITS_PER_COMPARISON` ledger units, the mapping the production
+/// ledger is sized by so a relation reaches the checker's TS2859 before the
+/// ledger refuses it: 200 reversed arms record about 200 × 201 / 2
+/// comparisons.
+#[test]
+fn a_recorded_comparison_costs_the_ledgers_mapped_units() {
+    let count = 200usize;
+    with_probe(
+        &reversed_object_unions(count),
+        "[S, T]",
+        |dispatch, node| {
+            let (s, t) = pair(dispatch, node);
+            let related = dispatch.execute_relate(dispatch.relate_key_for(s, t));
+            assert!(
+                matches!(related, RelationStep::Assignable { .. }),
+                "every arm of S fits an arm of T, got {related:?}"
+            );
+            let comparisons = count * (count + 1) / 2;
+            let used = dispatch.connected_demand.work_used_for_tests();
+            assert!(
+                used <= comparisons * super::connected_demand::RELATION_UNITS_PER_COMPARISON,
+                "{comparisons} comparisons charged {used} units"
+            );
+        },
+    );
 }

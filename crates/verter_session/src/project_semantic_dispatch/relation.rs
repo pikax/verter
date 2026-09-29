@@ -1414,6 +1414,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             (top, chain)
         };
+        // One more structured comparison of the chain's check: past the
+        // checker's allowance the check overflows, false (TS2859).
+        let exhausted = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let counts = &mut txn.relation.chain_comparisons;
+            match counts
+                .iter_mut()
+                .rev()
+                .find(|(base, _)| *base == chain.base)
+            {
+                Some((_, comparisons)) => comparisons.record().is_err(),
+                None => false,
+            }
+        };
+        if exhausted {
+            self.overflow_relation_chain(&chain);
+            return Some(RelationResult::NotAssignable);
+        }
         let depth = chain.depth + 1;
         let mut expanding = chain.expanding;
         {
@@ -1564,6 +1582,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// explicit stack, each alias once (a member naming an alias already
     /// read stays as it is written). `members` itself when none names
     /// such an alias.
+    /// The target arms a union source's arms first relate to by position
+    /// (`eachTypeRelatedToType`): the target union's arms — without
+    /// `undefined` when the source holds none
+    /// (`getUndefinedStrippedTargetIfNeeded`) — when the source has a
+    /// multiple of their number. `None` otherwise.
+    fn positional_union_targets(
+        &self,
+        source_members: &[SemanticNodeId],
+        target: SemanticNodeId,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let target_members = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return None,
+        };
+        let target_members = self.relation_union_members(&target_members);
+        let is_undefined = |node: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )
+        };
+        let positions: Vec<SemanticNodeId> = if !source_members.iter().any(is_undefined)
+            && target_members.iter().any(is_undefined)
+        {
+            target_members
+                .iter()
+                .copied()
+                .filter(|member| !is_undefined(member))
+                .collect()
+        } else {
+            target_members.to_vec()
+        };
+        (!positions.is_empty()
+            && source_members.len() >= positions.len()
+            && source_members.len().is_multiple_of(positions.len()))
+        .then_some(positions)
+    }
+
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
         let graph = self.graph();
         let mut seen: FxHashSet<DeclIdentity> = FxHashSet::default();
@@ -2521,6 +2578,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(test)]
         MOST_OPEN_FRAMES.with(|most| most.set(most.get().max(idx + 1)));
         txn.note_inline_flight(idx, inline_flight);
+        // A relation frame with no relation frame below it starts a chain —
+        // one check — whose comparisons count from zero; a chain at or above
+        // this index has closed.
+        if parent_chain.is_none() {
+            let counts = &mut txn.relation.chain_comparisons;
+            counts.retain(|(base, _)| *base < idx);
+            counts.push((idx, Default::default()));
+        }
         if let Some(state) = txn
             .reentry_mut()
             .frame_mut_for_update(idx)
@@ -8475,19 +8540,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
-        let mut complexity = crate::semantic_query::checker_policy::RelationComplexity::default();
         work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
             if !self.charge_relation_work(1) {
                 return RelationResult::Unknown;
-            }
-            // Each pair the worklist expands is a structured comparison the
-            // checker records; past its allowance the relation is false
-            // (TS2859). The connected-work ledger charged above is the
-            // operational envelope, and under its production allowance it
-            // refuses first.
-            if matches!(item, RelateWork::Expand(..)) && complexity.record().is_err() {
-                return RelationResult::NotAssignable;
             }
             match item {
                 RelateWork::Expand(s, t, intersection_target_arm) => {
@@ -8515,6 +8571,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(self.relate_arm_member(s, t, target_arm, bindings));
                     } else {
                         self.expand_pair(s, t, target_arm, bindings, &mut work, &mut results);
+                    }
+                }
+                RelateWork::PositionalArm {
+                    source: s,
+                    positional,
+                    target: t,
+                } => {
+                    let checkpoint = self.relation_session_checkpoint();
+                    let bindings_len = bindings.len();
+                    match self.relate_member(s, positional, bindings, InferPosition::Covariant) {
+                        result @ RelationResult::Assignable { .. } => results.push(result),
+                        _ => {
+                            self.relation_session_rollback(&checkpoint);
+                            bindings.truncate(bindings_len);
+                            work.push(RelateWork::Arm(s, t));
+                        }
                     }
                 }
                 RelateWork::ReduceAnd(n) => {
@@ -10488,6 +10560,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // member (`eachTypeRelatedToSomeType`), which is no recursion
             // entry of its own; against any other target each member is
             // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
+            if target_is_union {
+                if let Some(positions) = self.positional_union_targets(&members, target) {
+                    distribute_positionally(work, results, &members, &positions, target);
+                    return;
+                }
+            }
             let arm = if target_is_union {
                 RelateWork::Arm
             } else {
@@ -13333,6 +13411,15 @@ enum RelateWork {
     /// Evaluate one arm of an intersection target like [`Self::Arm`], exempt
     /// from the weak-type check the whole intersection already passed.
     TargetArm(SemanticNodeId, SemanticNodeId),
+    /// Relate one arm of a union source to a union target
+    /// (`eachTypeRelatedToType`): first to the target arm at its own
+    /// position, then, when that does not hold, as [`Self::Arm`] against the
+    /// whole target.
+    PositionalArm {
+        source: SemanticNodeId,
+        positional: SemanticNodeId,
+        target: SemanticNodeId,
+    },
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
     /// Relate a pair the checker relates with an `isRelatedTo` of its own
@@ -13641,6 +13728,36 @@ fn index_key_applies(
 
 /// Build and push the worklist fan-out for a distribution whose reducer
 /// is AND-all, each pair evaluated as `arm` builds it.
+/// [`distribute_and`] over a union source's `members` against the union
+/// `target` whose arms are `positions`: arm `i` first relates to
+/// `positions[i % positions.len()]` (`eachTypeRelatedToType`).
+fn distribute_positionally(
+    work: &mut Vec<RelateWork>,
+    results: &mut Vec<RelationResult>,
+    members: &[SemanticNodeId],
+    positions: &[SemanticNodeId],
+    target: SemanticNodeId,
+) {
+    if members.is_empty() {
+        results.push(RelationResult::Assignable {
+            bindings: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        return;
+    }
+    let mut forward: Vec<RelateWork> = Vec::with_capacity(members.len() + 1);
+    for (index, member) in members.iter().enumerate() {
+        forward.push(RelateWork::PositionalArm {
+            source: *member,
+            positional: positions[index % positions.len()],
+            target,
+        });
+    }
+    if members.len() > 1 {
+        forward.push(RelateWork::ReduceAnd(members.len() as u32));
+    }
+    push_forward_work(work, forward);
+}
+
 fn distribute_and<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,
