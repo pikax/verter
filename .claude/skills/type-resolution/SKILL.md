@@ -178,6 +178,18 @@ Materialising an artifact performs ZERO import resolution.
   (`SessionResolverContext::resolve_type_dependency_canonical` resolves through
   the session's own overlay): with nothing baked into the artifact, a base-host
   resolve would make an overlay-only dependency disappear.
+- A session request's overlay is ONE resolution snapshot
+  (`ResolutionOverlaySnapshot`), built once by `with_session_overlay` and kept
+  on the store view. The context resolves through it
+  (`ResolverContext::resolution_overlay`), and the view validates every
+  resolution fact against the effective world it composes. Facts the overlay
+  changes take versions from a reserved overlay space, so an overlay answer
+  never serves the workspace and a workspace answer the overlay reaches never
+  serves the session. A workspace answer the overlay cannot reach is reused.
+  The type route is one policy for both views
+  (`resolve_type_dependency_canonical_in`), and overlay answers are cached in
+  the Engine's overlay lane, never in a workspace slot. Never rebuild the
+  snapshot per call or add an overlay-keyed resolution memo beside the Engine.
 
 Full normative text: `docs/contributing/path-precise-resolution-currency.md`.
 

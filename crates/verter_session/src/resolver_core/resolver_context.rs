@@ -680,6 +680,14 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
         None
     }
 
+    /// The request overlay this context resolves through, if its view has
+    /// one — the ONE resolution snapshot of the request (see
+    /// [`crate::store_view_roots::StoreViewRoots::resolution_overlay`]).
+    /// `None` resolves through the workspace view.
+    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
+        None
+    }
+
     /// Return the request-scoped
     /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
     /// this context threads through the request, if any.
@@ -1021,17 +1029,11 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        match crate::VerterHost::resolve_type_dependency_canonical(
+        type_route_answer(crate::VerterHost::resolve_type_dependency_canonical(
             self,
             owner_canonical,
             import_source,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-            verter_workspace::ResolutionPublication::Refused(_) => {
-                note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
-                None
-            }
-        }
+        ))
     }
 
     #[inline]
@@ -1176,6 +1178,12 @@ pub(crate) trait RequestBoundLifecycle {
     /// The active session view, if this lifecycle carries one.
     fn session_view(&self) -> Option<&dyn crate::session_view::SessionView>;
 
+    /// The request overlay this lifecycle resolves through; `None`
+    /// resolves through the workspace view.
+    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
+        None
+    }
+
     /// Idempotently promote a newly-loaded canonical into the request
     /// overlay (epoch-guarded); the session lifecycle threads its view.
     fn complete_canonical(&self, canonical: &str);
@@ -1265,17 +1273,11 @@ pub(crate) trait RequestBoundLifecycle {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        match crate::VerterHost::resolve_type_dependency_canonical(
+        type_route_answer(crate::VerterHost::resolve_type_dependency_canonical(
             self.host(),
             owner_canonical,
             import_source,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-            verter_workspace::ResolutionPublication::Refused(_) => {
-                note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
-                None
-            }
-        }
+        ))
     }
 }
 
@@ -1633,6 +1635,11 @@ where
     }
 
     #[inline]
+    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
+        self.0.resolution_overlay()
+    }
+
+    #[inline]
     fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
         self.0.host()
     }
@@ -1785,6 +1792,22 @@ impl NonCacheableReadReason {
             // degradation sidecar on every re-run, so only warm
             // PUBLICATION is refused, never intra-request reuse.
             Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
+        }
+    }
+}
+
+/// A type-route publication as a resolver context answers it: the admitted
+/// target, or — for a refusal — `None` marked non-cacheable, so a refused
+/// route never becomes a cacheable "not found". Every context answers
+/// through this, whichever resolution snapshot produced the publication.
+pub(crate) fn type_route_answer(
+    publication: verter_workspace::ResolutionPublication<String>,
+) -> Option<String> {
+    match publication {
+        verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+        verter_workspace::ResolutionPublication::Refused(_) => {
+            note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
+            None
         }
     }
 }

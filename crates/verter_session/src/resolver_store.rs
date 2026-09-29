@@ -1985,6 +1985,24 @@ impl HostStoreView {
             );
         }
         snapshot.roots.with_session(session);
+        // Resolution facts answer for the EFFECTIVE view too. The captured
+        // workspace world cannot see an overlay-created, -deleted or
+        // -rewritten path, so a witness validated against it alone would
+        // accept a workspace answer the overlay changed. The overlay's
+        // effective world versions exactly the facts it changes (and every
+        // decision reaching one) in its own version space; the rest answer
+        // from the captured roots unchanged.
+        //
+        // The overlay is built ONCE, here, and kept on the view: every
+        // resolution a request over this view makes resolves through this
+        // same snapshot, so the answer, its witness and this validator
+        // refer to one effective view, and the overlay's source map is
+        // never rebuilt per resolution.
+        let overlay = host.resolution_overlay_snapshot(view);
+        if let Some(world) = snapshot.roots.resolution_root.as_ref() {
+            snapshot.roots.resolution_root = Some(overlay.effective_world(world));
+        }
+        snapshot.roots.resolution_overlay = Some(overlay);
         // The overlaid view answers differently from the base view it was
         // cloned from, so it must not inherit the base view's memo.
         self.memo = Arc::new(crate::store_view_roots::StoreViewMemo::default());
@@ -2220,6 +2238,14 @@ impl HostStoreView {
             resolution,
             workspace_shape: self.snapshot.roots.project_env_root.project_generation,
         }))
+    }
+
+    /// The request overlay this session view resolves through — see
+    /// [`crate::store_view_roots::StoreViewRoots::resolution_overlay`].
+    pub(crate) fn resolution_overlay(
+        &self,
+    ) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
+        self.snapshot.roots.resolution_overlay.as_ref()
     }
 
     /// This view's population identity for the four VIEW-DERIVED

@@ -230,15 +230,98 @@ resolution authority to admit against, and applying the batch's destructive
 half (clearing the exact/lazy/semantic-transitive stores) without its recording
 half would leave exactly the torn state the protocol exists to prevent.
 
-### Request-local snapshots, and what the filesystem backend is not
+### Request overlays are resolution snapshots, not a cache bypass
 
-A reader is REQUEST-LOCAL when its answers are scoped to one request and may
-neither read nor populate the shared candidate slot. Exactly one reader is:
-the overlay snapshot composed over an Engine-backed workspace, whose answers
-are overlay-effective while its cache key names the enclosing population.
+A session request's overlay (its upserted and deleted files) is a
+first-class resolution SNAPSHOT: `ResolutionOverlaySnapshot`. The session
+store view builds it ONCE, from its own view, and keeps it; every
+resolution a request over that view makes resolves through that same
+snapshot, and the view validates every resolution fact through the world
+the snapshot composes. The answer, its witness and its validator therefore
+refer to one effective view.
 
-The filesystem backend's two readers are NOT. Their split of duties is
-admission, not scope:
+**The effective world.** `ResolutionOverlaySnapshot::effective_world`
+composes the overlay over a captured workspace world. It records exactly the
+facts whose EFFECTIVE VALUE the overlay changes, by the same per-path rule
+the Engine applies when an editor overlay opens: `PathProbe`, `Realpath` and
+the parent's `DirectoryMembers` when a path's existence moves, `Manifest`
+when a manifest's resolution projection moves. An unrecorded workspace
+value is unknown and compares as changed. Every derived node
+(`Decision`, `OwnerResolutionSet`) reverse-reachable from a changed fact in
+the underlying decision graphs is recorded too. Everything else answers from
+the captured roots unchanged. The composition is built once per snapshot and
+underlying root pair, and an overlay that changes nothing composes to the
+captured world itself.
+
+**The overlay version space.** A changed fact takes a version from a
+reserved space (the top bit) that the Engine's monotonic counter never
+reaches, so:
+
+- an overlay answer's witness never validates against a world that cannot
+  see the overlay — a session answer never serves the workspace, whatever
+  either cached;
+- a workspace witness the overlay reaches never validates against the
+  overlay's world — a warm workspace miss never conceals an overlay-created
+  dependency, and a warm workspace hit never survives an overlay delete or a
+  higher-priority overlay candidate;
+- a workspace witness the overlay cannot reach validates unchanged — the
+  overlay view reuses every workspace decision it has no effect on. That is
+  the PROOF of reuse: the candidate's complete witness, negative probes
+  included, validated against the overlay's effective world.
+
+Probe and realpath values are encoded exactly (`File`/`Absent`, self/none),
+so two requests whose overlays give a path the same effective value agree on
+its version without a digest: an ordinary body edit of an overlaid file keeps
+every answer that depends only on the file existing. Directory-membership
+and manifest values are interned by exact value identity in one bounded
+process-wide table (`overlay_value_versions_len`); an evicted value
+re-mints, which only refuses the witnesses recorded against it. A derived
+node the overlay reaches gets a version unique to the composition. A world
+that composes an overlay which changes a fact reports no resolution stamp:
+root identity says nothing about which facts the overlay shadows, so the
+resolution domain does not compact there and witnesses keep their precise
+facts.
+
+**One cache owner, two lanes.** The Engine's candidate slots carry a lane.
+An overlay that changes no resolution fact of the captured world resolves
+exactly as the workspace does and answers in the WORKSPACE lane, publishing
+and reusing workspace decisions. An overlay that changes a fact answers in
+the OVERLAY lane: it reads the workspace slot and the overlay slot, reuses a
+workspace candidate whose witness validates against its effective world
+(rooting on the workspace decision node when the overlay does not reach
+it), and publishes its own answers into the overlay lane with their own
+witnesses and no decision node — the decision graph is the workspace's. The
+overlay lane is shared by every overlay: candidates are told apart by their
+witnesses, never by an overlay identity in the key, so another request's
+overlay answer is reused wherever its facts hold. The lane is bounded
+(`OVERLAY_LANE_SLOT_CAP` slots, oldest evicted first) and counted by
+`WorkspaceResourceSnapshot::overlay_resolution_slots`. An overlay answer
+never enters a workspace slot, never folds its observed values into the
+workspace's evidence baseline, and never records a workspace dependency
+edge.
+
+**Carried by the operation, not by a reader.** The overlay is part of the
+Engine's `ResolutionOperation` (`ResolutionOperation::over`), and the Engine
+composes the overlay reader itself. Like the evidence capability below, a
+reader hook would be forwarded by every delegating wrapper, and a wrapper
+that forgot it would version overlay answers as the workspace values they
+replaced. The evidence refresh never re-observes a path the request overlay
+covers: that observation is overlay-effective and must not overwrite
+workspace evidence.
+
+**The type route is one policy.** `resolve_type_dependency_canonical_in`
+takes the snapshot as a parameter (`None` for the workspace view) and owns
+lane selection (`TypeImport`, then the `EsmImport` fallback), declaration
+companion normalization and refusal propagation for both views. Every
+resolver context answers its publication through `type_route_answer`, which
+marks a refusal non-cacheable rather than a "not found". The witness
+builder for an unresolved wildcard edge resolves through the context's
+snapshot too, and a request's witness memo keys on the snapshot's identity.
+
+### What the filesystem backend is not
+
+The filesystem backend's two readers share one scope. Their split of duties
+is admission:
 
 - the DISCOVERY pass reads live disk through mutable caches and is never
   bridge complete, so it can never admit. It may still READ a warm
@@ -251,9 +334,9 @@ admission, not scope:
   facts and forces a retry, so a candidate is admitted only once the
   recorded baseline AGREES with live disk for every value it observed.
 
-Treating either as request-local silently disables the resolution memo on
-the production LSP backend: no candidate is ever read, none is ever
-published, and `add_lazy_resolved_dep` never runs, so lazily resolved
+Disabling candidate reads or publication for either silently disables the
+resolution memo on the production LSP backend: no candidate is ever read,
+none is ever published, and `add_lazy_resolved_dep` never runs, so lazily resolved
 (bare-specifier) edges never become reverse-queryable. Every import then
 pays two full resolver passes with real `probe_path` / `realpath` traffic,
 on every touch, forever. That is strictly worse than the global-generation
@@ -378,9 +461,11 @@ Consequences that follow from the single primitive:
   scenarios (manifest rewrite, snapshot-resident deletion, known-miss
   appearance) plus the inaccessible-target case run against
   `resolve_import_outcome`, `resolve_import_outcome_with_overlay` and
-  `resolve_import_at_published`. A request-local entry reads no candidate and
-  therefore cannot serve a stale one, but it is covered anyway: a later change
-  that lets it reuse inherits the healing instead of silently losing it.
+  `resolve_import_at_published`. The overlay entry resolves through an
+  overlay that changes facts the candidate never observed, so it reuses the
+  workspace candidate under the overlay's effective world and must heal it
+  exactly as the plain entry does; the evidence refresh skips only the paths
+  the overlay itself covers.
 
 #### One first-observation rule, and what a fill may not do
 

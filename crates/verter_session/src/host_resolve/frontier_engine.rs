@@ -739,8 +739,11 @@ impl VerterHost {
             owner_sources.entry(owner).or_default().push(source);
         }
         for (owner, sources) in owner_sources {
-            let Some(witness) = self.import_route_witness_for_specifiers(owner.as_str(), &sources)
-            else {
+            let Some(witness) = self.import_route_witness_for_specifiers(
+                ctx.resolution_overlay(),
+                owner.as_str(),
+                &sources,
+            ) else {
                 // The empty-facts signal alone only protects the caches
                 // that inspect route facts directly (`RouteDb` /
                 // `ImportedRootDb` strict admission, the owner-import-
