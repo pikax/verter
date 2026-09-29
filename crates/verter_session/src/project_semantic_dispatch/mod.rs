@@ -428,6 +428,12 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// Whether each alias the printing walk asked about declares a
+    /// homomorphic mapped type. REQUEST-SCOPED: it lives and dies with the
+    /// dispatch, and every entry is a pure function of declarations the
+    /// request's view pins.
+    pub(super) homomorphic_aliases:
+        std::cell::RefCell<rustc_hash::FxHashMap<crate::semantic_query::DeclIdentity, bool>>,
     /// How many type-level reads this dispatch made of a member's
     /// body-derived return whose evaluation closed degraded
     /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
@@ -714,6 +720,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            homomorphic_aliases: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             degraded_member_reads: std::cell::Cell::new(0),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
