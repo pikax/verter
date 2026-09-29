@@ -200,13 +200,17 @@ impl VerterHost {
         self.record_resolved_dependency_edge(owner_canonical, resolved_canonical_id);
     }
 
-    fn resolve_workspace_dependency(
+    /// One codegen-blocker resolution lane against one resolution snapshot
+    /// (see [`Self::resolve_for_persistent_state_in`]).
+    fn resolve_dependency_lane(
         &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         import_source: &str,
         kind: verter_semantic::resolver_core::ResolveRequestKind,
     ) -> verter_workspace::ResolutionPublication<String> {
-        self.resolve_for_persistent_state(
+        self.resolve_for_persistent_state_in(
+            overlay,
             owner_canonical,
             import_source,
             verter_semantic::resolver_core::ResolutionContext {
@@ -223,7 +227,7 @@ impl VerterHost {
         import_source: &str,
         kind: verter_semantic::resolver_core::ResolveRequestKind,
     ) -> verter_workspace::ResolutionPublication<String> {
-        self.resolve_workspace_dependency(owner_canonical, import_source, kind)
+        self.resolve_dependency_lane(None, owner_canonical, import_source, kind)
     }
 
     pub(crate) fn resolve_type_dependency_canonical(
@@ -231,7 +235,27 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
-        match self.resolve_workspace_dependency(
+        self.resolve_type_dependency_canonical_in(None, owner_canonical, import_source)
+    }
+
+    /// **The type-route policy**, against one resolution snapshot: the
+    /// workspace's own view (`None`) or a request overlay's effective view.
+    ///
+    /// `TypeImport` first; with no target, the `EsmImport` fallback; either
+    /// target normalized to its declaration companion
+    /// ([`Self::normalize_admitted_type_target`]). A refusal on any lane is
+    /// the answer — never a "not found". Every lane resolves through the
+    /// SAME snapshot, so an overlay view never mixes its own answer with a
+    /// workspace one, and there is no second policy for overlays to drift
+    /// from.
+    pub(crate) fn resolve_type_dependency_canonical_in(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        match self.resolve_dependency_lane(
+            overlay,
             owner_canonical,
             import_source,
             verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
@@ -239,14 +263,15 @@ impl VerterHost {
             verter_workspace::ResolutionPublication::Admitted(admitted)
                 if admitted.result().is_some() =>
             {
-                return self.normalize_admitted_type_target(owner_canonical, admitted);
+                return self.normalize_admitted_type_target(overlay, owner_canonical, admitted);
             }
             verter_workspace::ResolutionPublication::Admitted(_) => {}
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return verter_workspace::ResolutionPublication::Refused(refusal);
             }
         }
-        let runtime = match self.resolve_workspace_dependency(
+        let runtime = match self.resolve_dependency_lane(
+            overlay,
             owner_canonical,
             import_source,
             verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
@@ -256,18 +281,20 @@ impl VerterHost {
                 return verter_workspace::ResolutionPublication::Refused(refusal);
             }
         };
-        self.normalize_admitted_type_target(owner_canonical, runtime)
+        self.normalize_admitted_type_target(overlay, owner_canonical, runtime)
     }
 
     fn normalize_admitted_type_target(
         &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         admitted: verter_workspace::AdmittedResolution<String>,
     ) -> verter_workspace::ResolutionPublication<String> {
         let Some(runtime_target) = admitted.result().cloned() else {
             return verter_workspace::ResolutionPublication::Admitted(admitted);
         };
-        match self.resolve_workspace_dependency(
+        match self.resolve_dependency_lane(
+            overlay,
             owner_canonical,
             &runtime_target,
             verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
@@ -351,15 +378,20 @@ impl VerterHost {
     ///   ESM-fallback normalization and the absence-sensitive
     ///   `ImportRoute` hash lands on the SAME canonical the route
     ///   traversal would record.
-    pub(crate) fn generation_current_route_resolution(
+    ///
+    /// `overlay` is the resolution snapshot to answer for: the workspace
+    /// view (`None`) or a request overlay's effective view.
+    pub(crate) fn generation_current_route_resolution_in(
         &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         import_source: &str,
         recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
     ) -> verter_workspace::ResolutionPublication<String> {
         match recorded_kind {
             Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr) => self
-                .resolve_for_persistent_state(
+                .resolve_for_persistent_state_in(
+                    overlay,
                     owner_canonical,
                     import_source,
                     verter_semantic::resolver_core::ResolutionContext {
@@ -368,7 +400,27 @@ impl VerterHost {
                     },
                 )
                 .map_result(|resolution| resolution.source_id),
-            _ => self.resolve_route_edge_canonical(owner_canonical, import_source),
+            _ => {
+                verter_audit::attribute_scope!(ImportRouteResolve);
+                self.resolve_type_dependency_canonical_in(overlay, owner_canonical, import_source)
+            }
         }
+    }
+
+    /// [`Self::generation_current_route_resolution_in`] for the workspace
+    /// view.
+    #[cfg(test)]
+    pub(crate) fn generation_current_route_resolution(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.generation_current_route_resolution_in(
+            None,
+            owner_canonical,
+            import_source,
+            recorded_kind,
+        )
     }
 }

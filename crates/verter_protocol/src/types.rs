@@ -1152,6 +1152,9 @@ pub enum FfiSurfacePartialReason {
     FlowReturnUnverified,
     /// A body-derived demand produced no value at all.
     FlowReturnNoSurface,
+    /// A conditional type the checker decides stands undecided where its
+    /// answer should be.
+    UndecidedConditional,
 }
 
 #[derive(Serialize, Clone)]

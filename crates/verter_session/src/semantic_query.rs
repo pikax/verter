@@ -151,7 +151,9 @@ mod checker_diagnostic;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
 };
-pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
+/// The checker compatibility policy: the limits at which the checker gives up
+/// on a type operation, and the diagnostic it reports there.
+pub(crate) mod checker_policy;
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1979,6 +1981,12 @@ pub enum FlowReturnDegradation {
     /// A fabricated `any` is forbidden here: it is indistinguishable from
     /// an authored one at every downstream gate.
     UnmodeledPosition,
+    /// The evaluation composed its value from a member's body-derived
+    /// return whose evaluation closed degraded, read as a type
+    /// (`ReturnType<typeof C.m>`): the usable value is published, and the
+    /// answer carries the member's degradation as this typed reason rather
+    /// than publishing clean.
+    PartialInterior,
 }
 
 /// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
@@ -2135,6 +2143,11 @@ pub enum CallArgKey {
         /// which a `const` type parameter the argument is passed to infers
         /// from (`isConstContext`). `None` for any other argument.
         const_view: Option<SemanticNodeId>,
+        /// A context-sensitive object literal as the call's first inference
+        /// pass reads it (`SkipContextSensitive`): its context-sensitive
+        /// members read as the non-inferring `any`, so its other members
+        /// infer before those are typed. `None` for any other argument.
+        first_pass: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).
@@ -5014,6 +5027,14 @@ impl PartialReasonSet {
     /// `props: {…}` / `emits: […]` option objects, `get_component_meta`)
     /// is missing members it cannot name and must fail closed.
     pub const FLOW_RETURN_NO_SURFACE: Self = Self(1 << 16);
+    /// A conditional type over operands the checker decides (neither holds
+    /// a type variable the checker defers on) whose branch the lane could
+    /// not select: the relation it asks is undecided (`Unknown`, a budget,
+    /// a coinductive assumption), or the `extends` pattern is one the lane
+    /// does not infer from. The conditional shell it publishes is a typed
+    /// gap, never the checker's answer; a conditional the checker itself
+    /// defers (a generic operand) is complete.
+    pub const UNDECIDED_CONDITIONAL: Self = Self(1 << 17);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -5118,11 +5139,13 @@ pub enum PartialReason {
     FlowReturnUnverified,
     /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`].
     FlowReturnNoSurface,
+    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`].
+    UndecidedConditional,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -5140,6 +5163,7 @@ impl PartialReason {
         Self::FlowReturnUninferred,
         Self::FlowReturnUnverified,
         Self::FlowReturnNoSurface,
+        Self::UndecidedConditional,
     ];
 
     /// The single-reason set this variant names.
@@ -5163,6 +5187,7 @@ impl PartialReason {
             Self::FlowReturnUninferred => PartialReasonSet::FLOW_RETURN_UNINFERRED,
             Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+            Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
         }
     }
 
@@ -5189,6 +5214,7 @@ impl PartialReason {
             Self::FlowReturnUninferred => "flowReturnUninferred",
             Self::FlowReturnUnverified => "flowReturnUnverified",
             Self::FlowReturnNoSurface => "flowReturnNoSurface",
+            Self::UndecidedConditional => "undecidedConditional",
         }
     }
 }
@@ -5706,7 +5732,17 @@ pub enum QueryError {
     /// as that recovery, carrying the diagnostic that produced it. Never a
     /// stand-in for something this substrate cannot answer — those stay
     /// typed gaps.
-    CheckerRecovery(CheckerDiagnostic),
+    CheckerRecovery {
+        /// The diagnostic the checker reports.
+        diagnostic: CheckerDiagnostic,
+        /// The type itself where the checker gives up at one of its limits
+        /// ([`checker_policy`]) and Verter still names it: the answer
+        /// beyond the checker's limit, for a consumer that wants the type
+        /// rather than the checker's recovery. Nothing reads it as the
+        /// recovery: the recovery is `any`, and this is a retained leaf of
+        /// the node, never a descendant a semantic walk enters.
+        beyond: Option<SemanticNodeId>,
+    },
 }
 
 impl QueryError {
@@ -5723,7 +5759,7 @@ impl QueryError {
         match self {
             QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
-            | QueryError::CheckerRecovery(_) => false,
+            | QueryError::CheckerRecovery { .. } => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5858,7 +5894,16 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
-            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
+            (
+                Self::CheckerRecovery {
+                    diagnostic: a_d,
+                    beyond: a_b,
+                },
+                Self::CheckerRecovery {
+                    diagnostic: b_d,
+                    beyond: b_b,
+                },
+            ) => a_d == b_d && a_b == b_b,
             _ => false,
         }
     }
@@ -5893,7 +5938,7 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
-            Self::CheckerRecovery(_) => 21,
+            Self::CheckerRecovery { .. } => 21,
         }
     }
 }
@@ -5949,7 +5994,10 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
             | Self::OpenSurface => {}
-            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
+            Self::CheckerRecovery { diagnostic, beyond } => {
+                diagnostic.hash(state);
+                beyond.hash(state);
+            }
         }
     }
 }
@@ -8924,7 +8972,7 @@ pub enum SemanticQueryKey {
     ///   unwrapping on the current path is the checker's recursive
     ///   thenable: TS1062, with the arm dropped from an enclosing union and
     ///   otherwise the checker's error type as the answer
-    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   (`Opaque(QueryError::CheckerRecovery { .. })`, reading as `any`) —
     ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
     ///   not expand, an exhausted budget, or any other unsettled shape is
@@ -11003,10 +11051,13 @@ mod tests {
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
             QueryError::UnmodeledPosition,
-            QueryError::CheckerRecovery(CheckerDiagnostic {
-                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                operation: CheckerDiagnosticOperation::LibAwaited,
-            }),
+            QueryError::CheckerRecovery {
+                diagnostic: CheckerDiagnostic {
+                    code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: CheckerDiagnosticOperation::LibAwaited,
+                },
+                beyond: None,
+            },
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

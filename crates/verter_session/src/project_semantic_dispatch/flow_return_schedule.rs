@@ -132,7 +132,7 @@ pub(crate) struct FlowScheduleSession {
     /// probe collecting the unsettled callee returns its evaluation
     /// demands, `None` for one whose demands are scheduled where they are
     /// made.
-    probes: Vec<Option<Vec<FlowReturnKey>>>,
+    probes: Vec<Option<CalleeKeys>>,
 }
 
 /// What [`ProjectSemanticDispatch::intercept_unscheduled_flow_demand`]
@@ -220,6 +220,8 @@ struct ScheduledCallee {
 struct ScheduleRun {
     walking: Vec<ScheduledCallee>,
     component: Vec<FlowReturnKey>,
+    /// The keys on `component`, for a constant-time membership test.
+    on_component: FxHashSet<FlowReturnKey>,
     discovered: FxHashMap<FlowReturnKey, usize>,
     next_index: usize,
 }
@@ -370,6 +372,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let callees = self.discover_flow_return_callees(&key);
         run.discovered.insert(key.clone(), index);
         run.component.push(key.clone());
+        run.on_component.insert(key.clone());
         run.walking.push(ScheduledCallee {
             key,
             predicted: callees.len(),
@@ -431,6 +434,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .rposition(|key| key == &done.key)
                 .expect("a discovered entry is on the component stack");
             let members = run.component.split_off(position);
+            for member in &members {
+                run.on_component.remove(member);
+            }
             self.settle_all(members.iter());
             // A cycle's root, an entry with something left to evaluate
             // beneath it, and a forced entry are evaluated now; anything
@@ -450,17 +456,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if evaluated.reusable {
                 continue;
             }
+            let known: FxHashSet<&FlowReturnKey> = done.callees.iter().collect();
             let recorded: Vec<FlowReturnKey> = evaluated
                 .recorded
                 .into_iter()
-                .filter(|key| !done.callees.contains(key))
+                .filter(|key| !known.contains(key))
                 .collect();
+            drop(known);
             if !recorded.is_empty() {
                 // The probe met callee returns beneath it: they are walked,
                 // and evaluated, before the entry is evaluated again.
                 let mut entry = done;
                 entry.callees.extend(recorded);
                 run.component.push(entry.key.clone());
+                run.on_component.insert(entry.key.clone());
                 run.walking.push(entry);
                 continue;
             }
@@ -472,13 +481,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Whatever reached an open component never closed here: it joins
         // that component at its demand.
         let rest = std::mem::take(&mut run.component);
+        run.on_component.clear();
         self.settle_all(rest.iter());
         true
     }
 
     fn callee_standing(&self, key: &FlowReturnKey, run: &ScheduleRun) -> CalleeStanding {
         if let Some(&index) = run.discovered.get(key) {
-            if run.component.contains(key) {
+            if run.on_component.contains(key) {
                 return CalleeStanding::OnStack(index);
             }
         }
@@ -490,12 +500,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 return CalleeStanding::Open;
             }
-            if txn
-                .flow
-                .completed_members
-                .iter()
-                .any(|member| &member.key == key && member.reuse.is_some())
-            {
+            if txn.flow.results.contains(key) {
                 return CalleeStanding::Answered;
             }
             if txn.flow.schedule.settled.contains(key) {
@@ -522,6 +527,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn abandon(&self, run: &mut ScheduleRun) {
         self.settle_all(run.component.iter());
         run.component.clear();
+        run.on_component.clear();
         run.walking.clear();
     }
 
@@ -538,7 +544,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .flow
             .schedule
             .probes
-            .push(probe.then(Vec::new));
+            .push(probe.then(CalleeKeys::default));
         let step = self.execute_flow_return(key.clone());
         let recorded = self
             .dispatch_txn
@@ -557,11 +563,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // way.
         let reusable = matches!(step, FlowReturnStep::Complete(_)) && {
             let txn = self.dispatch_txn.borrow();
-            txn.flow
-                .completed_members
-                .iter()
-                .any(|member| &member.key == key && member.reuse.is_some())
-                || txn.flow.schedule.transferred.contains(key)
+            txn.flow.results.contains(key) || txn.flow.schedule.transferred.contains(key)
         };
         ScheduledEvaluation { reusable, recorded }
     }
@@ -613,11 +615,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         entry: &FunctionProgramEntry,
         lowered: &FlowSliceIR,
     ) -> Vec<FlowReturnKey> {
-        let mut out: Vec<FlowReturnKey> = Vec::new();
+        let mut out = CalleeKeys::default();
         // A nested position's bare names can bind in the frames around it,
         // which its own index entry does not record as free.
         if entry.lexical_parent.is_some() {
-            return out;
+            return Vec::new();
         }
         let calls = self.frame_calls(frame, entry, lowered);
         for call in &calls {
@@ -648,7 +650,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !is_uninstantiated(frame) && !self.push_logged_instantiations(frame, entry, &mut out) {
             self.push_forwarded_instantiations(frame, entry, &calls, &composed, &mut out);
         }
-        out
+        out.into_iter().collect()
     }
 
     /// The calls `frame`'s body evaluates for their value whose callee's
@@ -738,7 +740,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         frame: &FlowReturnKey,
         entry: &FunctionProgramEntry,
         lowered: &FlowSliceIR,
-        out: &mut Vec<FlowReturnKey>,
+        out: &mut CalleeKeys,
     ) {
         let slot = &frame.function.declaration_slot;
         let canonical = slot.defining_canonical.as_ref();
@@ -949,7 +951,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         frame: &FlowReturnKey,
         entry: &FunctionProgramEntry,
-        out: &mut Vec<FlowReturnKey>,
+        out: &mut CalleeKeys,
     ) -> bool {
         let Some(demanded) = self
             .dispatch_txn
@@ -1037,7 +1039,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         entry: &FunctionProgramEntry,
         calls: &[NamedCall],
         composed: &[(&FunctionProgramEntry, Vec<NamedCall>)],
-        out: &mut Vec<FlowReturnKey>,
+        out: &mut CalleeKeys,
     ) {
         let slot = &frame.function.declaration_slot;
         let canonical = slot.defining_canonical.as_ref();
@@ -1314,12 +1316,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Whether `key` is answered without evaluating it here: a warm
     /// candidate, or a reusable completed member.
     fn is_answered(&self, key: &FlowReturnKey) -> bool {
-        self.dispatch_txn
-            .borrow()
-            .flow
-            .completed_members
-            .iter()
-            .any(|member| &member.key == key && member.reuse.is_some())
+        self.dispatch_txn.borrow().flow.results.contains(key)
             || self
                 .graph()
                 .has_serving_flow_return_candidate(self.ctx, key)
@@ -1479,7 +1476,7 @@ struct ScheduledEvaluation {
     /// It closed as a reusable completed member.
     reusable: bool,
     /// The unsettled callee returns its probe recorded, in demand order.
-    recorded: Vec<FlowReturnKey>,
+    recorded: CalleeKeys,
 }
 
 /// One call a frame's body evaluates for its value, whose callee's
@@ -1554,10 +1551,13 @@ fn parameter_written(
     })
 }
 
-fn push_unique(out: &mut Vec<FlowReturnKey>, key: FlowReturnKey) {
-    if !out.contains(&key) {
-        out.push(key);
-    }
+/// Callee returns in first-demand order, each once: an insertion-ordered
+/// set, so recording one more is a hash lookup rather than a scan of every
+/// key recorded before it.
+pub(crate) type CalleeKeys = indexmap::IndexSet<FlowReturnKey, rustc_hash::FxBuildHasher>;
+
+fn push_unique(out: &mut CalleeKeys, key: FlowReturnKey) {
+    out.insert(key);
 }
 
 /// Whether `key` addresses its function under no instantiation.

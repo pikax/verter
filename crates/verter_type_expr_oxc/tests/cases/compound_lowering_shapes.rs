@@ -176,6 +176,28 @@ fn template_literal_keeps_quasis_and_expressions_aligned() {
     assert!(matches!(&expressions[1], TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"));
 }
 
+/// A template literal type's quasis are its cooked text, as the checker
+/// reads them (tsc 7.0.2: `` `a\n` `` is `"a\n"`, a line continuation is
+/// nothing, `` `\u{41}` `` and `` `\x41` `` are `"A"`); a quasi with an
+/// invalid escape has no cooked text and is its raw text (`` `a\u{zz}b` ``
+/// is `"a\\u{zz}b"`).
+#[test]
+fn template_literal_quasis_are_cooked_text() {
+    let lowered = lower_alias("type __T = `a\\n${string}\\t\\\\\\`\\${\\u{41}\\x42${Foo}c\\\nd`;");
+    let TypeExpr::TemplateLiteral { quasis, .. } = &lowered else {
+        panic!("expected TemplateLiteral, got {lowered:?}");
+    };
+    assert_eq!(quasis, &["a\n", "\t\\`${AB", "cd"]);
+    assert_eq!(
+        lower_alias("type __T = `x\\ty`;"),
+        TypeExpr::string_literal("x\ty")
+    );
+    assert_eq!(
+        lower_alias("type __T = `a\\u{zz}b`;"),
+        TypeExpr::string_literal("a\\u{zz}b")
+    );
+}
+
 #[test]
 fn array_single_argument_normalizes_to_array_node() {
     let lowered = lower_alias("type __T = Array<string>;");

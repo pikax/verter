@@ -537,8 +537,12 @@ fn intrinsic_applications_key_by_the_frozen_op_tag() {
     // pinned tag, and it joins `every_op`, which `ALL` must cover.
     let pinned = |op: CompilerIntrinsicTypeOp| match op {
         CompilerIntrinsicTypeOp::Awaited => 0u8,
+        CompilerIntrinsicTypeOp::NoInfer => 1u8,
     };
-    let every_op = [CompilerIntrinsicTypeOp::Awaited];
+    let every_op = [
+        CompilerIntrinsicTypeOp::Awaited,
+        CompilerIntrinsicTypeOp::NoInfer,
+    ];
     assert!(
         every_op
             .iter()
@@ -1916,6 +1920,103 @@ fn the_retention_walk_visits_every_retained_id() {
         ),
         "a forward argument of a back-edge fails closed"
     );
+}
+
+/// A checker recovery past one of the checker's limits holds the type
+/// Verter names beyond it: the semantic walk treats the recovery as a leaf
+/// (it is the checker's error type), the retention walk visits the type
+/// beyond it, and the stable key tells recoveries apart by that type and by
+/// their diagnostic.
+#[test]
+fn a_checker_recovery_keys_and_retains_its_beyond_type() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
+    };
+    let graph = SemanticGraphStore::new();
+    let ts2590 = CheckerDiagnostic {
+        code: CheckerDiagnosticCode::UnionTooComplex,
+        operation: CheckerDiagnosticOperation::Intersection,
+    };
+    let beyond = prim(&graph, PrimitiveKind::Number);
+    let other_beyond = prim(&graph, PrimitiveKind::String);
+    let recovery = |diagnostic: CheckerDiagnostic, beyond: Option<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            beyond,
+        }))
+    };
+    let with_beyond = recovery(ts2590, Some(beyond));
+    let data = graph.node_data(with_beyond).expect("interned");
+    let mut semantic = Vec::new();
+    let _ = data.for_each_child(|child| semantic.push(child));
+    let mut retained = Vec::new();
+    data.for_each_retained_child(|child| retained.push(child));
+    assert!(semantic.is_empty(), "the recovery is a semantic leaf");
+    assert_eq!(
+        retained,
+        vec![beyond],
+        "the retention walk visits its beyond type"
+    );
+
+    let key = |node| stable_key_for_node(&graph, node);
+    assert_eq!(key(with_beyond), key(recovery(ts2590, Some(beyond))));
+    assert_ne!(key(with_beyond), key(recovery(ts2590, Some(other_beyond))));
+    assert_ne!(key(with_beyond), key(recovery(ts2590, None)));
+    assert_ne!(
+        key(with_beyond),
+        key(recovery(
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::Intersection,
+            },
+            Some(beyond),
+        ))
+    );
+    assert_ne!(
+        key(with_beyond),
+        key(recovery(
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::UnionTooComplex,
+                operation: CheckerDiagnosticOperation::TemplateLiteral,
+            },
+            Some(beyond),
+        ))
+    );
+}
+
+/// A document close releases a checker recovery whose beyond type the
+/// closed document held: the recovery is interned without a scope, and the
+/// cascade reaches it through the type it retains.
+#[test]
+fn closing_a_document_releases_a_recovery_holding_its_type() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
+    };
+    let graph = SemanticGraphStore::new();
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from("/w/closed.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let beyond =
+        graph.intern_node_with_scope(SemanticNodeData::Literal(LiteralValue::Number(1.0)), scope);
+    let recovery = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: CheckerDiagnostic {
+            code: CheckerDiagnosticCode::UnionTooComplex,
+            operation: CheckerDiagnosticOperation::Intersection,
+        },
+        beyond: Some(beyond),
+    }));
+    let kept = prim(&graph, PrimitiveKind::String);
+    let report = graph.release_canonical("/w/closed.ts");
+    assert!(report.nodes_released >= 2, "{report:?}");
+    assert!(!graph.node_is_live(beyond), "the closed type is released");
+    assert!(
+        !graph.node_is_live(recovery),
+        "the recovery holding it is released with it"
+    );
+    assert!(graph.node_is_live(kept), "an unrelated node stays");
 }
 
 /// A document close forgets the key classes of the nodes it released: a

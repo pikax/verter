@@ -2099,6 +2099,15 @@ pub(crate) mod checker_syntax {
                 e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
+            // The checker prints its error type — the recovery after a
+            // diagnostic it reports — as `any`.
+            (
+                CheckerType::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                    diagnostic,
+                    ..
+                }),
+            ) => diagnostic.recovery() == Some(PrimitiveKind::Any),
             (CheckerType::KeyOf(expected), SemanticNodeData::KeyOf { base }) => {
                 matches_node(dispatch, *base, expected, depth + 1)
             }
@@ -2469,13 +2478,39 @@ pub(crate) mod checker_syntax {
                 readonly,
                 ty,
             } => {
+                // Without `exactOptionalPropertyTypes` an optional member's
+                // `undefined` is its absence: the checker prints a
+                // synthesized optional as `a?: T | undefined`, while a
+                // spread projection keeps the present value `T`
+                // (`optional_present_value`). Either spelling is the one type.
+                let present = match ty {
+                    CheckerType::Union(arms) if *optional => {
+                        let kept: Vec<CheckerType> = arms
+                            .iter()
+                            .filter(|arm| {
+                                !matches!(arm, CheckerType::Primitive(PrimitiveKind::Undefined))
+                            })
+                            .cloned()
+                            .collect();
+                        match kept.len() {
+                            0 => None,
+                            n if n == arms.len() => None,
+                            1 => kept.into_iter().next(),
+                            _ => Some(CheckerType::Union(kept)),
+                        }
+                    }
+                    _ => None,
+                };
                 member.name == Some(name.as_str())
                     && member.optional == *optional
                     && member.readonly == *readonly
                     && member.method_kind.is_none()
-                    && member
-                        .value
-                        .is_some_and(|value| matches_node(dispatch, value, ty, depth + 1))
+                    && member.value.is_some_and(|value| {
+                        matches_node(dispatch, value, ty, depth + 1)
+                            || present.as_ref().is_some_and(|present| {
+                                matches_node(dispatch, value, present, depth + 1)
+                            })
+                    })
             }
             CheckerMember::Method {
                 name,

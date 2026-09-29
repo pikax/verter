@@ -453,6 +453,11 @@ struct CompositeReduction {
     next: usize,
     views: Vec<SemanticNodeId>,
     named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
+    /// The named arms of an intersection that stand for unions of object
+    /// types: the arm stays the view, and the checker's cross product over
+    /// the unions is still weighed
+    /// ([`ProjectSemanticDispatch::named_intersection_too_complex`]).
+    named_object_unions: Vec<SemanticNodeId>,
     /// Whether the result keeps the names the checker prints as a union's
     /// origin (`U0 | 2`): only at the altitude a type is printed at. A
     /// demand that resolves declarations reads the type set itself (`0 |
@@ -1363,7 +1368,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - an alias whose declared body is a type the alias itself
     ///   constructs — an object, function, mapped, array or tuple type, a
     ///   union or an intersection — is printed by the alias (`Tup<number>`,
-    ///   `Fn<number>`);
+    ///   `Fn<number>`), except a tuple with a variadic element, which is
+    ///   normalized on instantiation and printed as the tuple (`type
+    ///   Push<T extends unknown[], U> = [...T, U]` prints `Push<[1, 2], 3>`
+    ///   as `[1, 2, 3]`);
     /// - an alias whose body references another declaration prints as
     ///   [`Self::printed_alias_reference`] decides;
     /// - every other alias is not named by the alias: a conditional
@@ -1397,7 +1405,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(body) = self.declared_alias_body(identity)? else {
             return Some(PrintedDeclaration::AliasTransparent);
         };
-        Some(match self.graph().node_data(body).as_deref() {
+        let graph = self.graph();
+        Some(match graph.node_data(body).as_deref() {
+            // A tuple with a variadic element (`...T` over anything but an
+            // array type) is normalized when it is instantiated, and the
+            // normalized tuple carries no alias (the checker defers only a
+            // tuple type node without one).
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if elements.iter().any(|element| {
+                    element.rest
+                        && !matches!(
+                            graph.node_data(element.value).as_deref(),
+                            Some(SemanticNodeData::Array {
+                                readonly: false,
+                                ..
+                            })
+                        )
+                }) =>
+            {
+                PrintedDeclaration::AliasTransparent
+            }
             Some(
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Signature { .. }
@@ -2375,6 +2402,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             next: 0,
             views: Vec::with_capacity(capacity),
             named_unions: Vec::new(),
+            named_object_unions: Vec::new(),
             keep_origin,
             waiting: None,
             completeness: ResultCompleteness::Complete,
@@ -2468,6 +2496,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .all(|member| self.is_composite_scalar(*member))
                 {
                     reduction.views.push(arm);
+                    reduction.named_object_unions.push(arm);
                 } else {
                     reduction
                         .views
@@ -2498,6 +2527,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let arms: &[SemanticNodeId] = &reduction.arms;
         let views = &reduction.views;
         let named_unions = &reduction.named_unions;
+        if !reduction.is_union {
+            if let Some(recovery) = self.named_intersection_too_complex(reduction) {
+                return Some(recovery);
+            }
+        }
         if views.as_slice() == arms {
             return None;
         }
@@ -2562,6 +2596,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => reduced,
         };
         (result != node).then_some(result)
+    }
+
+    /// The checker's TS2590 recovery for an intersection over named
+    /// object unions it refuses to distribute
+    /// ([`Self::intersection_too_complex`]): the intersection stays factored
+    /// while it is read, but its cross product is weighed as the checker
+    /// weighs it. `None` when the checker distributes it.
+    fn named_intersection_too_complex(
+        &self,
+        reduction: &CompositeReduction,
+    ) -> Option<SemanticNodeId> {
+        if reduction.named_object_unions.is_empty() {
+            return None;
+        }
+        self.intersection_too_complex(reduction.node)
     }
 
     /// Advance `walk` — the members of the resolved union a named arm

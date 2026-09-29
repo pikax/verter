@@ -44,9 +44,6 @@ pub enum TypeExprDisplayError {
     EmptyUnknownSource,
     /// A template-literal type must have exactly one more quasi than expression.
     InvalidTemplateLiteralArity { quasis: usize, expressions: usize },
-    /// A raw template quasi would terminate or open an interpolation in the
-    /// generated template literal instead of remaining literal text.
-    InvalidTemplateLiteralQuasi { index: usize },
     /// A numeric literal cannot be represented by TypeScript numeric syntax.
     NonFiniteNumberLiteral,
     /// The stored bigint magnitude was not a signed base-10 integer.
@@ -87,10 +84,6 @@ impl fmt::Display for TypeExprDisplayError {
             } => write!(
                 f,
                 "template-literal type has {quasis} quasis for {expressions} expressions"
-            ),
-            Self::InvalidTemplateLiteralQuasi { index } => write!(
-                f,
-                "template-literal quasi at index {index} contains an unescaped delimiter"
             ),
             Self::NonFiniteNumberLiteral => {
                 f.write_str("non-finite number is not a TypeScript literal type")
@@ -161,6 +154,7 @@ enum Frame<'a> {
     MemberName(&'a str),
     PropertyKey(&'a TypeAuthoredPropertyKey),
     SingleQuoted(&'a str),
+    TemplateQuasi(&'a str),
     CanonicalIndex(CanonicalIndexInt),
     Number(f64),
     BigInt(&'a str),
@@ -208,6 +202,7 @@ pub fn render_type_expr_display(
                 }
             },
             Frame::SingleQuoted(value) => push_single_quoted(&mut text, value),
+            Frame::TemplateQuasi(value) => push_template_quasi(&mut text, value),
             Frame::CanonicalIndex(value) => {
                 write!(&mut text, "{value}").expect("writing to String cannot fail");
             }
@@ -380,21 +375,14 @@ pub fn render_type_expr_display(
                             expressions: expressions.len(),
                         });
                     }
-                    for (index, quasi) in quasis.iter().enumerate() {
-                        if !template_quasi_is_safe(quasi) {
-                            return Err(TypeExprDisplayError::InvalidTemplateLiteralQuasi {
-                                index,
-                            });
-                        }
-                    }
                     work.push(Frame::Text("`"));
                     for index in (0..expressions.len()).rev() {
-                        work.push(Frame::Borrowed(&quasis[index + 1]));
+                        work.push(Frame::TemplateQuasi(&quasis[index + 1]));
                         work.push(Frame::Text("}"));
                         work.push(Frame::Expr(&expressions[index], Precedence::Lowest));
                         work.push(Frame::Text("${"));
                     }
-                    work.push(Frame::Borrowed(&quasis[0]));
+                    work.push(Frame::TemplateQuasi(&quasis[0]));
                     work.push(Frame::Text("`"));
                 }
                 TypeExpr::Infer { name } => {
@@ -815,21 +803,37 @@ fn is_bigint_magnitude(value: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Whether a parser-preserved raw quasi can be copied between template
-/// delimiters without changing token boundaries. An odd run of backslashes
-/// escapes the following byte; an even run leaves it active.
-fn template_quasi_is_safe(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    let mut escaped = false;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => escaped = !escaped,
-            b'`' if !escaped => return false,
-            b'$' if !escaped && bytes.get(index + 1) == Some(&b'{') => return false,
-            _ => escaped = false,
+/// Append the cooked text of a template literal quasi as template source,
+/// escaped as the checker prints a template literal type: a backslash, a
+/// backtick and a `${` escaped, `\r\n` and every control character but the
+/// line feed as its escape (`\t`, `\r`, `\b`, `\f`, `\v`, `\0`, else
+/// `\uXXXX`), the line and paragraph separators and U+0085 as `\uXXXX`, and
+/// a line feed written as it is.
+pub fn push_template_quasi(output: &mut String, cooked: &str) {
+    let mut characters = cooked.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '`' => output.push_str("\\`"),
+            '$' if characters.peek() == Some(&'{') => output.push_str("\\$"),
+            '\r' if characters.peek() == Some(&'\n') => {
+                characters.next();
+                output.push_str("\\r\\n");
+            }
+            '\n' => output.push('\n'),
+            '\t' => output.push_str("\\t"),
+            '\r' => output.push_str("\\r"),
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            '\u{b}' => output.push_str("\\v"),
+            '\0' if characters.peek().is_some_and(char::is_ascii_digit) => {
+                output.push_str("\\x00");
+            }
+            '\0' => output.push_str("\\0"),
+            control @ ('\u{1}'..='\u{1f}' | '\u{2028}' | '\u{2029}' | '\u{85}') => {
+                write!(output, "\\u{:04X}", control as u32).expect("writing to String cannot fail");
+            }
+            other => output.push(other),
         }
-        index += 1;
     }
-    !escaped
 }

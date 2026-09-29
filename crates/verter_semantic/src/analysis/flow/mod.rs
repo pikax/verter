@@ -382,6 +382,13 @@ pub struct SkeletonBinding {
     /// [`evolving_array_element_write_root`]) — so each records a write of
     /// the values it adds into the binding.
     pub evolving_array: bool,
+    /// Whether the binding is a function declaration WITHOUT a body — an
+    /// overload signature. A runtime variable with one is an overloaded
+    /// function, called through its signatures, never its implementation
+    /// (the checker's `getSignaturesOfSymbol`). Recorded here, in the one
+    /// discovery pass, so a reader never walks the program to find the
+    /// declaration's siblings.
+    pub overload_signature: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1994,6 +2001,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             destructured,
             pattern_sites: Arc::from([]),
             evolving_array: false,
+            overload_signature: false,
         });
     }
 
@@ -2503,6 +2511,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                         None,
                         false,
                     );
+                    if function.body.is_none() {
+                        if let Some(binding) = self.bindings.last_mut() {
+                            binding.overload_signature = true;
+                        }
+                    }
                 }
             }
             Statement::ClassDeclaration(class) => {

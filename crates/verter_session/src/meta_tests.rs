@@ -5547,6 +5547,11 @@ defineProps<Props>()
     // Dependency tracking assertions removed — the legacy walker is deleted.
 }
 
+/// The script setup generic reaches the props: `items` is `T[]`, and
+/// `selected` is the conditional the checker defers over the generic `T`,
+/// `T extends infer Selected ? Selected : never` (tsc 7.0.2 prints exactly
+/// that for `Props<T>["selected"]` inside a function generic over `T`, and
+/// its declaration emit keeps it) — never the `T` an early selection gives.
 #[test]
 fn evaluate_types_preserve_script_setup_generic_metadata_in_define_props() {
     let project = make_project();
@@ -5595,15 +5600,37 @@ defineProps<Props<T>>()
     }
 
     match &evaluated_define_props_type(&project, "/Generic.vue", &evaluated, "selected") {
-        TypeExpr::TypeParameter(param) => {
-            assert_eq!(param.name, "T");
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+            ..
+        } => {
+            assert!(
+                matches!(check.as_ref(), TypeExpr::TypeParameter(param)
+                if param.name == "T"
+                    && matches!(
+                        param.constraint.as_deref(),
+                        Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                    )),
+                "the check is the script setup generic: {check:?}"
+            );
+            assert!(
+                matches!(extends.as_ref(), TypeExpr::Infer { name } if name == "Selected"),
+                "the extends clause declares `infer Selected`: {extends:?}"
+            );
+            assert!(
+                matches!(true_type.as_ref(), TypeExpr::Infer { name } if name == "Selected"),
+                "the true branch reads `Selected`: {true_type:?}"
+            );
             assert!(matches!(
-                param.constraint.as_deref(),
-                Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                false_type.as_ref(),
+                TypeExpr::Primitive(PrimitiveName::Never)
             ));
         }
         other => panic!(
-            "expected infer conditional to resolve to the script setup generic, got {other:?}"
+            "expected the infer conditional deferred over the script setup generic, got {other:?}"
         ),
     }
 }

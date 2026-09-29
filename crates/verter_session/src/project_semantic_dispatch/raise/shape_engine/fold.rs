@@ -332,7 +332,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             QueryError::RecursiveRef { name, .. } => alg.recursive_ref(Arc::clone(name)),
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
-            QueryError::CheckerRecovery(diagnostic) => match diagnostic.recovery() {
+            QueryError::CheckerRecovery { diagnostic, .. } => match diagnostic.recovery() {
                 Some(recovery) => alg.primitive(semantic_primitive_to_primitive_name(recovery)),
                 None => alg.opaque_sentinel(err),
             },

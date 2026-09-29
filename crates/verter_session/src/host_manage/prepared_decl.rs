@@ -3287,7 +3287,11 @@ impl VerterHost {
         // served to the caller, and the next request cold-recomputes.
         if !unresolved_sources.is_empty() {
             let required: Vec<String> = unresolved_sources.into_iter().collect();
-            match self.import_route_witness_for_specifiers(owner_canonical, &required) {
+            match self.import_route_witness_for_specifiers(
+                ctx.resolution_overlay(),
+                owner_canonical,
+                &required,
+            ) {
                 Some(witness) => {
                     for fact in witness {
                         if !chain_facts.contains(&fact) {

@@ -441,7 +441,7 @@ fn value<'a>(
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
-                value.push_str(quasi.value.raw.as_str());
+                value.push_str(verter_type_expr_oxc::template_element_text(&quasi.value));
             }
             TypeExpr::string_literal(value)
         }
@@ -790,7 +790,7 @@ impl<'a> Frame<'a> for TemplateFrame<'a> {
                 .tpl
                 .quasis
                 .iter()
-                .map(|quasi| quasi.value.raw.to_string())
+                .map(|quasi| verter_type_expr_oxc::template_element_text(&quasi.value).to_string())
                 .collect(),
             expressions: Arc::from(std::mem::take(&mut self.holes).into_boxed_slice()),
         })))

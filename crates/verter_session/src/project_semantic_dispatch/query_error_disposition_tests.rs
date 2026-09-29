@@ -58,7 +58,10 @@ fn every_variant() -> Vec<QueryError> {
         QueryError::RaiseMiss,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
-        QueryError::CheckerRecovery(recursive_fulfillment()),
+        QueryError::CheckerRecovery {
+            diagnostic: recursive_fulfillment(),
+            beyond: None,
+        },
     ]
 }
 
@@ -276,7 +279,10 @@ fn genuine_failures_are_the_error_type() {
 /// known.
 #[test]
 fn checker_recovery_is_a_complete_error_type() {
-    let err = QueryError::CheckerRecovery(recursive_fulfillment());
+    let err = QueryError::CheckerRecovery {
+        diagnostic: recursive_fulfillment(),
+        beyond: None,
+    };
     let class = classify_query_error(&err);
     assert_eq!(class.disposition, QueryErrorDisposition::CheckerRecovery);
     assert!(class.disposition.is_error_type());
@@ -318,7 +324,7 @@ fn error_type_predicate_is_exactly_the_failure_disposition() {
             QueryError::Other(_)
                 | QueryError::UnsupportedIntrinsic { .. }
                 | QueryError::ValueDomainMismatch { .. }
-                | QueryError::CheckerRecovery(_)
+                | QueryError::CheckerRecovery { .. }
         );
         assert_eq!(
             query_error_disposition(&err).is_error_type(),
@@ -337,7 +343,7 @@ fn unknown_materializing_excludes_exactly_the_publishable_carriers() {
             err,
             QueryError::RecursiveRef { .. }
                 | QueryError::DeclPlaceholder { .. }
-                | QueryError::CheckerRecovery(_)
+                | QueryError::CheckerRecovery { .. }
         );
         assert_eq!(
             query_error_disposition(&err).is_unknown_materializing(),

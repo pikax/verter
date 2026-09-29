@@ -84,7 +84,7 @@ fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
         | QueryError::UnrepresentableSurfaceMember
         | QueryError::UnmodeledPosition
         | QueryError::OpenSurface
-        | QueryError::CheckerRecovery(_) => false,
+        | QueryError::CheckerRecovery { .. } => false,
     }
 }
 
@@ -149,6 +149,9 @@ struct CallArgument {
     /// The argument checked in its const context ([`CallArgKey::Eager`]),
     /// the source a candidate's `const` type parameter infers from.
     const_view: Option<SemanticNodeId>,
+    /// A context-sensitive literal as the first inference pass reads it
+    /// ([`CallArgKey::Eager`]).
+    first_pass: Option<SemanticNodeId>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -159,6 +162,16 @@ enum CandidateVerdict {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// `value` with its polymorphic `this` bound to the call's `receiver`,
+    /// when the call has one.
+    fn receiver_bound_return(
+        &self,
+        value: SemanticNodeId,
+        receiver: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        receiver.map_or(value, |receiver| self.bind_callee_receiver(value, receiver))
+    }
+
     /// The typed call-resolution authority: reentry hold, validated warm
     /// result, then root-family or inline mixed-obligation execution.
     pub(crate) fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
@@ -361,17 +374,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 unreachable!("a machinery-root ResolveCall closes its own component")
             }
         }
-    }
-
-    /// Whether `key` is an OPEN pending member of the enclosing component
-    /// — the only state in which a return-equation hold on it can be
-    /// solved. A call that closed its own component has already converged.
-    fn resolve_call_is_pending(&self, key: &ResolveCallKey) -> bool {
-        self.dispatch_txn
-            .borrow()
-            .obligations
-            .pending()
-            .contains(&ObligationIdentity::ResolveCall(key.clone()))
     }
 
     fn resolve_call_pending_state(
@@ -1168,98 +1170,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
-        // Normalize only the proved ambient `Function.prototype.call`
-        // occurrence. User-authored `.call` members remain ordinary methods.
-        if key.kind == CallKind::Call {
-            if let (Some(extracted), Some(first)) = (key.receiver, key.args.first()) {
-                let first_is_spread = match first {
-                    CallArgKey::Eager { spread, .. }
-                    | CallArgKey::ProgramExpression { spread, .. } => *spread,
-                };
-                let host = self.ctx.host_for_fact_tracer_install();
-                let project = host
-                    .resolve_project_for_canonical(key.point.canonical_id.as_ref())
-                    .and_then(|project| host.workspace().project_stable_key(project));
-                if !first_is_spread
-                    && project.is_some_and(|project| {
-                        self.prove_prototype_call(project, &visible).is_some()
-                    })
-                {
-                    let mut receiver_key = key.clone();
-                    receiver_key.args = Arc::from(vec![first.clone()].into_boxed_slice());
-                    let mut first_argument = match self.acquire_call_arguments(&receiver_key) {
-                        Ok(arguments) if arguments.len() == 1 => arguments,
-                        _ => return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
-                    };
-                    let mut rebased = key.clone();
-                    rebased.callee = extracted;
-                    rebased.receiver = Some(first_argument.remove(0).node);
-                    rebased.args = Arc::from(key.args[1..].to_vec().into_boxed_slice());
-                    // The authored type arguments instantiate the AMBIENT
-                    // method's own binders. The extracted callable is a
-                    // different function with its own (or no) binders, so
-                    // the rebased call carries none.
-                    rebased.explicit_type_args = Arc::from(Vec::new().into_boxed_slice());
-                    let rebased_identity = rebased.clone();
-                    return match self.execute_resolve_call(rebased) {
-                        ResolveCallStep::Complete(result) => {
-                            let return_type =
-                                super::return_equation::resolved_call_return_type(&result);
-                            // The rebased call is an equation HOLD only while
-                            // it is still an open member of this component.
-                            // One that closed its own component is already
-                            // final, and its value is in hand — holding on a
-                            // target the equation cannot read (a rootless
-                            // winner never reaches the completed-member
-                            // ledger) would degrade the outer call instead.
-                            let (concrete_seeds, holds) = if self
-                                .resolve_call_is_pending(&rebased_identity)
-                            {
-                                (
-                                    Vec::new(),
-                                    vec![ReturnObligationIdentity::ResolveCall(rebased_identity)],
-                                )
-                            } else {
-                                (vec![return_type], Vec::new())
-                            };
-                            CandidateVerdict::Selected(self.resolve_call_pending_state(
-                                key,
-                                match result {
-                                    ResolvedCallResult::Selected {
-                                        selected,
-                                        selected_signature,
-                                        substitution,
-                                        return_type: _,
-                                        fresh_literal_returns,
-                                        recovery_diagnostic,
-                                    } => ResolveCallSelection::Selected {
-                                        selected,
-                                        selected_signature:
-                                            super::dispatch_txn::SelectedSignature::General(
-                                                selected_signature,
-                                            ),
-                                        substitution,
-                                        fresh_literal_returns: fresh_literal_returns.to_vec(),
-                                        recovery_diagnostic,
-                                    },
-                                    ResolvedCallResult::DynamicAny { .. } => {
-                                        ResolveCallSelection::DynamicAny
-                                    }
-                                },
-                                concrete_seeds,
-                                holds,
-                                None,
-                                false,
-                            ))
-                        }
-                        ResolveCallStep::Hold(_) => {
-                            CandidateVerdict::Degraded(ResolveCallFailure::Undecidable)
-                        }
-                        ResolveCallStep::Degraded(failure) => CandidateVerdict::Degraded(failure),
-                    };
-                }
-            }
-        }
         let arguments = match self.acquire_call_arguments(key) {
             Ok(arguments) => arguments,
             Err(failure) => return CandidateVerdict::Degraded(failure),
@@ -1625,14 +1535,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode, const_view) = match argument {
+            let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
                 CallArgKey::Eager {
                     ty,
                     spread,
                     literal_mode,
                     const_view,
+                    first_pass,
                     ..
-                } => (*ty, *spread, *literal_mode, *const_view),
+                } => (*ty, *spread, *literal_mode, (*const_view, *first_pass)),
                 CallArgKey::ProgramExpression {
                     point,
                     spread,
@@ -1662,7 +1573,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             expression.as_ref(),
                         )
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode, None)
+                    (node, *spread, *literal_mode, (None, None))
                 }
             };
             let freshness_origin = node;
@@ -1675,6 +1586,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     indefinite_spread: false,
                     context_sensitive,
                     const_view: const_view
+                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                    first_pass: first_pass
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                 });
                 continue;
@@ -1707,6 +1620,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         indefinite_spread: false,
                         context_sensitive,
                         const_view: None,
+                        first_pass: None,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1716,6 +1630,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     indefinite_spread: true,
                     context_sensitive,
                     const_view: None,
+                    first_pass: None,
                 }),
             }
         }
@@ -1886,6 +1801,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .dispatch_txn
             .borrow_mut()
             .push_collecting_session(setup, None);
+        // A bare type-parameter rest takes its arity from the arguments
+        // (`impliedArity`), none when a spread feeds it; inference from
+        // the receiver onward reads it.
+        if let Some((param, rest_start)) = generic_rest {
+            let spread = arguments.iter().any(|argument| argument.indefinite_spread)
+                || key.args.iter().any(|argument| match argument {
+                    CallArgKey::Eager { spread, .. }
+                    | CallArgKey::ProgramExpression { spread, .. } => *spread,
+                });
+            if !spread {
+                let arity = arguments.len().saturating_sub(rest_start);
+                if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
+                    session.set_implied_arity(param, arity);
+                }
+            }
+        }
         let checkpoint = self
             .dispatch_txn
             .borrow()
@@ -1933,7 +1864,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.call_receiver_relation(receiver, receiver_param.ty, receiver, budget);
+            let source = self.receiver_relation_source(receiver, receiver_param.ty);
+            let step = self.call_receiver_relation(source, receiver_param.ty, receiver, budget);
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -2035,6 +1967,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // substitution; the post-fixation pass below then checks this
             // argument's applicability under it.
             if argument.context_sensitive {
+                // A context-sensitive literal still infers from its other
+                // members (`SkipContextSensitive` reads the sensitive ones
+                // as the non-inferring `anyFunctionType`); what it deposits
+                // is kept only when that reading relates.
+                if let Some(view) = argument.first_pass {
+                    let checkpoint = self.relation_session_checkpoint();
+                    let deposits_before = self.accepted_inference_deposits();
+                    let step = self.call_argument_relation(
+                        view,
+                        target,
+                        argument.freshness_origin,
+                        budget,
+                        argument.literal_mode,
+                    );
+                    if !budget.charge_accepted_deposits(
+                        self.accepted_inference_deposits() - deposits_before,
+                    ) {
+                        self.abandon_session(session_id);
+                        return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
+                    }
+                    if !matches!(step, RelationStep::Assignable { .. }) {
+                        self.relation_session_rollback(&checkpoint);
+                    }
+                }
                 continue;
             }
             // Applicability relates the argument's ACTUAL type. Widening is
@@ -2072,6 +2028,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
                 }
+                // A parameter whose type reads the candidate's own type
+                // parameters where this relation cannot decide it (a
+                // conditional over them, `ThisParameterType<T>`) infers
+                // nothing from the argument: the checker infers first and
+                // checks applicability on the instantiated signature, which
+                // the post-fixation pass below does.
+                RelationStep::Unknown
+                    if visible_type_params
+                        .iter()
+                        .any(|decl| self.mentions_node(target, decl.param)) => {}
                 RelationStep::Unknown | RelationStep::Assumed(_) => {
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
@@ -2328,8 +2294,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let target = self.substitute_canonical(receiver_param.ty, &substitution);
+            let source = self.receiver_relation_source(receiver, receiver_param.ty);
             match decided_call_relation(
-                self.call_relation(receiver, target, receiver, budget, false, false),
+                self.call_relation(source, target, receiver, budget, false, false),
                 own_return_function.as_ref(),
             ) {
                 Ok(Some(true)) => {}
@@ -2620,8 +2587,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .pending_len()
                                 == pending_before =>
                         {
-                            let seed =
-                                self.substitute_canonical(result.return_type(), &substitution);
+                            // A body-derived return's polymorphic `this` (a
+                            // class method returning `this`) is the receiver
+                            // the call reads the method through.
+                            let seed = self.receiver_bound_return(
+                                self.substitute_canonical(result.return_type(), &substitution),
+                                key.receiver,
+                            );
                             // Per-binder freshness at the call boundary,
                             // exactly as the declared-annotation arm: a
                             // fresh deposit KEPT at top level of the
@@ -2795,9 +2767,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             .pending_len()
                                             == widened_pending_before =>
                                     {
-                                        concrete_seeds.push(self.substitute_canonical(
-                                            widened.return_type(),
-                                            &widened_substitution,
+                                        concrete_seeds.push(self.receiver_bound_return(
+                                            self.substitute_canonical(
+                                                widened.return_type(),
+                                                &widened_substitution,
+                                            ),
+                                            key.receiver,
                                         ));
                                     }
                                     // The widened instantiation did not
@@ -3150,6 +3125,84 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
+    }
+
+    /// The receiver a `this` parameter relates: a receiver holding one
+    /// generic call signature, against a function-typed `this`, relates as
+    /// its base signature (every type parameter at its constraint, else
+    /// `unknown`) — the checker's `inferFromSignatures` reads a generic
+    /// source through `getBaseSignature`, so `id.call(null, 1)` over
+    /// `id<T>(x: T): T` infers `R` as `unknown`. A `this` typed by a bare
+    /// type parameter (`bind<T>(this: T, …)`) takes the receiver itself; the
+    /// declared `this` decides, before and after inference alike.
+    fn receiver_relation_source(
+        &self,
+        receiver: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let function_like = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature { .. }) => true,
+            Some(SemanticNodeData::Object(view)) => !view.call_signatures.is_empty(),
+            _ => false,
+        };
+        if !function_like(target) || !function_like(receiver) {
+            return receiver;
+        }
+        let signature = match self.shared_signature_nodes(receiver, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                match nodes.as_slice() {
+                    [one] => *one,
+                    _ => return receiver,
+                }
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return receiver,
+        };
+        let Some(data) = graph.node_data(signature) else {
+            return receiver;
+        };
+        let SemanticNodeData::Signature {
+            kind,
+            params,
+            return_type,
+            type_parameters,
+            occurrence,
+            return_carrier: SignatureReturnCarrier::Declared(_),
+            signature_span,
+            return_type_span,
+            predicate,
+            is_abstract,
+        } = data.as_ref()
+        else {
+            return receiver;
+        };
+        if type_parameters.is_empty() {
+            return receiver;
+        }
+        let base = |node: SemanticNodeId| {
+            self.instantiate_signature_params_at_base_constraints(signature, node)
+        };
+        let params: Arc<[FunctionParam]> = params
+            .iter()
+            .cloned()
+            .map(|mut param| {
+                param.ty = base(param.ty);
+                param
+            })
+            .collect();
+        let return_type = base(*return_type);
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: *kind,
+            params,
+            return_type,
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            occurrence: occurrence.clone(),
+            return_carrier: SignatureReturnCarrier::Declared(return_type),
+            signature_span: *signature_span,
+            return_type_span: *return_type_span,
+            predicate: *predicate,
+            is_abstract: *is_abstract,
+        })
     }
 
     fn call_receiver_relation(

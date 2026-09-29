@@ -2292,6 +2292,10 @@ struct InferenceInfo {
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
+    /// The arity a bare type-parameter rest (`...args: A`) takes from the
+    /// call's arguments (the checker's `impliedArity`), set before any
+    /// inference runs; a tuple inference splitting `[...A, ...B]` reads it.
+    implied_arity: Option<usize>,
 }
 
 /// The mutable inference session — cold-compute STATE of `execute`
@@ -2348,6 +2352,7 @@ impl InferenceSession {
                 const_policy: info.const_policy,
                 has_constraint: info.has_constraint,
                 candidates: Vec::new(),
+                implied_arity: None,
             })
             .collect();
         Self {
@@ -2654,6 +2659,27 @@ impl InferenceSession {
     /// Whether this session infers `param_node`.
     pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
         self.infos.iter().any(|info| info.param_node == param_node)
+    }
+
+    /// Record the arity the call's arguments imply for the bare rest type
+    /// parameter `param_node`.
+    pub(crate) fn set_implied_arity(&mut self, param_node: SemanticNodeId, arity: usize) {
+        if let Some(info) = self
+            .infos
+            .iter_mut()
+            .find(|info| info.param_node == param_node)
+        {
+            info.implied_arity = Some(arity);
+        }
+    }
+
+    /// The arity the call's arguments imply for `param_node`, when it is
+    /// the call's bare rest type parameter.
+    pub(crate) fn implied_arity(&self, param_node: SemanticNodeId) -> Option<usize> {
+        self.infos
+            .iter()
+            .find(|info| info.param_node == param_node)
+            .and_then(|info| info.implied_arity)
     }
 
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
@@ -2998,25 +3024,16 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
-    /// Set when a later demand for the same key on this transaction may
-    /// reuse the proven value instead of re-evaluating the body (§12:
-    /// shared body-obligation consumers reuse completed return work): the
-    /// member closed as its OWN SCC root, so its value came only from work
-    /// inside its frame, and every read that work made was recorded and
-    /// clean. `None` for a member closed inside a larger component, whose
-    /// value also rests on frames outside its own, and for any member
-    /// whose evaluation was not recorded or read something a replay cannot
-    /// reproduce.
-    pub(crate) reuse: Option<FlowMemberReuse>,
 }
 
-/// What reusing a completed flow member replays at the demanding site: the
+/// What reusing a completed flow result replays at the demanding site: the
 /// reads its evaluation made on every channel an enclosing build observes,
-/// so a scope that was not live when the member ran still sees them — the
-/// transaction-local counterpart of a warm hit bubbling its stored
-/// signature. Only a CLEAN evaluation is recorded as reusable (no
-/// non-cacheable read, no partial or cache-suppressing taint, a complete
-/// cold-compute scope), so these three rails are all a replay needs.
+/// so a scope that was not live when the result was computed still sees
+/// them — the transaction-local counterpart of a warm hit bubbling its
+/// stored signature. Only a COMPLETE evaluation is kept (no partial taint,
+/// a complete cold-compute scope); its refusal, if any, is carried by the
+/// result's [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) and
+/// replayed beside these rails.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowMemberReuse {
     /// The fact reads, fanned out again into the live tracers.
@@ -3027,6 +3044,66 @@ pub(crate) struct FlowMemberReuse {
     /// Whether the evaluation deposited canonical evidence, which a
     /// substitution's cache decision watches for.
     pub(crate) canonical_evidence_deposited: bool,
+}
+
+/// A flow result completed on this transaction: its value, how far it may
+/// travel, and what reusing it replays.
+#[derive(Debug, Clone)]
+pub(crate) struct TransactionFlowResult {
+    pub(crate) value: crate::semantic_query::FlowReturnResult,
+    /// [`ReuseClass::Shared`](crate::resolver_core::reuse::ReuseClass::Shared)
+    /// for a result eligible for cross-request reuse,
+    /// [`ReuseClass::RequestOnly`](crate::resolver_core::reuse::ReuseClass::RequestOnly)
+    /// for one whose persistent admission is refused. An incomplete result
+    /// never enters the table.
+    pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
+    pub(crate) replay: FlowMemberReuse,
+}
+
+/// The flow results completed on this transaction, keyed by their demand.
+///
+/// COMPLETION, not retention: a demand whose evaluation completed as its
+/// own component's root is answered here for the rest of the transaction,
+/// in constant time, whether its persistent admission later lands, is
+/// refused, or is aborted with its root's batch — so a complete child
+/// executes once per transaction however its publication fares. The
+/// ordered publication queue
+/// ([`FlowReturnDomainRuntime::completed_members`]) is separate and
+/// drained by the machinery root; this table is not. Nothing is evicted:
+/// it lives exactly as long as the dispatch transaction, and holds only
+/// results that transaction computed.
+#[derive(Debug, Default)]
+pub(crate) struct FlowResultTable {
+    results: FxHashMap<FlowReturnKey, TransactionFlowResult>,
+}
+
+impl FlowResultTable {
+    /// The completed result of `key`, if any.
+    pub(crate) fn get(&self, key: &FlowReturnKey) -> Option<&TransactionFlowResult> {
+        self.results.get(key)
+    }
+
+    /// Whether `key` completed on this transaction.
+    pub(crate) fn contains(&self, key: &FlowReturnKey) -> bool {
+        self.results.contains_key(key)
+    }
+
+    /// Record `key`'s completed result. Only a request-reusable class
+    /// enters; a later completion of the same demand replaces nothing (the
+    /// first completion answers every later demand, so a second one never
+    /// runs).
+    pub(crate) fn complete(&mut self, key: FlowReturnKey, result: TransactionFlowResult) {
+        if !result.reuse.is_request_reusable() {
+            return;
+        }
+        self.results.entry(key).or_insert(result);
+    }
+
+    /// Number of completed results held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.results.len()
+    }
 }
 
 /// A call member whose mixed component closed cleanly, queued for the
@@ -3070,6 +3147,8 @@ pub(crate) struct FlowReturnDomainRuntime {
     /// returns a schedule already settled, and the instantiated returns
     /// each uninstantiated frame's call resolution demanded.
     pub(crate) schedule: super::flow_return::schedule::FlowScheduleSession,
+    /// The flow results completed on this transaction, by demand.
+    pub(crate) results: FlowResultTable,
 }
 
 /// The call-resolution domain runtime.
@@ -3240,10 +3319,6 @@ impl CheckerDispatchTransaction {
             .iter()
             .rev()
             .find(|s| s.state == InferenceSessionState::Collecting)
-    }
-
-    pub(crate) fn binding_is_disabled(&self) -> bool {
-        !self.relation.binding_disabled_session_barriers.is_empty()
     }
 
     pub(crate) fn begin_binding_disabled(&mut self) {

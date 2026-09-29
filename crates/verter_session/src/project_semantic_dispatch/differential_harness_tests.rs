@@ -66,6 +66,30 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
+/// The four settings with `strictBindCallApply` off, in the same order.
+pub(super) const BIND_CALL_APPLY_OFF: [Setting; 4] = [
+    Setting {
+        root: "/strict-loose-bind",
+        label: "strict, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-loose-bind",
+        label: "strictNullChecks off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/strict-implicit-loose-bind",
+        label: "noImplicitAny off, strictBindCallApply off",
+        options: r#"{ "strict": true, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-implicit-loose-bind",
+        label: "both off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+];
+
 /// The CPU time one row's evaluating thread may spend before the row is
 /// reported overdue. A hang detector, not a speed budget: it catches a row
 /// that loops or whose work blows up super-linearly, never a slow but
@@ -622,6 +646,9 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         Ok(result) => Arc::clone(result),
         Err(error) => return Observed::NoValue(format!("{error:?}")),
     };
+    // The probe's type is read as a consumer reads it: under a request for
+    // the probe file, so every judgement takes that project's options.
+    let _request = crate::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -680,7 +707,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             crate::semantic_query::PrimitiveKind::BigInt => "bigint".to_owned(),
             other => format!("{other:?}").to_ascii_lowercase(),
         },
-        SemanticNodeData::Literal(LiteralValue::String(value)) => format!("\"{value}\""),
+        SemanticNodeData::Literal(LiteralValue::String(value)) => checker_string_literal(value),
         SemanticNodeData::Literal(LiteralValue::Number(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::Boolean(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::BigInt(value)) => format!("{value}n"),
@@ -705,6 +732,16 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             .map(|member| operand(dispatch, *member, depth, false))
             .collect::<Vec<_>>()
             .join(" & "),
+        // An object type with one call signature and nothing else prints as
+        // that signature's function type.
+        SemanticNodeData::Object(surface)
+            if surface.call_signatures.len() == 1
+                && surface.construct_signatures.is_empty()
+                && surface.index_signatures.is_empty()
+                && surface.positive_members().is_empty() =>
+        {
+            signature_text(dispatch, surface.call_signatures[0], depth, " => ")
+        }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = Vec::new();
             for signature in surface.call_signatures.iter() {
@@ -728,7 +765,11 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
                 ));
             }
             for member in surface.positive_members().iter() {
-                let name = member.key.as_string().unwrap_or("<key>");
+                let name = match member.key.cloned_known() {
+                    Some(verter_type_expr::PropertyKey::String(name)) => name.to_string(),
+                    Some(verter_type_expr::PropertyKey::Number(index)) => index.to_string(),
+                    _ => "<key>".to_owned(),
+                };
                 let optional = if member.optional { "?" } else { "" };
                 match member.method_kind {
                     Some(verter_type_expr::ObjectMethodKind::Method) => members.push(format!(
@@ -785,7 +826,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
         } => {
             let mut text = String::from("`");
             for (index, quasi) in quasis.iter().enumerate() {
-                text.push_str(quasi);
+                verter_type_expr::push_template_quasi(&mut text, quasi);
                 if let Some(expression) = expressions.get(index) {
                     text.push_str(&format!("${{{}}}", at(*expression)));
                 }
@@ -823,6 +864,36 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             format!("<unrendered {text}>")
         }
     }
+}
+
+/// A string literal type as the checker prints it: double-quoted, with a
+/// backslash, a double quote, every control character and U+2028 / U+2029 /
+/// U+0085 escaped.
+fn checker_string_literal(value: &str) -> String {
+    let mut text = String::from("\"");
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => text.push_str("\\\\"),
+            '"' => text.push_str("\\\""),
+            '\n' => text.push_str("\\n"),
+            '\t' => text.push_str("\\t"),
+            '\r' => text.push_str("\\r"),
+            '\u{8}' => text.push_str("\\b"),
+            '\u{c}' => text.push_str("\\f"),
+            '\u{b}' => text.push_str("\\v"),
+            '\0' if characters.peek().is_some_and(char::is_ascii_digit) => {
+                text.push_str("\\x00");
+            }
+            '\0' => text.push_str("\\0"),
+            control @ ('\u{1}'..='\u{1f}' | '\u{2028}' | '\u{2029}' | '\u{85}') => {
+                text.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => text.push(other),
+        }
+    }
+    text.push('"');
+    text
 }
 
 /// `node` printed as an operand of `|`, `&`, `[]` or `keyof`:
@@ -898,22 +969,41 @@ fn signature_text(
             .collect();
         format!("<{}>", names.join(", "))
     };
-    let rendered: Vec<String> = params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            format!(
-                "{}{}{}: {}",
-                if param.rest { "..." } else { "" },
-                param
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("arg{index}"), str::to_owned),
-                if param.optional { "?" } else { "" },
-                at(param.ty)
-            )
-        })
-        .collect();
+    let mut rendered: Vec<String> = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        let name = param
+            .name
+            .as_deref()
+            .map_or_else(|| format!("arg{index}"), str::to_owned);
+        // A rest parameter of a tuple type prints as the parameters its
+        // elements are (the checker's expanded parameters): an element's
+        // label, else `<rest>_<index>`, names each.
+        if param.rest {
+            if let Some(SemanticNodeData::Tuple { elements, .. }) =
+                graph.node_data(param.ty).as_deref()
+            {
+                for (position, element) in elements.iter().enumerate() {
+                    let element_name = element
+                        .label
+                        .as_deref()
+                        .map_or_else(|| format!("{name}_{position}"), str::to_owned);
+                    rendered.push(format!(
+                        "{}{element_name}{}: {}",
+                        if element.rest { "..." } else { "" },
+                        if element.optional { "?" } else { "" },
+                        at(element.value)
+                    ));
+                }
+                continue;
+            }
+        }
+        rendered.push(format!(
+            "{}{name}{}: {}",
+            if param.rest { "..." } else { "" },
+            if param.optional { "?" } else { "" },
+            at(param.ty)
+        ));
+    }
     let result = match predicate {
         Some(predicate) => {
             let subject = match predicate.subject {
@@ -1162,8 +1252,21 @@ fn canonical_member(member: &str) -> String {
         };
         let rest = member[parts[0].len() + 2..].to_owned();
         let (name, rest) = if let Some(optional) = name.strip_suffix('?') {
-            // `name?: (T | undefined)` prints the optional member's own
-            // `undefined`; both sides keep it.
+            // Without `exactOptionalPropertyTypes` (off in every setting)
+            // `name?: T | undefined` and `name?: T` are one type; the
+            // checker's declaration emit spells a declared `b?: string`
+            // as authored and a synthesized optional (a spread's partial)
+            // as `a?: number | undefined`, so both sides drop the
+            // optional member's `undefined` arm.
+            let arms: Vec<String> = split_top(&rest, " | ")
+                .into_iter()
+                .filter(|arm| arm.trim() != "undefined")
+                .collect();
+            let rest = if arms.is_empty() {
+                rest
+            } else {
+                arms.join(" | ")
+            };
             (format!("{optional}?"), rest)
         } else {
             (name, rest)
@@ -1219,6 +1322,26 @@ fn the_canonical_spelling_sorts_members_and_folds_booleans() {
     assert_eq!(
         canonical_text("{ a: string | number; b: [1, (2 | undefined)?]; }"),
         canonical_text("{ b: [1, 2?]; a: number | string; }")
+    );
+    assert_eq!(
+        canonical_text("[a: string, b?: number | undefined]"),
+        canonical_text("[a: string, b?: number]")
+    );
+    assert_eq!(
+        canonical_text("{ a: 1; b?: 2 | undefined; }"),
+        canonical_text("{ b?: 2; a: 1; }")
+    );
+    assert_ne!(
+        canonical_text("{ b?: undefined; }"),
+        canonical_text("{ b?: 2; }")
+    );
+    assert_ne!(
+        canonical_text("{ b: 2 | undefined; }"),
+        canonical_text("{ b: 2; }")
+    );
+    assert_ne!(
+        canonical_text("[a: string, b?: number]"),
+        canonical_text("[a: string, b: number]")
     );
     assert_eq!(
         canonical_text("(x: string | null) => number | undefined"),

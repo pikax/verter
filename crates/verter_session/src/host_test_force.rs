@@ -86,6 +86,15 @@ pub(crate) struct TestForceKnobs {
     /// Per-host (no process-global concurrency hazard). `#[cfg(test)]`-gated: the
     /// only reader is the `#[cfg(test)]` injection in `execute_via_cold_build_helper`.
     pub(crate) force_fenced_serve_for_tests: std::sync::atomic::AtomicBool,
+    /// Per-host test-injection knob for the inline flow-return executor.
+    /// When `true`, every inline flow evaluation notes a synthetic FENCED
+    /// (ReturnOnly) serve INSIDE its own recorded scope, so the evaluation
+    /// completes with a typed, deterministic refusal of its persistent
+    /// admission — the in-process equivalent of a member whose body read a
+    /// served-without-publication artifact. `#[cfg(test)]`-gated: the only
+    /// reader is the `#[cfg(test)]` injection in
+    /// `execute_flow_return_inline`.
+    pub(crate) force_flow_member_fenced_serve_for_tests: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the shared cold-build closure. When
     /// `true`, the `traced_build` closure taints THIS build's frame
     /// `result_is_partial` BEFORE the inner build runs, so it finalises

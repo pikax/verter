@@ -307,6 +307,17 @@ impl ProjectSemanticDispatch<'_> {
                     Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
                     _ => return None,
                 };
+                // A body-derived return whose evaluation closed degraded
+                // stays a usable value, and the read that composed its
+                // answer from it is counted on this request, so the
+                // published answer (`ReturnType<typeof C.m>`) degrades
+                // rather than reading clean. Only this member's return
+                // decides it; the other members of the type that holds it
+                // read as they are.
+                if self.body_derived_return_degraded(signature) {
+                    self.degraded_member_reads
+                        .set(self.degraded_member_reads.get().saturating_add(1));
+                }
                 // Free signature generics instantiate at their base
                 // constraints: `ReturnType<typeof id>` over `id<T>(x: T): T`
                 // is `unknown`, over `id<T extends string>(x: T): T` it is
@@ -355,5 +366,42 @@ impl ProjectSemanticDispatch<'_> {
             Some(SemanticNodeData::Signature { params, .. }) => Some(Arc::clone(params)),
             _ => None,
         }
+    }
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// Whether `signature`'s return is body-derived and its evaluation
+    /// closed with a typed degradation. A return still in flight or with no
+    /// value answers `false`: its own read already carries that.
+    ///
+    /// The re-read asks for the VERDICT only: the signature's lowering read
+    /// the value and folded its rails, so this read's own observations (a
+    /// nested cold compute's limits) are scoped and dropped here.
+    pub(super) fn body_derived_return_degraded(&self, signature: SemanticNodeId) -> bool {
+        let identity = match self.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                return_carrier:
+                    crate::semantic_query::SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    ),
+                ..
+            }) => identity.clone(),
+            _ => return false,
+        };
+        let canonical = Arc::clone(&identity.anchor.canonical_id);
+        let sticky_defer = crate::request_context::DeferredPartialStickyScope::enter();
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let observation = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let node = self.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            &canonical,
+        );
+        let _ = observation.finish();
+        completeness_scope.discard();
+        drop(sticky_defer);
+        matches!(
+            node,
+            super::flow_return::FunctionReturnNode::Flow(result) if result.degradation().is_some()
+        )
     }
 }

@@ -695,15 +695,15 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     assert!(is_assignable(any, string));
     assert!(is_assignable(string, any));
 
-    // §22.3: the error carrier relates bidirectionally like `any` against the
-    // OTHER lattice extremes too — including a `never` / `any` / `unknown`
-    // target/source. `relate(any, never)` is Assignable, so `relate(error,
-    // never)` MUST be Assignable as well (the regression: the `(_, Never)`
-    // bottom arm fired before the error wildcard, so `error <: never` wrongly
-    // resolved NotAssignable while `any <: never` resolved Assignable).
+    // §22.3: the error carrier relates like `any` against the OTHER lattice
+    // extremes too. Like `any`, it is assignable to everything but `never`,
+    // which is assignable to it. Measured on TypeScript 7.0.2 (all four
+    // `strictNullChecks` × `noImplicitAny` settings agree), with `E` a
+    // TS2589 recovery: `[any] extends [never] ? 1 : 2` and `[E] extends
+    // [never] ? 1 : 2` are `2`, `[never] extends [E] ? 1 : 2` is `1`.
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-    for &other in &[never, unknown, any] {
+    for &other in &[unknown, any] {
         assert!(
             is_assignable(error, other),
             "error must relate to a {other:?} target bidirectionally like any"
@@ -713,10 +713,14 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
             "a {other:?} source must relate to error bidirectionally like any"
         );
     }
-    // Cross-check the `any` baseline this mirrors: `any <: never` is Assignable.
+    assert!(is_assignable(never, error), "never <: error");
     assert!(
-        is_assignable(any, never),
-        "any <: never is Assignable (mirror)"
+        !is_assignable(error, never),
+        "error is not assignable to never"
+    );
+    assert!(
+        !is_assignable(any, never),
+        "any is not assignable to never (mirror)"
     );
 
     // Discriminating negative: the error flip is specifically the error
