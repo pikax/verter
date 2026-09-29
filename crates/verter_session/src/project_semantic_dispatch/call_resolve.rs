@@ -27,9 +27,6 @@ use crate::semantic_query::{
     SignatureReturnCarrier, VariancePhase,
 };
 
-pub(super) const MAX_APPLICABILITY_RELATIONS: usize = 1_024;
-const MAX_INFERENCE_DEPOSITS: usize = 1_024;
-
 /// Whether a fresh-literal deposit's binder occurs at the top level of a
 /// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,24 +113,33 @@ enum ResolveCallFramePop {
     RootClose(ResolveCallRootClose),
 }
 
-#[derive(Default)]
-pub(super) struct CallResolutionBudget {
-    applicability_relations: usize,
-    inference_deposits: usize,
+/// The work one call resolution performs: its applicability relations and
+/// its accepted inference deposits. The checker has no per-call quota in
+/// either unit — a thousand overloads resolve, as does a call inferring
+/// from thousands of tuple positions — so neither count is a stopping rule.
+/// Both are charged to the connected-work ledger, the operational envelope
+/// every evaluation shares; its trip is the typed `Budget` failure.
+pub(super) struct CallResolutionBudget<'l> {
+    ledger: &'l super::connected_demand::ConnectedDemandLedger<'l>,
 }
 
-impl CallResolutionBudget {
-    fn relation(&mut self) -> bool {
-        self.applicability_relations += 1;
-        self.applicability_relations <= MAX_APPLICABILITY_RELATIONS
+impl<'l> CallResolutionBudget<'l> {
+    fn new(ledger: &'l super::connected_demand::ConnectedDemandLedger<'l>) -> Self {
+        Self { ledger }
     }
 
-    /// Charge one unit per ACCEPTED deposit — the counter's declared unit.
-    /// The count is a delta of the transaction's acceptance-site counter,
-    /// taken across one binding-enabled relation.
+    /// Charge one applicability relation. `false` when the connected-work
+    /// ledger refuses it.
+    fn relation(&mut self) -> bool {
+        self.ledger.charge().is_ok()
+    }
+
+    /// Charge one unit per ACCEPTED deposit. The count is a delta of the
+    /// transaction's acceptance-site counter, taken across one
+    /// binding-enabled relation. `false` when the connected-work ledger
+    /// refuses them.
     fn charge_accepted_deposits(&mut self, accepted: u64) -> bool {
-        self.inference_deposits += accepted as usize;
-        self.inference_deposits <= MAX_INFERENCE_DEPOSITS
+        accepted == 0 || self.ledger.charge_units(accepted as usize).is_ok()
     }
 }
 
@@ -243,6 +249,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         root_key: ResolveCallKey,
         member_key: ResolveCallKey,
     ) -> (ResolvedCallResult, bool) {
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        assert!(
+            initial_trip.is_none(),
+            "a fresh connected demand has not tripped"
+        );
         let root_idx = self.resolve_call_frame_open(&root_key);
         let member_idx = self.resolve_call_frame_open(&member_key);
         self.dispatch_txn
@@ -1174,7 +1185,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Ok(arguments) => arguments,
             Err(failure) => return CandidateVerdict::Degraded(failure),
         };
-        let mut budget = CallResolutionBudget::default();
+        let mut budget = CallResolutionBudget::new(&self.connected_demand);
 
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
         let bucket_kind = |node: SemanticNodeId| -> Option<SignatureKind> {
@@ -1643,7 +1654,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         candidate: &SignatureRef,
         raw_candidate: &SignatureRef,
         arguments: &[CallArgument],
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         recovery: bool,
         sole_candidate: bool,
     ) -> CandidateVerdict {
@@ -2861,7 +2872,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
         freshness_origin: SemanticNodeId,
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         binding_enabled: bool,
         excess_property_check: bool,
     ) -> RelationStep {
@@ -2869,7 +2880,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
             return RelationStep::BudgetExceeded(crate::semantic_query::RecursionOrBudgetCap {
                 kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
-                limit: MAX_APPLICABILITY_RELATIONS as u32,
+                limit: self.connected_trip_limit(),
             });
         }
         let applicability = self.dispatch_txn.borrow().call.applicability;
@@ -2968,7 +2979,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         type_params: &[crate::semantic_query::TypeParamDecl],
         (signature, target): (SemanticNodeId, SemanticNodeId),
         return_structure: Option<SemanticNodeId>,
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         own_return_function: Option<&crate::semantic_query::FlowFunctionSlotIdentity>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
         let inputs = {
@@ -3022,7 +3033,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
         freshness_origin: SemanticNodeId,
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         literal_mode: ArgumentLiteralMode,
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
@@ -3082,7 +3093,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arguments: &[CallArgument],
         rest_start: usize,
         target: SemanticNodeId,
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         binding_enabled: bool,
     ) -> RelationStep {
         let graph = self.graph();
@@ -3210,7 +3221,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
         freshness_origin: SemanticNodeId,
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
     ) -> RelationStep {
         self.dispatch_txn
             .borrow_mut()
@@ -3617,7 +3628,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         widened: CanonicalTypeSubstitution,
         defaulted: &[DefaultedParam],
-        budget: &mut CallResolutionBudget,
+        budget: &mut CallResolutionBudget<'_>,
         own_return_function: Option<&crate::semantic_query::FlowFunctionSlotIdentity>,
     ) -> Result<CanonicalTypeSubstitution, ResolveCallFailure> {
         let mut bindings = widened.bindings().to_vec();

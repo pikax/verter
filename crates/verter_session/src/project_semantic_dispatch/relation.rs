@@ -2872,7 +2872,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             RelationProof::BudgetExceeded {
                                 cap: RecursionOrBudgetCap {
                                     kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
-                                    limit: super::call_resolve::MAX_APPLICABILITY_RELATIONS as u32,
+                                    limit: self.connected_trip_limit(),
                                 },
                             },
                         ))
