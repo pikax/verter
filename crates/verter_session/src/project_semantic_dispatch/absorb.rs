@@ -235,7 +235,9 @@ impl ProjectSemanticDispatch<'_> {
 
     // ── Conditional ───────────────────────────────────────────────────────
     /// §22.2 conditional absorption on the CHECK type. Three rows, in
-    /// dominance order:
+    /// dominance order, after the checker's own first test — an error
+    /// EXTENDS type is the answer as well (`T extends error` ⇒ `error`),
+    /// unless the check type already is one:
     ///
     /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
     ///    and both branches — stays FIRST).
@@ -272,6 +274,13 @@ impl ProjectSemanticDispatch<'_> {
         mut force_branch: impl FnMut(bool) -> SemanticNodeId,
     ) -> Option<QueryBuildOutput> {
         let decision_roots = [check, extends];
+        // (0) An error EXTENDS type is the conditional's answer too: the
+        //     checker returns its error type when either operand is it.
+        if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
+            if !matches!(self.peek_special(check), Some((SpecialKind::Error, _))) {
+                return Some(self.absorbed_output(err, decision_roots));
+            }
+        }
         match self.peek_special(check)? {
             // (1) error dominates any/never and both branches.
             (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),

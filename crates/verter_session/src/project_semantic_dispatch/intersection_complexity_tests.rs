@@ -72,7 +72,7 @@ fn five_ten_member_unions_intersect_to_the_ts2590_recovery() {
     let failures = mismatches(
         &ten_by_ten(),
         &[
-            ("IsAny<R5>", "\"any\""),
+            ("IsAny<R5>", "any"),
             ("[R5] extends [{ k0: 0 }] ? 1 : 2", "1"),
             ("IsAny<R4>", "\"not-any\""),
             ("[R4] extends [{ k0: 0 }] ? 1 : 2", "2"),
@@ -116,7 +116,7 @@ fn the_ts2590_recovery_holds_the_written_intersection_beyond_it() {
 /// is `2` at 369 × 271; `any` and `1` under TS2590 at 400 × 250.
 #[test]
 fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
-    for (a, b, is_any, relation) in [(369, 271, "\"not-any\"", "2"), (400, 250, "\"any\"", "1")] {
+    for (a, b, is_any, relation) in [(369, 271, "\"not-any\"", "2"), (400, 250, "any", "1")] {
         let source = format!(
             "{IS_ANY}{}{}type R = A & B;\n",
             object_union("A", "a", a),
@@ -173,7 +173,7 @@ fn three_written_types_divide_before_the_product_is_checked() {
     for (x, is_any, relation) in [
         (40, "\"not-any\"", "2"),
         (990, "\"not-any\"", "2"),
-        (991, "\"any\"", "1"),
+        (991, "any", "1"),
     ] {
         let source = format!(
             "{IS_ANY}{}{}{}type R = X & Y & Z;\n",
@@ -233,7 +233,7 @@ fn unions_of_primitives_intersect_without_a_cross_product() {
             ("[R] extends [0 | 1] ? 1 : 2", "2"),
             ("R extends number ? 1 : 2", "1"),
             (inline.as_str(), "2"),
-            (mixed.as_str(), "\"any\""),
+            (mixed.as_str(), "any"),
         ],
     );
     assert!(
@@ -279,10 +279,7 @@ fn unions_with_undefined_intersect_without_it() {
     );
     failures.extend(mismatches(
         &over,
-        &[
-            ("IsAny<R>", "\"any\""),
-            ("[R] extends [{ a: 0 }] ? 1 : 2", "1"),
-        ],
+        &[("IsAny<R>", "any"), ("[R] extends [{ a: 0 }] ? 1 : 2", "1")],
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -303,7 +300,7 @@ fn a_member_read_over_the_limit_is_the_ts2590_recovery() {
     let failures = mismatches(
         &source,
         &[
-            ("IsAny<O5[\"m\"]>", "\"any\""),
+            ("IsAny<O5[\"m\"]>", "any"),
             ("IsAny<O3[\"m\"]>", "\"not-any\""),
         ],
     );
@@ -315,7 +312,7 @@ fn a_member_read_over_the_limit_is_the_ts2590_recovery() {
 /// earlier read left in the host's memo.
 #[test]
 fn the_limit_answers_the_same_cold_warm_and_reordered() {
-    let over = ("IsAny<R5>", "\"any\"");
+    let over = ("IsAny<R5>", "any");
     let under = ("IsAny<R4>", "\"not-any\"");
     let over_relation = ("[R5] extends [{ k0: 0 }] ? 1 : 2", "1");
     let under_relation = ("[R4] extends [{ k0: 0 }] ? 1 : 2", "2");
