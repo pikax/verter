@@ -108,7 +108,9 @@ fn the_ts2590_recovery_holds_the_written_intersection_beyond_it() {
 }
 
 /// Two object unions at the limit: 369 × 271 = 99,999 distributes and 400 ×
-/// 250 = 100,000 does not.
+/// 250 = 100,000 does not. Under the limit the intersection is the type it
+/// denotes; at the limit it is the checker's TS2590 recovery, holding the
+/// written intersection as the type beyond it.
 ///
 /// Measured: `IsAny<R>` is `"not-any"` and `[R] extends [{ a: 0 }] ? 1 : 2`
 /// is `2` at 369 × 271; `any` and `1` under TS2590 at 400 × 250.
@@ -128,6 +130,32 @@ fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
             ],
         );
         assert!(failures.is_empty(), "{a} × {b}: {}", failures.join("\n"));
+        with_probe(&source, "A & B", |dispatch, node| {
+            let data = dispatch.graph().node_data(node);
+            match data.as_deref() {
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic,
+                    beyond: Some(beyond),
+                })) => {
+                    assert!(
+                        a * b >= 100_000,
+                        "{a} × {b} is under the limit, measured {data:?}"
+                    );
+                    assert_eq!(*diagnostic, TS2590);
+                    assert!(
+                        matches!(
+                            dispatch.graph().node_data(*beyond).as_deref(),
+                            Some(SemanticNodeData::Intersection(arms)) if arms.len() == 2
+                        ),
+                        "beyond the limit is the written `A & B`"
+                    );
+                }
+                other => assert!(
+                    a * b < 100_000 && !matches!(other, Some(SemanticNodeData::Opaque(_))),
+                    "{a} × {b}: measured {other:?}"
+                ),
+            }
+        });
     }
 }
 
@@ -165,16 +193,38 @@ fn three_written_types_divide_before_the_product_is_checked() {
 }
 
 /// Unions of primitives intersect member-wise, with no cross product: two
-/// thousand-member number unions are the thousand numbers they share.
+/// thousand-member number unions are the thousand numbers they share,
+/// written as aliases or inline. A union that also holds an object is not a
+/// union of primitives, and its cross product is weighed.
 ///
 /// Measured: `IsAny<R>` is `"not-any"`, `[R] extends [0 | 1] ? 1 : 2` is `2`
-/// and `R extends number ? 1 : 2` is `1`, with no diagnostic.
+/// and `R extends number ? 1 : 2` is `1`, with no diagnostic; written
+/// inline, `[(0 | … | 999) & (500 | … | 1499)] extends [500 | 501] ? 1 : 2`
+/// is `2` with no diagnostic; and `IsAny<(0 | … | 399 | { x: 1 }) & (0 | … |
+/// 399 | { y: 1 })>` (401 × 401 = 160,801) is `any` under TS2590.
 #[test]
 fn unions_of_primitives_intersect_without_a_cross_product() {
+    let numbers = |from: usize, count: usize| {
+        (from..from + count)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     let source = format!(
-        "{IS_ANY}{}{}type R = A & B;\n",
+        "{IS_ANY}{}{}type R = A & B;
+",
         literal_union("A", 1000, false, ""),
         literal_union("B", 1000, false, "")
+    );
+    let inline = format!(
+        "[({}) & ({})] extends [500 | 501] ? 1 : 2",
+        numbers(0, 1000),
+        numbers(500, 1000)
+    );
+    let mixed = format!(
+        "IsAny<({} | {{ x: 1 }}) & ({} | {{ y: 1 }})>",
+        numbers(0, 400),
+        numbers(0, 400)
     );
     let failures = mismatches(
         &source,
@@ -182,9 +232,18 @@ fn unions_of_primitives_intersect_without_a_cross_product() {
             ("IsAny<R>", "\"not-any\""),
             ("[R] extends [0 | 1] ? 1 : 2", "2"),
             ("R extends number ? 1 : 2", "1"),
+            (inline.as_str(), "2"),
+            (mixed.as_str(), "\"any\""),
         ],
     );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
 }
 
 /// Unions that all hold `undefined` intersect without it and add it back:
