@@ -3696,12 +3696,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 _ => false,
             };
-            // A parameter with a primitive constraint keeps its literal
-            // inference wherever it was made (`getCovariantInference`'s
-            // `hasPrimitiveConstraint`): `f<T extends string>(v: T[])`
-            // over `["x", "y"]` is `"x" | "y"`.
             let kept = match return_structure {
-                _ if has_fresh && self.has_primitive_constraint(*param) => true,
                 Some(structure) if has_fresh => {
                     match self.deposit_at_top_level(structure, *param) {
                         BinderReach::Present => true,
@@ -3738,55 +3733,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             widened_bindings.push((*param, widened));
         }
         Ok(any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings)))
-    }
-
-    /// Whether the type parameter `param` has a constraint that may be a
-    /// primitive (the checker's `hasPrimitiveConstraint`: `maybeTypeOfKind`
-    /// over its constraint for a primitive, a literal, a template literal
-    /// or a `keyof`).
-    fn has_primitive_constraint(&self, param: SemanticNodeId) -> bool {
-        let graph = self.graph();
-        let Some(constraint) = (match graph.node_data(param).as_deref() {
-            Some(SemanticNodeData::TypeParam { constraint, .. }) => *constraint,
-            _ => None,
-        }) else {
-            return false;
-        };
-        let mut stack = vec![constraint];
-        let mut seen = rustc_hash::FxHashSet::default();
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Primitive(kind)) => {
-                    if !matches!(
-                        kind,
-                        PrimitiveKind::Any
-                            | PrimitiveKind::Unknown
-                            | PrimitiveKind::Never
-                            | PrimitiveKind::Object
-                    ) {
-                        return true;
-                    }
-                }
-                Some(
-                    SemanticNodeData::Literal(_)
-                    | SemanticNodeData::EnumLiteral(_)
-                    | SemanticNodeData::TemplateLiteral { .. }
-                    | SemanticNodeData::KeyOf { .. },
-                ) => return true,
-                Some(SemanticNodeData::Alias(inner)) => stack.push(*inner),
-                Some(
-                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
-                ) => {
-                    let members = composite.composite_members().expect("composite arm");
-                    stack.extend(members.iter().copied());
-                }
-                _ => {}
-            }
-        }
-        false
     }
 
     /// A covariant inference as the checker widens it (`getWidenedType` in

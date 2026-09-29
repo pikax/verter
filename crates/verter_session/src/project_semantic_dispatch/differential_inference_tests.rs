@@ -1352,6 +1352,27 @@ fn template_escapes() {
             r#""a\\u{zz}b""#,
         ),
         (
+            Read::Type(r#"`a\n${number}` extends "b" ? 1 : 0"#),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(r#"`x\\${number}` extends "y" ? 1 : 0"#),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(r#"`a\n${number}` extends `a\n${number}` ? 1 : 0"#),
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+        ),
+        (
             Read::Return(r#"v1"#),
             r#""a\nq""#,
             r#""a\nq""#,
@@ -1381,6 +1402,103 @@ fn template_escapes() {
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`primitive_constraint_literals`].
+const PRIMITIVE_CONSTRAINT_LITERALS: &str = r##"
+declare function pw<T extends string>(x: { v: T }): T;
+declare function pn<T extends number>(x: { v: T }): T;
+declare function pu<T>(x: { v: T }): T;
+declare function pt<T extends string>(x: [T]): T;
+declare function pf<T extends number>(f: () => T): T;
+declare function pk<T extends keyof { a: 1; b: 2 }>(x: { k: T }): T;
+export function q1() { return pw({ v: "x" }); }
+export function q2() { return pn({ v: 1 }); }
+export function q3() { return pu({ v: "x" }); }
+export function q4() { return pt(["x"]); }
+export function q5() { return pf(() => 1); }
+export function q6() { return pk({ k: "a" }); }
+declare function pr<T extends string>(...xs: T[]): T;
+declare function pru<T>(...xs: T[]): T;
+declare function pa<T extends number>(x: T, y: T[]): T;
+export function q7() { return pr("a", "b"); }
+export function q8() { return pru("a", "b"); }
+export function q9() { return pa(1, [2]); }
+"##;
+
+/// A literal a call infers from a rest argument or a returned literal stays a literal, and one an unconstrained parameter reads off an object member widens.
+#[test]
+fn primitive_constraint_literals() {
+    let failures = Matrix::new(PRIMITIVE_CONSTRAINT_LITERALS).four(&[
+        (
+            Read::Return(r#"q3"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (Read::Return(r#"q5"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
+        (
+            Read::Return(r#"q7"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"q8"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An object or array literal argument keeps a literal where the parameter types it with a primitive-constrained type parameter (`isLiteralOfContextualType`), and the parameter keeps it (`hasPrimitiveConstraint`).
+#[test]
+#[ignore = "WRONG-CLEAN / gap in the lane: an object or array literal argument is evaluated before its parameter's contextual type is known, so its members arrive widened"]
+fn pinned_nested_argument_literals_under_a_primitive_constraint() {
+    let failures = Matrix::new(PRIMITIVE_CONSTRAINT_LITERALS).four(&[
+        (
+            Read::Return(r#"q1"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (Read::Return(r#"q2"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
+        (
+            Read::Return(r#"q4"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"q6"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"q9"#),
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+        ),
+    ]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
 }
 
 /// The checker keeps an array literal argument's element literals when the parameter's element type is a type parameter with a primitive constraint (`isLiteralOfContextualType`): `ni3(["x", "y"], "x")` is `"x" | "y"`.
