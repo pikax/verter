@@ -27,16 +27,99 @@ use super::version::{CompactionDomain, FactAttribution, FactVersionRef};
 pub struct ResultEvidence {
     facts: Arc<[FactVersionRef]>,
     digest: u128,
-    /// Every canonical a fact reachable from here names, sorted.
-    canonicals: Arc<[Arc<str>]>,
+    /// Every canonical a fact reachable from here names: a persistent set
+    /// sharing its structure with the sets of the receipts it consumed.
+    canonicals: CanonicalSet,
     /// Every compaction domain a reachable fact carries as its terminal
     /// aggregate, in first-appearance order.
     aggregated: Arc<[CompactionDomain]>,
     /// Whether a reachable fact is resolution evidence.
     resolution_evidence: bool,
-    /// How many distinct receipts are reachable from here, this one
-    /// included.
-    receipts: usize,
+}
+
+/// Every canonical the facts reachable from a receipt name, ordered.
+///
+/// A persistent set: a receipt's set starts as its largest consumed
+/// receipt's set, shared, and gains only what that set lacks, so a chain
+/// of `n` receipts each naming one new canonical holds `O(n log n)` set
+/// structure rather than a copy of every prefix. Its `len()` is the
+/// logical count of the canonicals it names; the storage is shared.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct CanonicalSet(imbl::OrdSet<Arc<str>>);
+
+impl CanonicalSet {
+    /// Whether `canonical` is one of the set's canonicals.
+    #[must_use]
+    pub fn contains(&self, canonical: &str) -> bool {
+        self.0.contains(canonical)
+    }
+
+    /// The set's own copy of `canonical`, when it holds it.
+    #[must_use]
+    pub fn get(&self, canonical: &str) -> Option<&Arc<str>> {
+        self.0.get(canonical)
+    }
+
+    /// The canonicals, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<str>> + '_ {
+        self.0.iter()
+    }
+
+    /// How many canonicals the set names.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the set names no canonical.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The union of `consumed` and `own`: the largest consumed set,
+    /// shared, plus what each other set holds that it lacks (found by a
+    /// difference walk that skips the structure the two share), plus each
+    /// own canonical it lacks.
+    fn union_of(consumed: &[&CanonicalSet], own: &[&str]) -> Self {
+        let Some(largest) = consumed.iter().copied().max_by_key(|set| set.len()) else {
+            let mut set = imbl::OrdSet::new();
+            for canonical in own {
+                if !set.contains(*canonical) {
+                    set.insert(Arc::from(*canonical));
+                }
+            }
+            return Self(set);
+        };
+        let mut set = largest.0.clone();
+        for other in consumed {
+            if std::ptr::eq(*other, largest) {
+                continue;
+            }
+            let added: Vec<Arc<str>> = set
+                .diff(&other.0)
+                .filter_map(|item| match item {
+                    imbl::ordset::DiffItem::Add(canonical) => Some(Arc::clone(canonical)),
+                    imbl::ordset::DiffItem::Remove(_) => None,
+                })
+                .collect();
+            for canonical in added {
+                set.insert(canonical);
+            }
+        }
+        for canonical in own {
+            if !set.contains(*canonical) {
+                set.insert(Arc::from(*canonical));
+            }
+        }
+        Self(set)
+    }
+}
+
+impl std::fmt::Debug for CanonicalSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.iter()).finish()
+    }
 }
 
 /// Dropped from an explicit stack: a long chain of receipts, each the last
@@ -93,27 +176,24 @@ impl ResultReceipt {
             fact.hash(&mut digester);
         }
         let digest = digester.digest128();
-        let mut canonicals: Vec<Arc<str>> = Vec::new();
+        let mut consumed: Vec<&CanonicalSet> = Vec::new();
+        let mut own: Vec<&str> = Vec::new();
         let mut aggregated: Vec<CompactionDomain> = Vec::new();
         let mut resolution_evidence = false;
-        let mut receipts = 1usize;
         for fact in &facts {
             match fact {
                 FactVersionRef::Receipt(child) => {
-                    canonicals.extend(child.0.canonicals.iter().cloned());
+                    consumed.push(&child.0.canonicals);
                     for domain in child.0.aggregated.iter() {
                         if !aggregated.contains(domain) {
                             aggregated.push(*domain);
                         }
                     }
                     resolution_evidence |= child.0.resolution_evidence;
-                    receipts = receipts.saturating_add(child.0.receipts);
                 }
                 other => {
                     match other.attribution() {
-                        FactAttribution::Canonical(canonical) => {
-                            canonicals.push(Arc::from(canonical));
-                        }
+                        FactAttribution::Canonical(canonical) => own.push(canonical),
                         FactAttribution::DomainAggregate(domain) => {
                             if !aggregated.contains(&domain) {
                                 aggregated.push(domain);
@@ -135,15 +215,13 @@ impl ResultReceipt {
                 }
             }
         }
-        canonicals.sort_unstable();
-        canonicals.dedup();
+        let canonicals = CanonicalSet::union_of(&consumed, &own);
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
             digest,
-            canonicals: canonicals.into(),
+            canonicals,
             aggregated: aggregated.into(),
             resolution_evidence,
-            receipts,
         }))
     }
 
@@ -159,10 +237,16 @@ impl ResultReceipt {
         self.0.digest
     }
 
-    /// Every canonical a fact reachable from this receipt names, sorted.
+    /// Every canonical a fact reachable from this receipt names.
     #[must_use]
-    pub fn canonicals(&self) -> &[Arc<str>] {
+    pub fn canonicals(&self) -> &CanonicalSet {
         &self.0.canonicals
+    }
+
+    /// Whether a fact reachable from this receipt names `canonical`.
+    #[must_use]
+    pub fn references_canonical(&self, canonical: &str) -> bool {
+        self.0.canonicals.contains(canonical)
     }
 
     /// Every compaction domain a reachable fact carries as its terminal
@@ -288,7 +372,6 @@ impl std::fmt::Debug for ResultReceipt {
         f.debug_struct("ResultReceipt")
             .field("digest", &format_args!("{:032x}", self.0.digest))
             .field("facts", &self.0.facts.len())
-            .field("receipts", &self.0.receipts)
             .finish()
     }
 }

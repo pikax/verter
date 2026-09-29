@@ -965,12 +965,7 @@ impl ValidatedReceipts {
         let canonicals = receipt.canonicals();
         let mut strict: Vec<Arc<str>> = self_root_canonicals
             .iter()
-            .filter_map(|root| {
-                canonicals
-                    .binary_search_by(|canonical| canonical.as_ref().cmp(root))
-                    .ok()
-                    .map(|at| Arc::clone(&canonicals[at]))
-            })
+            .filter_map(|root| canonicals.get(root).map(Arc::clone))
             .collect();
         strict.sort_unstable();
         strict.dedup();

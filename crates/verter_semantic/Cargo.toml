@@ -33,6 +33,9 @@ verter_parser = { path = "../verter_parser" }
 # so this dependency preserves the semantic layer's dependency direction.
 verter_language = { path = "../verter_language" }
 verter_css_syntax = { path = "../verter_css_syntax" }
+# Persistent ordered set: a result receipt's canonical summary shares its
+# structure with the summaries of the receipts it consumed.
+imbl = "7.0.1"
 verter_no_typeexpr = { workspace = true }
 # Dependency-neutral macro-codegen DTO vocabulary. This crate is an explicit
 # two-sided firewall (see its Cargo.toml): the semantic kernel's C2 non-flow
