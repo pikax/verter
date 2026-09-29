@@ -21221,7 +21221,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
-                            (None, _) | (Some(_), None) => {
+                            (Some(init), None) => {
+                                // A non-union declared type is what the
+                                // binding holds, whatever its initializer
+                                // evaluates to. The initializer still runs
+                                // (the checker checks it and its flow sees
+                                // every write and assertion inside it), so
+                                // it evaluates for its effects and its
+                                // calls, its value discarded. A value the
+                                // lane could not model there degrades
+                                // nothing the binding holds; an initializer
+                                // that writes keeps whatever it recorded,
+                                // since its writes reach later reads.
+                                let before = self.degradation.take();
+                                let holds_before = self.holds.len();
+                                let _ = self.eval_expr(init);
+                                self.holds.truncate(holds_before);
+                                let recorded = self.degradation.take();
+                                self.degradation = before;
+                                if let Some(recorded) = recorded {
+                                    if expression_changes_reaching_values(init) {
+                                        self.record_degradation(recorded);
+                                    }
+                                }
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    declared_node,
+                                    None,
+                                    false,
+                                );
+                                continue;
+                            }
+                            (None, _) => {
                                 self.bind_local(
                                     &FlowProductSubject::Local(*binding),
                                     *kind,
