@@ -11794,30 +11794,43 @@ fn a_constructed_call_argument_closes_its_proof() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
-/// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
-/// finalizer's verdict is partial (an obligation left pending, or a typed
-/// gap), so the `FlowReturn` read is `ReturnOnly` with
-/// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`] —
-/// while the host flow-return boundary publishes the value clean, because
-/// the value itself carries no typed degradation.
-const UNPROVEN_CORRECT_RETURNS: &str = r#"
+/// A callable in a parameter list is served by no index entry, but the
+/// frame resolves every name it reaches, so its capture set is exact and
+/// no closure-capture gap stands. TypeScript 7.0.2, all four settings:
+/// `dpArrow` is `() => number`.
+const PARAMETER_CALLABLES: &str = r#"
 export function dpArrow(cb = () => 7) { return cb; }
 "#;
 
-/// A correct flow answer closes with its proof: the `FlowReturn` read is
-/// complete, so a publication boundary that honours the verdict keeps it
-/// clean. The completeness design keeps every correct clean answer clean
-/// and admits no unproven one as exact, so these proofs must close before
-/// the boundary surfaces a partial verdict.
-///
-/// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
-/// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
-///
-/// The same holds for `sig_classStaticBlockAssigns`.
 #[test]
-#[ignore = "a correct flow answer closes with its proof"]
-fn a_correct_flow_answer_closes_with_its_proof() {
-    let unproven = flow_reads_without_proof(UNPROVEN_CORRECT_RETURNS, &["dpArrow"]);
+fn a_parameter_default_callable_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(PARAMETER_CALLABLES, &["dpArrow"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(PARAMETER_CALLABLES)
+            .returns(&[("dpArrow", "() => number")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class static block runs at the class's evaluation, and the checker
+/// flows through it inline: `x = 1` in `class C { static { x = 1; } }`
+/// reaches every later read of `x` in the frame. TypeScript 7.0.2, all four
+/// settings: `classStaticBlockAssigns` is `(x: string | number) =>
+/// boolean` (the assignment declines the predicate).
+///
+/// What the lane gives: `boolean`, the checker's answer, with the verdict
+/// partial (`DegradedValue`): the class declaration's unmodeled write
+/// lowers to the statement gap `FlowGap::GuardNarrowing`, which the value
+/// then carries. Proving it takes the static block's statements lowered
+/// in the frame, which the skeleton does not walk (a static block keeps
+/// its own scope and no index entry serves it).
+const STATIC_BLOCK_WRITES: &str = r#"
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+"#;
+
+#[test]
+#[ignore = "a class static block's write is flowed in its frame"]
+fn a_class_static_block_write_is_flowed_in_its_frame() {
+    let unproven = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
     assert!(unproven.is_empty(), "{}", unproven.join("\n"));
 }
