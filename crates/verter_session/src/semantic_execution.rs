@@ -235,6 +235,34 @@ thread_local! {
     /// Whether a frame step is running on this thread. A drive that begins
     /// while it is set would nest an execution on the native stack.
     static STEP_RUNNING: Cell<bool> = const { Cell::new(false) };
+
+    /// How many drives are running on this thread. Code a frame's step
+    /// reaches synchronously sees it set, and evaluates in place what it
+    /// would otherwise drive.
+    static DRIVES_RUNNING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks a drive as running for its extent, unwinding included.
+struct DriveScope;
+
+impl DriveScope {
+    fn enter() -> Self {
+        DRIVES_RUNNING.with(|running| running.set(running.get() + 1));
+        DriveScope
+    }
+}
+
+impl Drop for DriveScope {
+    fn drop(&mut self) {
+        DRIVES_RUNNING.with(|running| running.set(running.get() - 1));
+    }
+}
+
+/// Whether a drive is running on this thread: a synchronous entry reached
+/// from one of its steps (or from the program it drives) must not drive
+/// another.
+pub(crate) fn drive_running() -> bool {
+    DRIVES_RUNNING.with(Cell::get) > 0
 }
 
 /// Marks a frame step as running for its extent, unwinding included.
@@ -327,6 +355,7 @@ impl<P: Program> SemanticExecution<P> {
             self.live_frames == 0 && self.ready.is_empty(),
             "a drive begins with no open demand"
         );
+        let _drive = DriveScope::enter();
         if let Some(&id) = self.index.get(&root) {
             let record = &self.demands[id.0 as usize];
             verter_debug_assert!(record.state == DemandState::Complete);

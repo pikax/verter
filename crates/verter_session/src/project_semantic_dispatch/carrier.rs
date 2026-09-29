@@ -268,6 +268,13 @@ pub(super) enum CarrierResolutionPlan {
     NeedsArgs(CarrierArgsContinuation),
 }
 
+/// How a resolved head finishes over its arguments: with a node, or with the
+/// instantiation whose node it is.
+pub(super) enum CarrierFinish {
+    Node(SemanticNodeId),
+    Instantiate(SemanticQueryKey),
+}
+
 /// Owned second half of a reference resolution whose head consumes arguments.
 /// Keeping this continuation independent of [`CarrierResolverContext`] is what
 /// lets the projection worklist resume it after all argument nodes complete.
@@ -298,9 +305,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
+        match self.plan_carrier_finish(continuation, type_args) {
+            CarrierFinish::Node(node) => node,
+            CarrierFinish::Instantiate(key) => self.instantiated_node(key),
+        }
+    }
+
+    /// How a resolved head finishes over its lowered arguments: a carrier or
+    /// reduced node, or the instantiation whose node it is.
+    pub(super) fn plan_carrier_finish(
+        &self,
+        continuation: CarrierArgsContinuation,
+        type_args: Arc<[SemanticNodeId]>,
+    ) -> CarrierFinish {
         match continuation {
             CarrierArgsContinuation::Intern { head, name, scope } => {
-                self.intern_ref_head_carrier(head, &name, &scope, type_args)
+                CarrierFinish::Node(self.intern_ref_head_carrier(head, &name, &scope, type_args))
             }
             CarrierArgsContinuation::Builtin {
                 identity,
@@ -347,14 +367,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .flow_return_callee_for_typeof_arg(type_args[0])
                             .is_some());
                 if build_carrier {
-                    return self.intern_ref_head_carrier(
+                    return CarrierFinish::Node(self.intern_ref_head_carrier(
                         RefHeadResolution::Builtin(identity),
                         &name,
                         &scope,
                         type_args,
-                    );
+                    ));
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -364,10 +384,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
-                )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                    _ => self.opaque(QueryError::Miss),
-                }
+                ))
             }
             CarrierArgsContinuation::Instantiate { identity, context } => {
                 // The same back-edge rule as a 0-arg head: an application of
@@ -381,9 +398,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
-                    return self.recursive_ref_sentinel(&identity, type_args);
+                    return CarrierFinish::Node(self.recursive_ref_sentinel(&identity, type_args));
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -393,13 +410,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
-                )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                    _ => self.opaque(QueryError::Miss),
-                }
+                ))
             }
             CarrierArgsContinuation::ApplyTypeof { base } => {
-                self.apply_typeof_instantiation_args(base, &type_args)
+                CarrierFinish::Node(self.apply_typeof_instantiation_args(base, &type_args))
             }
         }
     }

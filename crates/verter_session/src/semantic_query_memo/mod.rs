@@ -79,11 +79,14 @@ mod unresolved_reach;
 
 pub(crate) use arena::UNALLOCATABLE_ID_FLOOR;
 pub(crate) use inflight::InlineMemberFlight;
-pub(crate) use producer::{Acquired, ReadCapture};
+pub(crate) use producer::{
+    Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
+};
 pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
+pub(crate) use tasks::ExecutionTask;
 
 mod producer;
 mod stats;
@@ -189,7 +192,7 @@ fn narrow_cache_read(
     }
 }
 
-fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
+pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
     crate::request_context::mark_request_result_cancelled();
     CacheRead {
         value: QueryResult::Error(QueryError::Cancelled),
@@ -1857,7 +1860,7 @@ impl SemanticGraphStore {
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_value_impl(&family, slot, &requested, ctx, None, true)
+        self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
             .map(narrow_cache_read)
     }
 
@@ -1870,16 +1873,16 @@ impl SemanticGraphStore {
         &self,
         prepared: &PreparedKeyHandle,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        operand_evidence: Option<
-            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
-        >,
+        capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        let (operand_evidence, deferred_carrier) = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
             prepared.requested_point(),
             ctx,
             operand_evidence,
+            deferred_carrier,
             true,
         )
     }
@@ -1905,6 +1908,7 @@ impl SemanticGraphStore {
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
+        deferred_carrier: Option<&mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
@@ -1946,7 +1950,10 @@ impl SemanticGraphStore {
                     &entry.dispatch_dep_signature,
                 );
             }
-            entry.read_set_signature.bubble(ctx);
+            match deferred_carrier {
+                Some(slot) => *slot = Some(entry.read_set_signature.clone()),
+                None => entry.read_set_signature.bubble(ctx),
+            }
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
                 value: entry.result,
@@ -2035,10 +2042,9 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
-        operand_evidence: Option<
-            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
-        >,
+        capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        let (operand_evidence, deferred_carrier) = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
         let slot = prepared.slot();
@@ -2088,8 +2094,12 @@ impl SemanticGraphStore {
 
         // R3/R26/R28 - bubble the entry path-precise fact observation
         // set into any outer cold-compute scope so transitive memo
-        // hits do not lose the contributing fact identities.
-        entry.read_set_signature.bubble_via_tls();
+        // hits do not lose the contributing fact identities — or hand it
+        // to the consumer that replays it when it resumes.
+        match deferred_carrier {
+            Some(slot) => *slot = Some(entry.read_set_signature.clone()),
+            None => entry.read_set_signature.bubble_via_tls(),
+        }
         let hit = CacheRead {
             value: entry.result,
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),

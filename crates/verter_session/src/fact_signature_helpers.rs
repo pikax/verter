@@ -104,12 +104,22 @@ pub(crate) fn install_fact_tracer<F, R>(
 where
     F: FnOnce() -> R,
 {
+    #[cfg(test)]
     let host = source.host();
-    let (value, mut read_set) = source.with_fact_tracer(|| {
+    let (value, read_set) = source.with_fact_tracer(|| {
         #[cfg(test)]
         force_tracer_overflow_observations(host, None);
         f()
     });
+    (value, finalise_compute_scope(source, read_set))
+}
+
+/// Finalise the read set of one compute's tracer scope: re-check its basis,
+/// finalise it, and report an overflow.
+fn finalise_compute_scope(
+    source: &FactTracerBasisSource<'_>,
+    mut read_set: crate::resolver_core::FactReadSet,
+) -> FactReadSetFinalise {
     note_basis_recheck(source, &mut read_set);
     let finalise = read_set.finalise();
     // The overflow audit event + host counter are emitted HERE and ONLY here —
@@ -125,10 +135,52 @@ where
                 cap: FACT_SIGNATURE_CAP as u32,
             },
         );
-        host.signature_overflow_at_install
+        source
+            .host()
+            .signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    (value, finalise)
+    finalise
+}
+
+/// The fact tracer of one compute that runs in steps (a continuation
+/// frame's build): installed on the thread only while one of its steps
+/// runs, and finalised once, as [`install_fact_tracer`] finalises its
+/// scope, when the compute completes.
+pub(crate) struct StepwiseFactTracer<'h> {
+    source: FactTracerBasisSource<'h>,
+    tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
+    #[cfg(test)]
+    forced: bool,
+}
+
+impl<'h> StepwiseFactTracer<'h> {
+    pub(crate) fn new(source: FactTracerBasisSource<'h>) -> Self {
+        let tracer = source.host().owned_fact_tracer(source.seed);
+        Self {
+            source,
+            tracer,
+            #[cfg(test)]
+            forced: false,
+        }
+    }
+
+    /// Install the tracer for one step; the scope uninstalls it.
+    pub(crate) fn install(
+        &mut self,
+    ) -> crate::resolver_core::resolver_context::OwnedTracerScope<'_> {
+        let scope = self.tracer.install();
+        #[cfg(test)]
+        if !std::mem::replace(&mut self.forced, true) {
+            force_tracer_overflow_observations(self.source.host(), None);
+        }
+        scope
+    }
+
+    /// The compute completed: finalise what it observed.
+    pub(crate) fn finish(self) -> FactReadSetFinalise {
+        finalise_compute_scope(&self.source, self.tracer.into_read_set())
+    }
 }
 
 /// Everything a fact-tracer scope needs to compose its compaction basis,
