@@ -805,6 +805,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         negative: bool,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -874,6 +875,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub fn mixed_binding_scc_discharge_for_tests(
         &self,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -924,6 +926,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// exposes the consumed binding snapshot and the real stability gate.
     #[cfg(test)]
     pub fn binding_scc_substitution_edge_for_tests(&self) -> (Arc<[InferBinding]>, bool) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
@@ -5093,6 +5096,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> RelationResult {
         let mut any_unknown = false;
         for (source, target) in alternatives {
+            // Each alternative is relation work of its own, whether or not
+            // it enters a worklist.
+            if !self.charge_relation_work(1) {
+                return RelationResult::Unknown;
+            }
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
             let result = if excess_prepass_completed {
@@ -6361,10 +6369,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn relation_budget_limit(&self) -> u64 {
-        (self.graph().node_count() as u64)
-            .saturating_mul(10)
-            .max(4096)
+    /// Charge `units` of relation work to the connected-work ledger, the
+    /// one operational envelope every evaluation shares. The checker has no
+    /// work allowance of its own below its relation-complexity limit, so a
+    /// refusal is resource incompleteness, never a verdict: it poisons the
+    /// frame with the typed cap the budget outcome reports and the caller
+    /// answers `Unknown`.
+    fn charge_relation_work(&self, units: u64) -> bool {
+        let units = usize::try_from(units).unwrap_or(usize::MAX);
+        if self.connected_demand.charge_units(units).is_ok() {
+            return true;
+        }
+        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+        false
     }
 
     fn note_relation_budget_exceeded(&self, budget_limit: u64) {
@@ -6447,16 +6464,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Pair descent, union alternatives, and member enumeration share one
         // iterative envelope; descendants never open a fresh relation budget.
         let graph = self.graph();
-        let budget_limit = if self
+        let forced_exhaustion = self
             .ctx
             .host_for_fact_tracer_install()
             .relation_knobs
             .force_budget_exhaustion
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.relation_budget_limit()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let charge = |units: u64| {
+            if forced_exhaustion {
+                self.note_relation_budget_exceeded(0);
+                return false;
+            }
+            self.charge_relation_work(units)
         };
         // The pair is canonicalized (lesser node first) once, before any
         // descent: comparability is answer-symmetric, so the frame-local
@@ -6502,7 +6521,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // forced-exhaustion knob bypasses the fast path entirely so a
         // tripped budget is still reported as the TYPED cap outcome, never
         // silently decided.
-        if budget_limit > 0 {
+        if !forced_exhaustion {
             // bounded-loop: at most one nominal widen retry — O(1) graph reads, no allocation.
             for _ in 0..2 {
                 if let Some(leaf) =
@@ -6543,7 +6562,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        let mut budget_used = 0u64;
         let mut work = vec![Work::Eval(source, target)];
         let mut results = Vec::new();
         let mut active = FxHashSet::default();
@@ -6578,9 +6596,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(result);
                 }
                 Work::Eval(source, target) => {
-                    budget_used = budget_used.saturating_add(1);
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    if !charge(1) {
                         return RelationResult::Unknown;
                     }
                     let source = match self.unwrap_identity_carrier_for_relation(source) {
@@ -6812,13 +6828,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                         self.intern_normalized_union_or_intersection(&[value, undefined], true)
                     };
-                    budget_used = budget_used.saturating_add(
+                    if !charge(
                         (source_view.positive_members().len() as u64)
                             .saturating_mul(target_width)
                             .saturating_mul(2),
-                    );
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    ) {
                         return RelationResult::Unknown;
                     }
                     work.push(
@@ -6829,17 +6843,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         },
                     );
                     for source_member in source_view.positive_members() {
-                        budget_used = budget_used.saturating_add(1);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(1) {
                             return RelationResult::Unknown;
                         }
                         let Some(member_key) = source_member.key.cloned_known() else {
                             continue;
                         };
-                        budget_used = budget_used.saturating_add(target_width);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(target_width) {
                             return RelationResult::Unknown;
                         }
                         let crate::semantic_query::SurfaceKeyProjection::Exact(target_member) =
@@ -8416,12 +8426,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The iterative structural worklist driver. Consumes a worklist of
     /// pairs and reducers, combining the final [`RelationResult`].
     ///
-    /// **Termination budget.** The driver caps total work at
-    /// `10 × graph.node_count()` with a minimum floor of 4096 entries.
-    /// Exceeding the budget poisons the frame with the typed
-    /// [`RecursionOrBudgetCap`] (the public `BudgetExceeded` outcome) and
-    /// yields `Unknown` — the SCC gate routes the whole component through
-    /// ReturnOnly.
+    /// **Termination.** Every worklist step is charged to the
+    /// connected-work ledger ([`Self::charge_relation_work`]). A refusal
+    /// poisons the frame with the typed [`RecursionOrBudgetCap`] (the public
+    /// `BudgetExceeded` outcome) and yields `Unknown` — the SCC gate routes
+    /// the whole component through ReturnOnly.
     pub(super) fn decide_relation(
         &self,
         source: SemanticNodeId,
@@ -8464,16 +8473,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return assignable(bindings);
         }
-        let budget_limit = self.relation_budget_limit();
-        let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
+        let mut complexity = crate::semantic_query::checker_policy::RelationComplexity::default();
         work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
-            budget_used = budget_used.saturating_add(1);
-            if budget_used > budget_limit {
-                self.note_relation_budget_exceeded(budget_limit);
+            if !self.charge_relation_work(1) {
                 return RelationResult::Unknown;
+            }
+            // Each pair the worklist expands is a structured comparison the
+            // checker records; past its allowance the relation is false
+            // (TS2859). The connected-work ledger charged above is the
+            // operational envelope, and under its production allowance it
+            // refuses first.
+            if matches!(item, RelateWork::Expand(..)) && complexity.record().is_err() {
+                return RelationResult::NotAssignable;
             }
             match item {
                 RelateWork::Expand(s, t, intersection_target_arm) => {

@@ -199,3 +199,36 @@ fn the_limit_answers_the_same_cold_warm_and_reordered() {
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A union absorbs the string literals a template literal type in it
+/// already matches (`removeStringLiteralsMatchedByTemplateLiterals`), so
+/// `A = "a0" | … | "a399" | `a${number}`` is the one constituent
+/// `` `a${number}` `` and `` `${A}-${B}` `` over 250 `B` literals is 250
+/// concatenations; without the pattern the same span is 400 × 250, the
+/// checker's limit.
+///
+/// Measured: `A` is `` `a${number}` ``, `` IsAny<`${A}-${B}`> `` is
+/// `"not-any"`, `` "x" extends `${A}-${B}` ? 1 : 2 `` is `2`, and `` "x"
+/// extends `${A2}-${B}` ? 1 : 2 `` is `any` under TS2590.
+#[test]
+#[ignore = "a union keeps the string literals a template literal type in it matches, so a span over-counts its constituents"]
+fn a_union_absorbs_the_literals_its_template_matches() {
+    let source = format!(
+        "{IS_ANY}type A = {} | `a${{number}}`;\n{}{}",
+        (0..400)
+            .map(|i| format!("\"a{i}\""))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        string_union("A2", "a", 400),
+        string_union("B", "b", 250),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<`${A}-${B}`>", "\"not-any\""),
+            ("\"x\" extends `${A}-${B}` ? 1 : 2", "2"),
+            ("\"x\" extends `${A2}-${B}` ? 1 : 2", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
