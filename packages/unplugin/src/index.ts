@@ -252,7 +252,22 @@ async function resolveUpsertDependencies(
   );
   if (dependencySpecifiers.length > 0) {
     const path = await import("path");
-    const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
+    const exts = [
+      "",
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      ".mts",
+      ".mjs",
+      ".d.ts",
+      ".d.mts",
+      ".d.cts",
+      "/index.ts",
+      "/index.d.ts",
+      "/index.d.mts",
+      "/index.d.cts",
+    ];
     for (const specifier of dependencySpecifiers) {
       let bundlerFailure: BundlerResolution["failure"] = null;
       // Try bundler resolve hook first (if available)

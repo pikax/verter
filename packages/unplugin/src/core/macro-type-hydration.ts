@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from "fs";
 import { createRequire } from "module";
 import type { VerterHost, HostDependencyResolution, Workspace } from "@verter/native";
 import { resolveThroughBundler, type BundlerResolution, type ResolveHook } from "./bundler-resolve";
+import { exportsDeclarationTargets } from "./package-exports";
 
 /**
  * Minimal file access interface used by this module.
@@ -181,12 +182,31 @@ function findPackageSubpathDeclaration(
   }
   if (!pkgDir) return null;
 
+  // A sub-path the package's `exports` map declares resolves only through it.
+  let manifest: { exports?: unknown } | null = null;
+  try {
+    manifest = JSON.parse(fa.readFile(normalizePath(join(pkgDir, "package.json"))) ?? "null");
+  } catch {
+    manifest = null;
+  }
+  const exported = exportsDeclarationTargets(manifest?.exports, "./" + subPath);
+  if (exported !== null) {
+    for (const target of exported) {
+      const candidate = normalizePath(join(pkgDir, target));
+      if (fa.fileExists(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  // Otherwise probe the literal package layout.
   const absBase = join(pkgDir, subPath);
   const candidates = [
     absBase + ".d.ts",
     absBase + ".d.mts",
+    absBase + ".d.cts",
     absBase + "/index.d.ts",
     absBase + "/index.d.mts",
+    absBase + "/index.d.cts",
     absBase + ".ts",
     absBase,
   ];
@@ -372,10 +392,14 @@ async function resolveTypeImportPath(
   const absBase = resolve(dirname(importer), source);
   const candidates = [
     absBase + ".d.ts",
+    absBase + ".d.mts",
+    absBase + ".d.cts",
     absBase + ".ts",
     absBase + ".tsx",
     absBase + ".vue",
     absBase + "/index.d.ts",
+    absBase + "/index.d.mts",
+    absBase + "/index.d.cts",
     absBase + "/index.ts",
     absBase + "/index.vue",
     absBase,
@@ -663,9 +687,13 @@ export async function hydrateMacroTypeDeps(
       const probeCandidates = [
         absBase + ".ts",
         absBase + ".d.ts",
+        absBase + ".d.mts",
+        absBase + ".d.cts",
         absBase + ".tsx",
         absBase + "/index.ts",
         absBase + "/index.d.ts",
+        absBase + "/index.d.mts",
+        absBase + "/index.d.cts",
         absBase, // exact path
       ];
       let found = false;
