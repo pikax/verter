@@ -84,7 +84,7 @@ fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
         | QueryError::UnrepresentableSurfaceMember
         | QueryError::UnmodeledPosition
         | QueryError::OpenSurface
-        | QueryError::CheckerRecovery(_) => false,
+        | QueryError::CheckerRecovery { .. } => false,
     }
 }
 
