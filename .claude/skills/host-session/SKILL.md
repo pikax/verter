@@ -139,7 +139,9 @@ missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
-before receiving them. Request answers are fenced again at settlement.
+before receiving them. A discovery load shadowed by an editor open returns
+`ShadowedMutation` without an applied receipt because no provider write occurred.
+Request answers are fenced again at settlement.
 
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 

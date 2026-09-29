@@ -148,6 +148,27 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
         .unwrap();
     assert_eq!(engine.calls().len(), 1);
 
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "stale background".into(),
+                    kind: OverlayFileKind::Load,
+                    priority: OverlayPriority::Background,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::ShadowedMutation)
+    ));
+    assert_eq!(
+        engine.calls().len(),
+        1,
+        "shadowed writes have no applied receipt"
+    );
+
     harness.crash_current_generation();
     harness.spawn_gate.add_permits(1);
     harness.notifier.await_started(2).await;

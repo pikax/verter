@@ -87,6 +87,8 @@ pub enum AdmissionRefusal {
     IncompleteGeneratedProof,
     GeneratedUnitExcluded,
     ProviderWriteFailed,
+    /// A higher-authority live overlay suppressed this mutation before forwarding.
+    ShadowedMutation,
     DeadlineElapsed,
 }
 

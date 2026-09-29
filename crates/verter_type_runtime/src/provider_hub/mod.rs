@@ -1042,9 +1042,7 @@ async fn run_actor<P>(
                                 .expect("admission checked serving provider");
                             let disposition = desired.disposition(&mutation);
                             if disposition == Disposition::Shadowed {
-                                Ok(AppliedReceipt {
-                                    epoch: Some(serving.epoch),
-                                })
+                                Err(AdmissionRefusal::ShadowedMutation)
                             } else {
                                 let forwarding = async {
                                     let forwarded = desired::forward(
