@@ -208,6 +208,7 @@ mod flow_completion_inventory_tests;
 pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;
+pub(crate) mod graph_walk;
 mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering

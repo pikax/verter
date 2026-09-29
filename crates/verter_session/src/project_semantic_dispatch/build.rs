@@ -3930,7 +3930,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => return None,
                 };
                 let settled = self.resolve_signature_source_carrier(instance, context);
-                self.is_valid_base_type(settled, 0).then_some(instance)
+                self.is_valid_base_type(settled).then_some(instance)
             });
         Some(ClassValueBase {
             constructor_type,
@@ -3941,45 +3941,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// TypeScript's `isValidBaseType` over a settled node: an object type
     /// (an object surface, array, tuple, signature, class or interface
-    /// instance), `object`, `any`, or an intersection of those. A union or
-    /// a primitive is not a base type.
-    fn is_valid_base_type(&self, node: SemanticNodeId, depth: usize) -> bool {
-        const MAX_NESTING: usize = 8;
-        if depth > MAX_NESTING {
-            return false;
-        }
-        let Some(data) = self.graph().node_data(node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Object(_)
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::Signature { .. }
-            | SemanticNodeData::ClassExpressionInstance { .. }
-            | SemanticNodeData::MergedDecl { .. }
-            | SemanticNodeData::Primitive(PrimitiveKind::Object | PrimitiveKind::Any) => true,
-            SemanticNodeData::DeclRef { identity }
-            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
-                self.prepared_decl_kind(identity),
-                Some(
-                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
-                )
-            ),
-            SemanticNodeData::Intersection(arms) => {
-                let arms = arms.members_arc();
-                drop(data);
-                arms.iter().all(|arm| {
-                    let settled = self.resolve_signature_source_carrier(
-                        *arm,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                    );
-                    self.is_valid_base_type(settled, depth + 1)
-                })
+    /// instance), `object`, `any`, or an intersection of those, each arm
+    /// settled through its carriers, at any nesting. A union or a primitive
+    /// is not a base type, and neither is an intersection that contains
+    /// itself.
+    /// [`Self::is_valid_base_type`], for the tests beside this module.
+    #[cfg(test)]
+    pub(super) fn is_valid_base_type_for_tests(&self, node: SemanticNodeId) -> bool {
+        self.is_valid_base_type(node)
+    }
+
+    fn is_valid_base_type(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        // The nodes already settled: the start, and each arm's settlement.
+        let mut settled: FxHashSet<SemanticNodeId> = FxHashSet::from_iter([node]);
+        crate::graph_walk::classify(node, |node| {
+            if settled.insert(node) {
+                let resolved = self.resolve_signature_source_carrier(
+                    node,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                );
+                if resolved != node {
+                    settled.insert(resolved);
+                    return Verdict::As(resolved);
+                }
             }
-            _ => false,
-        }
+            let Some(data) = self.graph().node_data(node) else {
+                return Verdict::Leaf(Some(false));
+            };
+            Verdict::Leaf(Some(match data.as_ref() {
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. }
+                | SemanticNodeData::MergedDecl { .. }
+                | SemanticNodeData::Primitive(PrimitiveKind::Object | PrimitiveKind::Any) => true,
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                    self.prepared_decl_kind(identity),
+                    Some(
+                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                    )
+                ),
+                SemanticNodeData::Intersection(arms) => {
+                    return Verdict::All(arms.members_arc().to_vec());
+                }
+                _ => false,
+            }))
+        })
+        .unwrap_or(false)
     }
 
     /// The static-side contribution of a class value base: the base
@@ -10152,7 +10164,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         readonly: bool,
     ) -> NormalizedTupleShape {
         let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
-        self.splice_tuple_elements(elements, &mut out, 0);
+        self.splice_tuple_elements(elements, &mut out);
         // Non-trailing optional reconciliation (reverse scan: a slot's
         // conversion depends only on LATER elements; a converted slot is
         // itself required and forces conversion of earlier optionals).
@@ -10202,58 +10214,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
         NormalizedTupleShape::Tuple(out)
     }
 
-    /// Recursive splice body for [`Self::normalize_tuple_spread`].
+    /// The splice body of [`Self::normalize_tuple_spread`]: every rest
+    /// element whose value settles on a tuple is replaced by that tuple's
+    /// elements, spliced in turn, so `[...[...[1, 2]]]` is `[1, 2]` at any
+    /// nesting. The tuples being spliced are read from a work list; a tuple
+    /// spread into itself (a cycle) keeps its rest element as it is.
     fn splice_tuple_elements(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         out: &mut Vec<crate::semantic_query::TupleElement>,
-        depth: u32,
     ) {
-        /// Nested `[...[...T]]` splice ceiling — real-world nesting is
-        /// 1–2 levels; the bound is a runaway fuse.
-        const SPLICE_DEPTH_BUDGET: u32 = 8;
-        for element in elements {
-            if element.rest && depth < SPLICE_DEPTH_BUDGET {
-                let inner_tuple = self.settled_node_through_aliases(element.value, |data| {
-                    matches!(data, SemanticNodeData::Tuple { .. })
-                });
-                if let Some(tuple_node) = inner_tuple {
-                    if let Some(SemanticNodeData::Tuple {
-                        elements: inner, ..
-                    }) = self.graph().node_data(tuple_node).as_deref()
-                    {
-                        let inner = Arc::clone(inner);
-                        self.splice_tuple_elements(&inner, out, depth + 1);
-                        continue;
-                    }
+        // Each level: the elements it splices, the next one, and the tuple
+        // it came from (none for the outermost).
+        let mut levels: Vec<(
+            Arc<[crate::semantic_query::TupleElement]>,
+            usize,
+            Option<SemanticNodeId>,
+        )> = vec![(Arc::from(elements), 0, None)];
+        let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        while let Some((elements, next, _)) = levels.last_mut() {
+            let Some(element) = elements.get(*next).cloned() else {
+                if let Some((_, _, Some(tuple))) = levels.pop() {
+                    splicing.remove(&tuple);
+                }
+                continue;
+            };
+            *next += 1;
+            if element.rest {
+                let inner = self
+                    .settled_node_through_aliases(element.value, |data| {
+                        matches!(data, SemanticNodeData::Tuple { .. })
+                    })
+                    .filter(|tuple| !splicing.contains(tuple))
+                    .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
+                        Some(SemanticNodeData::Tuple {
+                            elements: inner, ..
+                        }) => Some((tuple, Arc::clone(inner))),
+                        _ => None,
+                    });
+                if let Some((tuple, inner)) = inner {
+                    splicing.insert(tuple);
+                    levels.push((inner, 0, Some(tuple)));
+                    continue;
                 }
             }
-            out.push(element.clone());
+            out.push(element);
         }
     }
 
-    /// Unwrap transparent `Alias` hops (bounded) and return the settled
-    /// node iff its data matches `predicate`. `None` for open /
-    /// unresolved carriers — callers preserve those verbatim.
+    /// Follow `node`'s transparent `Alias` redirects, however long the
+    /// chain, and return the settled node iff its data matches `predicate`.
+    /// `None` for open / unresolved carriers and for an alias cycle —
+    /// callers preserve those verbatim.
     fn settled_node_through_aliases(
         &self,
         node: SemanticNodeId,
         predicate: impl Fn(&SemanticNodeData) -> bool,
     ) -> Option<SemanticNodeId> {
-        let mut current = node;
-        // bounded-loop: at most 8 transparent Alias hops.
-        for _ in 0..8 {
-            let data = self.graph().node_data(current)?;
-            match &*data {
-                SemanticNodeData::Alias(target) => {
-                    let next = *target;
-                    drop(data);
-                    current = next;
-                }
-                other => return predicate(other).then_some(current),
-            }
+        let graph = self.graph();
+        match graph.alias_chain_end(node, |_| {}) {
+            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
+                .node_data(settled)
+                .is_some_and(|data| predicate(&data))
+                .then_some(settled),
+            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
+            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
         }
-        None
     }
 
     /// Build a tuple node whose elements are the function's parameter
@@ -10405,7 +10431,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => {}
         }
-        let keys = self.finite_index_keys(resolved, 0)?;
+        let keys = self.finite_index_keys(resolved)?;
         if keys.is_empty() {
             return None;
         }
@@ -10497,125 +10523,233 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   resolves first) is those keys — `Box[keyof Box]` reads every
     ///   property;
     /// - an intersection is the keys common to every arm, in the first
-    ///   arm's order — `'opt' & keyof Box` is `'opt'`.
+    ///   arm's order — `'opt' & keyof Box` is `'opt'`;
+    /// - a named key type (`type K = keyof Box`) is the keys its declaration
+    ///   resolves to.
+    ///
+    /// Composites nest to any depth: they are read from a work list, and a
+    /// key type that contains itself is not finite.
+    /// [`Self::finite_index_keys`], for the tests beside this module.
+    #[cfg(test)]
+    pub(super) fn finite_index_keys_for_tests(
+        &self,
+        index: SemanticNodeId,
+    ) -> Option<Vec<crate::semantic_query::IndexKey>> {
+        self.finite_index_keys(index)
+    }
+
     fn finite_index_keys(
         &self,
         index: SemanticNodeId,
-        depth: usize,
     ) -> Option<Vec<crate::semantic_query::IndexKey>> {
         use crate::semantic_query::IndexKey;
-        const MAX_INDEX_NESTING: usize = 8;
-        if depth > MAX_INDEX_NESTING {
-            return None;
+        /// A key type waiting on its parts' keys.
+        enum Pending {
+            /// A union: every member's keys, first occurrence first — the
+            /// keys kept so far deduplicated through a set, since a scan of
+            /// them made a long key union quadratic.
+            Union {
+                node: SemanticNodeId,
+                members: Arc<[SemanticNodeId]>,
+                next: usize,
+                keys: Vec<IndexKey>,
+                seen: FxHashSet<IndexKey>,
+            },
+            /// An intersection: the keys common to every member, in the
+            /// first member's order.
+            Intersection {
+                node: SemanticNodeId,
+                members: Arc<[SemanticNodeId]>,
+                next: usize,
+                common: Option<Vec<IndexKey>>,
+            },
+            /// A named key type: its declaration's keys.
+            Named { node: SemanticNodeId },
         }
-        let data = self.graph().node_data(index)?;
-        match data.as_ref() {
-            SemanticNodeData::Union(members) => {
-                let members = members.members_arc();
-                drop(data);
-                // First occurrence order, deduplicated through a set: a
-                // scan of the keys kept so far made a long key union
-                // quadratic.
-                let mut keys = Vec::with_capacity(members.len());
-                let mut seen: FxHashSet<IndexKey> = FxHashSet::default();
-                for member in members.iter() {
-                    for key in self.finite_index_keys(*member, depth + 1)? {
-                        if first_index_key(&mut seen, &key) {
-                            keys.push(key);
-                        }
-                    }
-                }
-                Some(keys)
-            }
-            SemanticNodeData::Intersection(members) => {
-                let members = members.members_arc();
-                drop(data);
-                let mut common: Option<Vec<IndexKey>> = None;
-                for member in members.iter() {
-                    let keys = self.finite_index_keys(*member, depth + 1)?;
-                    common = Some(match common {
-                        None => keys,
-                        Some(common) => {
-                            let mut present: FxHashSet<IndexKey> = FxHashSet::default();
-                            for key in &keys {
-                                first_index_key(&mut present, key);
-                            }
-                            common
-                                .into_iter()
-                                .filter(|key| index_key_present(&present, key))
-                                .collect()
-                        }
-                    });
-                }
-                common
-            }
-            SemanticNodeData::KeyOf { base } => {
-                let base = *base;
-                drop(data);
-                let settled = self.resolve_signature_source_carrier(
-                    base,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Expanded,
-                    ),
-                );
-                let names = self.key_names_from_base_node(settled)?;
-                Some(
-                    names
-                        .into_iter()
-                        .map(|name| match name {
-                            crate::semantic_query::PropertyKey::String(text) => {
-                                IndexKey::String(text)
-                            }
-                            crate::semantic_query::PropertyKey::Number(number) => {
-                                IndexKey::Number(number)
-                            }
-                            crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
-                                IndexKey::UniqueSymbol(identity)
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            SemanticNodeData::Literal(_) => {
-                drop(data);
-                Some(vec![match self.normalized_index_key_node(index) {
-                    key @ (IndexKey::String(_)
-                    | IndexKey::Number(_)
-                    | IndexKey::UniqueSymbol(_)) => key,
-                    IndexKey::Computed(resolved) => {
-                        match self.graph().node_data(resolved).as_deref() {
-                            Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
-                                IndexKey::Computed(resolved)
-                            }
-                            _ => return None,
-                        }
-                    }
-                }])
-            }
-            // A named key type (`type K = keyof Box`) is the keys its
-            // declaration resolves to.
-            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
-                drop(data);
-                let context = crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                );
-                let settled = self.resolve_signature_source_carrier(index, context);
-                if settled == index {
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut open: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut visit = Some(index);
+        loop {
+            // The keys of the node visited, when it has no parts.
+            let mut keys: Option<Vec<IndexKey>> = None;
+            // The set `keys` are deduplicated through, when a union handed
+            // them up: a union whose first member is a union adopts both,
+            // so a nest of unions hashes each key once, not once per level.
+            let mut keys_seen: Option<FxHashSet<IndexKey>> = None;
+            if let Some(node) = visit.take() {
+                if open.contains(&node) {
                     return None;
                 }
-                let settled = self
-                    .evaluate_deferred_semantic_node_with_context(settled, context)
-                    .into_active_query_build_node(self);
-                self.finite_index_keys(settled, depth + 1)
-            }
-            _ => {
-                drop(data);
-                match self.normalized_index_key_node(index) {
-                    key @ (IndexKey::String(_)
-                    | IndexKey::Number(_)
-                    | IndexKey::UniqueSymbol(_)) => Some(vec![key]),
-                    IndexKey::Computed(_) => None,
+                let data = self.graph().node_data(node)?;
+                match data.as_ref() {
+                    SemanticNodeData::Union(members) => {
+                        let members = members.members_arc();
+                        drop(data);
+                        open.insert(node);
+                        pending.push(Pending::Union {
+                            node,
+                            keys: Vec::with_capacity(members.len()),
+                            members,
+                            next: 0,
+                            seen: FxHashSet::default(),
+                        });
+                    }
+                    SemanticNodeData::Intersection(members) => {
+                        let members = members.members_arc();
+                        drop(data);
+                        open.insert(node);
+                        pending.push(Pending::Intersection {
+                            node,
+                            members,
+                            next: 0,
+                            common: None,
+                        });
+                    }
+                    SemanticNodeData::KeyOf { base } => {
+                        let base = *base;
+                        drop(data);
+                        let settled = self.resolve_signature_source_carrier(
+                            base,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Expanded,
+                            ),
+                        );
+                        let names = self.key_names_from_base_node(settled)?;
+                        keys = Some(
+                            names
+                                .into_iter()
+                                .map(|name| match name {
+                                    crate::semantic_query::PropertyKey::String(text) => {
+                                        IndexKey::String(text)
+                                    }
+                                    crate::semantic_query::PropertyKey::Number(number) => {
+                                        IndexKey::Number(number)
+                                    }
+                                    crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
+                                        IndexKey::UniqueSymbol(identity)
+                                    }
+                                })
+                                .collect(),
+                        );
+                    }
+                    SemanticNodeData::Literal(_) => {
+                        drop(data);
+                        keys = Some(vec![match self.normalized_index_key_node(node) {
+                            key @ (IndexKey::String(_)
+                            | IndexKey::Number(_)
+                            | IndexKey::UniqueSymbol(_)) => key,
+                            IndexKey::Computed(resolved) => {
+                                match self.graph().node_data(resolved).as_deref() {
+                                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
+                                        IndexKey::Computed(resolved)
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                        }]);
+                    }
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. } => {
+                        drop(data);
+                        let context = crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Expanded,
+                        );
+                        let settled = self.resolve_signature_source_carrier(node, context);
+                        if settled == node {
+                            return None;
+                        }
+                        let settled = self
+                            .evaluate_deferred_semantic_node_with_context(settled, context)
+                            .into_active_query_build_node(self);
+                        open.insert(node);
+                        pending.push(Pending::Named { node });
+                        visit = Some(settled);
+                        continue;
+                    }
+                    _ => {
+                        drop(data);
+                        keys = Some(match self.normalized_index_key_node(node) {
+                            key @ (IndexKey::String(_)
+                            | IndexKey::Number(_)
+                            | IndexKey::UniqueSymbol(_)) => vec![key],
+                            IndexKey::Computed(_) => return None,
+                        });
+                    }
                 }
+            }
+            // Deliver `keys` to the innermost waiting key type, closing each
+            // one its parts complete.
+            loop {
+                let Some(top) = pending.last_mut() else {
+                    return keys;
+                };
+                match top {
+                    Pending::Union {
+                        members,
+                        next,
+                        keys: collected,
+                        seen,
+                        ..
+                    } => {
+                        match (keys.take(), keys_seen.take()) {
+                            (Some(delivered), Some(delivered_seen)) if collected.is_empty() => {
+                                *collected = delivered;
+                                *seen = delivered_seen;
+                            }
+                            (delivered, _) => {
+                                for key in delivered.into_iter().flatten() {
+                                    if first_index_key(seen, &key) {
+                                        collected.push(key);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(member) = members.get(*next) {
+                            *next += 1;
+                            visit = Some(*member);
+                            break;
+                        }
+                        keys = Some(std::mem::take(collected));
+                        keys_seen = Some(std::mem::take(seen));
+                    }
+                    Pending::Intersection {
+                        members,
+                        next,
+                        common,
+                        ..
+                    } => {
+                        keys_seen = None;
+                        if let Some(delivered) = keys.take() {
+                            *common = Some(match common.take() {
+                                None => delivered,
+                                Some(common) => {
+                                    let mut present: FxHashSet<IndexKey> = FxHashSet::default();
+                                    for key in &delivered {
+                                        first_index_key(&mut present, key);
+                                    }
+                                    common
+                                        .into_iter()
+                                        .filter(|key| index_key_present(&present, key))
+                                        .collect()
+                                }
+                            });
+                        }
+                        if let Some(member) = members.get(*next) {
+                            *next += 1;
+                            visit = Some(*member);
+                            break;
+                        }
+                        // An intersection of no members has no key set.
+                        keys = Some(common.take()?);
+                    }
+                    Pending::Named { .. } => {}
+                }
+                let closed = match pending.pop().expect("the waiting key type") {
+                    Pending::Union { node, .. }
+                    | Pending::Intersection { node, .. }
+                    | Pending::Named { node } => node,
+                };
+                open.remove(&closed);
             }
         }
     }

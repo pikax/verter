@@ -1693,7 +1693,7 @@ pub(super) fn distribute_over_unions(
     });
     if origin == DistributionOrigin::KeepWrittenIntersection
         && keeps_intersection
-        && constituent_count(graph, &constituents, 0) > constituent_count(graph, arms, 0)
+        && constituent_count(graph, &constituents) > constituent_count(graph, arms)
     {
         return None;
     }
@@ -1704,23 +1704,50 @@ pub(super) fn distribute_over_unions(
 }
 
 /// The checker's constituent count of a type list: a union or an
-/// intersection counts its constituents, anything else counts one.
-fn constituent_count(graph: &SemanticGraphStore, nodes: &[SemanticNodeId], depth: usize) -> usize {
-    const MAX_NESTING: usize = 8;
-    nodes
-        .iter()
-        .map(|node| match graph.node_data(*node).as_deref() {
-            Some(SemanticNodeData::Union(members)) if depth < MAX_NESTING => {
-                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
-                constituent_count(graph, &members, depth + 1)
-            }
-            Some(SemanticNodeData::Intersection(members)) if depth < MAX_NESTING => {
-                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
-                constituent_count(graph, &members, depth + 1)
-            }
-            _ => 1,
-        })
-        .sum()
+/// intersection counts its constituents, at any nesting, anything else
+/// counts one. The composites are read from a work list; a composite that
+/// contains itself counts one where it recurs.
+/// [`constituent_count`], for the tests beside this module.
+#[cfg(test)]
+pub(super) fn constituent_count_for_tests(
+    graph: &SemanticGraphStore,
+    nodes: &[SemanticNodeId],
+) -> usize {
+    constituent_count(graph, nodes)
+}
+
+fn constituent_count(graph: &SemanticGraphStore, nodes: &[SemanticNodeId]) -> usize {
+    // Each entry: a node to count, or (`true`) a composite whose members
+    // are all counted.
+    let mut pending: Vec<(SemanticNodeId, bool)> =
+        nodes.iter().rev().map(|node| (*node, false)).collect();
+    let mut open: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    let mut count = 0;
+    while let Some((node, closed)) = pending.pop() {
+        if closed {
+            open.remove(&node);
+            continue;
+        }
+        let members =
+            match graph.node_data(node).as_deref() {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) if !open.contains(&node) => composite
+                    .composite_members()
+                    .expect("a composite's members")
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                _ => {
+                    count += 1;
+                    continue;
+                }
+            };
+        open.insert(node);
+        pending.push((node, true));
+        pending.extend(members.into_iter().rev().map(|member| (member, false)));
+    }
+    count
 }
 
 /// Iterative recursive same-kind flattening. Preserves source order; records

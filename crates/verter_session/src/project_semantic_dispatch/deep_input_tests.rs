@@ -1363,3 +1363,97 @@ fn alias_chains_20_long_keep_a_top_level_deposit() {
         Vec::<String>::new()
     );
 }
+
+/// `{name}0 = {base}`, then `{name}{n} = {name}{n - 1}` up to `length`.
+fn named_chain(name: &str, length: usize, base: &str) -> String {
+    let mut source = format!("type {name}0 = {base};\n");
+    for level in 1..=length {
+        source.push_str(&format!("type {name}{level} = {name}{};\n", level - 1));
+    }
+    source
+}
+
+/// A target signature whose result names `void` through a chain of twelve
+/// aliases accepts any source result: `(() => number) extends (() => V12)`
+/// is `1` (TypeScript 7.0.2, all four settings). The chain is followed to
+/// its end, however long.
+#[test]
+fn a_void_result_through_a_12_alias_chain_accepts_any_result() {
+    let source = named_chain("V", 12, "void");
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(
+            source,
+            &[("(() => number) extends (() => V12) ? 1 : 2", "1")]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// A rest element names its array through a declaration and through a
+/// chain of twelve aliases: `[string, 1, 2]` is assignable to
+/// `[string, ...R]` for `type R = number[]` and for `R12` down to it
+/// (TypeScript 7.0.2, all four settings).
+#[test]
+fn a_rest_element_names_its_array_through_aliases() {
+    for source in [
+        "type R = number[];\ntype T = [string, ...R];\n".to_owned(),
+        format!(
+            "{}type T = [string, ...R12];\n",
+            named_chain("R", 12, "number[]")
+        ),
+    ] {
+        assert_eq!(
+            evaluated_mismatches_on_a_worker_stack(
+                source,
+                &[("[string, 1, 2] extends T ? 1 : 2", "1")]
+            ),
+            Vec::<String>::new()
+        );
+    }
+}
+
+/// A base class whose instance type is an intersection nested twelve times
+/// through aliases (`I{n} = I{n - 1} & { k{n}: n }`) is a valid base: its
+/// derived class reads every member (TypeScript 7.0.2, all four settings).
+#[test]
+fn a_base_through_12_nested_intersections_is_valid() {
+    let mut source = String::from("type I0 = { k0: 0 };\n");
+    for level in 1..=12 {
+        source.push_str(&format!(
+            "type I{level} = I{} & {{ k{level}: {level} }};\n",
+            level - 1
+        ));
+    }
+    source.push_str("declare const Base: new () => I12;\nexport class C extends Base {}\n");
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(source, &[("C[\"k0\"]", "0"), ("C[\"k12\"]", "12")]),
+        Vec::<String>::new()
+    );
+}
+
+/// An index of named key unions nested twelve times
+/// (`K{n} = K{n - 1} | "k{n}"`) enumerates every key:
+/// `Box[K12]` reads all thirteen members (TypeScript 7.0.2, all four
+/// settings).
+#[test]
+#[ignore = "an index by a named key union that names another key union evaluates to no value"]
+fn an_index_through_12_nested_key_unions_enumerates_every_key() {
+    let mut source = String::from("type Box = {");
+    for level in 0..=12 {
+        source.push_str(&format!(" k{level}: {level};"));
+    }
+    source.push_str(" };\ntype K0 = \"k0\";\n");
+    for level in 1..=12 {
+        source.push_str(&format!("type K{level} = K{} | \"k{level}\";\n", level - 1));
+    }
+    assert_eq!(
+        evaluated_mismatches_on_a_worker_stack(
+            source,
+            &[(
+                "Box[K12]",
+                "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12"
+            )]
+        ),
+        Vec::<String>::new()
+    );
+}

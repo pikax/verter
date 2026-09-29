@@ -6398,7 +6398,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
     ) -> bool {
         let graph = self.graph();
-        let source_object_like = !self.may_be_below_a_primitive(source, 0);
+        let source_object_like = !self.may_be_below_a_primitive(source);
         let target_data = graph.node_data(target);
         let primitive_like_target = matches!(
             target_data.as_deref(),
@@ -6435,47 +6435,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// primitive part: an object, array, tuple, signature or mapped type,
     /// a lib global interface's terminal carrier (`Promise<T>` — an async
     /// body's result — `Date`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Error`,
-    /// `Function`), a union of only such types, or an intersection none of
-    /// whose members has a primitive part. Other declaration carriers are
-    /// read through what they name.
-    fn may_be_below_a_primitive(&self, node: SemanticNodeId, level: usize) -> bool {
-        /// Nesting read before the question is left open.
-        const LEVELS: usize = 8;
-        if level > LEVELS {
-            return true;
-        }
-        let resolved = self.resolved_reduction_view(node);
-        let graph = self.graph();
-        let data = graph.node_data(resolved);
-        match data.as_deref() {
-            Some(
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. }
-                | SemanticNodeData::Mapped { .. }
-                | SemanticNodeData::ClassExpressionInstance { .. },
-            ) => false,
-            Some(SemanticNodeData::Union(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .all(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(SemanticNodeData::Intersection(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .any(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(
-                SemanticNodeData::DeclRef { identity }
-                | SemanticNodeData::InstantiationRef { base: identity, .. },
-            ) => self.runtime_nominal_identity(identity).is_none(),
-            _ => true,
-        }
+    /// `Function`), a union with such a member (a union is below a
+    /// primitive only when each of its members is), or an intersection none
+    /// of whose members has a primitive part. Other declaration carriers
+    /// are read through what they name.
+    ///
+    /// Unions and intersections are read through, however they nest, from a
+    /// work list; one that contains itself is left open.
+    pub(super) fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        crate::graph_walk::classify(node, |node| {
+            let resolved = self.resolved_reduction_view(node);
+            let graph = self.graph();
+            let data = graph.node_data(resolved);
+            Verdict::Leaf(Some(match data.as_deref() {
+                Some(
+                    SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                ) => false,
+                Some(SemanticNodeData::Union(members)) => return Verdict::All(members.to_vec()),
+                Some(SemanticNodeData::Intersection(members)) => {
+                    return Verdict::Any(members.to_vec())
+                }
+                Some(
+                    SemanticNodeData::DeclRef { identity }
+                    | SemanticNodeData::InstantiationRef { base: identity, .. },
+                ) => self.runtime_nominal_identity(identity).is_none(),
+                _ => true,
+            }))
+        })
+        .unwrap_or(true)
     }
 
     /// The type a generic reduction SOURCE relates as, the checker's
