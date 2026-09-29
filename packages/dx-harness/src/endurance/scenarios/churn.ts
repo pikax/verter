@@ -330,6 +330,10 @@ export interface RetentionReading {
   readonly signatureRecords: number;
   /** The record cap the kernel replaces its epoch at. */
   readonly signatureRecordCap: number;
+  /** Overlay-lane resolution slots held for live overlay authorities (sessions, request overlays). */
+  readonly overlayResolutionSlots: number;
+  /** Overlay value versions held for live overlay authorities. */
+  readonly overlayValueVersions: number;
   /** Queued releases applied so far (monotonic by design, so not a retention counter). */
   readonly releasesApplied: number;
   /** The longest a queued release waited for a zero-reader instant, in microseconds. */
@@ -430,6 +434,8 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "registeredSources",
   "signatureRecords",
   "signatureRecordCap",
+  "overlayResolutionSlots",
+  "overlayValueVersions",
   "releasesApplied",
   "releaseWaitMaxMicros",
   "releaseElapsedMaxMicros",
@@ -1107,6 +1113,8 @@ export const CHURN_RETENTION_COUNTERS = [
   "resolvedImportFacts",
   "componentMetaStates",
   "registeredSources",
+  "overlayResolutionSlots",
+  "overlayValueVersions",
 ] as const satisfies readonly (keyof RetentionReading)[];
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
@@ -1309,6 +1317,7 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `pressureRefusals=${reading.refusalsPressure} ` +
     `importFacts=${reading.resolvedImportFacts} metaStates=${reading.componentMetaStates} ` +
     `registeredSources=${reading.registeredSources} signatureRecords=${reading.signatureRecords} ` +
+    `overlayResolutionSlots=${reading.overlayResolutionSlots} overlayValueVersions=${reading.overlayValueVersions} ` +
     `deferred=${reading.deferredReleases} releases=${reading.releasesApplied} ` +
     `releaseWaitMax=${formatMicros(reading.releaseWaitMaxMicros)} releaseMax=${formatMicros(reading.releaseElapsedMaxMicros)} ` +
     (reading.lastRelease

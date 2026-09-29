@@ -361,6 +361,9 @@ impl ProjectSemanticDispatch<'_> {
         }
         let check = operands.check;
         let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if let Some(output) = self.absorb_named_error_operand(check, extends) {
+            return output;
+        }
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
@@ -416,10 +419,10 @@ impl ProjectSemanticDispatch<'_> {
         let check = self.reduced_conditional_operand(check);
         let extends = self.reduced_conditional_operand(extends);
         let declared_check = self.reduced_conditional_operand(declared_check);
-        let check = self.checker_error_operand(check).unwrap_or(check);
-        let extends = self.checker_error_operand(extends).unwrap_or(extends);
+        let check = self.conditional_operand_extreme(check).unwrap_or(check);
+        let extends = self.conditional_operand_extreme(extends).unwrap_or(extends);
         let declared_check = self
-            .checker_error_operand(declared_check)
+            .conditional_operand_extreme(declared_check)
             .unwrap_or(declared_check);
         ConditionalOperands {
             check,
@@ -478,46 +481,89 @@ impl ProjectSemanticDispatch<'_> {
         output
     }
 
-    /// The checker's error type a conditional operand stands for: the
-    /// checker instantiates a conditional's check and extends types before
-    /// it relates them, so a name for its error type (the recovery from a
-    /// diagnostic the name's own instantiation raised) IS that error type
-    /// there, and so is a union or intersection with such a member, or an
-    /// intersection whose cross product the checker refuses. The error type
-    /// then dominates the conditional. `None` for any other operand.
-    fn checker_error_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self.graph().node_data(operand).as_deref() {
+    /// The lattice extreme a conditional operand is where the checker
+    /// constructs it. The checker instantiates a conditional's check and
+    /// extends types before it relates them, so:
+    /// - a union or an intersection is the extreme its members reduce it to
+    ///   (`getUnionType` / `getIntersectionType`): `never`, then the error
+    ///   type, then `any` decide an intersection (`1 & any` is `any`, `1 &
+    ///   any & never` is `never`); the error type, `any`, then `unknown`
+    ///   decide a union;
+    /// - an intersection whose cross product the checker refuses is its
+    ///   error type.
+    ///
+    /// The members are read as the types they name, whatever carrier the
+    /// composite was built as: an intersection substituted into an
+    /// instantiated body is still the intersection the checker constructs.
+    /// `None` for any other operand; an operand that is itself a name is
+    /// read once the conditional is related
+    /// ([`Self::absorb_named_error_operand`]), so the relation, not this
+    /// read, decides where its evaluation joins the demand.
+    fn conditional_operand_extreme(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::absorb::SpecialKind;
+        let graph = self.graph();
+        let (arms, is_union) = match graph.node_data(operand).as_deref() {
             Some(
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::DeclRef { .. }
-                | SemanticNodeData::InstantiationRef { .. },
-            ) => {}
-            // The error type dominates a union or an intersection it is a
-            // member of, and an intersection whose cross product the checker
-            // refuses is its error type.
-            Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.members_arc();
-                return self
-                    .intersection_too_complex(operand)
-                    .or_else(|| arms.iter().find_map(|arm| self.checker_error_operand(*arm)));
-            }
-            Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.members_arc();
-                return arms.iter().find_map(|arm| self.checker_error_operand(*arm));
-            }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+            ) => return None,
+            Some(SemanticNodeData::Intersection(arms)) => (arms.members_arc(), false),
+            Some(SemanticNodeData::Union(arms)) => (arms.members_arc(), true),
             _ => return None,
+        };
+        if !is_union {
+            if let Some(recovery) = self.intersection_too_complex(operand) {
+                return Some(recovery);
+            }
         }
-        let resolved = self
-            .normalize_node_for_structural_fact_demand(
-                operand,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-            .into_complete_node()?;
-        matches!(
-            self.peek_special(resolved),
-            Some((super::absorb::SpecialKind::Error, _))
+        let mut found: [Option<SemanticNodeId>; 4] = [None; 4];
+        for arm in arms.iter() {
+            let arm_type = match graph.node_data(*arm).as_deref() {
+                Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => {
+                    self.conditional_operand_extreme(*arm)
+                }
+                Some(
+                    SemanticNodeData::Alias(_)
+                    | SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::TypeOf(_)
+                    | SemanticNodeData::BareRef(_)
+                    | SemanticNodeData::ImportType(_)
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+                ) => self.resolved_operand(*arm),
+                _ => Some(*arm),
+            };
+            let Some(arm_type) = arm_type else { continue };
+            let slot = match self.peek_special(arm_type) {
+                Some((SpecialKind::Never, _)) => 0,
+                Some((SpecialKind::Error, _)) => 1,
+                Some((SpecialKind::Any, _)) => 2,
+                Some((SpecialKind::Unknown, _)) => 3,
+                None => continue,
+            };
+            found[slot].get_or_insert(arm_type);
+        }
+        let [never, error, any, unknown] = found;
+        if is_union {
+            error.or(any).or(unknown)
+        } else {
+            never.or(error).or(any)
+        }
+    }
+
+    /// The type a name operand resolves to, at structural transit; `None`
+    /// when its demand does not complete.
+    fn resolved_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.normalize_node_for_structural_fact_demand(
+            operand,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
-        .then_some(resolved)
+        .into_complete_node()
     }
 
     fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {

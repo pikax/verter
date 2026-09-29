@@ -5442,7 +5442,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             && !arm_lists
                 .iter()
                 .flatten()
-                .all(|arm| nullish_kind(*arm).is_some() || self.provably_non_nullish(*arm, 0))
+                .all(|arm| nullish_kind(*arm).is_some() || self.dispatch.provably_non_nullish(*arm))
         {
             return None;
         }
@@ -5456,7 +5456,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         let disjoint_from = |arm: SemanticNodeId, kind: PrimitiveKind| match nullish_kind(arm) {
             Some(other) => other != kind,
-            None => self.provably_non_nullish(arm, 0),
+            None => self.dispatch.provably_non_nullish(arm),
         };
         for (position, arms) in stripped.iter().enumerate() {
             for &arm in arms {
@@ -5499,53 +5499,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 .map(|kind| self.graph().intern_node(SemanticNodeData::Primitive(kind)))
                 .collect(),
         })
-    }
-
-    /// Whether `node` provably excludes both `null` and `undefined`, so the
-    /// checker's intersection of it with either is `never`: a literal, a
-    /// non-nullish primitive (`object` included), an object, array, tuple
-    /// or template-literal type, a signature, an interface or class
-    /// reference, or an intersection with such an arm.
-    fn provably_non_nullish(&self, node: SemanticNodeId, depth: usize) -> bool {
-        const MAX_NESTING: usize = 4;
-        if depth > MAX_NESTING {
-            return false;
-        }
-        let Some(data) = self.graph().node_data(node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Literal(_)
-            | SemanticNodeData::Object(_)
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::Signature { .. } => true,
-            SemanticNodeData::Primitive(kind) => matches!(
-                kind,
-                PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::Boolean
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Symbol
-                    | PrimitiveKind::Object
-            ),
-            SemanticNodeData::DeclRef { identity }
-            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
-                self.dispatch.prepared_decl_kind(identity),
-                Some(
-                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
-                )
-            ),
-            SemanticNodeData::Intersection(arms) => {
-                let arms = arms.members_arc();
-                drop(data);
-                arms.iter()
-                    .any(|arm| self.provably_non_nullish(*arm, depth + 1))
-            }
-            _ => false,
-        }
     }
 
     /// Join intersection `contributors` (at least one) the member-value
@@ -9895,6 +9848,52 @@ enum ExpandFrame {
 enum ExpansionCombineKind {
     Intersection,
     Union,
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// Whether `node` provably excludes both `null` and `undefined`, so the
+    /// checker's intersection of it with either is `never`: a literal, a
+    /// non-nullish primitive (`object` included), an object, array, tuple
+    /// or template-literal type, a signature, an interface or class
+    /// reference, or an intersection with such an arm, at any nesting.
+    pub(super) fn provably_non_nullish(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        crate::graph_walk::classify(node, |node| {
+            let Some(data) = self.graph().node_data(node) else {
+                return Verdict::Leaf(Some(false));
+            };
+            Verdict::Leaf(Some(match data.as_ref() {
+                SemanticNodeData::Literal(_)
+                | SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Signature { .. } => true,
+                SemanticNodeData::Primitive(kind) => matches!(
+                    kind,
+                    PrimitiveKind::String
+                        | PrimitiveKind::Number
+                        | PrimitiveKind::Boolean
+                        | PrimitiveKind::BigInt
+                        | PrimitiveKind::Symbol
+                        | PrimitiveKind::Object
+                ),
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                    self.prepared_decl_kind(identity),
+                    Some(
+                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                    )
+                ),
+                SemanticNodeData::Intersection(arms) => {
+                    return Verdict::Any(arms.members_arc().to_vec());
+                }
+                _ => false,
+            }))
+        })
+        .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

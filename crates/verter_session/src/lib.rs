@@ -210,6 +210,7 @@ mod flow_completion_inventory_tests;
 pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;
+pub(crate) mod graph_walk;
 mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering
@@ -384,6 +385,8 @@ pub mod route_analysis_inputs;
 /// closed capability catalog and the certified engine binding that is the
 /// sole route a TypeScript engine's answer enters the semantic plane.
 pub mod semantic_capability;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod semantic_execution;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 /// The one PROCESS-wide aggregate retention account: public so the LSP

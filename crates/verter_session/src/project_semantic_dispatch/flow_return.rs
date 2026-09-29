@@ -6540,7 +6540,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
     ) -> bool {
         let graph = self.graph();
-        let source_object_like = !self.may_be_below_a_primitive(source, 0);
+        let source_object_like = !self.may_be_below_a_primitive(source);
         let target_data = graph.node_data(target);
         let primitive_like_target = matches!(
             target_data.as_deref(),
@@ -6577,47 +6577,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// primitive part: an object, array, tuple, signature or mapped type,
     /// a lib global interface's terminal carrier (`Promise<T>` — an async
     /// body's result — `Date`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Error`,
-    /// `Function`), a union of only such types, or an intersection none of
-    /// whose members has a primitive part. Other declaration carriers are
-    /// read through what they name.
-    fn may_be_below_a_primitive(&self, node: SemanticNodeId, level: usize) -> bool {
-        /// Nesting read before the question is left open.
-        const LEVELS: usize = 8;
-        if level > LEVELS {
-            return true;
-        }
-        let resolved = self.resolved_reduction_view(node);
-        let graph = self.graph();
-        let data = graph.node_data(resolved);
-        match data.as_deref() {
-            Some(
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. }
-                | SemanticNodeData::Mapped { .. }
-                | SemanticNodeData::ClassExpressionInstance { .. },
-            ) => false,
-            Some(SemanticNodeData::Union(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .all(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(SemanticNodeData::Intersection(members)) => {
-                let members = members.to_vec();
-                drop(data);
-                members
-                    .iter()
-                    .any(|member| self.may_be_below_a_primitive(*member, level + 1))
-            }
-            Some(
-                SemanticNodeData::DeclRef { identity }
-                | SemanticNodeData::InstantiationRef { base: identity, .. },
-            ) => self.runtime_nominal_identity(identity).is_none(),
-            _ => true,
-        }
+    /// `Function`), a union with such a member (a union is below a
+    /// primitive only when each of its members is), or an intersection none
+    /// of whose members has a primitive part. Other declaration carriers
+    /// are read through what they name.
+    ///
+    /// Unions and intersections are read through, however they nest, from a
+    /// work list; one that contains itself is left open.
+    pub(super) fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        crate::graph_walk::classify(node, |node| {
+            let resolved = self.resolved_reduction_view(node);
+            let graph = self.graph();
+            let data = graph.node_data(resolved);
+            Verdict::Leaf(Some(match data.as_deref() {
+                Some(
+                    SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                ) => false,
+                Some(SemanticNodeData::Union(members)) => return Verdict::All(members.to_vec()),
+                Some(SemanticNodeData::Intersection(members)) => {
+                    return Verdict::Any(members.to_vec())
+                }
+                Some(
+                    SemanticNodeData::DeclRef { identity }
+                    | SemanticNodeData::InstantiationRef { base: identity, .. },
+                ) => self.runtime_nominal_identity(identity).is_none(),
+                _ => true,
+            }))
+        })
+        .unwrap_or(true)
     }
 
     /// The type a generic reduction SOURCE relates as, the checker's
@@ -15578,11 +15571,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         target: Option<&crate::flow_slice_content::GatedType>,
+        call: verter_span::Span,
     ) {
         self.capture_throw_point();
+        // The assertion call's evidence, with the same discipline a
+        // predicate call's narrowing takes: the call was evaluated, and
+        // its relation decided (or not) the narrow it established. A
+        // target the narrow cannot consume at all deposits nothing, so the
+        // demand stays unproven.
         let fact = match target {
-            Some(target) => self.narrow_to_predicate_target(subject, target, false),
-            None => self.narrow_truthy(subject, false),
+            Some(target) => {
+                let (fact, consumption) =
+                    self.narrow_to_predicate_target_consuming(subject, target, false);
+                match consumption {
+                    PredicateNarrowConsumption::NotConsumed => {}
+                    PredicateNarrowConsumption::Decided | PredicateNarrowConsumption::Undecided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: call,
+                            relations_decided: matches!(
+                                consumption,
+                                PredicateNarrowConsumption::Decided
+                            ),
+                        });
+                    }
+                }
+                fact
+            }
+            None => {
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.narrow_truthy(subject, false)
+            }
         };
         match fact {
             GuardNarrowing::Narrowed(subject, node) => {
@@ -15622,8 +15643,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &crate::flow_slice_content::SliceStatement) {
         match effect {
-            crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
-                self.apply_assertion(subject, target.as_ref());
+            crate::flow_slice_content::SliceStatement::Assertion {
+                subject,
+                target,
+                call,
+            } => {
+                self.apply_assertion(subject, target.as_ref(), *call);
             }
             crate::flow_slice_content::SliceStatement::If {
                 guard,
@@ -19316,27 +19341,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
-    /// keep the subject's arms assignable to the predicate's target type.
-    /// When NO arm survives but the target is itself assignable to the
-    /// subject's type, the target IS the narrow (the checker's own rule
-    /// for a predicate whose target is a strict subtype of the declared
-    /// type). The target lowers like a declarator annotation — a
-    /// frame-shadowed answer establishes nothing.
-    ///
-    /// The assertion-statement caller: the guard twin consumes the
-    /// consumption verdict too and records the predicate call's
-    /// evidence from it.
-    fn narrow_to_predicate_target(
-        &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        target: &crate::flow_slice_content::GatedType,
-        negated: bool,
-    ) -> GuardNarrowing {
-        self.narrow_to_predicate_target_consuming(subject, target, negated)
-            .0
-    }
-
     /// The constraint a bare type-parameter node reads as in a narrow
     /// (`getBaseConstraintOfType`, `unknown` when it declares none), or
     /// `None` for any other node.
@@ -19584,8 +19588,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         (Some(self.never_node()), consumption)
     }
 
-    /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
-    /// verdict — whether the evaluator genuinely consumed the predicate
+    /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
+    /// keep the subject's arms assignable to the predicate's target type.
+    /// When NO arm survives but the target is itself assignable to the
+    /// subject's type, the target IS the narrow (the checker's own rule
+    /// for a predicate whose target is a strict subtype of the declared
+    /// type). The target lowers like a declarator annotation — a
+    /// frame-shadowed answer establishes nothing.
+    ///
+    /// It carries the CONSUMPTION verdict — whether the evaluator
+    /// genuinely consumed the predicate
     /// fact, and whether the narrow-direction obligation it asked was
     /// decided. This is what the guard twin's call evidence is recorded
     /// from: a fact the evaluator could not consume at all (a
@@ -21426,7 +21438,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
-                            (None, _) | (Some(_), None) => {
+                            (Some(init), None) => {
+                                // A non-union declared type is what the
+                                // binding holds, whatever its initializer
+                                // evaluates to. The initializer still runs
+                                // (the checker checks it and its flow sees
+                                // every write and assertion inside it), so
+                                // it evaluates for its effects and its
+                                // calls, its value discarded. A value the
+                                // lane could not model there degrades
+                                // nothing the binding holds; an initializer
+                                // that writes keeps whatever it recorded,
+                                // since its writes reach later reads.
+                                let before = self.degradation.take();
+                                let holds_before = self.holds.len();
+                                let _ = self.eval_expr(init);
+                                self.holds.truncate(holds_before);
+                                let recorded = self.degradation.take();
+                                self.degradation = before;
+                                if let Some(recorded) = recorded {
+                                    if expression_changes_reaching_values(init) {
+                                        self.record_degradation(recorded);
+                                    }
+                                }
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    declared_node,
+                                    None,
+                                    false,
+                                );
+                                continue;
+                            }
+                            (None, _) => {
                                 self.bind_local(
                                     &FlowProductSubject::Local(*binding),
                                     *kind,
@@ -21775,7 +21819,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
+                crate::flow_slice_content::SliceStatement::Assertion {
+                    subject,
+                    target,
+                    call,
+                } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -21785,7 +21833,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref());
+                    self.apply_assertion(subject, target.as_ref(), *call);
                 }
                 crate::flow_slice_content::SliceStatement::CalleeEffect {
                     callee,
@@ -23106,7 +23154,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                            self.apply_assertion(
+                                &assertion.subject,
+                                assertion.target.as_ref(),
+                                assertion.call,
+                            );
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -23732,7 +23784,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                    self.apply_assertion(
+                        &assertion.subject,
+                        assertion.target.as_ref(),
+                        assertion.call,
+                    );
                 }
                 outcome
             }

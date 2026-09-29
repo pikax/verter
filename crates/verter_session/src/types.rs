@@ -5032,6 +5032,13 @@ pub struct HostRetentionSnapshot {
     pub signature_records: usize,
     /// The record cap the kernel replaces its epoch at.
     pub signature_record_cap: usize,
+    /// Resolution slots the workspace's overlay lane holds: overlay answers
+    /// held by the overlay authorities (sessions, request overlays) that
+    /// produced or reused them, released with the last of them.
+    pub overlay_resolution_slots: usize,
+    /// Overlay value versions the workspace holds, held and released the
+    /// same way.
+    pub overlay_value_versions: usize,
     /// What the activity gate has applied so far: counts, the longest a
     /// queued release waited, and the last release's own cost.
     pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,

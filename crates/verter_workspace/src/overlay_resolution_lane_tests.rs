@@ -213,6 +213,7 @@ fn an_overlay_changes_a_realpath_only_when_the_effective_value_moves() {
             session: None,
             population: ResolutionPopulation::Base,
             overlay: None,
+            overlay_values: None,
         })
     };
     let probe = ResolutionFactKey::PathProbe {
@@ -243,5 +244,221 @@ fn an_overlay_changes_a_realpath_only_when_the_effective_value_moves() {
     assert!(
         Arc::ptr_eq(&unchanged, &direct),
         "an overlay that moves no effective value is the captured world"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Residency: overlay answers and overlay value versions live while an
+// overlay authority holds them, and are charged while they live.
+// ---------------------------------------------------------------------------
+
+fn lane_and_values(workspace: &MemoryWorkspace) -> (usize, usize) {
+    let resources = workspace.resource_snapshot();
+    (
+        resources.overlay_resolution_slots,
+        resources.overlay_value_versions,
+    )
+}
+
+#[test]
+fn a_request_overlays_answers_go_when_its_snapshot_is_superseded() {
+    let workspace = workspace(&[]);
+    {
+        let creates_dep = overlay(&[("/p/dep.ts", "export const dep = 1\n")], &[]);
+        assert_eq!(
+            target(&through(&workspace, &creates_dep, "./dep")),
+            Some("/p/dep.ts")
+        );
+        assert_eq!(
+            lane_and_values(&workspace),
+            (1, 1),
+            "one overlay answer, one interned directory-membership value"
+        );
+    }
+    assert_eq!(
+        lane_and_values(&workspace),
+        (0, 0),
+        "the snapshot's authority released both with the snapshot"
+    );
+}
+
+#[test]
+fn a_session_authority_keeps_its_answers_across_requests_until_it_closes() {
+    let workspace = workspace(&[]);
+    let session = crate::overlay_residency::OverlayAuthority::new();
+    let request = |authority: &crate::overlay_residency::OverlayAuthority| {
+        ResolutionOverlaySnapshot::new_under(
+            Some(authority.clone()),
+            [(
+                "/p/dep.ts".to_string(),
+                Arc::<str>::from("export const dep = 1\n"),
+            )],
+            [],
+        )
+    };
+
+    let first = request(&session);
+    assert!(!through(&workspace, &first, "./dep").trace().reused());
+    drop(first);
+    assert_eq!(
+        lane_and_values(&workspace),
+        (1, 1),
+        "the session still holds its answer after its request ends"
+    );
+
+    let second = request(&session);
+    assert!(
+        through(&workspace, &second, "./dep").trace().reused(),
+        "the next request of the session reuses it"
+    );
+    drop(second);
+    drop(session);
+    assert_eq!(
+        lane_and_values(&workspace),
+        (0, 0),
+        "closing the session releases it"
+    );
+}
+
+#[test]
+fn an_answer_another_authority_reused_outlives_the_one_that_produced_it() {
+    let workspace = workspace(&[]);
+    let producing = crate::overlay_residency::OverlayAuthority::new();
+    let reusing = crate::overlay_residency::OverlayAuthority::new();
+    let request = |authority: &crate::overlay_residency::OverlayAuthority| {
+        ResolutionOverlaySnapshot::new_under(
+            Some(authority.clone()),
+            [(
+                "/p/dep.ts".to_string(),
+                Arc::<str>::from("export const dep = 1\n"),
+            )],
+            [],
+        )
+    };
+    let _ = through(&workspace, &request(&producing), "./dep");
+    assert!(through(&workspace, &request(&reusing), "./dep")
+        .trace()
+        .reused());
+    drop(producing);
+    assert_eq!(
+        lane_and_values(&workspace),
+        (1, 1),
+        "the reusing authority still holds the answer and its value"
+    );
+    drop(reusing);
+    assert_eq!(lane_and_values(&workspace), (0, 0));
+}
+
+/// A retention account that admits or refuses every reservation and
+/// tracks the bytes its live charges hold.
+struct CountingAccount {
+    admit: bool,
+    charged: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct CountingCharge {
+    bytes: usize,
+    charged: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for CountingCharge {
+    fn drop(&mut self) {
+        self.charged
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::overlay_residency::ResolutionRetentionAccount for CountingAccount {
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<crate::overlay_residency::ResolutionRetentionCharge> {
+        if !self.admit {
+            return None;
+        }
+        self.charged
+            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+        Some(crate::overlay_residency::ResolutionRetentionCharge::new(
+            CountingCharge {
+                bytes,
+                charged: Arc::clone(&self.charged),
+            },
+        ))
+    }
+}
+
+#[test]
+fn resident_overlay_state_is_charged_while_it_lives() {
+    use crate::traits::WorkspaceAccess;
+    let workspace = workspace(&[]);
+    let charged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    workspace.install_resolution_retention(Arc::new(CountingAccount {
+        admit: true,
+        charged: Arc::clone(&charged),
+    }));
+    {
+        let creates_dep = overlay(&[("/p/dep.ts", "export const dep = 1\n")], &[]);
+        let _ = through(&workspace, &creates_dep, "./dep");
+        assert!(
+            charged.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the overlay answer and its value are charged"
+        );
+    }
+    assert_eq!(
+        charged.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "and released with them"
+    );
+}
+
+#[test]
+fn a_refused_charge_serves_the_overlay_answer_uncached() {
+    use crate::traits::WorkspaceAccess;
+    let workspace = workspace(&[]);
+    workspace.install_resolution_retention(Arc::new(CountingAccount {
+        admit: false,
+        charged: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    let creates_dep = overlay(&[("/p/dep.ts", "export const dep = 1\n")], &[]);
+    for _ in 0..2 {
+        let outcome = through(&workspace, &creates_dep, "./dep");
+        assert_eq!(
+            target(&outcome),
+            Some("/p/dep.ts"),
+            "the answer is complete"
+        );
+        assert!(!outcome.trace().reused(), "and never retained");
+    }
+    assert_eq!(lane_and_values(&workspace), (0, 0));
+}
+
+#[test]
+fn overlay_churn_leaves_no_residency_behind() {
+    let workspace = workspace(&[]);
+    for cycle in 0..200 {
+        let path = format!("/p/dep{cycle}.ts");
+        let session = crate::overlay_residency::OverlayAuthority::new();
+        for edit in 0..2 {
+            let snapshot = ResolutionOverlaySnapshot::new_under(
+                Some(session.clone()),
+                [(
+                    path.clone(),
+                    Arc::<str>::from(format!("export const v = {edit}\n")),
+                )],
+                [],
+            );
+            let specifier = format!("./dep{cycle}");
+            assert_eq!(
+                target(&through(&workspace, &snapshot, &specifier)),
+                Some(path.as_str())
+            );
+        }
+        drop(session);
+        assert_eq!(lane_and_values(&workspace), (0, 0), "cycle {cycle}");
+    }
+    assert_eq!(workspace.engine.overlay_lane_item_count_for_test(), 0);
+    assert!(
+        workspace.engine.overlay_residency_queue_len_for_test() <= 64,
+        "released slots do not accumulate in the eviction queue"
     );
 }

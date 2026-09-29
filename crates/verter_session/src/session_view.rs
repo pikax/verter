@@ -270,6 +270,17 @@ pub trait SessionView: Send + Sync {
     fn tombstoned_canonicals(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// The overlay authority of the live domain this view is a request
+    /// of — a session — under which the workspace holds the view's
+    /// resident resolution state, so it outlives one request and is
+    /// released when the session closes.
+    ///
+    /// Default `None`: the view's overlay is a request overlay of its own,
+    /// and its resident resolution state goes with the request.
+    fn resolution_authority(&self) -> Option<&verter_workspace::OverlayAuthority> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +819,9 @@ pub struct OverlaidViewRef<'a> {
     /// first-readers are handled by `OnceLock::get_or_init` (one computes,
     /// the rest block then read the same value).
     overlay_set_fingerprint: std::sync::OnceLock<u64>,
+    /// The session's overlay authority, when the view is a session's
+    /// request — see [`SessionView::resolution_authority`].
+    resolution_authority: Option<verter_workspace::OverlayAuthority>,
 }
 
 impl<'a> OverlaidViewRef<'a> {
@@ -837,7 +851,19 @@ impl<'a> OverlaidViewRef<'a> {
             // paths read it once on first use. The O(N²) per-query
             // recompute the batch path paid is gone either way.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
+            resolution_authority: None,
         }
+    }
+
+    /// Mark the view as a request of the live overlay domain `authority`
+    /// belongs to (see [`SessionView::resolution_authority`]).
+    #[must_use]
+    pub fn with_resolution_authority(
+        mut self,
+        authority: verter_workspace::OverlayAuthority,
+    ) -> Self {
+        self.resolution_authority = Some(authority);
+        self
     }
 
     /// Whether the view tombstones the given canonical (overlay-Delete).
@@ -969,6 +995,10 @@ impl SessionView for OverlaidViewRef<'_> {
 
     fn tombstoned_canonicals(&self) -> Vec<String> {
         self.overlay_tombstones.iter().cloned().collect()
+    }
+
+    fn resolution_authority(&self) -> Option<&verter_workspace::OverlayAuthority> {
+        self.resolution_authority.as_ref()
     }
 }
 

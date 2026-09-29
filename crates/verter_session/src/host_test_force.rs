@@ -143,6 +143,10 @@ pub(crate) struct TestForceKnobs {
     /// `ResolutionPublication::Refused` producers, while this seam isolates
     /// the session-side `UnrootableRoute` propagation and reuse carrier.
     pub(crate) force_import_route_witness_refusal_for_tests: std::sync::atomic::AtomicBool,
+    /// Refuse every type-route resolution of this exact specifier, as a
+    /// publication whose final fence failed would. Isolates the session-side
+    /// propagation of a refused edge inside a route walk.
+    pub(crate) force_type_route_refusal_for_specifier: parking_lot::Mutex<Option<String>>,
     /// Number of synthetic `FileWholeHash` observations every
     /// `fact_signature_helpers::install_fact_tracer` scope fans into its
     /// freshly-installed tracer. A value above `FACT_SIGNATURE_CAP` (1024)

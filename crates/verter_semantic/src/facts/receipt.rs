@@ -212,9 +212,22 @@ impl ReceiptWalk {
     pub fn leaves(
         &mut self,
         receipt: &ResultReceipt,
+        visit: impl FnMut(&FactVersionRef) -> bool,
+    ) -> bool {
+        self.leaves_unless(receipt, |_| false, visit)
+    }
+
+    /// [`Self::leaves`], except that a receipt `settled` answers `true` for
+    /// is taken as already validated: neither its facts nor anything only
+    /// it reaches are visited. `settled` is asked once per distinct receipt
+    /// the walk meets, so a caller can also learn every receipt it walked.
+    pub fn leaves_unless(
+        &mut self,
+        receipt: &ResultReceipt,
+        mut settled: impl FnMut(&ResultReceipt) -> bool,
         mut visit: impl FnMut(&FactVersionRef) -> bool,
     ) -> bool {
-        if !self.walked.insert(Arc::as_ptr(&receipt.0)) {
+        if !self.walked.insert(Arc::as_ptr(&receipt.0)) || settled(receipt) {
             return true;
         }
         let mut stack: Vec<&ResultEvidence> = vec![&receipt.0];
@@ -222,7 +235,7 @@ impl ReceiptWalk {
             for fact in evidence.facts.iter() {
                 match fact {
                     FactVersionRef::Receipt(child) => {
-                        if self.walked.insert(Arc::as_ptr(&child.0)) {
+                        if self.walked.insert(Arc::as_ptr(&child.0)) && !settled(child) {
                             stack.push(&child.0);
                         }
                     }
@@ -282,7 +295,9 @@ impl std::fmt::Debug for ResultReceipt {
 
 impl PartialEq for ResultReceipt {
     fn eq(&self, other: &Self) -> bool {
-        self.ptr_eq(other) || (self.0.digest == other.0.digest && self.0.facts == other.0.facts)
+        self.ptr_eq(other)
+            || (self.0.digest == other.0.digest
+                && compare_evidence(&self.0, &other.0) == std::cmp::Ordering::Equal)
     }
 }
 
@@ -302,8 +317,56 @@ impl Ord for ResultReceipt {
         self.0
             .digest
             .cmp(&other.0.digest)
-            .then_with(|| self.0.facts.cmp(&other.0.facts))
+            .then_with(|| compare_evidence(&self.0, &other.0))
     }
+}
+
+/// Order two evidences by their facts, as a slice comparison would, but
+/// reading the receipts they consumed from an explicit stack: two equal
+/// evidence graphs assembled apart (a result recomputed after its receipt
+/// was released, say) compare in heap memory, never one native frame per
+/// level. A pair of receipts found equal once is not compared again, so a
+/// graph that shares its children costs its distinct pairs.
+fn compare_evidence(a: &ResultEvidence, b: &ResultEvidence) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut stack: Vec<(&[FactVersionRef], &[FactVersionRef], usize)> =
+        vec![(&a.facts, &b.facts, 0)];
+    let mut compared: rustc_hash::FxHashSet<(*const ResultEvidence, *const ResultEvidence)> =
+        rustc_hash::FxHashSet::default();
+    while let Some(top) = stack.last_mut() {
+        let (left, right, at) = *top;
+        let (Some(x), Some(y)) = (left.get(at), right.get(at)) else {
+            match left.len().cmp(&right.len()) {
+                Ordering::Equal => {
+                    stack.pop();
+                    continue;
+                }
+                unequal => return unequal,
+            }
+        };
+        top.2 += 1;
+        match (x, y) {
+            (FactVersionRef::Receipt(x), FactVersionRef::Receipt(y)) => {
+                if x.ptr_eq(y) {
+                    continue;
+                }
+                match x.0.digest.cmp(&y.0.digest) {
+                    Ordering::Equal => {}
+                    unequal => return unequal,
+                }
+                // A pair already on the stack or found equal: an evidence
+                // graph is acyclic, so it was found equal.
+                if compared.insert((Arc::as_ptr(&x.0), Arc::as_ptr(&y.0))) {
+                    stack.push((&x.0.facts, &y.0.facts, 0));
+                }
+            }
+            (x, y) => match x.cmp(y) {
+                Ordering::Equal => {}
+                unequal => return unequal,
+            },
+        }
+    }
+    Ordering::Equal
 }
 
 impl Hash for ResultReceipt {

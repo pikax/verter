@@ -830,43 +830,49 @@ impl VerterHost {
             }
         }
 
-        let mut refused = false;
-        let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
+        // One run of the companion probes per canonical per request: every
+        // consumer normalizing it again in the request shares that run.
+        let normalization = self.request_normalized_canonical(canonical_id, || {
+            let mut refused = false;
+            let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
+                if refused {
+                    return false;
+                }
+                match self.resolve_for_persistent_state(
+                    canonical_id,
+                    candidate,
+                    verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    },
+                ) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.result().is_some()
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        refused = true;
+                        false
+                    }
+                }
+            });
             if refused {
-                return false;
+                // The original canonical remains useful to this query, but
+                // no resolution-derived mapping may be retained. Taint
+                // every enclosing cacheability scope so a caller folding
+                // this fallback serves ReturnOnly.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return (None, true);
             }
-            match self.resolve_for_persistent_state(
-                canonical_id,
-                candidate,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-                },
-            ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    admitted.result().is_some()
-                }
-                verter_workspace::ResolutionPublication::Refused(_) => {
-                    refused = true;
-                    false
-                }
-            }
+            let normalized = resolved
+                .filter(|resolved| resolved != canonical_id)
+                .map(|resolved| std::sync::Arc::<str>::from(resolved.as_str()));
+            (normalized, false)
         });
-
-        if refused {
-            // The original canonical remains useful to this query, but no
-            // resolution-derived mapping may be retained. Taint every
-            // enclosing cacheability scope so a caller folding this fallback
-            // serves ReturnOnly.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
-            );
-            return std::borrow::Cow::Borrowed(canonical_id);
-        }
-
-        match resolved {
-            Some(resolved) if resolved != canonical_id => std::borrow::Cow::Owned(resolved),
-            _ => std::borrow::Cow::Borrowed(canonical_id),
+        match normalization.normalized.as_deref() {
+            Some(normalized) => std::borrow::Cow::Owned(normalized.to_string()),
+            None => std::borrow::Cow::Borrowed(canonical_id),
         }
     }
 

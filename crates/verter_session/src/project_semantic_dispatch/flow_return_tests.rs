@@ -11731,62 +11731,34 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     assert_eq!(acquisitions(4), vec![1; 4], "four callers");
 }
 
-/// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
-/// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
-/// finalizer's verdict is partial (an obligation left pending, or a typed
-/// gap), so the `FlowReturn` read is `ReturnOnly` with
-/// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`] —
-/// while the host flow-return boundary publishes the value clean, because
-/// the value itself carries no typed degradation.
-const UNPROVEN_CORRECT_RETURNS: &str = r#"
-declare function f<T>(x: T): T;
-function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
-function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
-declare function assertString(x: unknown): asserts x is string;
-export function wContextual() { const x: 1 = f(f(1)); return x; }
-export function dpArrow(cb = () => 7) { return cb; }
-export function p12(x: string | number) { return ((0, assertString(x)), x); }
-export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
-"#;
-
-/// A correct flow answer closes with its proof: the `FlowReturn` read is
-/// complete, so a publication boundary that honours the verdict keeps it
-/// clean. The completeness design keeps every correct clean answer clean
-/// and admits no unproven one as exact, so these proofs must close before
-/// the boundary surfaces a partial verdict.
-///
-/// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
-/// - `wContextual` (`1`): verdict partial, `IncompleteObligations`.
-/// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
-/// - `p12` (`string`): verdict partial, `IncompleteObligations`.
-/// - `inSequence` (`string | number`): verdict partial,
-///   `IncompleteObligations`.
-///
-/// The same holds for `pReject` (`Promise<never>`, library-backed, in
-/// `differential_global_library_tests`), `guardedInSequence` and
-/// `sig_classStaticBlockAssigns`.
-#[test]
-#[ignore = "a correct flow answer closes with its proof"]
-fn a_correct_flow_answer_closes_with_its_proof() {
-    const FILE: &str = "/ws/unproven.ts";
+/// The functions of `source` whose `FlowReturn` read closes WITHOUT its
+/// proof — the finalizer's verdict partial, so the read is `ReturnOnly`
+/// with [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`]
+/// — each with its partial reasons. A correct flow answer closes with its
+/// proof: the completeness design keeps every correct answer clean and
+/// admits no unproven one as exact, so a publication boundary that
+/// honours the verdict can only keep a correct answer clean when its
+/// proof closes.
+fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
+    const FILE: &str = "/ws/proof.ts";
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(FILE.to_string()),
         input_id: FILE.to_string(),
-        source: Arc::from(UNPROVEN_CORRECT_RETURNS),
+        source: Arc::from(source),
         file_language: crate::LanguageRegistry::global()
             .classify_static(FILE)
             .static_resolution(),
         aliases: Vec::new(),
     });
     let mut unproven = Vec::new();
-    for name in ["wContextual", "dpArrow", "p12", "inSequence"] {
+    for name in names {
         with_dispatch(&host, |dispatch| {
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
                     Arc::from(FILE),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(name),
+                    Arc::from(*name),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
@@ -11802,5 +11774,140 @@ fn a_correct_flow_answer_closes_with_its_proof() {
             }
         });
     }
+    unproven
+}
+
+/// An annotated declaration's initializer RUNS: the checker checks it and
+/// its flow sees every write and call inside it, whatever the declared
+/// type makes of its value. Its writes reach later reads, each call in it
+/// is evaluated and so evidenced, and the proof closes. TypeScript 7.0.2,
+/// all four settings: `wContextual` is `1`, `initWrite` `number`,
+/// `initWriteLet` `readonly [number, number]`.
+const ANNOTATED_INITIALIZERS: &str = r#"
+declare function f<T>(x: T): T;
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+export function initWrite() { let y: string | number = "s"; const x: 1 = (y = 2, 1); return y; }
+export function initWriteLet() { let y: string | number = "s"; let x: number = (y = 2, 3); return [x, y] as const; }
+"#;
+
+#[test]
+fn an_annotated_declarations_initializer_runs_and_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(
+        ANNOTATED_INITIALIZERS,
+        &["wContextual", "initWrite", "initWriteLet"],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ANNOTATED_INITIALIZERS).returns(&[
+            ("wContextual", "1"),
+            ("initWrite", "number"),
+            ("initWriteLet", "readonly [number, number]"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An `asserts` call applied as a sequence operand, a sequence arm or an
+/// initializer operand is evaluated where it narrows: the narrow records
+/// the call's evidence, decided exactly as a predicate call's narrow is,
+/// and the proof closes. TypeScript 7.0.2, all four settings: `p12` is
+/// `string`, `inSequence` `string | number`, `guardedInSequence` `never`,
+/// `initAssert` `string`, `stmtTruthy` and `seqTruthy` `string`.
+const ASSERTION_CALLS: &str = r#"
+declare function assertString(x: unknown): asserts x is string;
+declare function ok(v: unknown): asserts v;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+export function guardedInSequence(x: string | number | boolean) { const y = (typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)), x); return y; }
+export function initAssert(v: string | number) { const x: 1 = ((0, assertString(v)), 1); return v; }
+export function stmtTruthy(v: string | undefined) { ok(v); return v; }
+export function seqTruthy(v: string | undefined) { return ((0, ok(v)), v); }
+"#;
+
+#[test]
+fn an_assertion_call_evidences_its_own_narrow() {
+    let mut failures = flow_reads_without_proof(
+        ASSERTION_CALLS,
+        &[
+            "p12",
+            "inSequence",
+            "guardedInSequence",
+            "initAssert",
+            "stmtTruthy",
+            "seqTruthy",
+        ],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ASSERTION_CALLS).returns(&[
+            ("p12", "string"),
+            ("inSequence", "string | number"),
+            ("guardedInSequence", "never"),
+            ("initAssert", "string"),
+            ("stmtTruthy", "string"),
+            ("seqTruthy", "string"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A construction passed as a call argument is a call of its constructor:
+/// the frame evaluates it as it does any call argument, so the
+/// construction's own call is evidenced and the proof closes. TypeScript
+/// 7.0.2, all four settings: `cArg` is `Error0`.
+const CONSTRUCTED_ARGUMENTS: &str = r#"
+class Error0 {}
+declare function id<T>(x: T): T;
+export function cArg() { return id(new Error0()); }
+"#;
+
+#[test]
+fn a_constructed_call_argument_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(CONSTRUCTED_ARGUMENTS, &["cArg"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(CONSTRUCTED_ARGUMENTS)
+            .returns(&[("cArg", "Error0")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A callable in a parameter list is served by no index entry, but the
+/// frame resolves every name it reaches, so its capture set is exact and
+/// no closure-capture gap stands. TypeScript 7.0.2, all four settings:
+/// `dpArrow` is `() => number`.
+const PARAMETER_CALLABLES: &str = r#"
+export function dpArrow(cb = () => 7) { return cb; }
+"#;
+
+#[test]
+fn a_parameter_default_callable_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(PARAMETER_CALLABLES, &["dpArrow"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(PARAMETER_CALLABLES)
+            .returns(&[("dpArrow", "() => number")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class static block runs at the class's evaluation, and the checker
+/// flows through it inline: `x = 1` in `class C { static { x = 1; } }`
+/// reaches every later read of `x` in the frame. TypeScript 7.0.2, all four
+/// settings: `classStaticBlockAssigns` is `(x: string | number) =>
+/// boolean` (the assignment declines the predicate).
+///
+/// What the lane gives: `boolean`, the checker's answer, with the verdict
+/// partial (`DegradedValue`): the class declaration's unmodeled write
+/// lowers to the statement gap `FlowGap::GuardNarrowing`, which the value
+/// then carries. Proving it takes the static block's statements lowered
+/// in the frame, which the skeleton does not walk (a static block keeps
+/// its own scope and no index entry serves it).
+const STATIC_BLOCK_WRITES: &str = r#"
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+"#;
+
+#[test]
+#[ignore = "a class static block's write is flowed in its frame"]
+fn a_class_static_block_write_is_flowed_in_its_frame() {
+    let unproven = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
     assert!(unproven.is_empty(), "{}", unproven.join("\n"));
 }
