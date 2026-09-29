@@ -154,7 +154,10 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                 })),
             }),
             extends: Arc::new(reference("Expected")),
-            true_type: Arc::new(TypeExpr::Infer { name: "V".into() }),
+            true_type: Arc::new(TypeExpr::Infer {
+                name: "V".into(),
+                constraint: None,
+            }),
             false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         }),
         optional: MappedModifier::Remove,

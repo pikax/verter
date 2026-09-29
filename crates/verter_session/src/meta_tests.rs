@@ -5617,11 +5617,11 @@ defineProps<Props<T>>()
                 "the check is the script setup generic: {check:?}"
             );
             assert!(
-                matches!(extends.as_ref(), TypeExpr::Infer { name } if name == "Selected"),
+                matches!(extends.as_ref(), TypeExpr::Infer { name, .. } if name == "Selected"),
                 "the extends clause declares `infer Selected`: {extends:?}"
             );
             assert!(
-                matches!(true_type.as_ref(), TypeExpr::Infer { name } if name == "Selected"),
+                matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "Selected"),
                 "the true branch reads `Selected`: {true_type:?}"
             );
             assert!(matches!(

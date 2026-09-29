@@ -3,6 +3,7 @@
 //! a conditional's `infer` declarations and a reverse mapped type
 //! (`getTypeFromInference`), and for a signature's type parameters.
 
+mod constraints;
 mod fixation;
 
 pub(crate) use fixation::{winning_candidates, WinningCandidates};

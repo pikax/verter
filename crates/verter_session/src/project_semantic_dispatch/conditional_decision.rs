@@ -890,10 +890,9 @@ impl ProjectSemanticDispatch<'_> {
             // relation for ANY check (`any` included — the pre-any-guard
             // placement is load-bearing).
             return match self.execute_relate_pair(check, extends) {
-                super::dispatch_txn::RelationStep::Assignable { bindings } => (
-                    ConditionalBranchSelection::True,
-                    Some(super::relation::RelationInferBindings { bindings }),
-                ),
+                super::dispatch_txn::RelationStep::Assignable { bindings } => {
+                    self.select_with_inferences(check, extends, bindings)
+                }
                 super::dispatch_txn::RelationStep::NotAssignable => {
                     (ConditionalBranchSelection::False, None)
                 }
@@ -910,37 +909,11 @@ impl ProjectSemanticDispatch<'_> {
         // every consumer rides. A binding-producing judgement's returned
         // bindings substitute into the selected (true) branch.
         let related = self.execute_relate_pair(check, extends);
-        // What the pattern infers selects no branch by itself: the checker
-        // relates the check to the pattern instantiated with the inferred
-        // types (`getConditionalType`), so `{ a: 1; b: (x: string) => void
-        // }` against `{ a: infer U; b: (x: infer U) => void }` infers `1`
-        // and takes the false branch. A pattern that reaches each of its
-        // `infer` declarations once infers each from the one position it
-        // occupies, where the inferring relation already related it: that
-        // relation is the check.
         let selected = |bindings: std::sync::Arc<[crate::semantic_query::InferBinding]>| {
             if !matches!(route, ConditionalInferRoute::InScopePattern(_)) {
                 return (ConditionalBranchSelection::True, None);
             }
-            if !self.pattern_repeats_an_infer(extends) {
-                return (
-                    ConditionalBranchSelection::True,
-                    Some(super::relation::RelationInferBindings { bindings }),
-                );
-            }
-            let instantiated = bindings.iter().fold(extends, |node, binding| {
-                self.substitute_semantic_type_param(node, binding.param, binding.bound)
-            });
-            match self.relate_outside_inference(check, instantiated) {
-                super::dispatch_txn::RelationStep::Assignable { .. } => (
-                    ConditionalBranchSelection::True,
-                    Some(super::relation::RelationInferBindings { bindings }),
-                ),
-                super::dispatch_txn::RelationStep::NotAssignable => {
-                    (ConditionalBranchSelection::False, None)
-                }
-                _ => (ConditionalBranchSelection::Undecided, None),
-            }
+            self.select_with_inferences(check, extends, bindings)
         };
         let params = self.type_params_within(&[check, extends]);
         if params.is_empty() {
@@ -972,6 +945,57 @@ impl ProjectSemanticDispatch<'_> {
             ) => selected(bindings),
             (super::dispatch_txn::RelationStep::NotAssignable, _) => {
                 (ConditionalBranchSelection::Deferred, None)
+            }
+            _ => (ConditionalBranchSelection::Undecided, None),
+        }
+    }
+
+    /// The branch an inferring `extends` pattern selects once its
+    /// inferences are fixed. What the pattern infers selects no branch by
+    /// itself: a constrained `infer` whose inference its constraint refuses
+    /// takes the constraint (`getInferredType`), and the checker relates the
+    /// check to the pattern instantiated with the fixed types
+    /// (`getConditionalType`) — `[1]` against `[infer X extends string]`
+    /// fixes `string` and takes the false branch, and `{ a: 1; b: (x:
+    /// string) => void }` against `{ a: infer U; b: (x: infer U) => void }`
+    /// infers `1` and takes it too. A pattern that reaches each of its
+    /// unconstrained `infer` declarations once infers each from the one
+    /// position it occupies, where the inferring relation already related it:
+    /// that relation is the check.
+    fn select_with_inferences(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        bindings: std::sync::Arc<[crate::semantic_query::InferBinding]>,
+    ) -> (
+        ConditionalBranchSelection,
+        Option<super::relation::RelationInferBindings>,
+    ) {
+        let constrained = self.pattern_constrains_an_infer(extends);
+        let bindings = if constrained {
+            match self.infer_bindings_within_constraints(&bindings) {
+                Some(bindings) => bindings,
+                None => return (ConditionalBranchSelection::Undecided, None),
+            }
+        } else {
+            bindings
+        };
+        if !constrained && !self.pattern_repeats_an_infer(extends) {
+            return (
+                ConditionalBranchSelection::True,
+                Some(super::relation::RelationInferBindings { bindings }),
+            );
+        }
+        let instantiated = bindings.iter().fold(extends, |node, binding| {
+            self.substitute_semantic_type_param(node, binding.param, binding.bound)
+        });
+        match self.relate_outside_inference(check, instantiated) {
+            super::dispatch_txn::RelationStep::Assignable { .. } => (
+                ConditionalBranchSelection::True,
+                Some(super::relation::RelationInferBindings { bindings }),
+            ),
+            super::dispatch_txn::RelationStep::NotAssignable => {
+                (ConditionalBranchSelection::False, None)
             }
             _ => (ConditionalBranchSelection::Undecided, None),
         }

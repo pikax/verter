@@ -1327,10 +1327,21 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 }
             }
         }
-        SemanticNodeData::Infer { name, binder } => {
+        SemanticNodeData::Infer {
+            name,
+            binder,
+            constraint,
+        } => {
             enc.header(category::BINDER, subtag::INFER);
             enc.str(name);
             enc.bytes(&binder.stable_fingerprint_bytes());
+            match constraint {
+                None => enc.u8(0),
+                Some(c) => {
+                    enc.u8(1);
+                    enc.child(*c);
+                }
+            }
         }
         SemanticNodeData::InferRef { name, binder } => {
             enc.header(category::BINDER, subtag::INFER_REF);

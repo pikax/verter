@@ -1630,7 +1630,6 @@ fn pinned_recursive_alias_instantiation() {
 
 /// `infer X extends C` infers `X` and relates it to `C` (a template literal hole converts a numeric or boolean string).
 #[test]
-#[ignore = "typed gap in the lane (UNDECIDED_CONDITIONAL): an `infer` declaration with an extends constraint is an out-of-scope pattern"]
 fn pinned_infer_with_an_extends_constraint() {
     let failures = Matrix::new(INFER_WITH_CONSTRAINTS).four(&[
         (
@@ -1804,7 +1803,6 @@ fn pinned_library_promise_relations_and_calls() {
 
 /// An `infer` nested in a generic application or constrained by `extends` infers through the pattern; without `strictNullChecks` `null` relates to the pattern and its `infer` falls back to `unknown`.
 #[test]
-#[ignore = "typed gap in the lane (UNDECIDED_CONDITIONAL): an `infer` declaration with an extends constraint is an out-of-scope pattern"]
 fn pinned_hype_nested_infer_patterns() {
     let failures = Matrix::new(HYPE_REPROS).four(&[
         (

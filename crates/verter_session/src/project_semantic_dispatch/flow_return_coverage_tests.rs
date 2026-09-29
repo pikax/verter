@@ -3312,11 +3312,11 @@ fn return_position_infer_keeps_its_binder_in_both_positions() {
         panic!("expected an Array extends clause, got {extends:?}");
     };
     assert!(
-        matches!(element.as_ref(), TypeExpr::Infer { name } if name == "E"),
+        matches!(element.as_ref(), TypeExpr::Infer { name, .. } if name == "E"),
         "the `infer E` binder must survive in the extends clause"
     );
     assert!(
-        matches!(true_type.as_ref(), TypeExpr::Infer { name } if name == "E"),
+        matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "E"),
         "the true branch must reference the same `infer` binder"
     );
     assert_eq!(

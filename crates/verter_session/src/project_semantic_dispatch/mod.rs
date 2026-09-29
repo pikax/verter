@@ -4220,6 +4220,8 @@ mod closedness_evaluator_tests;
 #[cfg(test)]
 mod conditional_decision_tests;
 #[cfg(test)]
+mod constrained_infer_tests;
+#[cfg(test)]
 mod generic_source_inference_tests;
 #[cfg(test)]
 mod inference_fixation_tests;

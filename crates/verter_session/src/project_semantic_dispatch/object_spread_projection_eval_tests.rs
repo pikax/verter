@@ -1807,6 +1807,7 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = object(graph, [surface_member("x", infer_u, false)]);
     let infer = |check: SemanticNodeId| {

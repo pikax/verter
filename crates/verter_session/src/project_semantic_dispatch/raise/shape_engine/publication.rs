@@ -419,7 +419,7 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
             tag: FactShapeTag::Other,
         }
     }
-    fn infer(&mut self, _name: Arc<str>) -> ScoredOut {
+    fn infer(&mut self, _name: Arc<str>, _constraint: Option<ScoredOut>) -> ScoredOut {
         ScoredOut {
             score: combine::symbolic_leaf(),
             tag: FactShapeTag::Other,

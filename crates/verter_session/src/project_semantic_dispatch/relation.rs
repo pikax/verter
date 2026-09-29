@@ -814,6 +814,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
@@ -883,6 +884,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
         let member_key = self.relate_key_for(string, number);
@@ -933,6 +935,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -5764,6 +5767,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::Infer {
             name: base_name,
             binder: base_binder,
+            ..
         }) = graph.node_data(base_infer).as_deref().cloned()
         else {
             return Vec::new();
@@ -10319,7 +10323,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     graph.node_data(hole).as_deref(),
                     Some(SemanticNodeData::Infer { .. })
                 ) {
-                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    // A constrained hole converts its capture first
+                    // (`infer N extends number` takes `"42"` as `42`).
+                    match self.template_capture(slice, hole) {
+                        Some(capture) => {
+                            undecided |= !self.relation_deposit(hole, capture, occurrence);
+                        }
+                        None => undecided = true,
+                    }
                     continue;
                 }
                 match self.valid_for_template_placeholder(slice, hole) {
