@@ -50,6 +50,10 @@ pub(super) struct QueryProgram<'p, 'a> {
     task: ExecutionTask,
     /// Claims that continue after an outside producer went away.
     retries: FxHashMap<SemanticQueryKey, ClaimAttempt>,
+    /// The depth a frame started now nests at: one below the frame whose
+    /// step needed it (the drive runs one chain, so a demand starts right
+    /// after the step that needed it, or after its wait restarts it).
+    child_depth: u32,
 }
 
 /// A suspended semantic computation.
@@ -67,6 +71,9 @@ pub(super) struct InstantiateFrame<'p, 'a> {
     build: Option<Box<InstantiateBuild>>,
     /// The declaration the build entered as active, until it leaves it.
     active: Option<super::InstantiateIdentity>,
+    /// How deep this instantiation nests in the drive's chain: the root's
+    /// is 1.
+    depth: u32,
 }
 
 impl Drop for InstantiateFrame<'_, '_> {
@@ -129,6 +136,7 @@ impl<'p, 'a> Program for QueryProgram<'p, 'a> {
                     taint: BuildLocalTaint::default(),
                     build: None,
                     active: None,
+                    depth: self.child_depth,
                 })))
             }
         }
@@ -136,7 +144,10 @@ impl<'p, 'a> Program for QueryProgram<'p, 'a> {
 
     fn step(&mut self, frame: &mut Self::Frame, delivery: Option<Outcome<Self>>) -> EvalStep<Self> {
         match frame {
-            QueryFrame::Instantiate(frame) => self.dispatch.step_instantiate_frame(frame, delivery),
+            QueryFrame::Instantiate(frame) => {
+                self.child_depth = frame.depth + 1;
+                self.dispatch.step_instantiate_frame(frame, delivery)
+            }
         }
     }
 
@@ -226,6 +237,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dispatch: self,
             task: execution.task().clone(),
             retries: FxHashMap::default(),
+            child_depth: 1,
         };
         program.retries.insert(key.clone(), attempt);
         let outcome = SemanticExecution::new().drive(&mut program, key.clone());
@@ -410,7 +422,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let SemanticQueryKey::Instantiate(key) = &frame.key else {
                     unreachable!("an instantiation frame produces an instantiation")
                 };
-                let begun = match self.cold_build_budget_refusal(&frame.key) {
+                let refusal = self
+                    .cold_build_budget_refusal(&frame.key)
+                    .or_else(|| self.instantiation_budget_refusal(frame.depth));
+                let begun = match refusal {
                     Some(refusal) => InstantiateStart::Done(Box::new(refusal)),
                     None => self.begin_instantiate(
                         key.base(),
@@ -443,6 +458,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 EvalStep::Complete(self.complete_instantiate_frame(frame, *output))
             }
         }
+    }
+
+    /// An instantiation nested `depth` deep past Verter's instantiation
+    /// budget: the checker's TS2589 recovery, reported at Verter's limit.
+    /// Whether the budget is reached depends on the chain that needed the
+    /// instantiation, not on the instantiation alone, so neither the
+    /// recovery nor anything evaluated from it is kept in the memo.
+    fn instantiation_budget_refusal(
+        &self,
+        depth: u32,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        let diagnostic = crate::semantic_query::checker_policy::instantiation_budget(
+            self.connected_demand.instantiation_within_budget(depth),
+        )
+        .err()?;
+        let recovery =
+            crate::semantic_query::checker_policy::checker_recovery(self.graph(), diagnostic, None);
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Value(recovery),
+            self.project_generation_signature(),
+        )
+            .into();
+        output.cache_suppress = true;
+        Some(output)
     }
 
     /// Settle, admit and complete a finished build's producer, exactly as

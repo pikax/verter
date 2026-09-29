@@ -51,7 +51,8 @@ pub enum CheckerDiagnosticCode {
     /// instantiation depth, or a conditional tail run longer than its tail
     /// limit ([`checker_policy`](super::checker_policy)) — including the lib
     /// `Awaited<T>` conditional re-entering an application it is still
-    /// evaluating, whose instantiation never terminates.
+    /// evaluating, whose instantiation never terminates — or nested past
+    /// Verter's own instantiation budget.
     ExcessivelyDeepInstantiation,
     /// TS2590: a cross product over unions has at least the checker's
     /// product limit of constituents, checked before one is built
@@ -145,4 +146,7 @@ pub enum CheckerDiagnosticOperation {
     /// One tail run of a conditional alias (`getConditionalType`): its
     /// selected branch applying the alias again.
     ConditionalTail,
+    /// An instantiation nested past Verter's own instantiation budget,
+    /// which lies far past the checker's depth limit.
+    InstantiationBudget,
 }

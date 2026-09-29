@@ -5,10 +5,15 @@
 //! chain is — neither the stack the caller runs on nor the nested-query
 //! depth the connected demand counts for native re-entry decides it.
 //!
-//! Every expected answer is TypeScript 7.0.2's, measured through the capped
-//! `tsc` with `--ignoreConfig`.
+//! Past the checker's own instantiation depth Verter keeps evaluating and
+//! answers; it reports the checker's TS2589 — the same code and message —
+//! only where its own instantiation budget runs out, far past the
+//! checker's.
+//!
+//! Every checker answer quoted is TypeScript 7.0.2's, measured through the
+//! capped `tsc` with `--ignoreConfig`.
 
-use super::checker_probe_lane_tests::{evaluated_mismatches, with_probe};
+use super::checker_probe_lane_tests::{evaluated_mismatches, with_probe_in, ProbeProject};
 use crate::semantic_query::{CheckerDiagnosticCode, QueryError, SemanticNodeData};
 
 /// A chain of `length` aliases down to `T | undefined`, a generic function
@@ -85,7 +90,7 @@ fn alias_chains_up_to_500_long_answer_cold_on_a_one_mebibyte_stack() {
 /// off at 1,000): no TS2589; under `strictNullChecks` `typeof c` and
 /// `gj`'s return are `"ok" | undefined`.
 #[test]
-#[ignore = "the request's projection-operation budget of 2,000 stops an alias chain the checker instantiates"]
+#[ignore = "the flow return of a call whose declared return is a chain of 500 or more aliases produces no result"]
 fn alias_chains_500_and_1000_long_answer_every_row_cold_on_a_one_mebibyte_stack() {
     for (length, rows) in [(500, &ALIAS_CHAIN_ROWS[1..]), (1000, ALIAS_CHAIN_ROWS)] {
         let mismatches = on_a_small_stack(move || evaluated_mismatches(&alias_chain(length), rows));
@@ -97,6 +102,117 @@ fn alias_chains_500_and_1000_long_answer_every_row_cold_on_a_one_mebibyte_stack(
     }
 }
 
+/// The four `strictNullChecks` × `noImplicitAny` settings.
+const SETTINGS: [&str; 4] = [
+    r#"{ "strictNullChecks": true, "noImplicitAny": true }"#,
+    r#"{ "strictNullChecks": true, "noImplicitAny": false }"#,
+    r#"{ "strictNullChecks": false, "noImplicitAny": true }"#,
+    r#"{ "strictNullChecks": false, "noImplicitAny": false }"#,
+];
+
+/// `probe` over `source`, checked under `options` on a 1 MiB thread —
+/// under an instantiation budget of `budget` when set — read by `read`
+/// with the probe's evaluated node.
+fn evaluated_in<R: Send + 'static>(
+    budget: Option<u32>,
+    options: &'static str,
+    source: String,
+    probe: String,
+    read: impl FnOnce(&super::ProjectSemanticDispatch<'_>, crate::semantic_query::SemanticNodeId) -> R
+        + Send
+        + 'static,
+) -> R {
+    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    on_a_small_stack(move || {
+        let _budget = budget.map(super::connected_demand::InstantiationBudgetForTests::install);
+        with_probe_in(
+            ProbeProject {
+                compiler_options: Some(options),
+                ..Default::default()
+            },
+            &source,
+            &probe,
+            |dispatch, node| {
+                let value = dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("the probe evaluates completely");
+                read(dispatch, value)
+            },
+        )
+    })
+}
+
+/// `probe`'s evaluated type as displayed, `Ok` when it is `checker`.
+fn displayed_in(
+    budget: Option<u32>,
+    options: &'static str,
+    source: String,
+    probe: &str,
+    checker: &'static str,
+) -> Result<String, String> {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    evaluated_in(
+        budget,
+        options,
+        source,
+        probe.to_owned(),
+        move |dispatch, value| {
+            let expected = checker_syntax::parse(checker).expect("the checker type parses");
+            let shown = render_node(dispatch, value, 0);
+            if checker_syntax::matches_node(dispatch, value, &expected, 0) {
+                Ok(shown)
+            } else {
+                Err(shown)
+            }
+        },
+    )
+}
+
+/// The TS2589 diagnostic `probe` evaluates to, if it is a checker
+/// recovery.
+fn recovery_in(
+    budget: Option<u32>,
+    options: &'static str,
+    source: String,
+    probe: &str,
+) -> Option<crate::semantic_query::CheckerDiagnostic> {
+    evaluated_in(
+        budget,
+        options,
+        source,
+        probe.to_owned(),
+        |dispatch, value| match dispatch.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })) => {
+                Some(*diagnostic)
+            }
+            _ => None,
+        },
+    )
+}
+
+/// `E<length><"ok">` answers `"ok"` under each of `settings`.
+fn check_conditional_argument_chains_answer(lengths: &[usize], settings: &[&'static str]) {
+    for &length in lengths {
+        for &options in settings {
+            let answer = displayed_in(
+                None,
+                options,
+                conditional_argument_chain(length),
+                &format!("E{length}<\"ok\">"),
+                "\"ok\"",
+            );
+            assert!(
+                answer.is_ok(),
+                "E{length}<\"ok\"> under {options} is \"ok\": {answer:?}"
+            );
+        }
+    }
+}
+
 /// Conditional arguments nested through a chain of aliases evaluate on a
 /// 1 MiB thread up to the checker's instantiation depth.
 ///
@@ -104,35 +220,138 @@ fn alias_chains_500_and_1000_long_answer_every_row_cold_on_a_one_mebibyte_stack(
 /// settings: `E97<"ok">` is `"ok"`; `E98<"ok">` is TS2589.
 #[test]
 fn conditional_arguments_nested_97_deep_answer_on_a_one_mebibyte_stack() {
-    let source = conditional_argument_chain(97);
-    let mismatches =
-        on_a_small_stack(move || evaluated_mismatches(&source, &[("E97<\"ok\">", "\"ok\"")]));
-    assert_eq!(mismatches, Vec::<String>::new());
+    check_conditional_argument_chains_answer(&[97], &SETTINGS);
 }
 
-/// One level deeper, the checker's instantiation of the declared alias type
-/// — a conditional nested once per alias — reaches its depth limit: TS2589,
-/// whose recovery reads as `any`.
+/// Past the checker's instantiation depth Verter keeps evaluating: the
+/// declared alias type — a conditional nested once per alias — is
+/// evaluated to its answer, where the checker gives up.
 ///
-/// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
-/// settings: `E98<"ok">`, `E200<"ok">` and `E500<"ok">` are TS2589.
+/// TypeScript 7.0.2, all four settings: `E98<"ok">` and `E200<"ok">` are
+/// TS2589, the checker's limit; Verter's full answer is `"ok"`, as at 97.
 #[test]
-#[ignore = "the checker's instantiation depth over a declared alias type is not counted"]
-fn conditional_arguments_nested_98_deep_are_the_checker_recovery() {
-    for length in [98, 200, 500] {
-        let source = conditional_argument_chain(length);
-        let recovered = on_a_small_stack(move || {
-            with_probe(&source, &format!("E{length}<\"ok\">"), |dispatch, node| {
-                matches!(
-                    dispatch.graph().node_data(node).as_deref(),
-                    Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
-                        if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation
-                )
-            })
-        });
+fn conditional_arguments_nested_past_the_checker_depth_answer() {
+    check_conditional_argument_chains_answer(&[98, 200], &SETTINGS);
+}
+
+/// Five hundred levels deep, the same full answer.
+///
+/// TypeScript 7.0.2, all four settings: `E500<"ok">` is TS2589; Verter's
+/// full answer is `"ok"`.
+#[test]
+fn conditional_arguments_nested_500_deep_answer() {
+    check_conditional_argument_chains_answer(&[500], &SETTINGS);
+}
+
+/// A thousand levels deep, the same full answer, well inside Verter's
+/// instantiation budget.
+///
+/// TypeScript 7.0.2, `strictNullChecks` and `noImplicitAny`:
+/// `E1000<"ok">` is TS2589; Verter's full answer is `"ok"`.
+#[test]
+fn conditional_arguments_nested_1000_deep_answer() {
+    check_conditional_argument_chains_answer(&[1000], &SETTINGS[..1]);
+}
+
+/// Verter's instantiation budget, pinned at three points on one chain:
+/// the checker's limit, where Verter answers; just inside Verter's budget,
+/// where it still answers; and one level past it, where it reports the
+/// checker's TS2589 — the checker's code and message — as a typed
+/// recovery, having held at most the budget's frames. A lower budget than
+/// production's stands in for it on the same path, so the chain stays
+/// quick to evaluate: an `E<n>` chain nests `n` instantiations.
+///
+/// TypeScript 7.0.2, all four settings: `E98<"ok">` is TS2589 with
+/// "Type instantiation is excessively deep and possibly infinite."
+#[test]
+fn verters_instantiation_budget_reports_the_checkers_ts2589() {
+    use crate::semantic_query::CheckerDiagnosticOperation;
+    const BUDGET: u32 = 150;
+    const TS2589: &str = "Type instantiation is excessively deep and possibly infinite.";
+    let answers = |options: &'static str, length: usize| {
+        displayed_in(
+            Some(BUDGET),
+            options,
+            conditional_argument_chain(length),
+            &format!("E{length}<\"ok\">"),
+            "\"ok\"",
+        )
+        .is_ok()
+    };
+    let reports_ts2589 = |options: &'static str, length: usize| {
+        recovery_in(
+            Some(BUDGET),
+            options,
+            conditional_argument_chain(length),
+            &format!("E{length}<\"ok\">"),
+        )
+        .is_some_and(|diagnostic| {
+            diagnostic.code.code() == 2589
+                && diagnostic.code.message() == TS2589
+                && diagnostic.operation == CheckerDiagnosticOperation::InstantiationBudget
+        })
+    };
+    for options in SETTINGS {
+        assert!(
+            answers(options, 98),
+            "E98 under {options} answers past the checker's limit"
+        );
+        let inside = BUDGET as usize;
+        assert!(
+            answers(options, inside),
+            "E{inside} under {options} answers inside Verter's budget"
+        );
+        assert!(
+            reports_ts2589(options, inside + 1),
+            "E{} under {options} is the checker's TS2589 at Verter's budget",
+            inside + 1
+        );
+    }
+}
+
+/// An instantiation that never terminates — each one needing the next of
+/// the same alias over a growing argument — stops at Verter's
+/// instantiation budget with the checker's TS2589, in bounded memory.
+///
+/// TypeScript 7.0.2, all four settings: `Grow<"ok">` over `type Pair<X> =
+/// X extends unknown ? [X, X] : never` and `type Grow<T> = T extends never
+/// ? never : Pair<Grow<[T]>>` is TS2589.
+#[test]
+#[ignore = "a growing application of one alias is cut as a deferred recursive reference by the declaration recurrence guard, before Verter's budget"]
+fn an_unbounded_instantiation_stops_at_verters_budget_with_ts2589() {
+    const GROW: &str = "type Pair<X> = X extends unknown ? [X, X] : never;\n\
+                        type Grow<T> = T extends never ? never : Pair<Grow<[T]>>;\n";
+    for options in SETTINGS {
+        let recovered = evaluated_in(
+            Some(150),
+            options,
+            GROW.to_owned(),
+            "Grow<\"ok\">".to_owned(),
+            |dispatch, value| {
+                let mut seen = rustc_hash::FxHashSet::default();
+                let mut stack = vec![value];
+                while let Some(node) = stack.pop() {
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    let Some(data) = dispatch.graph().node_data(node) else {
+                        continue;
+                    };
+                    if matches!(
+                        data.as_ref(),
+                        SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })
+                            if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                    ) {
+                        return true;
+                    }
+                    data.for_each_retained_child(|child| stack.push(child));
+                }
+                false
+            },
+        );
         assert!(
             recovered,
-            "E{length}<\"ok\"> is the checker's TS2589 recovery"
+            "Grow<\"ok\"> under {options} reaches the checker's TS2589 at Verter's budget"
         );
     }
 }
@@ -194,4 +413,142 @@ fn an_edit_below_a_chain_of_frames_reaches_every_instantiation_above_it() {
         evaluate("export type A0<T> = T | null;\n", "\"ok\" | null"),
         Ok(())
     );
+}
+
+/// Printing an application of a long alias chain reads each alias's body a
+/// bounded number of times: whether the chain declares a homomorphic
+/// mapping is walked once for the whole chain, not once per alias, and the
+/// printing walk itself runs in a loop.
+///
+/// TypeScript 7.0.2: `E200<"ok">` is TS2589 (Verter's full answer is
+/// `"ok"`); the bound is on Verter's own work.
+#[test]
+fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
+    const LENGTH: usize = 200;
+    let lowerings = on_a_small_stack(|| {
+        let _trace = super::raise::enable_dispatch_trace_for_test();
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            &conditional_argument_chain(LENGTH),
+            &format!("E{LENGTH}<\"ok\">"),
+            |_, _| (),
+        );
+        super::raise::DISPATCH_TRACE.with(|trace| {
+            trace
+                .borrow()
+                .iter()
+                .filter(|kind| **kind == "LowerLocator")
+                .count()
+        })
+    });
+    assert!(
+        lowerings <= 4 * LENGTH,
+        "{lowerings} body lowerings for a chain of {LENGTH} aliases"
+    );
+}
+
+/// Set in the child process
+/// [`a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread`]
+/// starts.
+const SMALL_STACK_CHILD: &str = "VERTER_CONTINUATION_SMALL_STACK_CHILD";
+
+/// In a process of its own — nothing evaluated before it, on any stack —
+/// 1 MiB threads evaluate a 200-alias chain, conditional arguments nested
+/// 97 deep and 500 deep, display an answer, and drop every host and
+/// dispatcher they built there. An overflow aborts the child and fails
+/// this test instead of the whole run.
+///
+/// TypeScript 7.0.2, `strict`: `typeof c` and `ReturnType<typeof gj>` over
+/// the 200-alias chain are `"ok" | undefined`; `E97<"ok">` is `"ok"`;
+/// `E500<"ok">` is TS2589, where Verter's full answer is `"ok"`.
+#[test]
+fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
+    if std::env::var_os(SMALL_STACK_CHILD).is_some() {
+        let mismatches =
+            on_a_small_stack(|| evaluated_mismatches(&alias_chain(200), ALIAS_CHAIN_ROWS));
+        assert_eq!(mismatches, Vec::<String>::new(), "a chain of 200 aliases");
+        for length in [97, 500] {
+            let shown = displayed_in(
+                None,
+                SETTINGS[0],
+                conditional_argument_chain(length),
+                &format!("E{length}<\"ok\">"),
+                "\"ok\"",
+            )
+            .unwrap_or_else(|shown| panic!("E{length}<\"ok\"> displays as {shown}"));
+            assert!(
+                shown.contains("ok"),
+                "E{length}<\"ok\"> displays as {shown}"
+            );
+        }
+        println!("{SMALL_STACK_CHILD}: every chain answered");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "project_semantic_dispatch::continuation_depth_tests::a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(SMALL_STACK_CHILD, "1")
+        .output()
+        .expect("run the evaluation in a child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout.contains(&format!("{SMALL_STACK_CHILD}: every chain answered")),
+        "the child evaluating on 1 MiB threads failed (status {:?}):\n{stdout}\n{stderr}",
+        output.status
+    );
+}
+
+/// Whether Verter's instantiation budget is reached depends on the chain
+/// that needed an instantiation, so its recovery is never kept: a demand
+/// on the same host under the production budget evaluates the chain again
+/// and answers.
+///
+/// TypeScript 7.0.2, `strict`: `E151<"ok">` is TS2589; Verter's full
+/// answer is `"ok"`.
+#[test]
+fn a_budget_recovery_is_never_kept_in_the_memo() {
+    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    let recovered_then_answered = on_a_small_stack(|| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let source = conditional_argument_chain(151);
+        let evaluate = || {
+            super::checker_probe_lane_tests::with_probe_on_host(
+                &host,
+                Default::default(),
+                &source,
+                "E151<\"ok\">",
+                |dispatch, node| {
+                    let value = dispatch
+                        .normalize_node_for_structural_fact_demand(
+                            node,
+                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                        )
+                        .into_complete_node()
+                        .expect("the probe evaluates completely");
+                    match dispatch.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. })) => None,
+                        _ => Some(
+                            crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                                dispatch, value, 0,
+                            ),
+                        ),
+                    }
+                },
+            )
+        };
+        let limited = {
+            let _budget = super::connected_demand::InstantiationBudgetForTests::install(150);
+            evaluate()
+        };
+        (limited, evaluate())
+    });
+    assert_eq!(recovered_then_answered, (None, Some("\"ok\"".to_owned())));
 }
