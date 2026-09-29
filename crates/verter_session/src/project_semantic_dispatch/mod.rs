@@ -736,6 +736,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.connected_demand.charge()
     }
 
+    /// The limit of the connected-work rail the active demand tripped (the
+    /// work limit when none has): the cap a budget verdict reports.
+    pub(super) fn connected_trip_limit(&self) -> u32 {
+        let reasons = self
+            .connected_demand
+            .active_trip()
+            .unwrap_or(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
+        u32::try_from(self.connected_demand.limit_report(reasons).0).unwrap_or(u32::MAX)
+    }
+
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
         self.connected_demand.active_trip()
     }
