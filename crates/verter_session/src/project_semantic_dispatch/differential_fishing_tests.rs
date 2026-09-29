@@ -1558,9 +1558,8 @@ fn keyof_unions_intersections() {
 /// A conditional whose check type is a type parameter is deferred until the
 /// parameter is known (`getConditionalType`'s `isDeferredType`), even where
 /// every instantiation would select the true branch: the checker gives the
-/// return of `g` over `T extends unknown ? 1 : 2` as that conditional. The
-/// lane prints no deferred conditional, so the row is an honest gap in
-/// every setting — never the clean `1` an early selection publishes.
+/// return of `g` over `T extends unknown ? 1 : 2` as that conditional, and
+/// so does the lane — never the clean `1` an early selection publishes.
 #[test]
 fn a_conditional_over_a_generic_check_is_not_selected_early() {
     let matrix = Matrix::new(
@@ -1574,9 +1573,8 @@ fn a_conditional_over_a_generic_check_is_not_selected_early() {
     let verdicts = matrix.verdicts(&rows);
     for verdict in &verdicts[0] {
         assert!(
-            !verdict.matched && verdict.class == "GAP",
-            "the deferred conditional is a gap, never a clean answer: {} {}",
-            verdict.class,
+            verdict.matched,
+            "the conditional stays deferred: {}",
             verdict.lane
         );
     }

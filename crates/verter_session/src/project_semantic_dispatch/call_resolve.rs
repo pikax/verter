@@ -72,6 +72,7 @@ fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
         | QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. }
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::RaiseAliasCycle

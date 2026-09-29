@@ -119,7 +119,7 @@ pub(super) enum Read<'a> {
 }
 
 impl Read<'_> {
-    fn text(&self) -> &str {
+    pub(super) fn text(&self) -> &str {
         match self {
             Read::Type(text) | Read::Return(text) => text,
         }
@@ -915,7 +915,34 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             let text: String = format!("{error:?}").chars().take(80).collect();
             format!("<opaque {text}>")
         }
-        SemanticNodeData::Conditional { .. } => "<unreduced conditional>".to_owned(),
+        // A conditional the checker keeps (a generic operand) prints as
+        // written, its branches as the pending substitution reads them.
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            pending,
+            ..
+        } => {
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
+            format!(
+                "{} extends {} ? {} : {}",
+                operand(dispatch, *check, depth, false),
+                operand(dispatch, *extends, depth, false),
+                at(true_branch),
+                at(false_branch)
+            )
+        }
         SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {

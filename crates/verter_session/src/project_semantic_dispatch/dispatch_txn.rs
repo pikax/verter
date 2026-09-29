@@ -3321,6 +3321,21 @@ impl CheckerDispatchTransaction {
             .find(|s| s.state == InferenceSessionState::Collecting)
     }
 
+    /// Whether a collecting session visible here infers `param_node`.
+    pub(crate) fn collecting_session_infers(&self, param_node: SemanticNodeId) -> bool {
+        let start = self
+            .relation
+            .binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0);
+        self.relation.sessions.get(start..).is_some_and(|sessions| {
+            sessions.iter().any(|session| {
+                session.state == InferenceSessionState::Collecting && session.infers(param_node)
+            })
+        })
+    }
+
     pub(crate) fn begin_binding_disabled(&mut self) {
         self.relation
             .binding_disabled_session_barriers
