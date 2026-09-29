@@ -3074,21 +3074,34 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     });
 }
 
-/// A deeply nested array literal that trips the shallow leaf-lowering
-/// budget (`> MAX_SEMANTIC_INFERENCE_DEPTH` nesting levels).
-fn budget_tripping_array() -> String {
-    let levels = 70;
-    let mut out = String::new();
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push('[');
-    }
-    out.push('0');
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push(']');
-    }
-    out
+/// A leaf whose lowering trips the shallow leaf-lowering work budget
+/// (`> MAX_SEMANTIC_INFERENCE_WORK` visits): a `satisfies` over a
+/// conditional holding a 5,000-element array literal, which the leaf
+/// lowering infers whole ([`budget_tripping_content_trips_when_lowered`]).
+fn budget_tripping_content() -> String {
+    format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    )
+}
+
+/// The budget-tripping content trips when it IS lowered: returned, the
+/// function's evaluation answers the leaf lowering's typed budget failure.
+/// The two tests below read it unlowered, which only this makes a proof.
+#[test]
+fn budget_tripping_content_trips_when_lowered() {
+    let source = format!(
+        "export function pf() {{ return {}; }}\n",
+        budget_tripping_content()
+    );
+    assert_eq!(
+        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+            crate::semantic_query::FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            )
+        ))
+    );
 }
 
 /// The demand slice is the ONLY lowered content: an UNREAD binding's
@@ -3105,7 +3118,7 @@ fn flow_return_unread_binding_content_never_lowers() {
         input_id: "/ws/unread-content.ts".to_string(),
         source: Arc::from(format!(
             "export function sliced() {{\n  const unused = {};\n  return 2;\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/unread-content.ts")
@@ -3136,7 +3149,7 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
         input_id: "/ws/member-sibling-content.ts".to_string(),
         source: Arc::from(format!(
             "export function memberSliced() {{\n  return {{ a: {}, b: 1 }};\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/member-sibling-content.ts")

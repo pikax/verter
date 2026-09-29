@@ -1430,24 +1430,28 @@ fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
     assert!(!calls[0].new_construct);
 }
 
-/// An array literal opens one child site per element, but a nest of array
-/// literals deeper than the shallow inference's nesting budget is a leaf:
-/// that inference answers it whole and reports the typed budget
-/// exhaustion, so neither half descends it level by level. Sixty-four
-/// levels are structural; sixty-five are one leaf.
+/// An array literal opens one child site per element at any depth: a nest
+/// of array literals is structural level by level, so the evaluator answers
+/// it as the checker does (65 levels return `number` under 65 array
+/// dimensions, TypeScript 7.0.2).
 #[test]
-fn array_nests_past_the_inference_budget_are_leaves() {
-    let nest = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
-    let return_shape = |levels: usize| {
-        let skeleton = skeleton_of(&format!("function f() {{ return {}; }}", nest(levels)));
-        let site = skeleton.return_sites[0]
-            .argument
-            .expect("the return carries a value");
-        matches!(
-            skeleton.expr_site(site).shape,
-            SkeletonExprShape::ArrayLiteral { .. }
-        )
-    };
-    assert!(return_shape(64), "a 64-level nest opens its array sites");
-    assert!(!return_shape(65), "a 65-level nest is one leaf");
+fn array_nests_open_a_site_per_level_at_any_depth() {
+    let levels = 65;
+    let skeleton = skeleton_of(&format!(
+        "function f() {{ return {}0{}; }}",
+        "[".repeat(levels),
+        "]".repeat(levels)
+    ));
+    let mut site = skeleton.return_sites[0]
+        .argument
+        .expect("the return carries a value");
+    let mut opened = 0;
+    while let SkeletonExprShape::ArrayLiteral { elements } = &skeleton.expr_site(site).shape {
+        opened += 1;
+        site = elements[0];
+    }
+    assert_eq!(
+        opened, levels,
+        "every level of the nest opens its array site"
+    );
 }

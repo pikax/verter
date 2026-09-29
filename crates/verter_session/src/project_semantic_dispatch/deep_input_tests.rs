@@ -73,15 +73,6 @@ const WORK_BUDGET_EXCEEDED: Result<
     InferenceUnavailableReason::WorkBudgetExceeded,
 )));
 
-/// The typed outcome of a return whose inference outgrew the semantic
-/// inference depth budget: no value, and the depth budget named.
-const DEPTH_BUDGET_EXCEEDED: Result<
-    Option<crate::semantic_query::FlowReturnDegradation>,
-    FlowReturnError,
-> = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
-    InferenceUnavailableReason::DepthBudgetExceeded,
-)));
-
 fn wrap(depth: usize, open: &str, close: &str) -> String {
     format!("{}1{}", open.repeat(depth), close.repeat(depth))
 }
@@ -298,44 +289,76 @@ fn calls_nested_10000_deep_answer_on_production_stacks() {
     );
 }
 
-/// A depth whose nested array literals the semantic inference depth budget
-/// (64 levels) admits.
-const ARRAYS_UNDER_THE_INFERENCE_BUDGET: usize = 64;
-
 fn arrays(depth: usize) -> String {
     returning(wrap(depth, "[", "]"))
 }
 
-const ARRAY_PROBE: &str = "ReturnType<typeof pf> extends unknown[] ? 1 : 2";
+/// `pf`'s return over `source`, read on a 1 MiB thread: how many mutable
+/// arrays it nests, and whether the innermost one's element is `number`.
+/// Read from a loop: the checker-print comparison descends a bounded depth
+/// of its own.
+fn array_nest_on_a_small_stack(source: String) -> (usize, bool) {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            super::checker_probe_lane_tests::with_probe(&source, RETURN, |dispatch, node| {
+                let graph = dispatch.graph();
+                let mut node = node;
+                let mut depth = 0;
+                while let Some(crate::semantic_query::SemanticNodeData::Array {
+                    element,
+                    readonly: false,
+                }) = graph.node_data(node).as_deref()
+                {
+                    depth += 1;
+                    node = *element;
+                }
+                let number = matches!(
+                    graph.node_data(node).as_deref(),
+                    Some(crate::semantic_query::SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Number
+                    ))
+                );
+                (depth, number)
+            })
+        })
+        .expect("spawn the probing thread")
+        .join()
+        .expect("the probe answers")
+}
 
-/// Array literals nested 64 deep evaluate from the evaluator's stack (an
-/// array literal is a frame of it, each element evaluated from the stack).
+/// Array literals nested 65 deep, past any depth a shallow per-expression
+/// inference bounds: the planner opens a site per element and the
+/// evaluator evaluates each array literal as a frame of its stack, so the
+/// return is `number` under 65 array dimensions, as the checker's is.
 #[test]
-fn arrays_nested_64_deep_answer_on_production_stacks() {
+fn arrays_nested_65_deep_answer_on_production_stacks() {
+    assert_eq!(array_nest_on_a_small_stack(arrays(65)), (65, true));
+}
+
+/// Array literals nested 3,000 deep: the content half lowers each literal
+/// as a frame of its stack, element by element, so no level costs a
+/// native one.
+#[test]
+fn arrays_nested_3000_deep_answer_on_production_stacks() {
     assert_eq!(
-        mismatches_on_a_small_stack(arrays(ARRAYS_UNDER_THE_INFERENCE_BUDGET), ARRAY_PROBE, "1"),
-        Vec::<String>::new()
+        array_nest_on_a_small_stack(arrays(UNDER_THE_PLAN_BUDGET)),
+        (UNDER_THE_PLAN_BUDGET, true)
     );
 }
 
-/// Array literals nested 10,000 deep return on the production stacks (the
-/// semantic inference depth budget admits 64 levels, so the return is its
-/// typed budget failure).
+/// Array literals nested 10,000 deep return on the production stacks (their
+/// demand slice exceeds the plan budget, so the return is its typed budget
+/// failure).
 #[test]
 fn arrays_nested_10000_deep_return_on_production_stacks() {
-    assert_eq!(
-        return_on_a_small_stack(arrays(DEPTH)),
-        DEPTH_BUDGET_EXCEEDED
-    );
+    assert_eq!(return_on_a_small_stack(arrays(DEPTH)), WORK_BUDGET_EXCEEDED);
 }
 
 #[test]
-#[ignore = "the semantic inference depth budget admits no 10,000 nested array literals"]
+#[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested array literals"]
 fn arrays_nested_10000_deep_answer_on_production_stacks() {
-    assert_eq!(
-        mismatches_on_a_small_stack(arrays(DEPTH), ARRAY_PROBE, "1"),
-        Vec::<String>::new()
-    );
+    assert_eq!(array_nest_on_a_small_stack(arrays(DEPTH)), (DEPTH, true));
 }
 
 #[test]
