@@ -78,13 +78,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
-    provisional_relate_step, redischarge_is_stable, select_inference_candidates,
-    CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
-    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
-    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
+    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
+    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
+    ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
+    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -5223,6 +5223,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The source signature a relation of `source` to the signature
+    /// `target` compares. A generic source relates as it is instantiated
+    /// in the target's context (`compareSignaturesRelated`); a relation of
+    /// comparability (which erases generics) keeps the source as it is.
+    /// Under an inference session a generic source infers as its base
+    /// signature (`inferFromSignatures` reads `getBaseSignature`: `<T>(x:
+    /// T) => T` against `(...a: infer A) => infer R` infers `[x: unknown]`
+    /// and `unknown`) — unless the target is generic itself: its own type
+    /// parameters are no inference site of the session, so the pair relates
+    /// as it does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
+    /// U) => U, x: T)`). `None` when the base signature cannot be read.
+    fn signature_relation_source(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> Option<SemanticNodeId> {
+        if self.current_relation_kind() == RelationKind::Comparable {
+            return Some(source);
+        }
+        if !self.relation_session_active() || self.signature_is_generic(target) {
+            return Some(
+                self.instantiate_signature_in_context_of(source, target, kind)
+                    .unwrap_or(source),
+            );
+        }
+        if self.signature_is_generic(source) {
+            return self.base_signature(source);
+        }
+        Some(source)
+    }
+
     /// Whether `signature` declares type parameters of its own.
     fn signature_is_generic(&self, signature: SemanticNodeId) -> bool {
         matches!(
@@ -5600,10 +5632,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .active_session()
             .map(|session| session.projection_candidates_since(checkpoint))
             .unwrap_or_default();
-        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
-        let projection_recovered = !candidate_nodes.is_empty();
+        let winning = super::inference::winning_candidates(&candidates);
+        let projection_recovered = !winning.is_empty();
         let recovered = if projection_recovered {
-            self.relation_combine_candidates(&candidate_nodes, variance)
+            let (candidate_nodes, variance) = winning.inferred_from();
+            self.relation_combine_candidates(candidate_nodes, variance)
         } else {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
@@ -10762,21 +10795,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             drop(source_data);
             drop(target_data);
-            // A generic source relates as it is instantiated in the
-            // target's context (`compareSignaturesRelated`); a relation
-            // under an inference session, or of comparability (which
-            // erases generics), keeps the source as it is — unless the
-            // target is generic itself: its own type parameters are no
-            // inference site of the session, so the pair relates as it
-            // does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
-            // U) => U, x: T)`).
-            if self.current_relation_kind() != RelationKind::Comparable
-                && (!self.relation_session_active() || self.signature_is_generic(target))
-            {
-                if let Some(instantiated) =
-                    self.instantiate_signature_in_context_of(source, target, kind)
-                {
-                    work.push(RelateWork::Eval(instantiated, target));
+            match self.signature_relation_source(source, target, kind) {
+                Some(compared) if compared != source => {
+                    work.push(RelateWork::Eval(compared, target));
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    results.push(RelationResult::Unknown);
                     return;
                 }
             }
@@ -12206,6 +12232,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 predicate: *predicate,
             }),
             _ => None,
+        };
+        result_of(source)?;
+        result_of(target)?;
+        // The method's source signature is the one any signature relation
+        // compares (a generic source instantiated or read at its base).
+        let Some(source) = self.signature_relation_source(
+            source,
+            target,
+            crate::semantic_query::SignatureKind::Call,
+        ) else {
+            return Some(RelationResult::Unknown);
         };
         let source_result = result_of(source)?;
         let target_result = result_of(target)?;

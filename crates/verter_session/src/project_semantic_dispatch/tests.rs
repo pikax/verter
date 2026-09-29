@@ -16598,51 +16598,30 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
     }
 }
 
+/// A direct candidate outranks a reverse homomorphic mapped one: the
+/// inference owner fixes from the strongest priority a variable received,
+/// and complete reverse recovery outranks partial recovery.
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use super::dispatch_txn::InferenceCandidate;
+    use crate::semantic_query::InferenceCandidatePriority;
 
     let host = host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
-    let never = primitive(&graph, PrimitiveKind::Never);
-    let (infer, parameter) = reverse_test_binders(&graph, "PriorityT", 31);
-    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
-        object: infer,
-        index: IndexKey::Computed(parameter),
-    });
-    let template = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", projection, false, false),
-            surface_member("direct", infer, false, false),
-        ],
-    );
-    let target = reverse_test_target(
-        &graph,
-        infer,
-        parameter,
-        template,
-        OptionalityMod::Keep,
-        ReadonlyMod::Keep,
-    );
-    let source_value = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", string, false, false),
-            surface_member("direct", number, false, false),
-        ],
-    );
-    let source = intern_object_with_members(
-        &graph,
-        vec![surface_member("a", source_value, false, false)],
-    );
-
-    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let candidate = |node, priority| InferenceCandidate {
+        node,
+        priority,
+        variance: crate::semantic_query::VariancePhase::Covariant,
+    };
+    let winning = super::inference::winning_candidates(&[
+        candidate(string, InferenceCandidatePriority::HomomorphicMapped),
+        candidate(number, InferenceCandidatePriority::Argument),
+    ]);
     assert_eq!(
-        result, number,
+        winning.covariant,
+        vec![number],
         "the direct Argument candidate must outrank the aggregate HomomorphicMapped candidate"
     );
     assert!(

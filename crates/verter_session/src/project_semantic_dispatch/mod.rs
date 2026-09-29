@@ -163,6 +163,7 @@ mod flow_return_widening;
 // the component close finalizes through it), and the `FlowReturnKey`
 // constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
+mod inference;
 // The product lattice of the flow authority: the per-domain dataflow
 // products and the ONE join route every merge point folds through. The
 // flow evaluator holds its whole semantic state here — the products ARE
@@ -4218,6 +4219,10 @@ mod carrier_head_resolution_tests;
 mod closedness_evaluator_tests;
 #[cfg(test)]
 mod conditional_decision_tests;
+#[cfg(test)]
+mod generic_source_inference_tests;
+#[cfg(test)]
+mod inference_fixation_tests;
 #[cfg(test)]
 mod mapped_key_domain_carrier_tests;
 
