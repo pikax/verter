@@ -558,6 +558,22 @@ pub(crate) fn template_literal_reduce_read(
     >,
     Arc<crate::semantic_query_memo::SemanticGraphStore>,
 ) {
+    template_literal_reduce_read_with_work_limit(host, quasis, arg_unions, None)
+}
+
+/// [`template_literal_reduce_read`] with the connected-work ledger limited to
+/// `work_limit` units when given.
+pub(crate) fn template_literal_reduce_read_with_work_limit(
+    host: &VerterHost,
+    quasis: &[&str],
+    arg_unions: &[Vec<String>],
+    work_limit: Option<usize>,
+) -> (
+    crate::semantic_query::CacheRead<
+        crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+    >,
+    Arc<crate::semantic_query_memo::SemanticGraphStore>,
+) {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId, SemanticQueryKey};
 
@@ -589,6 +605,9 @@ pub(crate) fn template_literal_reduce_read(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    if let Some(work_limit) = work_limit {
+        dispatch.set_connected_limits_for_tests(work_limit, 24);
+    }
     let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
         pattern: Arc::from(
             quasis
