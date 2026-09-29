@@ -66,6 +66,30 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
+/// The four settings with `strictBindCallApply` off, in the same order.
+pub(super) const BIND_CALL_APPLY_OFF: [Setting; 4] = [
+    Setting {
+        root: "/strict-loose-bind",
+        label: "strict, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-loose-bind",
+        label: "strictNullChecks off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/strict-implicit-loose-bind",
+        label: "noImplicitAny off, strictBindCallApply off",
+        options: r#"{ "strict": true, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-implicit-loose-bind",
+        label: "both off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+];
+
 /// The CPU time one row's evaluating thread may spend before the row is
 /// reported overdue. A hang detector, not a speed budget: it catches a row
 /// that loops or whose work blows up super-linearly, never a slow but
@@ -1199,14 +1223,15 @@ fn canonical_member(member: &str) -> String {
         };
         let rest = member[parts[0].len() + 2..].to_owned();
         let (name, rest) = if let Some(optional) = name.strip_suffix('?') {
-            // `name?: T | undefined` is the checker's print of the optional
-            // `name?: T` under `strictNullChecks` (the declared type of an
-            // optional property holds `undefined`, and the lane reads it off
-            // the optional flag), as `(T | undefined)?` is of an optional
-            // tuple element. A member typed `undefined` alone keeps it.
+            // Without `exactOptionalPropertyTypes` (off in every setting)
+            // `name?: T | undefined` and `name?: T` are one type; the
+            // checker's declaration emit spells a declared `b?: string`
+            // as authored and a synthesized optional (a spread's partial)
+            // as `a?: number | undefined`, so both sides drop the
+            // optional member's `undefined` arm.
             let arms: Vec<String> = split_top(&rest, " | ")
                 .into_iter()
-                .filter(|arm| arm != "undefined")
+                .filter(|arm| arm.trim() != "undefined")
                 .collect();
             let rest = if arms.is_empty() {
                 rest

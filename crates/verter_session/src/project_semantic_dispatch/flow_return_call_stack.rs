@@ -185,8 +185,12 @@ fn call_operand(call: &SliceCall) -> Option<&SliceExpr> {
         | SliceCall::OnValue {
             object: operand, ..
         }
+        | SliceCall::OnElement {
+            object: operand, ..
+        }
         | SliceCall::Construct(operand)
-        | SliceCall::TaggedTemplate(operand) => Some(operand),
+        | SliceCall::TaggedTemplate(operand)
+        | SliceCall::OptionalChain { root: operand, .. } => Some(operand),
         _ => None,
     }
 }

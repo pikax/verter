@@ -2511,9 +2511,11 @@ fn dependent_type_parameter_default_substitutes_earlier_bindings() {
 // Ambient `Function.prototype.call` rebasing
 // ---------------------------------------------------------------------------
 
-/// The vendored non-generic ambient `call`.
+/// A non-generic ambient `call` on `CallableFunction`, the apparent
+/// interface whose `call` the prototype rebase covers.
 const AMBIENT_PLAIN_CALL: &str = r#"
-interface Function {
+interface Function {}
+interface CallableFunction {
   call(this: Function, thisArg: any, ...argArray: any[]): any;
 }
 "#;
@@ -4634,4 +4636,59 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
         "the complete evaluation closes the operator, got {element:?}"
     );
     assert_eq!(cached(&control), 1, "the complete call warms");
+}
+
+/// The call-boundary binder walk over `A2<T>`, for `type A0<T> = T |
+/// undefined; type A1<T> = A0<T>; type A2<T> = A1<T>`, on a fresh host whose
+/// dispatch nests at most `query_depth` query boundaries.
+fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve::BinderReach {
+    let host = host();
+    upsert_source(
+        &host,
+        CANONICAL,
+        "type A0<T> = T | undefined;\ntype A1<T> = A0<T>;\ntype A2<T> = A1<T>;\nexport {};\n",
+    );
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    dispatch.set_connected_limits_for_tests(
+        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+        query_depth,
+    );
+    let graph = dispatch.graph();
+    let t = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("ChainT"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("A2"),
+        },
+        args: Arc::from(vec![t].into_boxed_slice()),
+    });
+    dispatch.deposit_at_top_level_for_tests(chain, t)
+}
+
+/// A binder behind aliases is found by instantiating them one at a time;
+/// an instantiation the walk cannot read leaves the reach unknown, never
+/// absent — absent would widen the deposit as if the binder were deeper.
+/// Mutation: read an unreadable instantiation as expanding to nothing;
+/// the refused walk answers `Absent`.
+#[test]
+fn a_binder_behind_an_unread_alias_is_unknown_never_absent() {
+    assert_eq!(
+        binder_reach_through_an_alias_chain(super::connected_demand::MAX_CONNECTED_QUERY_DEPTH),
+        super::call_resolve::BinderReach::Present
+    );
+    assert_eq!(
+        binder_reach_through_an_alias_chain(0),
+        super::call_resolve::BinderReach::Incomplete
+    );
 }

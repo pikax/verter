@@ -6713,25 +6713,18 @@ fn flow_return_new_expression_is_a_throw_point() {
     );
 }
 
-/// The finally-side twin: the finally entry joins the throw point, the
-/// try-write flag keeps the read honestly degraded. Oracle: `string |
-/// number` (the model carries the join, degraded — never the clean
-/// one-path answer).
+/// The finally-side twin: the finally entry joins the pre-try value, the
+/// write and the throw point, which is exactly the checker's exception
+/// flow (every mutation of the try block is a point its finally is entered
+/// from). Oracle: `string | number`, clean.
 #[test]
 fn flow_return_finally_entry_joins_the_template_throw_point() {
     let host = make_r2_host();
-    let outcome = r2_eval(&host, "r2FinallySideThrowPoint").expect("evaluates");
-    assert_eq!(
-        outcome.degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
-        "the read past the try stays fail-closed"
-    );
-    assert_eq!(
-        outcome.ty,
+    assert_r2_clean_warm(
+        &host,
+        "r2FinallySideThrowPoint",
         union(vec![number(), string()]),
-        "the finally entry carries the throw-point join"
     );
-    assert_eq!(outcome.candidates, 0, "a degraded success is ReturnOnly");
 }
 
 /// A pending break exit replays the lexical scope closes it crossed: the

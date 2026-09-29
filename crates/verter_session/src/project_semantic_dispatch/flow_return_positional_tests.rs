@@ -292,9 +292,12 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "computedMemberOffCall",
             FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
+        // The optional call is modelled; the `length` read off its
+        // `string` value is the unmodelled position here: this host
+        // registers no library, so `String` is unresolved.
         (
             "optionalCallMemberRead",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
+            FlowReturnDegradation::UnresolvedValue,
         ),
     ] {
         let outcome = evaluate(&host, POS_CANONICAL, name)
