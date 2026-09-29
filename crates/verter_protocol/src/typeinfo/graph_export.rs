@@ -1079,6 +1079,7 @@ impl<'a> GraphExporter<'a> {
 fn intrinsic_op_kind(op: CompilerIntrinsicTypeOp) -> CompilerIntrinsicTypeOpWire {
     match op {
         CompilerIntrinsicTypeOp::Awaited => CompilerIntrinsicTypeOpWire::Awaited,
+        CompilerIntrinsicTypeOp::NoInfer => CompilerIntrinsicTypeOpWire::NoInfer,
     }
 }
 

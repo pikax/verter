@@ -963,6 +963,7 @@ impl GraphBuilder {
                     // its wire code is stated.
                     op: match op {
                         verter_type_expr::CompilerIntrinsicTypeOp::Awaited => 1,
+                        verter_type_expr::CompilerIntrinsicTypeOp::NoInfer => 2,
                     },
                     arguments: arguments.iter().map(|ty| self.node_id(ty)).collect(),
                 }

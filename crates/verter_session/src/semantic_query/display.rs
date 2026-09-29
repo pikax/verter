@@ -655,11 +655,10 @@ fn display_resolved_type_node(
         } => {
             let mut s = String::from("`");
             for (i, quasi) in quasis.iter().enumerate() {
-                // Quasis are stored as RAW source text (`q.value.raw` —
-                // `verter_type_expr_oxc`), already carrying source-level escapes
-                // for backslash / backtick / `${`. They round-trip VERBATIM;
-                // re-escaping would double-escape them.
-                s.push_str(quasi);
+                // Quasis are the template's cooked text
+                // (`verter_type_expr_oxc::template_element_text`), escaped
+                // back into template source as the checker prints them.
+                verter_type_expr::push_template_quasi(&mut s, quasi);
                 if let Some(expr) = expressions.get(i) {
                     s.push_str("${");
                     s.push_str(&display_type_node(store, *expr, needs, child_depth, visited).0);

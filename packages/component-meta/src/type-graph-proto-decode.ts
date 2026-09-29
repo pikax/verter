@@ -227,6 +227,7 @@ const SURFACE_PARTIAL_REASON_BY_WIRE: Readonly<
   [SurfacePartialReason.FLOW_RETURN_UNINFERRED]: "flowReturnUninferred",
   [SurfacePartialReason.FLOW_RETURN_UNVERIFIED]: "flowReturnUnverified",
   [SurfacePartialReason.FLOW_RETURN_NO_SURFACE]: "flowReturnNoSurface",
+  [SurfacePartialReason.UNDECIDED_CONDITIONAL]: "undecidedConditional",
 };
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;

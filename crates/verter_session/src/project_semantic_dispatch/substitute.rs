@@ -1529,6 +1529,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
+                // `NoInfer` over an operand that is no longer generic is
+                // that operand.
+                if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer)
+                    && !self.type_is_generic(new_args[0])
+                {
+                    return (new_args[0], true);
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,

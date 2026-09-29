@@ -308,6 +308,7 @@ pub(super) fn call_key_at(
 
 pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
     CallArgKey::Eager {
+        first_pass: None,
         ty,
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
@@ -320,6 +321,7 @@ pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
 /// candidate widens under the inferring parameter's const policy.
 fn fresh_literal(ty: SemanticNodeId) -> CallArgKey {
     CallArgKey::Eager {
+        first_pass: None,
         ty,
         spread: false,
         literal_mode: ArgumentLiteralMode::Widened,
@@ -544,6 +546,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
         CallKind::Call,
         None,
         vec![CallArgKey::Eager {
+            first_pass: None,
             ty: tuple,
             spread: true,
             literal_mode: ArgumentLiteralMode::Literal,
@@ -574,6 +577,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
             CallKind::Call,
             None,
             vec![CallArgKey::Eager {
+                first_pass: None,
                 ty: number_array,
                 spread: true,
                 literal_mode: ArgumentLiteralMode::Widened,
@@ -1534,6 +1538,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let callee = callable(&dispatch, vec![with_callback], Vec::new());
 
     let lambda_arg = |context_sensitive| CallArgKey::Eager {
+        first_pass: None,
         ty: untyped_lambda,
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
@@ -3131,6 +3136,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
     );
     let callee = callable(&dispatch, vec![first, second], Vec::new());
     let spread_of_array = CallArgKey::Eager {
+        first_pass: None,
         ty: string_array,
         spread: true,
         literal_mode: ArgumentLiteralMode::Literal,

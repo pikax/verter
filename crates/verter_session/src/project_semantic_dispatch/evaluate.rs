@@ -1368,7 +1368,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - an alias whose declared body is a type the alias itself
     ///   constructs — an object, function, mapped, array or tuple type, a
     ///   union or an intersection — is printed by the alias (`Tup<number>`,
-    ///   `Fn<number>`);
+    ///   `Fn<number>`), except a tuple with a variadic element, which is
+    ///   normalized on instantiation and printed as the tuple (`type
+    ///   Push<T extends unknown[], U> = [...T, U]` prints `Push<[1, 2], 3>`
+    ///   as `[1, 2, 3]`);
     /// - an alias whose body references another declaration prints as
     ///   [`Self::printed_alias_reference`] decides;
     /// - every other alias is not named by the alias: a conditional
@@ -1402,7 +1405,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(body) = self.declared_alias_body(identity)? else {
             return Some(PrintedDeclaration::AliasTransparent);
         };
-        Some(match self.graph().node_data(body).as_deref() {
+        let graph = self.graph();
+        Some(match graph.node_data(body).as_deref() {
+            // A tuple with a variadic element (`...T` over anything but an
+            // array type) is normalized when it is instantiated, and the
+            // normalized tuple carries no alias (the checker defers only a
+            // tuple type node without one).
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if elements.iter().any(|element| {
+                    element.rest
+                        && !matches!(
+                            graph.node_data(element.value).as_deref(),
+                            Some(SemanticNodeData::Array {
+                                readonly: false,
+                                ..
+                            })
+                        )
+                }) =>
+            {
+                PrintedDeclaration::AliasTransparent
+            }
             Some(
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Signature { .. }

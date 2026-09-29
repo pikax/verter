@@ -2577,6 +2577,9 @@ fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::Sur
         FfiSurfacePartialReason::FlowReturnNoSurface => {
             proto::SurfacePartialReason::FlowReturnNoSurface
         }
+        FfiSurfacePartialReason::UndecidedConditional => {
+            proto::SurfacePartialReason::UndecidedConditional
+        }
     }
 }
 
@@ -2947,6 +2950,7 @@ mod tests {
             R::FlowReturnUninferred,
             R::FlowReturnUnverified,
             R::FlowReturnNoSurface,
+            R::UndecidedConditional,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived

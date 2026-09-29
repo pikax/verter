@@ -69,19 +69,27 @@ pub enum CompilerIntrinsicTypeOp {
     /// operand's thenability is not yet decidable — a binder-dependent
     /// operand such as an unconstrained `T`.
     Awaited,
+    /// `NoInfer<T>` over an operand that is still generic: the operand
+    /// itself for every relation, and no inference site for a call's type
+    /// parameters (the checker's `NoInfer` substitution type). Over an
+    /// operand that is not generic the application is the operand.
+    NoInfer,
 }
 
 impl CompilerIntrinsicTypeOp {
     /// Every operation, in declaration order. Lets exhaustiveness tests iterate
     /// the vocabulary without a wildcard.
-    pub const ALL: &'static [CompilerIntrinsicTypeOp] = &[CompilerIntrinsicTypeOp::Awaited];
+    pub const ALL: &'static [CompilerIntrinsicTypeOp] = &[
+        CompilerIntrinsicTypeOp::Awaited,
+        CompilerIntrinsicTypeOp::NoInfer,
+    ];
 
     /// The exact number of operands the operation takes. An application with
     /// any other count is malformed and is never minted as this operation.
     #[must_use]
     pub const fn arity(self) -> usize {
         match self {
-            Self::Awaited => 1,
+            Self::Awaited | Self::NoInfer => 1,
         }
     }
 
@@ -92,6 +100,7 @@ impl CompilerIntrinsicTypeOp {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Awaited => "Awaited",
+            Self::NoInfer => "NoInfer",
         }
     }
 
@@ -102,6 +111,7 @@ impl CompilerIntrinsicTypeOp {
     pub const fn wire_str(self) -> &'static str {
         match self {
             Self::Awaited => "awaited",
+            Self::NoInfer => "noInfer",
         }
     }
 
@@ -116,6 +126,7 @@ impl CompilerIntrinsicTypeOp {
     pub const fn stable_hash_tag(self) -> u8 {
         match self {
             Self::Awaited => 0,
+            Self::NoInfer => 1,
         }
     }
 
@@ -126,6 +137,7 @@ impl CompilerIntrinsicTypeOp {
     pub fn from_wire_str(value: &str) -> Option<Self> {
         match value {
             "awaited" => Some(Self::Awaited),
+            "noInfer" => Some(Self::NoInfer),
             _ => None,
         }
     }
@@ -163,7 +175,7 @@ mod tests {
     fn arity_is_pinned_per_operation() {
         for op in CompilerIntrinsicTypeOp::ALL {
             let expected = match op {
-                CompilerIntrinsicTypeOp::Awaited => 1,
+                CompilerIntrinsicTypeOp::Awaited | CompilerIntrinsicTypeOp::NoInfer => 1,
             };
             assert_eq!(op.arity(), expected, "{op:?}");
         }

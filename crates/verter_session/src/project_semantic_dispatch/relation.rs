@@ -4868,7 +4868,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// deposits never reach fixation (`{ (a: number, b: number): void;
     /// (a: string, b: string): void } extends (a: infer U, b: string) =>
     /// void` fixes `U := string`, never `number ∧ string`).
-    fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint> {
+    pub(super) fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint> {
         self.dispatch_txn
             .borrow()
             .active_session()
@@ -4877,7 +4877,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Roll the ACTIVE session's deposits back to `checkpoint` (no-op when
     /// no session is active or no checkpoint was taken).
-    fn relation_session_rollback(&self, checkpoint: &Option<SessionCheckpoint>) {
+    pub(super) fn relation_session_rollback(&self, checkpoint: &Option<SessionCheckpoint>) {
         if let Some(checkpoint) = checkpoint {
             if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
                 session.rollback_to(checkpoint);
@@ -5745,7 +5745,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let conditional_shadows =
                         self.extends_pattern_declares_infer(*extends, base_infer);
                     let (selection, _) = self.conditional_branch_selection(*check, *extends);
-                    if selection != super::ConditionalBranchSelection::Deferred {
+                    if matches!(
+                        selection,
+                        super::ConditionalBranchSelection::True
+                            | super::ConditionalBranchSelection::False
+                    ) {
                         if let Some(Some(selected)) = self.reduce_relation_conditional(node) {
                             stack.push((
                                 selected,
@@ -7862,6 +7866,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             (_, SemanticNodeData::Opaque(err)) if err.is_error_type() => {
                 ShallowRelation::Assignable
             }
+            // A type variable an inference binds takes `never` as its
+            // candidate: the structural reducer deposits it.
+            (SemanticNodeData::Primitive(PrimitiveKind::Never), target)
+                if self.null_deposits_into(target) =>
+            {
+                ShallowRelation::Unknown
+            }
             (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => ShallowRelation::Assignable,
             (
                 SemanticNodeData::Primitive(PrimitiveKind::Any),
@@ -7994,14 +8005,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         };
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
+        // A binder takes the other operand as written, a carrier the lane
+        // cannot resolve included (an inference candidate is recorded
+        // verbatim and resolves at the bound's own demand points).
         let source = match self.unwrap_identity_carrier_for_relation(source) {
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
         let target = match self.unwrap_identity_carrier_for_relation(target) {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
         // Function-inference demand point (the pre-relation function-infer
@@ -9306,9 +9322,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - template → template: the same quasis over structurally identical
     ///   placeholders are ONE type (the checker interns a template by its
     ///   texts and types) ⇒ `Assignable`; any other pair ⇒ `None`.
-    ///
-    /// Quasis are stored as RAW source text; a quasi carrying an escape
-    /// (`\\`) is not cooked-comparable and bails to `None`.
     fn relate_string_literal_and_template(
         &self,
         source_data: &SemanticNodeData,
@@ -9317,7 +9330,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<RelationResult> {
         fn skeleton_comparable(quasis: &[Arc<str>], expressions: &[SemanticNodeId]) -> bool {
             quasis.len() == expressions.len() + 1
-                && quasis.iter().all(|quasi| !quasi.contains('\\'))
         }
         /// Whether `text` is producible from the quasi skeleton with
         /// every placeholder read as an arbitrary (possibly empty)
@@ -9491,6 +9503,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
 
+        // ── `NoInfer<X>` relates as `X` — a source as itself, a target
+        //    with no inference into it (the checker's `NoInfer`
+        //    substitution type is no inference site). ─────────────────────
+        let no_infer = |data: &SemanticNodeData| match data {
+            SemanticNodeData::IntrinsicApplication {
+                op: crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer,
+                args,
+            } => Some(args[0]),
+            _ => None,
+        };
+        if let Some(operand) = no_infer(&source_data) {
+            drop(source_data);
+            drop(target_data);
+            work.push(same_pair(operand, target));
+            return;
+        }
+        if let Some(operand) = no_infer(&target_data) {
+            drop(source_data);
+            drop(target_data);
+            // Under an inference session the position infers nothing and
+            // is checked once the call's inferences are fixed (substituting
+            // the operand leaves no `NoInfer` behind); elsewhere it is its
+            // operand.
+            if self.relation_session_active() {
+                results.push(assignable(bindings));
+            } else {
+                work.push(same_pair(source, operand));
+            }
+            return;
+        }
+
         // ── Object-spread programs are formulas: distributed and aliased
         //    program operands relate through the SAME protocol as the root
         //    (there is no second matcher). ───────────────────────────────
@@ -9590,7 +9633,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(assignable(bindings));
                 return;
             }
-            (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => {
+            (SemanticNodeData::Primitive(PrimitiveKind::Never), target_shape) => {
+                // `never` is a candidate like any other source
+                // (`inferFromTypes`): `[never] extends [infer X]` infers
+                // `never`, as does `f(x as never)` over `f<T>(x: T)`.
+                if self.relation_session_active()
+                    && matches!(
+                        occurrence.variance,
+                        VariancePhase::Covariant | VariancePhase::Invariant
+                    )
+                    && matches!(
+                        target_shape,
+                        SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
+                    )
+                {
+                    let _ = self.relation_deposit(target, source, occurrence);
+                }
                 results.push(assignable(bindings));
                 return;
             }
@@ -9734,11 +9792,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // A type parameter against a union relates to each member (the
             // checker's `eachTypeRelatedToSomeType` over the target): an
-            // identical member holds it. Any other pair stays undecided.
+            // identical member holds it.
             let source_against_union = matches!(&*source_data, SemanticNodeData::TypeParam { .. })
                 && matches!(&*target_data, SemanticNodeData::Union(_));
             if !source_against_union {
-                results.push(RelationResult::Unknown);
+                if self.relation_session_active() {
+                    results.push(RelationResult::Unknown);
+                    return;
+                }
+                // Outside an inference session a type parameter is rigid
+                // (`structuredTypeRelatedTo`): as a source it relates as its
+                // constraint, `unknown` when it declares none; as a target
+                // only itself, `never` and `any` (decided above) relate to
+                // it.
+                match &*source_data {
+                    SemanticNodeData::TypeParam { constraint, .. } => {
+                        let constraint = constraint.unwrap_or_else(|| {
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                        });
+                        drop(source_data);
+                        drop(target_data);
+                        work.push(same_pair(constraint, target));
+                    }
+                    _ => results.push(RelationResult::NotAssignable),
+                }
                 return;
             }
         }

@@ -961,6 +961,7 @@ impl FamilyKey {
                     if let CallArgKey::Eager {
                         ty,
                         const_view,
+                        first_pass,
                         spread: _,
                         literal_mode: _,
                         context_sensitive: _,
@@ -969,6 +970,9 @@ impl FamilyKey {
                         visit(*ty);
                         if let Some(const_view) = const_view {
                             visit(*const_view);
+                        }
+                        if let Some(first_pass) = first_pass {
+                            visit(*first_pass);
                         }
                     }
                 }

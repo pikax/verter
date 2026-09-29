@@ -2048,22 +2048,30 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Tri-state outcome of
-/// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
-/// shared conditional branch-selection oracle, factored out of
+/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`] —
+/// the ONE shared conditional branch-selection oracle, factored out of
 /// `build_conditional`'s relation path (the infer-pattern cases and the
 /// full memoised relation engine, both through the sole relation
 /// authority `execute(SemanticQueryKey::Relate)`) and reused by the
 /// key-domain closedness classifiers in `raise.rs` for
 /// selected-branch-only classification.
-/// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
-/// the lattice-extreme checks that semantically use both branches
-/// (`any`) or dominate (`error`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConditionalBranchSelection {
     True,
     False,
+    /// The checker defers the conditional (`getConditionalType`): an
+    /// operand is generic, or the check fails the restrictive relation
+    /// while its permissive instantiation still relates. An `error` check
+    /// is kept too, the carrier dominating both branches.
     Deferred,
+    /// The checker decides the conditional and the lane cannot: the
+    /// relation it asks is undecided (`Unknown`, a budget, a coinductive
+    /// assumption), the `extends` pattern is one the lane does not infer
+    /// from, or an `any` check meets a pattern. The conditional is
+    /// published as a typed gap
+    /// ([`PartialReasonSet::UNDECIDED_CONDITIONAL`](crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL)),
+    /// never as the checker's answer.
+    Undecided,
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -4250,6 +4258,8 @@ mod differential_global_library_tests;
 #[cfg(test)]
 mod differential_harness_tests;
 #[cfg(test)]
+mod differential_inference_tests;
+#[cfg(test)]
 mod differential_literal_tests;
 #[cfg(test)]
 mod differential_module_tests;
@@ -4325,6 +4335,12 @@ mod truthiness_domain_tests;
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
 mod type_syntax_depth_tests;
+#[cfg(test)]
+mod undecided_call_tests;
+#[cfg(test)]
+mod undecided_conditional_tests;
+#[cfg(test)]
+mod unique_symbol_key_tests;
 #[cfg(test)]
 mod unique_symbol_widening_tests;
 #[cfg(test)]
