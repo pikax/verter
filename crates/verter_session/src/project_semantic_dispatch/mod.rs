@@ -4284,6 +4284,8 @@ mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
 #[cfg(test)]
+mod inference_census_tests;
+#[cfg(test)]
 mod intersection_complexity_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
