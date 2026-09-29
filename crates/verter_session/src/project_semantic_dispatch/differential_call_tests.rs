@@ -1223,6 +1223,14 @@ export function methodCall2() { return obj2.m.call(ctx, 1); }
 export function methodBind2() { return obj2.m.bind(ctx); }
 export function localArrow() { const g = (x: number) => x > 0; return g.call(undefined, 1); }
 export function nestedDecl() { function h(a: number) { return a > 0; } return h.call(undefined, 1); }
+declare function opt(a: number, b?: string): void;
+declare function three(a: number, b: string, c: boolean): number;
+export function boundAll() { return add.bind(undefined, 1, 2); }
+export function boundAllCalled() { return add.bind(undefined, 1, 2)(); }
+export function boundOptional() { return opt.bind(null, 1); }
+export function boundTwoOfThree() { return three.bind(null, 1, "s"); }
+export function boundOneOfThree() { return three.bind(null, 1); }
+export function boundGeneric() { return id.bind(null, 1); }
 export function idCall() { return id.call(null, 1); }
 export function idApply() { return id.apply(null, [1]); }
 export function ovCall() { return ov.call(null, 1); }
@@ -1310,18 +1318,40 @@ fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on):
-/// `add.bind(undefined, 1)` is `(b: number) => number` (`bind`'s second
-/// overload splits `add`'s parameters as `[...A, ...B]` at the bound
-/// arguments' count) and its call `number`.
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics: `bind` with bound arguments takes its second overload,
+/// which splits the function's parameters as `[...A, ...B]` at the number
+/// of bound arguments — `add.bind(undefined, 1)` is `(b: number) =>
+/// number`, `add.bind(undefined, 1, 2)` `() => number`, `three` bound at
+/// one and at two arguments `(b: string, c: boolean) => number` and `(c:
+/// boolean) => number`, the generic `id` bound at one `() => unknown` (its
+/// base signature) — and a call of a bound value is the function's return.
 #[test]
-#[ignore = "bind with bound arguments infers no [...A, ...B] parameter split, and degrades as an unrepresentable callee"]
 fn a_partially_applied_bind_reads_its_remaining_parameters() {
     let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
     let failures = matrix.returns(&[
         ("boundPartial", "(b: number) => number"),
         ("boundPartialCalled", "number"),
+        ("boundAll", "() => number"),
+        ("boundAllCalled", "number"),
+        ("boundOneOfThree", "(b: string, c: boolean) => number"),
+        ("boundTwoOfThree", "(c: boolean) => number"),
+        ("boundGeneric", "() => unknown"),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2: `opt.bind(null, 1)` over `opt(a: number, b?: string)`
+/// is `(b?: string | undefined) => void`, `(b?: string) => void` without
+/// `strictNullChecks` — the optional parameter stays optional in the split.
+#[test]
+fn a_partially_applied_bind_keeps_an_optional_parameter() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.nullness(&[(
+        Read::Return("boundOptional"),
+        "(b?: string | undefined) => void",
+        "(b?: string) => void",
+    )]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

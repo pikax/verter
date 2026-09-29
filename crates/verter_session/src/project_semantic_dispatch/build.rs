@@ -10365,6 +10365,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         function_node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
+        self.intern_function_params_tuple_from(function_node, 0)
+    }
+
+    /// [`Self::intern_function_params_tuple`] over the ordinary parameters
+    /// from position `from` on — the checker's `getRestTypeAtPosition`.
+    pub(super) fn intern_function_params_tuple_from(
+        &self,
+        function_node: SemanticNodeId,
+        from: usize,
+    ) -> Option<SemanticNodeId> {
         use crate::semantic_query::TupleElement;
 
         let data = self.graph().node_data(function_node)?;
@@ -10379,6 +10389,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let elements: Vec<TupleElement> = crate::semantic_query::split_this_receiver(&params)
             .1
             .iter()
+            .skip(from)
             .map(|param| TupleElement {
                 label: param.name.as_ref().map(Arc::clone),
                 // An optional parameter's tuple SLOT type is

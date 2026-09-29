@@ -335,7 +335,6 @@ fn function_apply_and_call_resolve_through_callable_function() {
 /// number`, `bind`'s second overload splitting `add`'s parameters at the
 /// bound argument.
 #[test]
-#[ignore = "bind with bound arguments infers no [...A, ...B] parameter split, and degrades as an unrepresentable callee"]
 fn function_bind_with_a_bound_argument_resolves_through_callable_function() {
     let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[("fnBind", "(b: number) => number")]);
