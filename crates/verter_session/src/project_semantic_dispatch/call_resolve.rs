@@ -1740,6 +1740,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .dispatch_txn
             .borrow_mut()
             .push_collecting_session(setup, None);
+        // A bare type-parameter rest takes its arity from the arguments
+        // (`impliedArity`), none when a spread feeds it; inference from
+        // the receiver onward reads it.
+        if let Some((param, rest_start)) = generic_rest {
+            let spread = arguments.iter().any(|argument| argument.indefinite_spread)
+                || key.args.iter().any(|argument| match argument {
+                    CallArgKey::Eager { spread, .. }
+                    | CallArgKey::ProgramExpression { spread, .. } => *spread,
+                });
+            if !spread {
+                let arity = arguments.len().saturating_sub(rest_start);
+                if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
+                    session.set_implied_arity(param, arity);
+                }
+            }
+        }
         let checkpoint = self
             .dispatch_txn
             .borrow()
