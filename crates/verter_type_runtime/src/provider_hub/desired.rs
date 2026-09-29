@@ -8,7 +8,7 @@
 
 use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::admission::AdmittedRequest;
 use crate::protocol::TypeProviderError;
@@ -155,7 +155,7 @@ pub(super) struct DesiredState {
     path_configs: Vec<DesiredPathConfig>,
     workspace_folders: Vec<serde_json::Value>,
     carriers: BTreeMap<String, DesiredCarrier>,
-    admitted: HashMap<String, AdmittedRequest>,
+    admitted: HashSet<String>,
 }
 
 impl DesiredState {
@@ -294,20 +294,20 @@ impl DesiredState {
         mutation: &DesiredMutation,
         admissions: &[AdmittedRequest],
     ) {
-        for (path, admission) in mutation.touched_paths().into_iter().zip(admissions) {
-            self.admitted.insert(path, admission.clone());
+        for (path, _) in mutation.touched_paths().into_iter().zip(admissions) {
+            self.admitted.insert(path);
         }
     }
 
     fn replay_admitted(&self, path: &str) -> bool {
-        !self.admitted.contains_key(path)
+        !self.admitted.contains(path)
     }
 
     /// Once replacement replay has finished, remove old-epoch generated state.
     /// Otherwise a later discovery load could be shadowed by an open overlay
     /// that the replacement never received.
     pub(super) fn discard_admitted(&mut self) {
-        for path in self.admitted.keys() {
+        for path in &self.admitted {
             self.files.remove(path);
             self.carriers.remove(path);
         }

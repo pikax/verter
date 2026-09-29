@@ -377,6 +377,15 @@ where
                 return Ok(witness.clone());
             }
         }
+        // Each witness retains its published workspace. Once a new basis is
+        // observed, old bindings and warm requests cannot authorize work and
+        // must not keep their snapshots alive.
+        state
+            .bindings
+            .retain(|_, witness| witness.0.input.basis == input.basis);
+        state
+            .requests
+            .retain(|_, request| request.witness.0.input.basis == input.basis);
         if state.bindings.len() >= 4096 {
             state.bindings.clear();
         }

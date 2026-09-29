@@ -133,6 +133,20 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
         Err(AdmissionRefusal::StaleProvider)
     ));
     assert!(engine.calls().is_empty());
+    let fingerprint = QueryFingerprint::new("diagnostics", unit.as_str(), 0, 0);
+    {
+        let mut watch = harness.provider.state.shared.query_watch.lock().unwrap();
+        watch.begin(&fingerprint);
+        for _ in 0..super::quarantine::QUARANTINE_STRIKE_THRESHOLD {
+            watch.record_crash_implications();
+        }
+        watch.end(&fingerprint, false);
+    }
+    assert!(harness
+        .provider
+        .get_diagnostics(unit.as_str())
+        .await
+        .is_err());
     harness
         .provider
         .apply_overlay(
@@ -146,6 +160,14 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
         )
         .await
         .unwrap();
+    assert!(
+        harness
+            .provider
+            .get_diagnostics(unit.as_str())
+            .await
+            .is_ok(),
+        "an admitted companion write lifts the prior content's quarantine"
+    );
     assert_eq!(engine.calls().len(), 1);
 
     assert!(matches!(
@@ -296,6 +318,56 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
         harness.provider.check_admission(&fresh_admission),
         Err(AdmissionRefusal::StaleBasis)
     ));
+    let other_basis = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&rebuilt))),
+        1,
+        1,
+    );
+    let other_reader = {
+        let basis = other_basis.clone();
+        Arc::new(move || Some(basis.clone())) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let other_witness = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            "d:/ws/src/Other.vue".into(),
+            project.into(),
+            Vec::new(),
+            other_basis,
+            other_reader,
+        ))
+        .unwrap();
+    assert!(matches!(
+        harness.provider.check_project(&changed_references),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    let other_admission = harness
+        .provider
+        .admit_request(
+            &other_witness,
+            std::slice::from_ref(&unit),
+            Some(&fresh_proof),
+        )
+        .unwrap();
+    replacement.inner.update_fails.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &other_admission,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "failed update".into(),
+                    kind: OverlayFileKind::Update,
+                    priority: OverlayPriority::Foreground,
+                },
+            )
+            .await,
+        Err(AdmissionRefusal::ProviderWriteFailed)
+    ));
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(4).await;
+    assert!(harness.provider.is_serving(), "explicit hub recovers");
 }
 
 // @ai-generated

@@ -1070,6 +1070,13 @@ async fn run_actor<P>(
                                             Ok(()) => {
                                                 desired.apply(&mutation, lane);
                                                 desired.record_admitted(&mutation, &admissions);
+                                                let mut watch =
+                                                    shared.query_watch.lock().unwrap_or_else(
+                                                        |poisoned| poisoned.into_inner(),
+                                                    );
+                                                for path in mutation.touched_paths() {
+                                                    watch.clear_path(&path);
+                                                }
                                                 Ok(AppliedReceipt {
                                                     epoch: Some(serving.epoch),
                                                 })
@@ -1078,14 +1085,22 @@ async fn run_actor<P>(
                                                 // A publication raced the forward. The engine
                                                 // may now contain an unadmitted unit, so it cannot
                                                 // serve or replay that state into another epoch.
-                                                retire(&shared, serving.epoch).await;
+                                                if demand_driven {
+                                                    retire(&shared, serving.epoch).await;
+                                                } else {
+                                                    serving.crash_signal.notify_one();
+                                                }
                                                 Err(reason)
                                             }
                                         }
                                     }
                                     Ok(Err(_)) => {
                                         // A partial provider write cannot be allowed to serve.
-                                        retire(&shared, serving.epoch).await;
+                                        if demand_driven {
+                                            retire(&shared, serving.epoch).await;
+                                        } else {
+                                            serving.crash_signal.notify_one();
+                                        }
                                         Err(AdmissionRefusal::ProviderWriteFailed)
                                     }
                                     Err(Interrupt::Retired(retired)) => {
