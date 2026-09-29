@@ -2912,6 +2912,30 @@ impl ResolutionTransaction {
         }
     }
 
+    /// Whether every fact this attempt observed still holds in `world`,
+    /// read precisely, before any aggregate compaction: an aggregate stamp
+    /// cannot prove an unrelated advance harmless, the observations can.
+    pub(crate) fn observations_hold_in(&self, world: &CapturedResolutionWorld) -> bool {
+        world.validates_fact_signature(&self.observations)
+    }
+
+    /// Every canonical an observation of this attempt reads, possibly
+    /// repeated.
+    pub(crate) fn observed_canonicals(&self) -> impl Iterator<Item = &str> + '_ {
+        self.observations
+            .iter()
+            .filter_map(|observation| observation.canonical_id())
+    }
+
+    /// Admit this attempt against `root`, a later world in which
+    /// [`Self::observations_hold_in`] held. The observations keep their own
+    /// versions; only the compaction basis moves to the world the
+    /// admission was validated against.
+    pub(crate) fn rebase_onto(&mut self, root: Arc<CapturedResolutionWorld>) {
+        self.aggregate_basis.resolution = root.resolution_stamp(root.population);
+        self.root = root;
+    }
+
     /// Move the retained raw observed values out of the transaction so the
     /// Engine can fold them into the recorded evidence baseline at the
     /// admission fence.

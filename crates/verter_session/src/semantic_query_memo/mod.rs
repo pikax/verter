@@ -859,6 +859,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         body: impl FnOnce() -> T,
     ) -> T {
+        use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
         let _open = execution
             .task()
