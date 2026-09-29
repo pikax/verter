@@ -68,6 +68,7 @@ pub(crate) enum Recursion {
 pub(crate) struct ReadCapture<'a> {
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
+    carrier: Option<&'a mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
 }
 
 impl<'a> ReadCapture<'a> {
@@ -76,6 +77,7 @@ impl<'a> ReadCapture<'a> {
         Self {
             publication: Some(slot),
             evidence: None,
+            carrier: None,
         }
     }
 
@@ -88,6 +90,40 @@ impl<'a> ReadCapture<'a> {
         Self {
             publication: None,
             evidence: Some(slot),
+            carrier: None,
+        }
+    }
+
+    /// Hand the answering result's carrier to `slot` instead of bubbling it
+    /// into the tracers active now: a consumer that is not running when the
+    /// result arrives replays the carrier into its own tracer when it
+    /// resumes.
+    pub(crate) fn deferring_carrier(
+        slot: &'a mut Option<crate::fact_signature_helpers::ReadSetSignature>,
+    ) -> Self {
+        Self {
+            publication: None,
+            evidence: None,
+            carrier: Some(slot),
+        }
+    }
+
+    /// The evidence and carrier slots together.
+    pub(super) fn parts(
+        &mut self,
+    ) -> (
+        Option<&mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
+        Option<&mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
+    ) {
+        (self.evidence.as_deref_mut(), self.carrier.as_deref_mut())
+    }
+
+    /// Deliver the answering result's carrier: into the deferred slot, or
+    /// into the tracers active now.
+    fn deliver_carrier(&mut self, carrier: &crate::fact_signature_helpers::ReadSetSignature) {
+        match self.carrier.as_deref_mut() {
+            Some(slot) => *slot = Some(carrier.clone()),
+            None => carrier.bubble_via_tls(),
         }
     }
 
@@ -292,7 +328,7 @@ impl SemanticGraphStore {
         // `validates_self_root_whole_hash`) before it is bubbled or
         // returned, so a stale candidate misses and the claim below
         // recomputes it.
-        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture.evidence()) {
+        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
             return Err(if ctx.is_cancelled() {
                 cancelled_cache_read()
             } else {
@@ -338,7 +374,7 @@ impl SemanticGraphStore {
         // 1. Warm re-read: reached on the rare race where another producer
         //    published after the lookup, or on a retry after an abort. The
         //    read validates strictly for this claimant's view.
-        if let Some(hit) = self.get_validated_value_prepared(prepared, ctx, capture.evidence()) {
+        if let Some(hit) = self.get_validated_value_prepared(prepared, ctx, capture) {
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
             if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
                 sched_ctx
@@ -591,7 +627,7 @@ impl Subscription<'_> {
         // producer observed — the same rail a cold producer and a warm hit
         // deliver.
         if let Some(ref carrier) = graph_carrier {
-            carrier.bubble_via_tls();
+            capture.deliver_carrier(carrier);
             if let Some(slot) = capture.evidence() {
                 *slot = semantic_operand_evidence(carrier, &producer_self_roots, &dep_signature);
             }
@@ -868,7 +904,7 @@ impl SettledProducer<'_> {
     /// and return the read.
     pub(crate) fn complete(
         self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        _ctx: &dyn crate::resolver_core::ResolverContext,
         capture: &mut ReadCapture<'_>,
     ) -> ValueRead {
         let Self {
@@ -895,7 +931,7 @@ impl SettledProducer<'_> {
         // `FileWholeHash` facts live only on the carrier; bubbling here makes
         // a cold-built child, a warm-hit child and a joined child deliver the
         // identical fact set to their parent.
-        carrier.bubble(ctx);
+        capture.deliver_carrier(&carrier);
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather

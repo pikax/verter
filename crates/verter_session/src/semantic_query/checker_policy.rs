@@ -15,6 +15,11 @@
 //! Each counter below starts where the checker's starts and resets where the
 //! checker's resets, so the fact never depends on what an earlier query left
 //! in a memo.
+//!
+//! Where Verter evaluates past a checker limit on budgets of its own, the
+//! diagnostic a budget reports when it is exhausted is here too: the
+//! checker's own code and message, at Verter's limit instead of the
+//! checker's ([`instantiation_budget`]).
 
 use super::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
@@ -65,6 +70,20 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// comparisons; `[S] extends [T] ? 1 : 2` is `1` at 1,800 arms and `2` under
 /// TS2859 at 2,100.
 pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
+/// Verter's instantiation budget, checked for one instantiation: `within`
+/// is whether the connected demand's ledger admits its depth. Past it the
+/// instantiation is the checker's TS2589 — its code and message — reported
+/// at Verter's limit rather than the checker's, which Verter evaluates
+/// past.
+pub(crate) fn instantiation_budget(within: bool) -> Result<(), CheckerDiagnostic> {
+    if within {
+        return Ok(());
+    }
+    Err(CheckerDiagnostic {
+        code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        operation: CheckerDiagnosticOperation::InstantiationBudget,
+    })
+}
 
 /// The checker's error type after `diagnostic`: the typed recovery carrier,
 /// with `beyond` the type Verter names past the checker's limit, if any.

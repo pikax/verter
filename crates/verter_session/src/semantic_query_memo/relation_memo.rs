@@ -135,7 +135,15 @@ impl SemanticGraphStore {
         // cooperative dispatch, which records the single miss (see
         // `get_validated_value_impl`'s `record_miss` contract).
         let hit = self
-            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None, false)?
+            .get_validated_value_impl(
+                &family,
+                ModeSlot::Single,
+                &requested,
+                ctx,
+                None,
+                None,
+                false,
+            )?
             .value;
         match hit {
             QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),

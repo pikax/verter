@@ -29,7 +29,9 @@ fn record_mapped_after_source_visit_for_tests() {
     MAPPED_AFTER_SOURCE_VISITS.set(MAPPED_AFTER_SOURCE_VISITS.get() + 1);
 }
 
-use super::carrier::{CarrierArgsContinuation, CarrierResolutionPlan, CarrierResolverContext};
+use super::carrier::{
+    CarrierArgsContinuation, CarrierFinish, CarrierResolutionPlan, CarrierResolverContext,
+};
 use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -119,9 +121,67 @@ enum ProjectionFrame {
         context: ProjectionReductionContext,
         state: Box<ReferenceArgsState>,
     },
+    /// A node whose projection is the instantiation the run is waiting on:
+    /// the delivered node is its projection.
+    AwaitInstantiation {
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    },
 }
 
 const _: () = assert!(std::mem::size_of::<ProjectionFrame>() <= 32);
+
+/// How a projection run treats the instantiations it reaches.
+///
+/// Run inline, a projection evaluates each instantiation where it reaches
+/// it. Run as a continuation, it parks the node instead, records the
+/// instantiation as the run's need, and stops: the caller delivers the
+/// instantiated node to [`ProjectSemanticDispatch::drain_projection`],
+/// which resumes the run exactly where it stopped.
+#[derive(Debug, Default)]
+pub(super) struct ProjectionSeam {
+    suspend: bool,
+    need: Option<SemanticQueryKey>,
+}
+
+impl ProjectionSeam {
+    /// Evaluate every instantiation in place.
+    pub(super) fn inline() -> Self {
+        Self::default()
+    }
+
+    /// Stop at every instantiation and hand it to the caller.
+    pub(super) fn suspending() -> Self {
+        Self {
+            suspend: true,
+            need: None,
+        }
+    }
+}
+
+/// A projection run the caller can resume: the explicit stack of what
+/// remains of each node's projection, owned so it can wait across the
+/// evaluation of an instantiation it needs.
+pub(super) struct ProjectionRun {
+    root: SemanticNodeId,
+    root_context: ProjectionReductionContext,
+    frames: SmallVec<[ProjectionFrame; 16]>,
+}
+
+/// Where a projection run stands after it ran as far as it could.
+pub(super) enum ProjectionPoll {
+    /// The run finished.
+    Done(ProjectedViewOutcome),
+    /// The run waits on this instantiation.
+    Need(SemanticQueryKey),
+}
+
+/// How a node's projection finishes: with a node, or with the
+/// instantiation whose node it is.
+pub(super) enum ProjectionFinish {
+    Node(SemanticNodeId),
+    Instantiate(SemanticQueryKey),
+}
 
 struct MappedContinuationState {
     node: SemanticNodeId,
@@ -140,6 +200,8 @@ struct ReferenceArgsState {
 
 enum ReferenceProjectionPlan {
     Ready(SemanticNodeId),
+    /// The reference projects to this instantiation's node.
+    Instantiate(SemanticQueryKey),
     NeedsArgs {
         continuation: CarrierArgsContinuation,
         args: Arc<[SemanticNodeId]>,
@@ -309,7 +371,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !routes_through_instantiate {
                     return ReferenceProjectionPlan::Ready(anchor);
                 }
-                let result = match self.execute_type_node(SemanticQueryKey::Instantiate(
+                ReferenceProjectionPlan::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -319,11 +381,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
-                )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                    _ => self.opaque(QueryError::Miss),
-                };
-                ReferenceProjectionPlan::Ready(result)
+                ))
             }
             SemanticNodeData::BareRef(_) => {
                 self.plan_bare_reference_projection(data, context, inputs, substitutions)
@@ -335,6 +393,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn project_view_node_worklist(
         &self,
         root: SemanticNodeId,
@@ -343,11 +402,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &mut ViewMemo,
     ) -> ProjectedViewOutcome {
+        // A completed projection is free reusable work: a warm root neither
+        // installs a connected-demand state nor consumes its work budget.
+        if let Some(&done) = memo.get(&(root, root_context)) {
+            return ProjectedViewOutcome::complete(done);
+        }
+        // One connected demand spans the whole run, so its work budget
+        // counts every step of it.
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let mut seam = ProjectionSeam::inline();
+        let mut run =
+            match self.begin_projection(root, root_context, inputs, substitutions, memo, &mut seam)
+            {
+                Ok(run) => run,
+                Err(outcome) => return outcome,
+            };
+        match self.drain_projection(&mut run, inputs, substitutions, memo, &mut seam, None) {
+            ProjectionPoll::Done(outcome) => outcome,
+            ProjectionPoll::Need(_) => {
+                unreachable!("an inline projection evaluates its instantiations in place")
+            }
+        }
+    }
+
+    /// Begin projecting `root`: answer it at once (a memoized, terminal or
+    /// refused root), or schedule it and return the run
+    /// [`Self::drain_projection`] carries on.
+    pub(super) fn begin_projection(
+        &self,
+        root: SemanticNodeId,
+        root_context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        memo: &mut ViewMemo,
+        seam: &mut ProjectionSeam,
+    ) -> Result<ProjectionRun, ProjectedViewOutcome> {
         // A completed projection is free reusable work. Preserve the original
         // recursive primitive's memo-first contract: warm hits neither install
         // a connected-demand state nor consume its runaway-work budget.
         if let Some(&done) = memo.get(&(root, root_context)) {
-            return ProjectedViewOutcome::complete(done);
+            return Err(ProjectedViewOutcome::complete(done));
         }
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let root_data = self.graph().node_data(root);
@@ -359,22 +453,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .and_then(|data| self.active_decl_recursion_sentinel(data))
         {
             memo.insert((root, root_context), recursive);
-            return ProjectedViewOutcome::complete(recursive);
+            return Err(ProjectedViewOutcome::complete(recursive));
         }
         if let Some(reasons) = preexisting_trip {
-            return ProjectedViewOutcome::partial(root, reasons);
+            return Err(ProjectedViewOutcome::partial(root, reasons));
         }
         crate::loop5_instrumentation::watchdog_beat();
         crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
         let Some(root_data) = root_data else {
             if let Err(reasons) = self.charge_connected_work() {
-                return ProjectedViewOutcome::partial(root, reasons);
+                return Err(ProjectedViewOutcome::partial(root, reasons));
             }
             memo.insert((root, root_context), root);
-            return ProjectedViewOutcome::complete(root);
+            return Err(ProjectedViewOutcome::complete(root));
         };
         if let Err(reasons) = self.charge_connected_work() {
-            return ProjectedViewOutcome::partial(root, reasons);
+            return Err(ProjectedViewOutcome::partial(root, reasons));
         }
         match root_data.as_ref() {
             SemanticNodeData::Primitive(_)
@@ -385,12 +479,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 memo.insert((root, root_context), root);
-                return ProjectedViewOutcome::complete(root);
+                return Err(ProjectedViewOutcome::complete(root));
             }
             SemanticNodeData::RawFallback { .. } => {
                 let miss = self.opaque(QueryError::Miss);
                 memo.insert((root, root_context), miss);
-                return ProjectedViewOutcome::complete(miss);
+                return Err(ProjectedViewOutcome::complete(miss));
             }
             _ => {}
         }
@@ -398,7 +492,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut frames: SmallVec<[ProjectionFrame; 16]> = SmallVec::new();
         let mut work_credit = match ConnectedWorkCredit::new(self.connected_demand()) {
             Ok(credit) => credit,
-            Err(reasons) => return ProjectedViewOutcome::partial(root, reasons),
+            Err(reasons) => return Err(ProjectedViewOutcome::partial(root, reasons)),
         };
         if let Err(reasons) = self.schedule_projection_node(
             root,
@@ -409,12 +503,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
             memo,
             &mut frames,
             &mut work_credit,
+            seam,
         ) {
-            return ProjectedViewOutcome::partial(root, reasons);
+            return Err(ProjectedViewOutcome::partial(root, reasons));
         }
 
+        Ok(ProjectionRun {
+            root,
+            root_context,
+            frames,
+        })
+    }
+
+    /// Carry a projection run on as far as it can go. `delivery` is the
+    /// node of the instantiation the run last stopped at, when it stopped at
+    /// one. An inline run always finishes; a suspending run stops at each
+    /// instantiation it reaches.
+    pub(super) fn drain_projection(
+        &self,
+        run: &mut ProjectionRun,
+        inputs: &LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        memo: &mut ViewMemo,
+        seam: &mut ProjectionSeam,
+        delivery: Option<SemanticNodeId>,
+    ) -> ProjectionPoll {
+        if let Some(key) = seam.need.take() {
+            return ProjectionPoll::Need(key);
+        }
+        let root = run.root;
+        let root_context = run.root_context;
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let mut work_credit = match ConnectedWorkCredit::new(self.connected_demand()) {
+            Ok(credit) => credit,
+            Err(reasons) => {
+                return ProjectionPoll::Done(ProjectedViewOutcome::partial(root, reasons))
+            }
+        };
+        let frames = &mut run.frames;
+        if let Some(instantiated) = delivery {
+            let Some(ProjectionFrame::AwaitInstantiation { node, context }) = frames.pop() else {
+                unreachable!("a delivery resumes the node that awaited it")
+            };
+            self.memoize_projected(memo, node, context, instantiated);
+        }
         let mut trip = None;
-        while let Some(frame) = frames.pop() {
+        // A step that stops at an instantiation leaves the run at once: the
+        // node awaiting it stays on top of the stack for its delivery.
+        while seam.need.is_none() {
+            let Some(frame) = frames.pop() else {
+                break;
+            };
             match frame {
                 ProjectionFrame::Enter { node, context } => {
                     let data =
@@ -433,8 +572,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inputs,
                         substitutions,
                         memo,
-                        &mut frames,
+                        frames,
                         &mut work_credit,
+                        seam,
                     ) {
                         trip = Some(reasons);
                         break;
@@ -463,8 +603,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             inputs,
                             substitutions,
                             memo,
-                            &mut frames,
+                            frames,
                             &mut work_credit,
+                            seam,
                         ) {
                             trip = Some(reasons);
                             break;
@@ -480,14 +621,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             if synchronize {
                                 work_credit.settle();
                             }
-                            let result = self.finish_projection_node(
+                            let result = match self.finish_projection_node(
                                 node,
                                 context,
                                 data.as_ref(),
                                 inputs,
                                 substitutions,
                                 memo,
-                            );
+                            ) {
+                                ProjectionFinish::Node(result) => result,
+                                ProjectionFinish::Instantiate(key) if seam.suspend => {
+                                    frames.push(ProjectionFrame::AwaitInstantiation {
+                                        node,
+                                        context,
+                                    });
+                                    seam.need = Some(key);
+                                    break;
+                                }
+                                ProjectionFinish::Instantiate(key) => self.instantiated_node(key),
+                            };
                             if synchronize {
                                 if let Err(reasons) = work_credit.refresh() {
                                     trip = Some(reasons);
@@ -532,8 +684,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             inputs,
                             substitutions,
                             memo,
-                            &mut frames,
+                            frames,
                             &mut work_credit,
+                            seam,
                         ) {
                             Ok(true) => break,
                             Ok(false) => {}
@@ -858,6 +1011,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     self.memoize_projected(memo, state.node, state.context, result);
                 }
+                ProjectionFrame::AwaitInstantiation { .. } => {
+                    unreachable!("an awaiting node resumes only with its delivery")
+                }
                 ProjectionFrame::ReferenceArgsResume {
                     node,
                     context,
@@ -886,8 +1042,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .into_boxed_slice(),
                         );
                         work_credit.settle();
-                        let result =
-                            self.finish_carrier_resolution(state.continuation, projected_args);
+                        let result = match self
+                            .plan_carrier_finish(state.continuation, projected_args)
+                        {
+                            CarrierFinish::Node(result) => result,
+                            CarrierFinish::Instantiate(key) if seam.suspend => {
+                                frames.push(ProjectionFrame::AwaitInstantiation { node, context });
+                                seam.need = Some(key);
+                                break;
+                            }
+                            CarrierFinish::Instantiate(key) => self.instantiated_node(key),
+                        };
                         if let Err(reasons) = work_credit.refresh() {
                             trip = Some(reasons);
                             break;
@@ -896,6 +1061,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
+            if seam.need.is_some() {
+                break;
+            }
             if let Some(reasons) = self.connected_demand_trip() {
                 trip = Some(reasons);
                 break;
@@ -903,10 +1071,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         work_credit.settle();
-        if let Some(reasons) = trip.or_else(|| self.connected_demand_trip()) {
-            ProjectedViewOutcome::partial(root, reasons)
-        } else {
-            ProjectedViewOutcome::complete(projected(memo, root, root_context))
+        if let Some(key) = seam.need.take() {
+            return ProjectionPoll::Need(key);
+        }
+        ProjectionPoll::Done(
+            if let Some(reasons) = trip.or_else(|| self.connected_demand_trip()) {
+                ProjectedViewOutcome::partial(root, reasons)
+            } else {
+                ProjectedViewOutcome::complete(projected(memo, root, root_context))
+            },
+        )
+    }
+
+    /// The node an instantiation a projection reached evaluates to.
+    pub(super) fn instantiated_node(&self, key: SemanticQueryKey) -> SemanticNodeId {
+        match self.execute_type_node(key) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            _ => self.opaque(QueryError::Miss),
         }
     }
 
@@ -1012,6 +1193,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         memo: &mut ViewMemo,
         frames: &mut SmallVec<[ProjectionFrame; 16]>,
         work_credit: &mut ConnectedWorkCredit<'_, '_>,
+        seam: &mut ProjectionSeam,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
         let remaining_children = children.get(next_child..).unwrap_or_default();
         for (offset, &child) in remaining_children.iter().enumerate() {
@@ -1097,6 +1279,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 memo,
                 frames,
                 work_credit,
+                seam,
             )? {
                 return Ok(());
             }
@@ -1111,8 +1294,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if synchronize {
             work_credit.settle();
         }
-        let result =
-            self.finish_projection_node(node, context, data.as_ref(), inputs, substitutions, memo);
+        let result = match self.finish_projection_node(
+            node,
+            context,
+            data.as_ref(),
+            inputs,
+            substitutions,
+            memo,
+        ) {
+            ProjectionFinish::Node(result) => result,
+            ProjectionFinish::Instantiate(key) if seam.suspend => {
+                frames.push(ProjectionFrame::AwaitInstantiation { node, context });
+                seam.need = Some(key);
+                return Ok(());
+            }
+            ProjectionFinish::Instantiate(key) => self.instantiated_node(key),
+        };
         if synchronize {
             work_credit.refresh()?;
         }
@@ -1180,6 +1377,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         memo: &mut ViewMemo,
         frames: &mut SmallVec<[ProjectionFrame; 16]>,
         work_credit: &mut ConnectedWorkCredit<'_, '_>,
+        seam: &mut ProjectionSeam,
     ) -> Result<bool, crate::semantic_query::PartialReasonSet> {
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
@@ -1237,9 +1435,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     inputs,
                     substitutions,
                 );
-                work_credit.refresh()?;
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {
+                        work_credit.refresh()?;
+                        self.memoize_projected(memo, node, context, result);
+                        Ok(false)
+                    }
+                    ReferenceProjectionPlan::Instantiate(key) if seam.suspend => {
+                        frames.push(ProjectionFrame::AwaitInstantiation { node, context });
+                        seam.need = Some(key);
+                        Ok(true)
+                    }
+                    ReferenceProjectionPlan::Instantiate(key) => {
+                        let result = self.instantiated_node(key);
+                        work_credit.refresh()?;
                         self.memoize_projected(memo, node, context, result);
                         Ok(false)
                     }
@@ -1248,6 +1457,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         args,
                         argument_context,
                     } => {
+                        work_credit.refresh()?;
                         frames.push(ProjectionFrame::ReferenceArgsResume {
                             node,
                             context,
