@@ -2136,3 +2136,209 @@ fn a_repeated_byteless_content_transition_is_strictly_newer_each_time() {
         WorkspaceRead::last_content_transition_generation(&ws, "/src/Unrelated.vue"),
     );
 }
+
+/// The in-memory twin of the filesystem sibling regressions: twelve sibling
+/// owners' resolutions of the same `./types`, one landing before every
+/// admission attempt of the demanded resolution, cost it no restart and no
+/// admission.
+#[test]
+fn twelve_sibling_publications_never_refuse_a_route() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(
+        "d:/project/src/types.ts".to_string(),
+        Arc::from("export interface Props { a: string }\n"),
+    );
+    for index in 0..13 {
+        ws.inject_file(
+            format!("d:/project/src/Comp{index}.ts"),
+            Arc::from("import type { Props } from './types'\n"),
+        );
+    }
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let sibling_ws = Arc::clone(&ws);
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if index > 12 {
+                return;
+            }
+            let owner = format!("d:/project/src/Comp{index}.ts");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| sibling_ws.resolve_import_outcome(&owner, "./types", CONTEXT))
+                    .join()
+                    .expect("the sibling resolves");
+            });
+        },
+        || ws.resolve_import_outcome("d:/project/src/Comp0.ts", "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "siblings never refuse the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(restarts, 0, "compatible siblings cost no restart");
+}
+
+/// Owners importing one `./types` beside them, in memory.
+fn sibling_owners_workspace(owners: usize) -> Arc<MemoryWorkspace> {
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(
+        "d:/project/src/types.ts".to_string(),
+        Arc::from("export interface Props { a: string }\n"),
+    );
+    for index in 0..owners {
+        ws.inject_file(
+            format!("d:/project/src/Comp{index}.ts"),
+            Arc::from("import type { Props } from './types'\n"),
+        );
+    }
+    ws
+}
+
+/// Resolve `owner`'s `./types` with `siblings` sibling resolutions each held
+/// INSIDE a world write (its epoch window open) across one admission check
+/// of the demanded resolution, released once that check has run: returns
+/// the outcome and the outer restarts it was charged.
+fn resolve_across_held_sibling_writes(
+    ws: &Arc<MemoryWorkspace>,
+    siblings: usize,
+) -> (crate::resolution_currency::ResolutionOutcome, usize) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    struct Held {
+        release: mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<()>,
+    }
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held: Arc<Mutex<Option<Held>>> = Arc::new(Mutex::new(None));
+    let hook_held = Arc::clone(&held);
+    let hook_ws = Arc::clone(ws);
+    let release = move |held: &Mutex<Option<Held>>| {
+        if let Some(sibling) = held.lock().unwrap().take() {
+            sibling.release.send(()).unwrap();
+            sibling.handle.join().expect("the sibling resolves");
+        }
+    };
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| match phase {
+            ResolutionPhase::PreAdmissionValidation => {
+                let index = started.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                if index > siblings {
+                    return;
+                }
+                let (held_tx, held_rx) = mpsc::channel::<()>();
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let ws = Arc::clone(&hook_ws);
+                let handle = std::thread::spawn(move || {
+                    let owner = format!("d:/project/src/Comp{index}.ts");
+                    resolution_test_hooks::with_hook(
+                        ResolutionPhase::WorldWriteHeld,
+                        move || {
+                            held_tx.send(()).unwrap();
+                            release_rx
+                                .recv_timeout(Duration::from_secs(30))
+                                .expect("the demanded resolution releases the sibling");
+                        },
+                        || {
+                            let _ = ws.resolve_import_outcome(&owner, "./types", CONTEXT);
+                        },
+                    );
+                });
+                held_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the sibling writes the resolution world");
+                *hook_held.lock().unwrap() = Some(Held {
+                    release: release_tx,
+                    handle,
+                });
+            }
+            // The admission check passed, or a restart begins a new
+            // attempt: either way the check has run, and the sibling may
+            // publish now.
+            ResolutionPhase::RequestCompletion | ResolutionPhase::AttemptStart => {
+                release(&hook_held)
+            }
+            _ => {}
+        },
+        || ws.resolve_import_outcome("d:/project/src/Comp0.ts", "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    if let Some(sibling) = held.lock().unwrap().take() {
+        let _ = sibling.release.send(());
+        let _ = sibling.handle.join();
+    }
+    (outcome, restarts)
+}
+
+/// A sibling resolution INSIDE a world write while the demanded resolution
+/// validates for admission is contention, not a conflict: the sibling's
+/// write retains the world the demanded resolution read. The demanded
+/// resolution is admitted, cacheable, and charged no restart.
+#[test]
+#[ignore = "a compatible in-flight world write is contention, not a superseded world"]
+fn a_sibling_world_write_in_flight_at_admission_costs_no_restart() {
+    let ws = sibling_owners_workspace(2);
+    let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 1);
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "an in-flight compatible write never refuses the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(
+        restarts, 0,
+        "an in-flight compatible write costs no restart"
+    );
+}
+
+/// Twelve siblings, each inside its world write across one admission check
+/// of the demanded resolution, as a concurrent component batch overlaps
+/// them: the demanded route is still answered, admitted and cacheable.
+/// Charged one restart each, they exhaust the operation's restart budget
+/// and refuse the route (`BudgetExceeded`), which the session reads as an
+/// unrootable route, so the batch never warms.
+#[test]
+#[ignore = "a compatible in-flight world write is contention, not a superseded world"]
+fn twelve_sibling_world_writes_in_flight_never_refuse_a_route() {
+    let ws = sibling_owners_workspace(13);
+    let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 12);
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "in-flight compatible writes never refuse the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(restarts, 0, "in-flight compatible writes cost no restart");
+}
