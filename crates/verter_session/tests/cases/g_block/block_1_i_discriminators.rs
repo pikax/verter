@@ -73,9 +73,9 @@ fn execute_read_cold_build_persists_traced_facts() {
          install the fact tracer"
     );
     assert!(
-        !raise_src.contains("graph.execute_cooperative_value("),
-        "execute_read must NOT call graph.execute_cooperative_value directly. A separate \
-         `graph.execute_cooperative_value(...)` call inside execute_read \
+        !raise_src.contains("graph.acquire_query("),
+        "execute_read must NOT call graph.acquire_query directly. A separate \
+         `graph.acquire_query(...)` call inside execute_read \
          would bypass install_fact_tracer."
     );
 }

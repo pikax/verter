@@ -15076,7 +15076,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
-                .is_same_path_inflight_on_current_thread(&relation.key(operand, context));
+                .is_same_path_claim(&relation.key(operand, context));
         if on_path {
             self.fold_into_top_build_local_taint(false, true);
         }
@@ -15652,10 +15652,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// each union and branch on the way. That recovery is the answer.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
-        if self
-            .graph()
-            .is_same_path_inflight_on_current_thread(&application)
-        {
+        if self.graph().is_same_path_claim(&application) {
             return Some(Some(self.checker_recovery(
                 crate::semantic_query::CheckerDiagnostic {
                     code:
