@@ -4452,11 +4452,11 @@ fn symbolic_and_unrepresentable_calls() {
     );
 
     // A callee with no structural arm (a computed member of a module
-    // object) fails closed rather than fabricating `any`.
+    // object keyed by a template) fails closed rather than fabricating `any`.
     let node = content_for(
         "const table = { h() { return 1; } };\n\
          const key: string = \"h\";\n\
-         function run() { return table[key](); }\n",
+         function run() { return table[`${key}`](); }\n",
         "run",
     );
     assert_eq!(
@@ -4496,7 +4496,7 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
     let node = content_for(
         "const table = { h() { return 1; } };\n\
          const key: string = \"h\";\n\
-         function run() { return (0, table[key]()); }\n",
+         function run() { return (0, table[`${key}`]()); }\n",
         "run",
     );
     assert_eq!(

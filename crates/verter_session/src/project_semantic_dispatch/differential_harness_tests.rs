@@ -66,6 +66,30 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
+/// The four settings with `strictBindCallApply` off, in the same order.
+pub(super) const BIND_CALL_APPLY_OFF: [Setting; 4] = [
+    Setting {
+        root: "/strict-loose-bind",
+        label: "strict, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-loose-bind",
+        label: "strictNullChecks off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/strict-implicit-loose-bind",
+        label: "noImplicitAny off, strictBindCallApply off",
+        options: r#"{ "strict": true, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-implicit-loose-bind",
+        label: "both off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+];
+
 /// The CPU time one row's evaluating thread may spend before the row is
 /// reported overdue. A hang detector, not a speed budget: it catches a row
 /// that loops or whose work blows up super-linearly, never a slow but

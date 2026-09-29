@@ -1712,6 +1712,10 @@ impl SliceExpr {
                     }
                     | SliceCall::Construct(value)
                     | SliceCall::TaggedTemplate(value) => take(value, out),
+                    SliceCall::OnElement { object, index } => {
+                        take(object, out);
+                        take(index, out);
+                    }
                     _ => {}
                 }
                 if let Some(arguments) = Arc::get_mut(&mut arguments.0) {
@@ -2691,6 +2695,9 @@ pub enum SliceCall {
         /// Whether the member declaring this frame is STATIC — its `super`
         /// reads the base constructor's own side, not its prototype.
         static_side: bool,
+        /// The calling class's own `this`, which a base member's
+        /// polymorphic `this` is bound to.
+        this: Option<SliceThis>,
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
@@ -2715,6 +2722,13 @@ pub enum SliceCall {
     OnValue {
         object: Box<SliceExpr>,
         member: Arc<str>,
+    },
+    /// A call of an element of a value whose key this frame evaluates
+    /// (`t[k]()`): the object is the call's receiver, and the key's
+    /// literal type names the member the call resolves over.
+    OnElement {
+        object: Box<SliceExpr>,
+        index: Box<SliceExpr>,
     },
     /// A tagged template: a call of its tag, lowered as a flow value like
     /// a constructor, whose arguments are the template strings and then
@@ -4644,6 +4658,46 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
             Expression::StaticMemberExpression(member) => object = &member.object,
             _ => return false,
         }
+    }
+}
+
+/// The object and key of an element call's callee (`t[k]()`).
+struct CallElement<'e, 'x> {
+    object: &'e Expression<'x>,
+    key: CallElementKey<'e, 'x>,
+}
+
+/// An element call's key: a name written as a literal, or a binding read
+/// whose type names it.
+enum CallElementKey<'e, 'x> {
+    Name(Arc<str>),
+    Read(&'e Expression<'x>),
+}
+
+/// The key of an element call this lowering models: a string or
+/// no-substitution template literal, an integral numeric literal, or a
+/// bare identifier read. `None` for any other key expression.
+fn call_element_key<'e, 'x>(key: &'e Expression<'x>) -> Option<CallElementKey<'e, 'x>> {
+    match unwrap_parenthesized(key) {
+        Expression::StringLiteral(literal) => {
+            Some(CallElementKey::Name(Arc::from(literal.value.as_str())))
+        }
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+            .quasis
+            .first()
+            .and_then(|quasi| quasi.value.cooked.as_ref())
+            .map(|cooked| CallElementKey::Name(Arc::from(cooked.as_str()))),
+        Expression::NumericLiteral(literal)
+            if literal.value.is_finite()
+                && literal.value.fract() == 0.0
+                && literal.value.abs() < 1e15 =>
+        {
+            Some(CallElementKey::Name(Arc::from(
+                format!("{}", literal.value as i64).as_str(),
+            )))
+        }
+        Expression::Identifier(_) => Some(CallElementKey::Read(key)),
+        _ => None,
     }
 }
 
@@ -14437,6 +14491,8 @@ impl<'a> Lowerer<'a> {
         call: &'e oxc_ast::ast::CallExpression<'x>,
         mode: ExprMode,
         on_value: &mut Option<&'e oxc_ast::ast::StaticMemberExpression<'x>>,
+        on_call: &mut Option<&'e Expression<'x>>,
+        on_element: &mut Option<CallElement<'e, 'x>>,
     ) -> SliceExpr {
         if let Expression::Identifier(callee) = &call.callee {
             let name = callee.name.as_str();
@@ -14578,6 +14634,29 @@ impl<'a> Lowerer<'a> {
                     call_site(call),
                     SliceCallArguments::none(),
                 );
+            }
+        }
+        // A call of a call's value (`f.bind(t)(1)`, `g(1)()`): the callee is
+        // the value the inner call evaluates to, arguments and receiver
+        // included, never the inner callee's argument-blind return.
+        if let Expression::CallExpression(inner) = unwrap_parenthesized(&call.callee) {
+            if !inner.optional && !call.optional {
+                *on_call = Some(&call.callee);
+                return SliceExpr::Elided;
+            }
+        }
+        // A call of an element (`t["m"]()`, `t[0]()`, `t[k]()`): the object
+        // is a flow value and the call's receiver, and the member is the
+        // key's name, a literal's written, a read's evaluated.
+        if let Expression::ComputedMemberExpression(member) = unwrap_parenthesized(&call.callee) {
+            if !member.optional && !call.optional {
+                if let Some(key) = call_element_key(&member.expression) {
+                    *on_element = Some(CallElement {
+                        object: &member.object,
+                        key,
+                    });
+                    return SliceExpr::Elided;
+                }
             }
         }
         // A member call on a constructed value or an object
@@ -14812,6 +14891,15 @@ impl<'a> Lowerer<'a> {
                 &'e oxc_ast::ast::StaticMemberExpression<'a>,
                 ExprMode,
             ),
+            /// A call of a call's value, waiting on that value.
+            CallOnCallValue(&'e oxc_ast::ast::CallExpression<'a>, ExprMode),
+            /// A call of an element, waiting on its object (and its key,
+            /// when the key is not written as a literal name).
+            CallOnElement(
+                &'e oxc_ast::ast::CallExpression<'a>,
+                Option<Arc<str>>,
+                ExprMode,
+            ),
             /// A member read off a value-rooted object, waiting on the
             /// object: a chain of reads costs no native level.
             ReadOnValue(&'e oxc_ast::ast::StaticMemberExpression<'a>),
@@ -14939,7 +15027,34 @@ impl<'a> Lowerer<'a> {
                 }
                 Task::CallCallee(expr, call, mode) => {
                     let mut on_value = None;
-                    let lowered = self.lower_call_expression(expr, call, mode, &mut on_value);
+                    let mut on_call = None;
+                    let mut on_element = None;
+                    let lowered = self.lower_call_expression(
+                        expr,
+                        call,
+                        mode,
+                        &mut on_value,
+                        &mut on_call,
+                        &mut on_element,
+                    );
+                    if let Some(CallElement { object, key }) = on_element {
+                        match key {
+                            CallElementKey::Name(name) => {
+                                tasks.push(Task::CallOnElement(call, Some(name), mode));
+                            }
+                            CallElementKey::Read(index) => {
+                                tasks.push(Task::CallOnElement(call, None, mode));
+                                tasks.push(Task::Lower(index, mode));
+                            }
+                        }
+                        tasks.push(Task::Lower(object, mode));
+                        continue;
+                    }
+                    if let Some(callee) = on_call {
+                        tasks.push(Task::CallOnCallValue(call, mode));
+                        tasks.push(Task::Lower(callee, mode));
+                        continue;
+                    }
                     match on_value {
                         Some(member) => {
                             self.open_value_rooted_reads += 1;
@@ -14961,6 +15076,35 @@ impl<'a> Lowerer<'a> {
                             object: Box::new(object),
                             member: Arc::from(member.property.name.as_str()),
                         },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    );
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
+                Task::CallOnElement(call, name, mode) => {
+                    let callee = match name {
+                        Some(member) => SliceCall::OnValue {
+                            object: Box::new(values.pop().expect("the element's object")),
+                            member,
+                        },
+                        None => {
+                            let index = values.pop().expect("the element's key");
+                            SliceCall::OnElement {
+                                object: Box::new(values.pop().expect("the element's object")),
+                                index: Box::new(index),
+                            }
+                        }
+                    };
+                    let lowered =
+                        SliceExpr::Call(callee, call_site(call), SliceCallArguments::none());
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
+                Task::CallOnCallValue(call, mode) => {
+                    let callee = values.pop().expect("the called call's value");
+                    let lowered = SliceExpr::Call(
+                        SliceCall::Nested(Box::new(callee)),
                         call_site(call),
                         SliceCallArguments::none(),
                     );
@@ -16280,6 +16424,7 @@ impl<'a> Lowerer<'a> {
                 },
                 member: Arc::from(member.to_vec().into_boxed_slice()),
                 static_side: heritage_access.static_side,
+                this: self.keyword_this(),
             },
             call_site(call),
             SliceCallArguments::none(),

@@ -7318,6 +7318,9 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
                     | SliceCall::TaggedTemplate(inner) => slice_expr_reads_frame(inner),
                     SliceCall::Member { receiver, .. } => slice_expr_reads_frame(receiver),
                     SliceCall::OnValue { object, .. } => slice_expr_reads_frame(object),
+                    SliceCall::OnElement { object, index } => {
+                        slice_expr_reads_frame(object) || slice_expr_reads_frame(index)
+                    }
                     SliceCall::LocalFunctionShadow | SliceCall::OnHeritage { .. } => false,
                 }
         }
@@ -7452,6 +7455,10 @@ fn expression_effect_tree(
                         children.push(callee)
                     }
                     SliceCall::OnValue { object, .. } => children.push(object),
+                    SliceCall::OnElement { object, index } => {
+                        children.push(object);
+                        children.push(index);
+                    }
                     _ => {}
                 }
                 children.extend(arguments.iter());
@@ -22503,6 +22510,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// A call of member `member` of the value `object`, its receiver:
+    /// resolved through the executor, which reads the receiver, else through
+    /// the one call sink.
+    fn call_member_of_value(
+        &mut self,
+        object: SemanticNodeId,
+        member: &Arc<str>,
+        site: crate::flow_slice_content::SliceCallSite,
+        arguments: &crate::flow_slice_content::SliceCallArguments,
+    ) -> Positional<CallValue> {
+        self.call_receivers.insert(site.span(), object);
+        let Some(callee) = self
+            .project_path_navigate(object, std::slice::from_ref(member))
+            .filter(|callee| {
+                !matches!(
+                    self.dispatch.graph().node_data(*callee).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                )
+            })
+        else {
+            return self.degraded_unrepresentable_callee();
+        };
+        if let Some(value) = self.eval_call_via_resolve_call(callee, site, arguments) {
+            return value;
+        }
+        self.call_return_of_callee_node(callee, site)
+    }
+
     /// Evaluate one flow expression to a graph node.
     ///
     /// [`Positional`] — so this function cannot report a FRAME failure at
@@ -24078,6 +24113,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                // A call of an `any` value (a call's `any` result) is the
+                // checker's untyped call: `any`.
+                if matches!(
+                    graph.node_data(signature).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                ) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
+                }
                 // A generic callee infers its clause from the arguments
                 // through the executor, as a binding-held one does.
                 if self.call_group_needs_executor(signature, site) {
@@ -24554,6 +24597,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 heritage,
                 member,
                 static_side,
+                this,
             } => {
                 // `super.m()` — the base member through the HERITAGE
                 // surface. The heritage expression's value type (the base
@@ -24576,8 +24620,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return self.degraded_unrepresentable_callee();
                 };
                 // The base member's polymorphic `this` is this class's own
-                // `this`, which the heritage read does not carry: it stays
-                // unbound, and the call sink gives the typed marker.
+                // `this`, never the base's instance; a frame whose `this`
+                // this evaluator cannot read leaves it unbound, and the call
+                // sink gives the typed marker.
+                let callee = if self.dispatch.receiver_this_types(callee).is_empty() {
+                    callee
+                } else {
+                    match this.as_ref().map(|this| self.eval_this(this)) {
+                        Some(Positional::Value(receiver)) => {
+                            self.dispatch.bind_callee_receiver(callee, receiver)
+                        }
+                        Some(Positional::Hold) => return Positional::Hold,
+                        Some(Positional::Unmodeled) | None => callee,
+                    }
+                };
                 self.call_return_of_callee_node(callee, site)
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
@@ -24675,11 +24731,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     )
                 };
                 let mut callee_node = receiver;
+                // The object the called member is read off: the call's
+                // receiver, which the executor route reads.
+                let mut object = receiver;
                 for name in member.iter() {
                     // A member of an `any` receiver is `any`.
                     if is_any(callee_node) {
                         break;
                     }
+                    object = callee_node;
                     let this_source = self.this_member_source(callee_node, name);
                     let Some(read) = this_source
                         .and_then(|source| self.receiver_non_public_member(source, name))
@@ -24702,6 +24762,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if is_any(callee_node) {
                     return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
+                self.call_receivers.insert(site.span(), object);
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
                 }
@@ -24717,22 +24778,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                self.call_receivers.insert(site.span(), object);
-                let Some(callee) = self
-                    .project_path_navigate(object, std::slice::from_ref(member))
-                    .filter(|callee| {
-                        !matches!(
-                            self.dispatch.graph().node_data(*callee).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        )
-                    })
-                else {
-                    return self.degraded_unrepresentable_callee();
+                self.call_member_of_value(object, member, site, arguments)
+            }
+            crate::flow_slice_content::SliceCall::OnElement { object, index } => {
+                // `t[k]()`: the key is a binding read (a leaf, evaluated
+                // here), and its literal type names the member of the
+                // object the call resolves over, the object its receiver.
+                // A key of any other type is the typed marker.
+                let object = match self.call_operand_value(object, site) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                if let Some(value) = self.eval_call_via_resolve_call(callee, site, arguments) {
-                    return value;
-                }
-                self.call_return_of_callee_node(callee, site)
+                let key = match self.eval_expr(index) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                let member: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::String(name),
+                    )) => Arc::from(name.as_str()),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Number(value),
+                    )) if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 => {
+                        Arc::from(format!("{}", *value as i64).as_str())
+                    }
+                    _ => return self.degraded_unrepresentable_callee(),
+                };
+                self.call_member_of_value(object, &member, site, arguments)
             }
             crate::flow_slice_content::SliceCall::Construct(constructor) => {
                 // `new C(…)` — the checker's `resolveNewExpression`: the
