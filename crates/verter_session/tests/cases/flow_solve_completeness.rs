@@ -3211,7 +3211,7 @@ enum CallableCaptureOutcome {
 /// retains `a` — as part of producing the demanded binding. Each fixture
 /// returns a target of such a pattern; none may seal the capture family
 /// without `a`.
-const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 8] = [
+const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 9] = [
     (
         "declarator_key",
         "function declarator_key(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
@@ -3240,6 +3240,11 @@ const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 8
     (
         "param_key",
         "function param_key(a, { [reg(() => a)]: x }) { return x; }",
+        CallableCaptureOutcome::Captured,
+    ),
+    (
+        "param_key_static_block",
+        "function param_key_static_block(a, { [reg(class { static { use(a); } })]: x }) { return x; }",
         CallableCaptureOutcome::Gap,
     ),
     (
@@ -3355,8 +3360,8 @@ fn assert_callable_capture_outcome(
 }
 
 const UNSERVED_CALLABLE_FIXTURE_SOURCE: &str = r#"
-function unserved_callable(p, q = () => p) {
-  return q;
+function unserved_callable(p) {
+  return sink(class { static { use(p); } });
 }
 "#;
 
@@ -3464,8 +3469,9 @@ fn a_sibling_reader_never_turns_a_write_only_capture_into_a_value_demand() {
     );
 }
 
-/// An authored callable the indexed program does not serve — here a
-/// parameter default — asserts NOTHING about what it captures. Reading
+/// An authored callable the indexed program does not serve — here a class
+/// whose static block runs at its evaluation — asserts NOTHING about what
+/// it captures. Reading
 /// its absent record as "captures nothing" publishes a wrong-complete
 /// result: the callable really does retain the enclosing `p`. It fails
 /// closed as the capture family's typed gap, so the solve stays a typed

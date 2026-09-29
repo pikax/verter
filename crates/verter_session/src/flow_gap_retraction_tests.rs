@@ -1052,14 +1052,8 @@ fn checker_correct_unannotated_same_closure_write_remains_complete_and_warm() {
 
 #[test]
 fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
-    let mut default = "0".to_owned();
-    for depth in 0..65 {
-        default = if depth % 2 == 0 {
-            format!("[{default}]")
-        } else {
-            format!("{{ value: {default} }}")
-        };
-    }
+    // A default the inference's work budget cannot visit: 5,000 elements.
+    let default = format!("[{}]", vec!["0"; 5_000].join(", "));
     let trace = run(
         "default_budget",
         &format!("function makeProps(value = {default}) {{ return value }}"),
@@ -1067,7 +1061,7 @@ fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
     );
     record_trace("default_budget", &trace);
     let expected = Some(FlowReturnError::Failure(FlowReturnFailure::Budget(
-        verter_type_expr::facts::InferenceUnavailableReason::DepthBudgetExceeded,
+        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
     )));
     for sample in [&trace.first, &trace.second] {
         assert_eq!(sample.error, expected, "{trace:#?}");

@@ -1573,6 +1573,70 @@ fn a_request_builds_an_owners_import_route_witness_once() {
     );
 }
 
+/// Within one request, normalizing an analysis canonical probes its
+/// declaration companions once: every later normalization of it in the
+/// request shares that run, its observations replayed into any witness
+/// scope open around the consumer, and an edit in the request probes again.
+/// Probing for every consumer re-ran the same missing dependencies' probes
+/// about sixty times per request on a real-world component.
+#[test]
+fn a_request_normalizes_an_analysis_canonical_once() {
+    use crate::host_manage::import_route_witness::{
+        normalization_builds_for_tests, ResolutionWitnessScope,
+    };
+    let host = make_host();
+    let importer = "/workspace/src/importer.ts";
+    let missing = "/workspace/src/missing";
+    upsert_non_sfc(
+        &host,
+        importer,
+        "import { X } from './missing'\nexport type Re = X\n",
+    );
+    let _request = crate::request_context::install_test_request_for(importer);
+    let resolutions = |host: &crate::VerterHost| {
+        let provenance = host.ws().vfs_provenance_snapshot();
+        provenance.import_resolution_cache_hit_count + provenance.import_resolution_cache_miss_count
+    };
+    let builds = normalization_builds_for_tests();
+    let (first, observed) = {
+        let scope = ResolutionWitnessScope::enter();
+        let first = host.normalized_analysis_canonical(missing).into_owned();
+        (first, scope.collected())
+    };
+    assert_eq!(first, missing, "a missing dependency normalizes to itself");
+    assert!(!observed.is_empty(), "its probes observe facts");
+    let probed = resolutions(&host);
+    for _ in 0..5 {
+        let replayed = {
+            let scope = ResolutionWitnessScope::enter();
+            assert_eq!(host.normalized_analysis_canonical(missing), missing);
+            scope.collected()
+        };
+        assert_eq!(
+            replayed, observed,
+            "a shared normalization records its observations into the scope around its consumer"
+        );
+    }
+    assert_eq!(
+        resolutions(&host),
+        probed,
+        "later normalizations in the request probe nothing"
+    );
+    assert_eq!(
+        normalization_builds_for_tests() - builds,
+        1,
+        "one run per request"
+    );
+
+    upsert_non_sfc(&host, "/workspace/src/missing.ts", "export type X = 1\n");
+    assert_eq!(
+        host.normalized_analysis_canonical(missing),
+        "/workspace/src/missing.ts",
+        "an edit in the request probes again and finds the new file"
+    );
+    assert_eq!(normalization_builds_for_tests() - builds, 2);
+}
+
 /// The CALLER-DECLARED specifier is covered by the owner's import-route
 /// witness.
 ///
@@ -11315,7 +11379,7 @@ fn host_resolution_populates_no_host_side_route_memo() {
 /// edges are `export *` wildcards (`export * from './missing'; export * from
 /// './present';`) is a wildcard-only provider: its wildcards resolve into a
 /// local `dep_edges` map and are NOT published into `import_routes`, so
-/// `import_route_witness_for_specifiers(owner, ..)` returns `None`. The hole-2
+/// the wildcard rooting produced no witness (`None`). The hole-2
 /// rooting loop fed that `None` through `?`, dropping the WHOLE route entry —
 /// so a valid result resolved via the LATER wildcard (`./present`) was returned
 /// as `None` (no value served at all). "Do not admit to cache" was wrongly
@@ -11391,7 +11455,7 @@ fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcar
 /// Two independent rails enforce this, and the test guards the end-to-end
 /// behaviour rather than isolating either:
 /// - The coverage-checked `ImportRoute` admission
-///   (`import_route_witness_for_specifiers`): the rooting
+///   (the route walk's own witness scope): the rooting
 ///   loop admits an `ImportRoute` fact ONLY when the produced hash covers
 ///   EVERY unresolved wildcard source the traversal hit; a partial table that
 ///   omits `./missing` yields no fact, so the `Miss` is returned with EMPTY

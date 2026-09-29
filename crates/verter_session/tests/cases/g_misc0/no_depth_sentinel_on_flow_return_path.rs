@@ -9,8 +9,8 @@
 //! depth counter and NO depth sentinel: recursion is discharged
 //! coinductively through the obligation runtime, never by a bounded
 //! retry. The only budget on the path is the shallow expression
-//! lowering's own depth / work budget inside `verter_semantic`'s leaf
-//! lowering (surfaced as the typed `FlowReturnFailure::Budget` reason),
+//! lowering's own work budget inside `verter_semantic`'s leaf lowering
+//! (surfaced as the typed `FlowReturnFailure::Budget` reason),
 //! the flow-slice planner's typed `FlowSliceBudget`, and the obligation
 //! runtime's connected-demand cap — none is a depth counter on the
 //! evaluation walk itself.

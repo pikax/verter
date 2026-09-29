@@ -1462,6 +1462,11 @@ struct SkeletonBuilder<'entry> {
     yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    /// The exact captures of this frame's parameter-list callables, by span.
+    parameter_callable_captures: FxHashMap<
+        verter_span::Span,
+        &'entry crate::analysis::function_program::FunctionParameterCallableCaptures,
+    >,
     /// The spans of this frame's references to an enclosing frame's
     /// EVOLVING-array binding
     /// ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
@@ -1512,6 +1517,15 @@ impl<'entry> SkeletonBuilder<'entry> {
                         .nested_captures
                         .iter()
                         .map(|child| (child.span, child))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            parameter_callable_captures: entry
+                .map(|entry| {
+                    entry
+                        .parameter_callable_captures
+                        .iter()
+                        .map(|callable| (callable.span, callable))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1865,15 +1879,35 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// indistinguishable from no callback at all, and a callable the index
     /// does not serve is silently invisible rather than a typed gap.
     fn push_nested_callable(&mut self, span: verter_span::Span) {
-        let Some(captures) = self.nested_captures.get(&span).copied() else {
-            self.push_unserved_callable(span);
-            return;
+        let (bindings, reads, correlation) = match self.nested_captures.get(&span).copied() {
+            Some(captures) => (
+                captures.bindings.clone(),
+                Arc::clone(&captures.reads),
+                if captures.exhaustive {
+                    SkeletonClosureCorrelation::Exact
+                } else {
+                    SkeletonClosureCorrelation::Partial
+                },
+            ),
+            // A parameter-list callable no entry serves, whose every
+            // reference the frame resolved: its capture set is exact.
+            None => match self.parameter_callable_captures.get(&span).copied() {
+                Some(captures) => (
+                    captures.bindings.clone(),
+                    Arc::clone(&captures.reads),
+                    SkeletonClosureCorrelation::Exact,
+                ),
+                None => {
+                    self.push_unserved_callable(span);
+                    return;
+                }
+            },
         };
         let site = self.footprint_site(span);
         let closure_span = self.frame_span(span);
         let mut own: Vec<FlowBindingRef> = Vec::new();
         let mut own_seen = FxHashSet::default();
-        for identity in captures.bindings.0.iter() {
+        for identity in bindings.0.iter() {
             let binding = FlowBindingRef::Captured(identity.clone());
             if own_seen.insert(binding.clone()) {
                 own.push(binding.clone());
@@ -1892,7 +1926,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         // this callable — is the one consuming the cell's value.
         let mut own_reads: Vec<FlowBindingRef> = Vec::new();
         let mut own_read_seen = FxHashSet::default();
-        for read in captures.reads.iter() {
+        for read in reads.iter() {
             let binding = FlowBindingRef::Captured(read.binding.clone());
             if own_read_seen.insert(binding.clone()) {
                 own_reads.push(binding);
@@ -1900,15 +1934,11 @@ impl<'entry> SkeletonBuilder<'entry> {
         }
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
-            correlation: if captures.exhaustive {
-                SkeletonClosureCorrelation::Exact
-            } else {
-                SkeletonClosureCorrelation::Partial
-            },
+            correlation,
             captures: Arc::from(own.into_boxed_slice()),
             read_captures: Arc::from(own_reads.into_boxed_slice()),
         });
-        for read in captures.reads.iter() {
+        for read in reads.iter() {
             let name = self.intern(&read.binding.name);
             let path: Arc<[_]> = read
                 .path

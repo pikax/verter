@@ -41,6 +41,9 @@ pub struct WorkspaceResourceSnapshot {
     pub overlay_resolution_slots: usize,
     /// Interned overlay value versions (process-wide, bounded).
     pub overlay_value_versions: usize,
+    /// Cold resolutions currently in flight (request-scoped: each lives
+    /// from its claim to its producer's settlement).
+    pub resolution_flights: usize,
 }
 
 /// Read-only view of the workspace authority.
@@ -731,6 +734,16 @@ pub trait WorkspaceAccess: WorkspaceRead {
     fn begin_strict_self_root_transition(&self) {}
 
     fn end_strict_self_root_transition(&self) {}
+
+    /// Install the host's aggregate retention account, which the resident
+    /// request-overlay resolution state (the overlay lane and the overlay
+    /// value table) charges its entries to. Adapter workspaces with no
+    /// Engine retain no such state and ignore it.
+    fn install_resolution_retention(
+        &self,
+        _account: std::sync::Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+    ) {
+    }
 
     // ── Reverse-graph authority methods (R6: NO DEFAULTS) ──
     //

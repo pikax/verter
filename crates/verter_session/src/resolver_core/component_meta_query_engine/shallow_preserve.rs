@@ -123,7 +123,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return true;
         };
-        node_references_type_param_names(self.ctx, member_node.node(), &param_names, 0)
+        node_references_type_param_names(self.ctx, member_node.node(), &param_names)
     }
 
     /// Node-domain fast-path classifier for one macro field: decide whether
@@ -179,7 +179,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id,
             scope_owner,
             field_value.node(),
-            0,
         ) {
             return symbolic_preserve(field_value);
         }
@@ -269,12 +268,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             ),
                         )
                         .at_optional_boundary()?;
-                    if node_references_type_param_names(
-                        self.ctx,
-                        member_node.node(),
-                        &param_names,
-                        0,
-                    ) {
+                    if node_references_type_param_names(self.ctx, member_node.node(), &param_names)
+                    {
                         return None;
                     }
                     let exactness = match crate::meta_resolve::exactness::classify_node(
@@ -360,19 +355,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // (5) Imported generic route through containers / local alias hops.
-        let mut active_locals = FxHashSet::default();
-        self.node_has_imported_generic_route(
-            scope_canonical_id,
-            scope_owner,
-            field_value.node(),
-            &mut active_locals,
-            0,
-        )
-        .then(|| FastShallowFieldExpr {
-            hot: field_value,
-            semantic_source: authored_source(),
-            exactness: FastShallowFieldExprExactness::Symbolic,
-        })
+        self.node_has_imported_generic_route(scope_canonical_id, scope_owner, field_value.node())
+            .then(|| FastShallowFieldExpr {
+                hot: field_value,
+                semantic_source: authored_source(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            })
     }
 
     /// Resolve the value NODE for the macro field at `output_path` —
@@ -448,382 +436,259 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Whether any node under `node` is a builtin utility application over an
     /// imported argument — the node-domain mirror of the former
-    /// `contains_direct_imported_utility_route` `TypeExpr` walk.
+    /// `contains_direct_imported_utility_route` `TypeExpr` walk. Every node is
+    /// read once per question ([`UtilityQuestion`]), whatever the nesting.
     fn node_contains_imported_utility_route(
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         node: crate::semantic_query::SemanticNodeId,
-        depth: u32,
     ) -> bool {
+        use crate::graph_walk::Reach;
         use crate::semantic_query::SemanticNodeData;
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
 
-        if depth > 256 {
-            return false;
-        }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
-            return false;
-        };
-        let utility_over_imported_arg =
-            |engine: &mut Self, args: &[crate::semantic_query::SemanticNodeId]| {
-                args.iter().any(|&arg| {
-                    engine.node_is_imported_utility_arg(
-                        scope_canonical_id,
-                        scope_owner,
-                        arg,
-                        depth + 1,
-                    )
+        crate::graph_walk::reaches(UtilityQuestion::Route(node), |question| match question {
+            UtilityQuestion::Route(node) => {
+                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
+                else {
+                    return Reach::Parts(Vec::new());
+                };
+                Reach::Parts(match data.as_ref() {
+                    data_ref if data_ref.bare_ref_head().is_some() => {
+                        let args = data_ref.carrier_type_args();
+                        let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
+                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                                name.as_ref(),
+                            )
+                            .is_some()
+                        });
+                        utility_arguments(utility, args)
+                    }
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        let utility =
+                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                                base.decl_name.as_ref(),
+                            )
+                            .is_some();
+                        utility_arguments(utility, args)
+                    }
+                    composite
+                    @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                        routes(composite.composite_members().expect("composite arm").iter())
+                    }
+                    SemanticNodeData::MergedDecl {
+                        contributors: members,
+                    } => routes(members.iter()),
+                    SemanticNodeData::Array { element, .. } => routes([element]),
+                    SemanticNodeData::Tuple { elements, .. } => {
+                        routes(elements.iter().map(|element| &element.value))
+                    }
+                    SemanticNodeData::Object(surface) => {
+                        routes(
+                            surface
+                                .positive_members()
+                                .iter()
+                                .map(|member| &member.value)
+                                .chain(surface.index_signatures.iter().flat_map(|signature| {
+                                    [&signature.key_type, &signature.value_type]
+                                }))
+                                .chain(surface.call_signatures.iter())
+                                .chain(surface.construct_signatures.iter()),
+                        )
+                    }
+                    SemanticNodeData::Signature {
+                        params,
+                        return_type,
+                        predicate,
+                        ..
+                    } => params
+                        .iter()
+                        .map(|param| param.ty)
+                        .chain(std::iter::once(*return_type))
+                        .chain(predicate.and_then(|predicate| predicate.ty))
+                        .map(UtilityQuestion::Route)
+                        .collect(),
+                    SemanticNodeData::Alias(inner) => routes([inner]),
+                    _ => Vec::new(),
                 })
-            };
-        match data.as_ref() {
-            data_ref if data_ref.bare_ref_head().is_some() => {
-                let args = data_ref.carrier_type_args();
-                let is_utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
-                    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                        name.as_ref(),
-                    )
-                    .is_some()
-                });
-                if is_utility && !args.is_empty() && utility_over_imported_arg(self, args) {
-                    return true;
+            }
+            // One utility ARGUMENT node is imported-routed: an imported bare
+            // reference, an imported `typeof` root, an indexed access over an
+            // imported root, a foreign resolved reference, or another imported
+            // utility route.
+            UtilityQuestion::Argument(node) => {
+                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
+                else {
+                    return Reach::Parts(Vec::new());
+                };
+                if let Some((name, _)) = data.bare_ref_head() {
+                    let name = std::sync::Arc::clone(name);
+                    if data.carrier_type_args().is_empty()
+                        && self.bare_ref_origin_in_scope(
+                            scope_canonical_id,
+                            scope_owner,
+                            name.as_ref(),
+                        ) == BareRefOrigin::Imported
+                    {
+                        return Reach::Hit;
+                    }
+                    return Reach::Parts(vec![UtilityQuestion::Route(node)]);
                 }
-                args.iter().any(|&arg| {
-                    self.node_contains_imported_utility_route(
+                if let Some((value_root, _)) = data.typeof_head() {
+                    return if self.bare_ref_origin_in_scope(
                         scope_canonical_id,
                         scope_owner,
-                        arg,
-                        depth + 1,
-                    )
-                })
-            }
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let is_utility =
-                    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                        base.decl_name.as_ref(),
-                    )
-                    .is_some();
-                if is_utility && !args.is_empty() && utility_over_imported_arg(self, args) {
-                    return true;
+                        value_root.name.as_ref(),
+                    ) == BareRefOrigin::Imported
+                    {
+                        Reach::Hit
+                    } else {
+                        Reach::Parts(Vec::new())
+                    };
                 }
-                args.iter().any(|&arg| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        arg,
-                        depth + 1,
-                    )
-                })
+                let foreign = |canonical_id: &str| {
+                    if canonical_id != scope_canonical_id {
+                        Reach::Hit
+                    } else {
+                        Reach::Parts(Vec::new())
+                    }
+                };
+                match data.as_ref() {
+                    SemanticNodeData::IndexedAccess { object, .. } => {
+                        Reach::Parts(vec![UtilityQuestion::Argument(*object)])
+                    }
+                    SemanticNodeData::DeclRef { identity } => {
+                        foreign(identity.canonical_id.as_ref())
+                    }
+                    SemanticNodeData::InstantiationRef { base, .. } => {
+                        foreign(base.canonical_id.as_ref())
+                    }
+                    _ => Reach::Parts(vec![UtilityQuestion::Route(node)]),
+                }
             }
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let members = composite.composite_members().expect("composite arm");
-                members.iter().any(|&member| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        member,
-                        depth + 1,
-                    )
-                })
-            }
-            SemanticNodeData::MergedDecl {
-                contributors: members,
-            } => members.iter().any(|&member| {
-                self.node_contains_imported_utility_route(
-                    scope_canonical_id,
-                    scope_owner,
-                    member,
-                    depth + 1,
-                )
-            }),
-            SemanticNodeData::Array { element, .. } => self.node_contains_imported_utility_route(
-                scope_canonical_id,
-                scope_owner,
-                *element,
-                depth + 1,
-            ),
-            SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
-                self.node_contains_imported_utility_route(
-                    scope_canonical_id,
-                    scope_owner,
-                    element.value,
-                    depth + 1,
-                )
-            }),
-            SemanticNodeData::Object(surface) => {
-                surface.positive_members().iter().any(|member| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        member.value,
-                        depth + 1,
-                    )
-                }) || surface.index_signatures.iter().any(|signature| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        signature.key_type,
-                        depth + 1,
-                    ) || self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        signature.value_type,
-                        depth + 1,
-                    )
-                }) || surface.call_signatures.iter().any(|&signature| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        signature,
-                        depth + 1,
-                    )
-                }) || surface.construct_signatures.iter().any(|&signature| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        signature,
-                        depth + 1,
-                    )
-                })
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            } => params
-                .iter()
-                .map(|param| param.ty)
-                .chain(std::iter::once(*return_type))
-                .chain(predicate.and_then(|predicate| predicate.ty))
-                .any(|position| {
-                    self.node_contains_imported_utility_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        position,
-                        depth + 1,
-                    )
-                }),
-            SemanticNodeData::Alias(inner) => self.node_contains_imported_utility_route(
-                scope_canonical_id,
-                scope_owner,
-                *inner,
-                depth + 1,
-            ),
-            _ => false,
-        }
-    }
-
-    /// Whether one utility ARGUMENT node is imported-routed: an imported bare
-    /// reference, an imported `typeof` root, an indexed access over an
-    /// imported root, a foreign resolved reference, or (recursively) another
-    /// imported utility route.
-    fn node_is_imported_utility_arg(
-        &mut self,
-        scope_canonical_id: &str,
-        scope_owner: verter_type_expr::TopLevelOwnerId,
-        node: crate::semantic_query::SemanticNodeId,
-        depth: u32,
-    ) -> bool {
-        use crate::semantic_query::SemanticNodeData;
-
-        if depth > 256 {
-            return false;
-        }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
-            return false;
-        };
-        if let Some((name, _)) = data.bare_ref_head() {
-            let name = std::sync::Arc::clone(name);
-            if data.carrier_type_args().is_empty()
-                && self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref())
-                    == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
-            {
-                return true;
-            }
-            return self.node_contains_imported_utility_route(
-                scope_canonical_id,
-                scope_owner,
-                node,
-                depth,
-            );
-        }
-        if let Some((value_root, _)) = data.typeof_head() {
-            return self.bare_ref_origin_in_scope(
-                scope_canonical_id,
-                scope_owner,
-                value_root.name.as_ref(),
-            ) == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported;
-        }
-        match data.as_ref() {
-            SemanticNodeData::IndexedAccess { object, .. } => self.node_is_imported_utility_arg(
-                scope_canonical_id,
-                scope_owner,
-                *object,
-                depth + 1,
-            ),
-            SemanticNodeData::DeclRef { identity } => {
-                identity.canonical_id.as_ref() != scope_canonical_id
-            }
-            SemanticNodeData::InstantiationRef { base, .. } => {
-                base.canonical_id.as_ref() != scope_canonical_id
-            }
-            _ => self.node_contains_imported_utility_route(
-                scope_canonical_id,
-                scope_owner,
-                node,
-                depth,
-            ),
-        }
+        })
     }
 
     /// Whether the field value reaches an IMPORTED GENERIC reference through
     /// containers or workspace-local alias hops — the node-domain mirror of
     /// the former `fast_symbolic_imported_generic_route` walk. Local alias
     /// hops raise the alias declaration's authored body through the one
-    /// dispatch (the memoized `LowerLocator` query), guarded by an active-set.
+    /// dispatch (the memoized `LowerLocator` query) and read it in the
+    /// declaration's scope. Every node is read once per scope, whatever the
+    /// nesting, so an alias that reaches itself ends the walk.
     fn node_has_imported_generic_route(
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         node: crate::semantic_query::SemanticNodeId,
-        active_locals: &mut FxHashSet<String>,
-        depth: u32,
     ) -> bool {
+        use crate::graph_walk::Reach;
         use crate::semantic_query::SemanticNodeData;
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
 
-        if depth > 256 {
-            return false;
-        }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
-            return false;
-        };
-        if let Some((name, _)) = data.bare_ref_head() {
-            let name = std::sync::Arc::clone(name);
-            let args_empty = data.carrier_type_args().is_empty();
-            return match self.bare_ref_origin_in_scope(
-                scope_canonical_id,
-                scope_owner,
-                name.as_ref(),
-            ) {
-                BareRefOrigin::Imported => !args_empty,
-                BareRefOrigin::Local if args_empty => {
-                    let Some(root_identity) =
-                        self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
-                    else {
-                        return false;
-                    };
-                    let active_key = format!(
-                        "{}::{}",
-                        root_identity.canonical_id, root_identity.symbol_name
-                    );
-                    if !active_locals.insert(active_key.clone()) {
-                        return false;
-                    }
-                    let preserve = self
-                        .prepared_type_decl(
-                            &root_identity.canonical_id,
-                            root_identity.owner,
-                            &root_identity.symbol_name,
-                        )
-                        .map(|prepared| prepared.body_facts.body_slot.clone())
-                        .and_then(|body_slot| {
-                            let dispatch =
-                                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                    self.ctx,
-                                );
-                            dispatch.raise_authored_locator_to_hot(
-                                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                                    body_slot,
-                                ),
-                                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                                    crate::semantic_query::ProjectionMode::Navigate,
-                                ),
-                            ).at_optional_boundary()
-                        })
-                        .is_some_and(|body_node| {
-                            self.node_has_imported_generic_route(
-                                root_identity.canonical_id.as_ref(),
-                                root_identity.owner,
-                                body_node.node(),
-                                active_locals,
-                                depth + 1,
-                            )
-                        });
-                    active_locals.remove(&active_key);
-                    preserve
-                }
-                _ => false,
+        // The scopes the walk reads nodes in: the field's, then each local
+        // alias declaration's it hops into.
+        let mut scopes: Vec<(std::sync::Arc<str>, verter_type_expr::TopLevelOwnerId)> =
+            vec![(std::sync::Arc::from(scope_canonical_id), scope_owner)];
+        crate::graph_walk::reaches((node, 0usize), |(node, scope)| {
+            let (scope_canonical_id, scope_owner) = scopes[scope].clone();
+            let in_scope = |nodes: &mut dyn Iterator<
+                Item = crate::semantic_query::SemanticNodeId,
+            >| { nodes.map(|node| (node, scope)).collect::<Vec<_>>() };
+            let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+                return Reach::Parts(Vec::new());
             };
-        }
-        match data.as_ref() {
-            SemanticNodeData::InstantiationRef { base, args } => {
-                (base.canonical_id.as_ref() != scope_canonical_id
-                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                        base.decl_name.as_ref(),
-                    )
-                    .is_none())
-                    || args.iter().any(|&arg| {
-                        self.node_has_imported_generic_route(
-                            scope_canonical_id,
-                            scope_owner,
-                            arg,
-                            active_locals,
-                            depth + 1,
-                        )
-                    })
-            }
-            SemanticNodeData::IndexedAccess { object, .. } => self.node_has_imported_generic_route(
-                scope_canonical_id,
-                scope_owner,
-                *object,
-                active_locals,
-                depth + 1,
-            ),
-            SemanticNodeData::Array { element, .. } => self.node_has_imported_generic_route(
-                scope_canonical_id,
-                scope_owner,
-                *element,
-                active_locals,
-                depth + 1,
-            ),
-            SemanticNodeData::KeyOf { base } => self.node_has_imported_generic_route(
-                scope_canonical_id,
-                scope_owner,
-                *base,
-                active_locals,
-                depth + 1,
-            ),
-            SemanticNodeData::Alias(inner) => self.node_has_imported_generic_route(
-                scope_canonical_id,
-                scope_owner,
-                *inner,
-                active_locals,
-                depth + 1,
-            ),
-            SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
-                self.node_has_imported_generic_route(
-                    scope_canonical_id,
+            if let Some((name, _)) = data.bare_ref_head() {
+                let name = std::sync::Arc::clone(name);
+                let args_empty = data.carrier_type_args().is_empty();
+                drop(data);
+                return match self.bare_ref_origin_in_scope(
+                    scope_canonical_id.as_ref(),
                     scope_owner,
-                    element.value,
-                    active_locals,
-                    depth + 1,
-                )
-            }),
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let members = composite.composite_members().expect("composite arm");
-                members.iter().any(|&member| {
-                    self.node_has_imported_generic_route(
-                        scope_canonical_id,
-                        scope_owner,
-                        member,
-                        active_locals,
-                        depth + 1,
-                    )
-                })
+                    name.as_ref(),
+                ) {
+                    BareRefOrigin::Imported if !args_empty => Reach::Hit,
+                    BareRefOrigin::Local if args_empty => {
+                        let Some(root_identity) = self.root_identity_in_scope(
+                            scope_canonical_id.as_ref(),
+                            scope_owner,
+                            name.as_ref(),
+                        ) else {
+                            return Reach::Parts(Vec::new());
+                        };
+                        let body = self
+                            .prepared_type_decl(
+                                &root_identity.canonical_id,
+                                root_identity.owner,
+                                &root_identity.symbol_name,
+                            )
+                            .map(|prepared| prepared.body_facts.body_slot.clone())
+                            .and_then(|body_slot| {
+                                let dispatch =
+                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                        self.ctx,
+                                    );
+                                dispatch.raise_authored_locator_to_hot(
+                                    &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                        body_slot,
+                                    ),
+                                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                        crate::semantic_query::ProjectionMode::Navigate,
+                                    ),
+                                ).at_optional_boundary()
+                            });
+                        let Some(body) = body else {
+                            return Reach::Parts(Vec::new());
+                        };
+                        let declaration_scope = (
+                            std::sync::Arc::clone(&root_identity.canonical_id),
+                            root_identity.owner,
+                        );
+                        let declaration_scope =
+                            match scopes.iter().position(|known| *known == declaration_scope) {
+                                Some(index) => index,
+                                None => {
+                                    scopes.push(declaration_scope);
+                                    scopes.len() - 1
+                                }
+                            };
+                        Reach::Parts(vec![(body.node(), declaration_scope)])
+                    }
+                    _ => Reach::Parts(Vec::new()),
+                };
             }
-            _ => false,
-        }
+            Reach::Parts(match data.as_ref() {
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    if base.canonical_id.as_ref() != scope_canonical_id.as_ref()
+                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                            base.decl_name.as_ref(),
+                        )
+                        .is_none()
+                    {
+                        return Reach::Hit;
+                    }
+                    in_scope(&mut args.iter().copied())
+                }
+                SemanticNodeData::IndexedAccess { object, .. } => vec![(*object, scope)],
+                SemanticNodeData::Array { element, .. } => vec![(*element, scope)],
+                SemanticNodeData::KeyOf { base } => vec![(*base, scope)],
+                SemanticNodeData::Alias(inner) => vec![(*inner, scope)],
+                SemanticNodeData::Tuple { elements, .. } => {
+                    in_scope(&mut elements.iter().map(|element| element.value))
+                }
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    in_scope(
+                        &mut composite
+                            .composite_members()
+                            .expect("composite arm")
+                            .iter()
+                            .copied(),
+                    )
+                }
+                _ => Vec::new(),
+            })
+        })
     }
 
     fn bare_ref_origin_in_scope(
@@ -925,97 +790,146 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// `param_names` — the node-domain mirror of the former
 /// `field_references_type_params` `TypeExpr` walk (declaration parameters are
 /// bound as `TypeParam` shells by the locator-shape lowering, so a name hit
-/// IS a parent-parameter reference). Bounded and purely carrier-data-driven.
+/// IS a parent-parameter reference). Every node is read once, whatever the
+/// nesting; purely carrier-data-driven.
 fn node_references_type_param_names(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     param_names: &FxHashSet<&str>,
-    depth: u32,
 ) -> bool {
+    use crate::graph_walk::Reach;
     use crate::semantic_query::SemanticNodeData;
 
-    if depth > 256 || param_names.is_empty() {
+    if param_names.is_empty() {
         return false;
     }
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
-        return false;
-    };
-    let recur = |n: crate::semantic_query::SemanticNodeId| {
-        node_references_type_param_names(ctx, n, param_names, depth + 1)
-    };
-    match data.as_ref() {
-        SemanticNodeData::TypeParam {
-            display_name,
-            constraint,
-            default,
-            ..
-        } => {
-            param_names.contains(display_name.as_ref())
-                || constraint.is_some_and(recur)
-                || default.is_some_and(recur)
-        }
-        SemanticNodeData::Alias(inner) => recur(*inner),
-        SemanticNodeData::Array { element, .. } => recur(*element),
-        SemanticNodeData::KeyOf { base } => recur(*base),
-        SemanticNodeData::IndexedAccess { object, index } => {
-            recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
-        }
-        SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-            let members = composite.composite_members().expect("composite arm");
-            members.iter().any(|&m| recur(m))
-        }
-        SemanticNodeData::MergedDecl {
-            contributors: members,
-        } => members.iter().any(|&m| recur(m)),
-        SemanticNodeData::Object(surface) => {
-            surface.positive_members().iter().any(|m| recur(m.value))
-                || surface
-                    .index_signatures
+    crate::graph_walk::reaches(node, |node| {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            return Reach::Parts(Vec::new());
+        };
+        Reach::Parts(match data.as_ref() {
+            SemanticNodeData::TypeParam {
+                display_name,
+                constraint,
+                default,
+                ..
+            } => {
+                if param_names.contains(display_name.as_ref()) {
+                    return Reach::Hit;
+                }
+                constraint.iter().chain(default.iter()).copied().collect()
+            }
+            SemanticNodeData::Alias(inner) => vec![*inner],
+            SemanticNodeData::Array { element, .. } => vec![*element],
+            SemanticNodeData::KeyOf { base } => vec![*base],
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let mut parts = vec![*object];
+                if let crate::semantic_query::IndexKey::Computed(inner) = index {
+                    parts.push(*inner);
+                }
+                parts
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                elements.iter().map(|element| element.value).collect()
+            }
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                composite
+                    .composite_members()
+                    .expect("composite arm")
                     .iter()
-                    .any(|sig| recur(sig.key_type) || recur(sig.value_type))
-                || surface.call_signatures.iter().any(|&c| recur(c))
-                || surface.construct_signatures.iter().any(|&c| recur(c))
-        }
-        SemanticNodeData::Signature {
-            params,
-            return_type,
-            predicate,
-            ..
-        } => {
-            params.iter().any(|p| recur(p.ty))
-                || recur(*return_type)
-                || predicate
-                    .and_then(|predicate| predicate.ty)
-                    .is_some_and(&recur)
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            pending,
-            ..
-        } => {
-            pending
-                .as_ref()
-                .is_some_and(|frame| frame.argument_nodes().any(&recur))
-                || recur(*check)
-                || recur(*extends)
-                || recur(*true_branch_ref)
-                || recur(*false_branch_ref)
-        }
-        SemanticNodeData::Mapped { .. } => {
+                    .copied()
+                    .collect()
+            }
+            SemanticNodeData::MergedDecl {
+                contributors: members,
+            } => members.to_vec(),
+            SemanticNodeData::Object(surface) => surface
+                .positive_members()
+                .iter()
+                .map(|member| member.value)
+                .chain(
+                    surface
+                        .index_signatures
+                        .iter()
+                        .flat_map(|signature| [signature.key_type, signature.value_type]),
+                )
+                .chain(surface.call_signatures.iter().copied())
+                .chain(surface.construct_signatures.iter().copied())
+                .collect(),
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                predicate,
+                ..
+            } => params
+                .iter()
+                .map(|param| param.ty)
+                .chain(std::iter::once(*return_type))
+                .chain(predicate.and_then(|predicate| predicate.ty))
+                .collect(),
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                pending,
+                ..
+            } => pending
+                .iter()
+                .flat_map(|frame| frame.argument_nodes())
+                .chain([*check, *extends, *true_branch_ref, *false_branch_ref])
+                .collect(),
             // A mapped type's binder shadows same-named outer parameters
             // inside its value; the conservative answer keeps the SLOW path
             // for a mapped shape referencing anything (parity with the
             // shadow-aware walk's caution).
-            !param_names.is_empty()
-        }
-        d if d.bare_ref_head().is_some() || d.typeof_head().is_some() => {
-            d.carrier_type_args().iter().any(|&arg| recur(arg))
-        }
-        _ => false,
-    }
+            SemanticNodeData::Mapped { .. } => return Reach::Hit,
+            d if d.bare_ref_head().is_some() || d.typeof_head().is_some() => {
+                d.carrier_type_args().to_vec()
+            }
+            _ => Vec::new(),
+        })
+    })
 }
+
+/// The two questions the imported-utility scan
+/// ([`ComponentMetaQueryEngine::node_contains_imported_utility_route`]) asks
+/// of a node.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum UtilityQuestion {
+    /// Does a builtin utility applied to an imported argument occur under
+    /// the node?
+    Route(crate::semantic_query::SemanticNodeId),
+    /// Is the node, as a utility's argument, imported-routed?
+    Argument(crate::semantic_query::SemanticNodeId),
+}
+
+/// A type application's parts for the imported-utility scan: under a
+/// builtin utility, each argument asked as an argument; and every argument
+/// scanned for a route.
+fn utility_arguments(
+    utility: bool,
+    args: &[crate::semantic_query::SemanticNodeId],
+) -> Vec<UtilityQuestion> {
+    let mut parts = Vec::with_capacity(args.len() * 2);
+    if utility {
+        parts.extend(args.iter().copied().map(UtilityQuestion::Argument));
+    }
+    parts.extend(args.iter().copied().map(UtilityQuestion::Route));
+    parts
+}
+
+/// `nodes` scanned for an imported-utility route.
+fn routes<'n>(
+    nodes: impl IntoIterator<Item = &'n crate::semantic_query::SemanticNodeId>,
+) -> Vec<UtilityQuestion> {
+    nodes
+        .into_iter()
+        .copied()
+        .map(UtilityQuestion::Route)
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "shallow_preserve_depth_tests.rs"]
+mod depth_tests;

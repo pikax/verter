@@ -273,8 +273,8 @@ Probe and realpath values are encoded exactly (`File`/`Absent`, self/none),
 so two requests whose overlays give a path the same effective value agree on
 its version without a digest: an ordinary body edit of an overlaid file keeps
 every answer that depends only on the file existing. Directory-membership
-and manifest values are interned by exact value identity in one bounded
-process-wide table (`overlay_value_versions_len`); an evicted value
+and manifest values are interned by exact value identity in the Engine's
+bounded overlay value table (see Residency below); an evicted value
 re-mints, which only refuses the witnesses recorded against it. A derived
 node the overlay reaches gets a version unique to the composition. A world
 that composes an overlay which changes a fact reports no resolution stamp:
@@ -300,6 +300,37 @@ never enters a workspace slot, never folds its observed values into the
 workspace's evidence baseline, and never records a workspace dependency
 edge.
 
+**Residency.** The overlay lane and the overlay value table are the two
+resident overlay structures, and both hold every entry on behalf of OVERLAY
+AUTHORITIES (`verter_workspace::overlay_residency`). A session holds one
+`OverlayAuthority` for its life and hands a clone to every request's
+snapshot (`SessionView::resolution_authority`), so its overlay answers stay
+warm across its requests and go when the session closes, after its last
+in-flight request. A request overlay with no session gets a fresh authority,
+so its answers go when its snapshot is superseded. An entry another
+authority reused is held by that authority too and outlives the one that
+produced it. Every entry is charged, as a retained reservation, to the
+host's aggregate `SemanticRetentionAccount` through the dependency-neutral
+`ResolutionRetentionAccount` seam; a refused reservation serves the answer
+uncached. Independently, each structure is bounded (per-slot candidate cap,
+slot cap, oldest first), and `HostRetentionSnapshot` reports both counts
+(`overlay_resolution_slots`, `overlay_value_versions`), as does the churn
+lane's retention line.
+
+**One producer per concurrent cold query.** A cold query that can admit
+claims its query slot's flight (`crate::resolution_flights`), keyed by the
+slot and the execution domain (workspace view or changing overlay).
+Identical concurrent demands subscribe and receive the candidate the
+producer admitted — retained or not — and each adopts it only if it
+validates for its own captured world; otherwise it resolves for itself, so
+incompatible overlays never adopt each other's answers. A subscriber holds
+the flight, not a thread identity, and can poll it instead of waiting; a
+cancelled subscriber (`ResolutionOperation::cancelled_by`) detaches with a
+typed `Cancelled` refusal while the producer runs on; a producer that
+admits nothing, fails or panics abandons the flight and every subscriber
+retries. A thread that owes a flight never waits on another, and no wait
+happens under an Engine lock.
+
 **Carried by the operation, not by a reader.** The overlay is part of the
 Engine's `ResolutionOperation` (`ResolutionOperation::over`), and the Engine
 composes the overlay reader itself. Like the evidence capability below, a
@@ -314,9 +345,12 @@ takes the snapshot as a parameter (`None` for the workspace view) and owns
 lane selection (`TypeImport`, then the `EsmImport` fallback), declaration
 companion normalization and refusal propagation for both views. Every
 resolver context answers its publication through `type_route_answer`, which
-marks a refusal non-cacheable rather than a "not found". The witness
-builder for an unresolved wildcard edge resolves through the context's
-snapshot too, and a request's witness memo keys on the snapshot's identity.
+marks a refusal non-cacheable rather than a "not found". Witness building
+reuses the decisions a walk already admitted instead of resolving again: the
+route walk resolves an unresolved wildcard edge inside its witness scope, so
+that scope's observations root the edge, and the owner import surface roots a
+skipped import with the witness of the very resolution that skipped it, in
+the same view.
 
 ### What the filesystem backend is not
 

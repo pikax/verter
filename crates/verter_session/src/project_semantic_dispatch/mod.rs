@@ -67,7 +67,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
     SemanticQueryValueTag, SignatureRef,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::semantic_query_memo::{Acquired, ReadCapture, SemanticGraphStore};
 use verter_type_expr::PrimitiveName;
 
 // Module tree. The sub-modules are `pub(crate)` so external callers see only
@@ -2184,20 +2184,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`SemanticQueryApi::execute`] and [`Self::execute_read`].
     ///
     /// **Single-call-site invariant.** This method holds the only
-    /// production `graph.execute_cooperative_value(...)` call site dispatched
-    /// from `ProjectSemanticDispatch`. The architecture guard
+    /// production `graph.acquire_query(...)` call site dispatched from
+    /// `ProjectSemanticDispatch`. The architecture guard
     /// `dispatch_cold_build_has_one_call_site.rs` asserts this with a
     /// static scan that strips test files + `#[cfg(test)]` regions and
     /// counts matches. A second production call site would mean a
     /// second cold-build path slipped through bypassing the tracer.
     ///
     /// **Tracer scope.** The fact tracer is installed ONLY around the
-    /// cold-build closure passed to `execute_cooperative`. Warm hits
-    /// (when the slot is already populated) MUST NOT allocate a
-    /// tracer — they short-circuit at the `try_warm_hit_fast_path`
-    /// inside `execute_cooperative`. The closure here only runs on
-    /// cold misses or when the prior winner aborted; the tracer cost
-    /// is bounded by the cold-build cost it observes.
+    /// cold build this helper runs once the memo hands it the key's
+    /// producer. Warm hits (when the slot is already populated) MUST NOT
+    /// allocate a tracer — the memo's lookup answers them before any
+    /// claim. The build runs only on cold misses or when the prior
+    /// producer aborted; the tracer cost is bounded by the cold-build
+    /// cost it observes.
     ///
     /// **Build-output threading.** On `FactReadSetFinalise::Ok`, the
     /// self-version-rooted carrier is stored on
@@ -2207,8 +2207,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `cache_suppress = true` so the memo refuses to publish the
     /// entry — the caller cold-recomputes on the next request.
     //
-    // arch-guard:single-execute-cooperative-call — the helper holds
-    // the only production `graph.execute_cooperative_value(` call site. The
+    // arch-guard:single-acquire-query-call — the helper holds the only
+    // production `graph.acquire_query(` call site. The
     // arch test parses `crates/verter_session/src/**/*.rs` (excluding
     // tests, stripping cfg(test) regions) and asserts exactly one
     // match.
@@ -2515,7 +2515,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
-        let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
+        let exact_same_path = self.graph().is_same_path_claim(&key);
         let mut query_depth_guard = None;
         if preexisting_trip.is_some_and(|reasons| {
             reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
@@ -3114,27 +3114,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 operand_force_active,
             )
         };
-        let cache_read = match (publication, operand_evidence) {
-            (Some(publication), None) => graph.execute_cooperative_value_capturing_publication(
-                self.ctx,
-                key.clone(),
-                sentinel,
-                traced_build,
-                publication,
-            ),
-            (None, Some(evidence)) => graph.execute_cooperative_value_capturing_operand_evidence(
-                self.ctx,
-                key.clone(),
-                sentinel,
-                traced_build,
-                evidence,
-                &SemanticOperandAuthority::mint_for_forcing_boundary(),
-            ),
-            (None, None) => {
-                graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build)
-            }
+        let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
+        let mut capture = match (publication, operand_evidence) {
+            (Some(publication), None) => ReadCapture::publication(publication),
+            (None, Some(evidence)) => ReadCapture::operand_evidence(evidence, &authority),
+            (None, None) => ReadCapture::default(),
             (Some(_), Some(_)) => unreachable!("capture modes are mutually exclusive"),
         };
+        // The memo protocol: a warm lookup, then a claim for this
+        // execution's task — the recursion carrier, another task's result
+        // (waited out here, at the synchronous entry), or this key's
+        // producer, which runs the traced build and then settles, is
+        // admitted and completes.
+        let mut execution = None;
+        let cache_read =
+            match graph.acquire_query(self.ctx, key.clone(), &mut execution, &mut capture) {
+                Acquired::Read(read) => read,
+                Acquired::Recursive(recursion) => {
+                    SemanticGraphStore::recursion_read(recursion, sentinel())
+                }
+                Acquired::Produce(lease) => match lease.settle(self.ctx, traced_build()) {
+                    Err(read) => read,
+                    Ok(mut settled) => match settled.admit(self.ctx, &mut capture) {
+                        Err(read) => read,
+                        Ok(()) => settled.complete(self.ctx, &mut capture),
+                    },
+                },
+            };
+        drop(execution);
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
@@ -4286,6 +4293,8 @@ mod differential_type_operator_tests;
 #[cfg(test)]
 mod enum_literal_tests;
 #[cfg(test)]
+mod helper_depth_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
@@ -4295,6 +4304,8 @@ mod index_signature_access_tests;
 mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
+#[cfg(test)]
+mod inference_census_tests;
 #[cfg(test)]
 mod intersection_complexity_tests;
 #[cfg(test)]

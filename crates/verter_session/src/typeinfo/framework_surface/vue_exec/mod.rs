@@ -981,8 +981,7 @@ pub(crate) fn navigate_param_to_object_surface(
     ) {
         return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons);
     }
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(&dispatch, base, 0)
-    {
+    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(&dispatch, base) {
         // The open-generic gate DECLINES a committed surface by design — a
         // complete negative answer, not a failure.
         return crate::typeinfo::surface_resolution::SurfaceResolution::no_surface();

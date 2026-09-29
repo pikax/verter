@@ -909,6 +909,28 @@ fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
         Ok(()),
         "control: a Content-only aggregate validates in the exact empty-completion population"
     );
+    let receipt = |facts: Vec<FactVersionRef>| {
+        FactVersionRef::Receipt(verter_workspace::ResultReceipt::new(facts))
+    };
+    assert_eq!(
+        request.validate_fact_signature(&[receipt(vec![resolution.clone()])], &[]),
+        Ok(()),
+        "control: a consumed result's Resolution-only evidence validates"
+    );
+    for (case, mixed) in [
+        vec![receipt(vec![resolution.clone()]), content.clone()],
+        vec![resolution.clone(), receipt(vec![content.clone()])],
+        vec![receipt(vec![resolution.clone(), content.clone()])],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            request.validate_fact_signature(&mixed, &[]).is_err(),
+            "case {case}: an aggregate a consumed result's receipt carries mixes like one \
+             of the signature's own"
+        );
+    }
     assert!(
         request
             .validate_fact_signature(&[resolution, content], &[])

@@ -134,3 +134,120 @@ fn a_long_chain_of_receipts_drops_without_native_recursion() {
         .join()
         .expect("the chain drops");
 }
+
+/// Two equal chains assembled apart, far longer than a native stack could
+/// compare one frame per level, compare equal on a 1 MiB thread; one
+/// differing fact at the bottom orders them apart.
+#[test]
+fn equal_chains_assembled_apart_compare_without_native_recursion() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            // Each level's digest is `digests[level]` when given, so a
+            // chain can forge another's digests all the way down.
+            let chain = |bottom: u8, digests: Option<&[u128]>| {
+                let mut seen = Vec::new();
+                let mut below: Option<ResultReceipt> = None;
+                for level in 0..100_000u32 {
+                    let mut facts = vec![whole("/n.ts", (level % 251) as u8)];
+                    match below.take() {
+                        Some(below) => facts.push(FactVersionRef::Receipt(below)),
+                        None => facts = vec![whole("/0.ts", bottom)],
+                    }
+                    let built = ResultReceipt::new(facts);
+                    seen.push(built.digest());
+                    below = Some(match digests {
+                        None => built,
+                        Some(digests) => ResultReceipt(Arc::new(ResultEvidence {
+                            facts: Arc::clone(&built.0.facts),
+                            digest: digests[level as usize],
+                            canonicals: Arc::clone(&built.0.canonicals),
+                            aggregated: Arc::clone(&built.0.aggregated),
+                            resolution_evidence: false,
+                            receipts: built.0.receipts,
+                        })),
+                    });
+                }
+                (below.expect("a chain has a top"), seen)
+            };
+            let (a, digests) = chain(0, None);
+            let (b, _) = chain(0, None);
+            assert!(!a.ptr_eq(&b), "premise: assembled apart");
+            assert_eq!(a, b);
+            assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+            // Equal digests at every level over a different bottom: only
+            // the bottom tells them apart.
+            let (forged, _) = chain(1, Some(&digests));
+            assert_eq!(forged.digest(), a.digest(), "premise: digests forged");
+            assert_ne!(a, forged);
+            assert_ne!(a.cmp(&forged), std::cmp::Ordering::Equal);
+        })
+        .expect("spawn the comparing thread")
+        .join()
+        .expect("the chains compare");
+}
+
+/// A walk that is told a receipt is already validated reads nothing only
+/// that receipt reaches, and asks about each distinct receipt once.
+#[test]
+fn a_walk_skips_the_receipts_it_is_told_are_settled() {
+    let shared = ResultReceipt::new(vec![whole("/s.ts", 1)]);
+    let left = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(shared.clone()),
+        whole("/l.ts", 2),
+    ]);
+    let right = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(shared.clone()),
+        whole("/r.ts", 3),
+    ]);
+    let top = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(left.clone()),
+        FactVersionRef::Receipt(right),
+    ]);
+    let mut asked = 0usize;
+    let mut visited = Vec::new();
+    assert!(ReceiptWalk::default().leaves_unless(
+        &top,
+        |met| {
+            asked += 1;
+            met.ptr_eq(&left)
+        },
+        |fact| {
+            visited.push(fact.canonical_id().map(str::to_owned));
+            true
+        },
+    ));
+    visited.sort();
+    assert_eq!(visited, [Some("/r.ts".into()), Some("/s.ts".into())]);
+    assert_eq!(asked, 4, "top, left, right and shared, once each");
+}
+
+/// Two equal lattices assembled apart, each level's two receipts
+/// consuming both of the level below, compare in their distinct pairs of
+/// receipts: the paths through them double per level and are never
+/// followed one by one.
+#[test]
+fn equal_lattices_assembled_apart_compare_in_their_distinct_pairs() {
+    let lattice = || {
+        let (mut left, mut right) = (
+            ResultReceipt::new(vec![whole("/l.ts", 0)]),
+            ResultReceipt::new(vec![whole("/r.ts", 0)]),
+        );
+        for level in 1..64u8 {
+            let below = [
+                FactVersionRef::Receipt(left.clone()),
+                FactVersionRef::Receipt(right.clone()),
+            ];
+            left = ResultReceipt::new([below.to_vec(), vec![whole("/l.ts", level)]].concat());
+            right = ResultReceipt::new([below.to_vec(), vec![whole("/r.ts", level)]].concat());
+        }
+        ResultReceipt::new(vec![
+            FactVersionRef::Receipt(left),
+            FactVersionRef::Receipt(right),
+        ])
+    };
+    let (a, b) = (lattice(), lattice());
+    assert!(!a.ptr_eq(&b), "premise: assembled apart");
+    assert_eq!(a, b);
+    assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+}

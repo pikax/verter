@@ -5143,6 +5143,11 @@ pub(crate) mod foundations_guards {
         // has no business minting or reading one.
         "pub(crate) mod flow_completion_inventory",
         "pub(crate) mod flow_slice_content",
+        // Existential and three-valued questions about a type answered
+        // through its parts from a work list (`reaches` / `classify`).
+        // Crate-private: generic walk machinery for the dispatch and
+        // meta-resolve helpers.
+        "pub(crate) mod graph_walk",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).
         // Crate-private: the materialise closure and the memo are its
@@ -5217,6 +5222,9 @@ pub(crate) mod foundations_guards {
         // wiring lands with the query-layer adoption).
         "pub mod query_host_port",
         "pub(crate) mod semantic_query_memo",
+        // The request-scoped continuation runtime semantic evaluation runs
+        // its frames on; crate-internal.
+        "pub(crate) mod semantic_execution",
         // The one process-local aggregate retained-byte account every
         // host-owned semantic store charges. `pub` because the account is
         // PROCESS-wide rather than crate-wide: the LSP server's
