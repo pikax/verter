@@ -7,9 +7,6 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use imbl::{HashMap, HashSet};
 use parking_lot::Mutex;
 
@@ -120,8 +117,12 @@ struct UnderlyingWorldIdentity {
     population: ResolutionPopulation,
 }
 
+// Per thread, so tests counting their own lookups never see a concurrent
+// test's.
 #[cfg(test)]
-static OVERLAY_LOOKUP_NORMALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static OVERLAY_LOOKUP_NORMALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 impl ResolutionOverlaySnapshot {
     #[must_use]
@@ -246,7 +247,7 @@ impl ResolutionOverlaySnapshot {
             return None;
         }
         #[cfg(test)]
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.entries
             .get(&verter_semantic::resolver_core::normalize_canonical_id(
                 canonical_id,
@@ -3121,11 +3122,11 @@ mod transaction_contract_tests {
     use super::*;
 
     fn reset_overlay_lookup_normalize_calls() {
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.store(0, Ordering::Relaxed);
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(0));
     }
 
     fn overlay_lookup_normalize_calls() -> usize {
-        OVERLAY_LOOKUP_NORMALIZE_CALLS.load(Ordering::Relaxed)
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.with(std::cell::Cell::get)
     }
 
     #[test]
