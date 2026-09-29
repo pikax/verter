@@ -2193,6 +2193,7 @@ impl Engine {
                         base,
                         session,
                         population,
+                        overlay: None,
                     }),
                 });
             }
@@ -3374,7 +3375,7 @@ impl Engine {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
-            let Some(captured) = captured else {
+            let Some(mut captured) = captured else {
                 #[cfg(test)]
                 resolution_test_hooks::record_return_only();
                 return ResolutionOutcome::refused(
@@ -3382,6 +3383,13 @@ impl Engine {
                     verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
                 );
             };
+            // A request overlay answers from its own effective world: every
+            // fact it changes is versioned in the overlay's version space, so
+            // the witness this attempt records never passes for the
+            // workspace value the overlay replaced.
+            if let Some(overlay) = reader.request_resolution_overlay() {
+                captured.world = overlay.effective_world(&captured.world);
+            }
             if expected_published.is_some_and(|expected| {
                 !captured
                     .world

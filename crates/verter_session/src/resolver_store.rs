@@ -1985,6 +1985,17 @@ impl HostStoreView {
             );
         }
         snapshot.roots.with_session(session);
+        // Resolution facts answer for the EFFECTIVE view too. The captured
+        // workspace world cannot see an overlay-created, -deleted or
+        // -rewritten path, so a witness validated against it alone would
+        // accept a workspace answer the overlay changed. The overlay's
+        // effective world versions exactly the facts it changes (and every
+        // decision reaching one) in its own version space; the rest answer
+        // from the captured roots unchanged.
+        if let Some(world) = snapshot.roots.resolution_root.as_ref() {
+            let overlay = host.resolution_overlay_snapshot(view);
+            snapshot.roots.resolution_root = Some(overlay.effective_world(world));
+        }
         // The overlaid view answers differently from the base view it was
         // cloned from, so it must not inherit the base view's memo.
         self.memo = Arc::new(crate::store_view_roots::StoreViewMemo::default());

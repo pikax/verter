@@ -227,6 +227,18 @@ pub trait WorkspaceRead: Send + Sync {
         false
     }
 
+    /// The request overlay this reader layers over the workspace, if any.
+    ///
+    /// The Engine composes it over every world it captures for this reader
+    /// ([`crate::ResolutionOverlaySnapshot::effective_world`]), so an
+    /// overlay-effective observation is versioned in the overlay's own
+    /// version space — never as the workspace value it replaced.
+    fn request_resolution_overlay(
+        &self,
+    ) -> Option<&crate::resolution_currency::ResolutionOverlaySnapshot> {
+        None
+    }
+
     // The live evidence capability is deliberately NOT a hook on this trait.
     // A reader hook is forwarded by every delegating wrapper, and a wrapper
     // that forgets one silently inherits the default. The capability is a
