@@ -3242,10 +3242,6 @@ impl CheckerDispatchTransaction {
             .find(|s| s.state == InferenceSessionState::Collecting)
     }
 
-    pub(crate) fn binding_is_disabled(&self) -> bool {
-        !self.relation.binding_disabled_session_barriers.is_empty()
-    }
-
     pub(crate) fn begin_binding_disabled(&mut self) {
         self.relation
             .binding_disabled_session_barriers

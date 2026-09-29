@@ -322,26 +322,23 @@ fn a_member_read_of_a_literal_expression_resolves() {
 }
 
 /// Under `strictBindCallApply` `add.apply(undefined, [1, 2])` and
-/// `add.call(undefined, 1, 2)` are `number` and `add.bind(undefined, 1)` is
-/// `(b: number) => number`, through `CallableFunction`'s generic `this`-typed
-/// signatures.
-///
-/// What the lane gives:
-/// - `fnApply`: the checker answers `number`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `fnCall`: the checker answers `number`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `fnBind`: the checker answers `(b: number) => number`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
+/// `add.call(undefined, 1, 2)` are `number`, through `CallableFunction`'s
+/// generic `this`-typed signatures.
 #[test]
-#[ignore = "apply, call and bind resolve through CallableFunction's generic signatures"]
-fn function_apply_call_and_bind_resolve_through_callable_function() {
+fn function_apply_and_call_resolve_through_callable_function() {
     let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("fnApply", "number"),
-        ("fnCall", "number"),
-        ("fnBind", "(b: number) => number"),
-    ]);
+    let failures = matrix.returns(&[("fnApply", "number"), ("fnCall", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Under `strictBindCallApply` `add.bind(undefined, 1)` is `(b: number) =>
+/// number`, `bind`'s second overload splitting `add`'s parameters at the
+/// bound argument.
+#[test]
+#[ignore = "bind with bound arguments infers no [...A, ...B] parameter split, and degrades as an unrepresentable callee"]
+fn function_bind_with_a_bound_argument_resolves_through_callable_function() {
+    let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.returns(&[("fnBind", "(b: number) => number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -729,6 +729,16 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             .map(|member| operand(dispatch, *member, depth, false))
             .collect::<Vec<_>>()
             .join(" & "),
+        // An object type with one call signature and nothing else prints as
+        // that signature's function type.
+        SemanticNodeData::Object(surface)
+            if surface.call_signatures.len() == 1
+                && surface.construct_signatures.is_empty()
+                && surface.index_signatures.is_empty()
+                && surface.positive_members().is_empty() =>
+        {
+            signature_text(dispatch, surface.call_signatures[0], depth, " => ")
+        }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = Vec::new();
             for signature in surface.call_signatures.iter() {
@@ -922,22 +932,41 @@ fn signature_text(
             .collect();
         format!("<{}>", names.join(", "))
     };
-    let rendered: Vec<String> = params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            format!(
-                "{}{}{}: {}",
-                if param.rest { "..." } else { "" },
-                param
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("arg{index}"), str::to_owned),
-                if param.optional { "?" } else { "" },
-                at(param.ty)
-            )
-        })
-        .collect();
+    let mut rendered: Vec<String> = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        let name = param
+            .name
+            .as_deref()
+            .map_or_else(|| format!("arg{index}"), str::to_owned);
+        // A rest parameter of a tuple type prints as the parameters its
+        // elements are (the checker's expanded parameters): an element's
+        // label, else `<rest>_<index>`, names each.
+        if param.rest {
+            if let Some(SemanticNodeData::Tuple { elements, .. }) =
+                graph.node_data(param.ty).as_deref()
+            {
+                for (position, element) in elements.iter().enumerate() {
+                    let element_name = element
+                        .label
+                        .as_deref()
+                        .map_or_else(|| format!("{name}_{position}"), str::to_owned);
+                    rendered.push(format!(
+                        "{}{element_name}{}: {}",
+                        if element.rest { "..." } else { "" },
+                        if element.optional { "?" } else { "" },
+                        at(element.value)
+                    ));
+                }
+                continue;
+            }
+        }
+        rendered.push(format!(
+            "{}{name}{}: {}",
+            if param.rest { "..." } else { "" },
+            if param.optional { "?" } else { "" },
+            at(param.ty)
+        ));
+    }
     let result = match predicate {
         Some(predicate) => {
             let subject = match predicate.subject {
