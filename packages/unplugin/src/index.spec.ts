@@ -1808,6 +1808,151 @@ defineProps<AnimationOptions>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 
+  it("a bundler resolver that throws for a types-only package subpath still hydrates the declaration", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // The subpath is exported only under the `types` condition, so a bundler
+    // resolving with runtime conditions throws (rolldown does) rather than
+    // returning null. The transform must fall back to the package declaration.
+    const pkgDir = join(tempDir, "node_modules", "@scope", "audit-types");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@scope/audit-types",
+        type: "module",
+        exports: { "./audit": { types: "./audit.ts" } },
+      }),
+    );
+    writeFileSync(
+      join(pkgDir, "audit.ts"),
+      "export type AuditChain = { steps: string[] };\nexport interface AuditProps { chain: AuditChain; label?: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { AuditProps } from "@scope/audit-types/audit"
+defineProps<AuditProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@scope/audit-types/audit") {
+        throw new Error(`"./audit" is not exported under the conditions ["import"]`);
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(resolveSpy).toHaveBeenCalledWith("@scope/audit-types/audit", filename, {
+      skipSelf: true,
+    });
+    const code = result.code;
+    expect(code).toContain("chain");
+    expect(code).toContain("label");
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("a types-only package subpath resolves through its `exports` types target", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // The declaration lives at the `exports` types target, not at the literal
+    // subpath, so only an exports-aware lookup finds it.
+    const pkgDir = join(tempDir, "node_modules", "@scope", "mapped-types");
+    mkdirSync(join(pkgDir, "dist", "types"), { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@scope/mapped-types",
+        type: "module",
+        exports: {
+          "./audit": { import: { types: "./dist/types/audit.d.ts" } },
+          "./*": { types: "./dist/types/*.d.ts" },
+        },
+      }),
+    );
+    writeFileSync(
+      join(pkgDir, "dist", "types", "audit.d.ts"),
+      "export interface AuditProps { chain: string[]; label?: string; }\n",
+    );
+    writeFileSync(
+      join(pkgDir, "dist", "types", "extra.d.ts"),
+      "export interface ExtraProps { depth: number; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { AuditProps } from "@scope/mapped-types/audit"
+import type { ExtraProps } from "@scope/mapped-types/extra"
+defineProps<AuditProps & ExtraProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source.startsWith("@scope/mapped-types/")) {
+        throw new Error(`"${source}" is not exported under the conditions ["import"]`);
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    const code = result.code;
+    expect(code).toContain("chain");
+    expect(code).toContain("label");
+    expect(code).toContain("depth");
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("a relative directory-index declaration resolves when the bundler resolver throws", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    mkdirSync(join(tempDir, "shapes"), { recursive: true });
+    writeFileSync(
+      join(tempDir, "shapes", "index.d.mts"),
+      "export interface ShapeProps { sides: number; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { ShapeProps } from "./shapes"
+defineProps<ShapeProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./shapes") throw new Error("resolver cannot load ./shapes");
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result.code).toContain("sides");
+    expect(result.code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("a bundler resolver error surfaces when no fallback resolves the import", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    const sfc = `<script setup lang="ts">
+import type { AliasProps } from "@/types"
+defineProps<AliasProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@/types") throw new Error("alias plugin failed to load @/types");
+      return null;
+    });
+
+    await expect(plugin.transform.call({ resolve: resolveSpy }, sfc, filename)).rejects.toThrow(
+      "alias plugin failed to load @/types",
+    );
+  });
+
   it("transform with relative type deps works via hydration (existing behavior preserved)", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
