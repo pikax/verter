@@ -42,8 +42,9 @@
  *   node scripts/release-publish.mjs local [--run <id>] [--tag v<version>]
  *       [--dir <path>] [--skip-crates] [--dry-run] [--redownload]
  *       [--allow-head-mismatch] [--otp <code>]
- *       The whole local release: preflight, download the tag's release-run
- *       artifacts with `gh`, then stage → prepare → publish-npm (interactive
+ *       The whole local release: preflight, prove the tag (scripts/release-proof.mjs:
+ *       its release pull request's CI run, or the proven run named by --run),
+ *       download that run's artifacts with `gh`, then stage → prepare → publish-npm (interactive
  *       OTP) → verify-npm → publish-crates.
  *
  * Artifacts directory layout (what `gh run download` and
@@ -58,12 +59,14 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
+import { releaseProof } from "./release-proof.mjs";
 import {
   BINARY_FAMILIES,
   invokedAsEntrypoint,
@@ -597,7 +600,7 @@ async function publishCrates(flags) {
 }
 
 // ---------------------------------------------------------------------------
-// local — the whole release from a tag's release-run artifacts
+// local — the whole release from the proven run's artifacts
 // ---------------------------------------------------------------------------
 
 function ghJson(args) {
@@ -606,28 +609,35 @@ function ghJson(args) {
   return JSON.parse(result.stdout);
 }
 
-/** The completed release.yml run for the tag's commit, newest first. */
-function findReleaseRun(tag, tagSha) {
-  const runs = ghJson([
-    "run",
-    "list",
-    "--workflow",
-    "release.yml",
-    "--branch",
-    tag,
-    "--limit",
-    "20",
-    "--json",
-    "databaseId,headSha,status,createdAt",
-  ]);
-  const candidates = runs.filter((r) => r.headSha === tagSha && r.status === "completed");
-  if (candidates.length === 0) {
+/**
+ * The run whose artifacts the tag ships: its release pull request's CI run,
+ * whose rehearsal built them for the tagged tree (scripts/release-proof.mjs).
+ * The tag's own release.yml run builds nothing; it publishes that run's
+ * artifacts, and so does this. A run named with --run passes the same proof
+ * (successful CI of the release pull request for the tagged tree, the Release
+ * Check rehearsal, every artifact family); naming it only picks among proven
+ * runs.
+ */
+async function findReleaseRun(tag, tagSha, named) {
+  if (named !== undefined && !/^[1-9][0-9]*$/u.test(String(named)))
     fail(
-      `no completed release.yml run found for ${tag} at ${tagSha} — pass --run <id> once the build jobs have finished`,
+      `--run ${named === true ? "needs a workflow run id" : `${named} is not a workflow run id`}`,
     );
+  const runId = named === undefined ? undefined : Number(named);
+  const repo = ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
+  try {
+    return await releaseProof({
+      repo,
+      sha: tagSha,
+      titlePrefix: "release: ",
+      rehearsal: "Release Check",
+      artifacts: ["native-*", "native-loader", "tsc-*", "lsp-*", "mcp-*", "wasm"],
+      runId,
+      api: async (path) => ghJson(["api", path]),
+    });
+  } catch (error) {
+    return fail(`${tag}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  candidates.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  return candidates[0].databaseId;
 }
 
 async function local(flags) {
@@ -674,9 +684,12 @@ async function local(flags) {
     log(`npm user: ${who.stdout.trim()}`);
   }
 
-  // --- Download the tag's release-run artifacts (the exact binaries CI built
-  // for this tag), unless a previous invocation already did.
-  const runId = flags.get("run") ?? findReleaseRun(tag, tagSha);
+  // --- Prove the tag and download the proven run's artifacts (the exact
+  // binaries the release pull request's CI built for the tagged tree), unless a
+  // previous invocation already downloaded that same run.
+  const named = flags.get("run");
+  const proven = await findReleaseRun(tag, tagSha, named);
+  const runId = proven.runId;
   const runInfo = ghJson([
     "run",
     "view",
@@ -684,20 +697,36 @@ async function local(flags) {
     "--json",
     "headSha,status,conclusion,workflowName",
   ]);
-  if (runInfo.headSha !== tagSha) {
-    fail(`run ${runId} built ${runInfo.headSha}, not the tagged commit ${tagSha}`);
+  // The proof chose a run of the release pull request's head that recorded
+  // testing exactly the tagged tree.
+  if (runInfo.headSha !== proven.head) {
+    fail(`run ${runId} ran for ${runInfo.headSha}, not the proven head ${proven.head}`);
   }
   log(`Release run: ${runId} (${runInfo.workflowName}, ${runInfo.status}/${runInfo.conclusion})`);
 
+  // The download is reused only when it is the proven run's: its run id is
+  // recorded beside it (not inside, where staging would read it) once the
+  // download completes, and any other or unrecorded download is replaced.
+  const cachedRunFile = `${artifactsDir}.run-id`;
+  const cachedRun = existsSync(cachedRunFile) ? readFileSync(cachedRunFile, "utf8").trim() : null;
   const haveArtifacts =
     existsSync(artifactsDir) &&
     readdirSync(artifactsDir, { withFileTypes: true }).some((d) => d.isDirectory());
-  if (haveArtifacts && flags.get("redownload") !== true) {
-    log(`Reusing downloaded artifacts in ${artifactsDir} (pass --redownload to fetch again)`);
+  if (haveArtifacts && cachedRun === String(runId) && flags.get("redownload") !== true) {
+    log(
+      `Reusing run ${runId}'s downloaded artifacts in ${artifactsDir} (pass --redownload to fetch again)`,
+    );
   } else {
+    if (haveArtifacts && cachedRun !== String(runId))
+      log(
+        `Discarding the artifacts of run ${cachedRun ?? "(unrecorded)"}: the proven run is ${runId}`,
+      );
     heading(`Download run ${runId} artifacts to ${artifactsDir}`);
+    rmSync(cachedRunFile, { force: true });
+    rmSync(artifactsDir, { recursive: true, force: true });
     mkdirSync(artifactsDir, { recursive: true });
     run("gh", ["run", "download", String(runId), "-D", artifactsDir]);
+    writeFileSync(cachedRunFile, `${runId}\n`);
   }
 
   // --- The shared publish path.

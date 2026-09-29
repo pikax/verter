@@ -186,19 +186,16 @@ test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core
   assert.doesNotMatch(bf2Source, /spawnSync|test-threads|max-threads|--jobs/);
 });
 
-test("release.yml runs the same BF2 command in parallel and blocks publishing on it", () => {
+// BF2 is CI's required lane (above), which the release pull request runs; a
+// tag publishes only after validate proves that pull request's CI passed for
+// the tagged tree, so release.yml runs BF2 no second time.
+test("release.yml leaves BF2 to CI and publishes only after proving that CI passed", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
-  const coreJob = yamlJob(workflow, "test");
-  const bf2Job = yamlJob(workflow, "bf2-authoritative");
-  assert.match(coreJob, /provision-oracle-npm-cache\.mjs/);
-  assert.doesNotMatch(coreJob, /--features\s+(?:verter_session\/)?bf2-authoritative/);
-  assert.doesNotMatch(bf2Job, /^\s*needs:/m);
-  assert.match(bf2Job, /provision-oracle-npm-cache\.mjs/);
-  assert.match(bf2Job, /node scripts\/bf2-authoritative\.mjs/);
-  assert.match(bf2Job, /NEXTEST_PROFILE:\s*ci/);
-  assert.doesNotMatch(bf2Job, /max-threads|test-threads|--jobs|-j\s*\d/);
-  for (const requiredJob of ["publish-crates", "publish-npm", "build-vsix", "github-release"]) {
-    assert.match(yamlJob(workflow, requiredJob), /\bbf2-authoritative\b/);
+  assert.doesNotMatch(workflow, /node scripts\/bf2-authoritative\.mjs/);
+  assert.doesNotMatch(workflow, /^ {2}bf2-authoritative:$/m);
+  assert.match(yamlJob(workflow, "validate"), /node scripts\/release-proof\.mjs/);
+  for (const publishJob of ["publish-crates", "publish-npm", "github-release"]) {
+    assert.match(yamlJob(workflow, publishJob), /needs:\s*validate\b/);
   }
 });
 
