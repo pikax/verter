@@ -721,7 +721,7 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::UnrepresentableSurface
         | QueryError::UnrepresentableSurfaceMember
-        | QueryError::CheckerRecovery(_) => PropCallableRoleUnresolvedReason::Unsupported,
+        | QueryError::CheckerRecovery { .. } => PropCallableRoleUnresolvedReason::Unsupported,
         QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::ForeignSemanticOperand

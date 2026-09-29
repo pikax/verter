@@ -575,7 +575,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // and message, whose recovery reads as the recorded recovery print.
     let live_diagnostic = match dispatch.graph().node_data(node).as_deref() {
         Some(crate::semantic_query::SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::CheckerRecovery(diagnostic),
+            crate::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
         )) => Some(*diagnostic),
         _ => None,
     };

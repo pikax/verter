@@ -413,8 +413,14 @@ pub(crate) struct StoreViewRoots {
     pub(crate) project_env_root: Arc<ProjectEnvRoot>,
     /// The workspace's immutable published resolution world. The
     /// resolve-imports `Resolution` arm validates against THIS composition
-    /// and never the Engine's live registry.
+    /// and never the Engine's live registry. On a session view it is the
+    /// session overlay's effective world over the captured one.
     pub(crate) resolution_root: Option<Arc<verter_workspace::CapturedResolutionWorld>>,
+    /// The session view's request overlay — the ONE resolution snapshot a
+    /// request built over this view resolves and validates through.
+    /// `None` on a base view and on a session view with no overlay.
+    /// Request-scoped: it lives exactly as long as the view.
+    pub(crate) resolution_overlay: Option<verter_workspace::ResolutionOverlaySnapshot>,
     /// The session's per-canonical override layer, `None` on a base view.
     pub(crate) session_root: Option<Arc<SessionOverlayRoot>>,
     /// Live candidate store. Every candidate it returns is admitted only
@@ -616,6 +622,7 @@ impl StoreViewRoots {
                 capture.parse_env_override,
             )),
             resolution_root: capture.resolution_world.clone(),
+            resolution_overlay: None,
             session_root: None,
             resolved_import_facts: Some(Arc::clone(&capture.resolved_import_facts)),
             artifact_reader: Some(Arc::clone(&capture.artifact_reader)),

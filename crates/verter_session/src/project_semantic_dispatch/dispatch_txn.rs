@@ -2292,6 +2292,10 @@ struct InferenceInfo {
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
+    /// The arity a bare type-parameter rest (`...args: A`) takes from the
+    /// call's arguments (the checker's `impliedArity`), set before any
+    /// inference runs; a tuple inference splitting `[...A, ...B]` reads it.
+    implied_arity: Option<usize>,
 }
 
 /// The mutable inference session — cold-compute STATE of `execute`
@@ -2348,6 +2352,7 @@ impl InferenceSession {
                 const_policy: info.const_policy,
                 has_constraint: info.has_constraint,
                 candidates: Vec::new(),
+                implied_arity: None,
             })
             .collect();
         Self {
@@ -2654,6 +2659,27 @@ impl InferenceSession {
     /// Whether this session infers `param_node`.
     pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
         self.infos.iter().any(|info| info.param_node == param_node)
+    }
+
+    /// Record the arity the call's arguments imply for the bare rest type
+    /// parameter `param_node`.
+    pub(crate) fn set_implied_arity(&mut self, param_node: SemanticNodeId, arity: usize) {
+        if let Some(info) = self
+            .infos
+            .iter_mut()
+            .find(|info| info.param_node == param_node)
+        {
+            info.implied_arity = Some(arity);
+        }
+    }
+
+    /// The arity the call's arguments imply for `param_node`, when it is
+    /// the call's bare rest type parameter.
+    pub(crate) fn implied_arity(&self, param_node: SemanticNodeId) -> Option<usize> {
+        self.infos
+            .iter()
+            .find(|info| info.param_node == param_node)
+            .and_then(|info| info.implied_arity)
     }
 
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
@@ -3293,10 +3319,6 @@ impl CheckerDispatchTransaction {
             .iter()
             .rev()
             .find(|s| s.state == InferenceSessionState::Collecting)
-    }
-
-    pub(crate) fn binding_is_disabled(&self) -> bool {
-        !self.relation.binding_disabled_session_barriers.is_empty()
     }
 
     pub(crate) fn begin_binding_disabled(&mut self) {

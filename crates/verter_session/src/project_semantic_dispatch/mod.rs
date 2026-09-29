@@ -170,7 +170,6 @@ pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
-pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
@@ -428,6 +427,12 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// How many type-level reads this dispatch made of a member's
+    /// body-derived return whose evaluation closed degraded
+    /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
+    /// the dispatch the request builds, and the host flow-return boundary
+    /// reads it around its one evaluation.
+    pub(super) degraded_member_reads: std::cell::Cell<u32>,
     /// Runtime evidence injected into the cold build for the EXACT key the
     /// active force targets. Paired with that target key so the merge never
     /// leaks into a transitively nested build the target key's own
@@ -586,6 +591,20 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
     }
 }
 
+impl ProjectSemanticDispatch<'_> {
+    /// `key`'s flow return, and whether its evaluation read a member's
+    /// degraded body-derived return as a type — a fact the value's own
+    /// nodes do not carry, which the published answer must not drop.
+    pub(crate) fn execute_flow_return_observing_degraded_read(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> (crate::semantic_query::FlowReturnStep, bool) {
+        let before = self.degraded_member_reads.get();
+        let step = self.execute_flow_return(key);
+        (step, self.degraded_member_reads.get() != before)
+    }
+}
+
 /// Panic-safe RAII frame for the dispatch's
 /// [`ProjectSemanticDispatch::lexical_demand_scope`] stack: pushes the
 /// member-access/call-site canonical on construction and pops it on drop,
@@ -668,6 +687,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            degraded_member_reads: std::cell::Cell::new(0),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             dispatch_txn: std::cell::RefCell::new(
@@ -4251,6 +4271,8 @@ mod index_signature_access_tests;
 mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
+#[cfg(test)]
+mod intersection_complexity_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
 #[cfg(test)]

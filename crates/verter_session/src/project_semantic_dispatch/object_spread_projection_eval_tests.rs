@@ -765,7 +765,16 @@ fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     // One arm past the alternative-product distribution cap.
-    let arms = (0..1025).map(|_| object(graph, [])).collect::<Vec<_>>();
+    // Each arm carries its own member: arms that spread into an empty object
+    // merge without distributing (the checker's
+    // `tryMergeUnionOfObjectTypeAndEmptyObject`), so only non-empty arms
+    // reach the cap.
+    let arms = (0..1025)
+        .map(|index| {
+            let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            object(graph, [surface_member(&format!("k{index}"), value, false)])
+        })
+        .collect::<Vec<_>>();
     let union = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
     ));
@@ -1687,7 +1696,16 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     // The alternative-product cap is a ReturnOnly operational partial.
-    let arms = (0..1025).map(|_| object(graph, [])).collect::<Vec<_>>();
+    // Each arm carries its own member: arms that spread into an empty object
+    // merge without distributing (the checker's
+    // `tryMergeUnionOfObjectTypeAndEmptyObject`), so only non-empty arms
+    // reach the cap.
+    let arms = (0..1025)
+        .map(|index| {
+            let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            object(graph, [surface_member(&format!("k{index}"), value, false)])
+        })
+        .collect::<Vec<_>>();
     let union = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
     ));

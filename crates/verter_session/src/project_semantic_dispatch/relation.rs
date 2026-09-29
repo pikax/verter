@@ -4114,10 +4114,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// [`Self::relation_key_with_inference`] in place.
+    ///
+    /// A binding-disabled caller (a call's applicability recheck) still
+    /// upgrades: the pattern's session opens above the caller's barrier,
+    /// which keeps the caller's own session out of reach, and a relation
+    /// against an `infer` pattern decides the same wherever it is asked.
     fn upgrade_relation_key_with_inference(&self, key: &mut RelateMemoKey) {
-        if key.relation != RelationKind::Assignable
-            || self.dispatch_txn.borrow().binding_is_disabled()
-        {
+        if key.relation != RelationKind::Assignable {
             return;
         }
         // Only upgrade when a binding could actually occur: the pattern
@@ -5237,6 +5240,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) || self
                 .relation_pattern_info(target)
                 .is_some_and(|pattern| pattern.shape == InferPatternShape::Function))
+    }
+
+    /// The two slices a fixed-length `remainder` tuple splits into against
+    /// an `inference` tuple of exactly two variadic elements the active
+    /// session infers (`[...A, ...B]`), at the arity the call's arguments
+    /// imply for the first: `(A, A's slice, B, B's slice)`. `None` for
+    /// every other shape, or when the first's arity is unknown or longer
+    /// than the remainder.
+    #[allow(clippy::type_complexity)]
+    fn implied_arity_split(
+        &self,
+        inference: &[crate::semantic_query::TupleElement],
+        remainder: &[crate::semantic_query::TupleElement],
+    ) -> Option<(
+        SemanticNodeId,
+        Vec<crate::semantic_query::TupleElement>,
+        SemanticNodeId,
+        Vec<crate::semantic_query::TupleElement>,
+    )> {
+        let [first, second] = inference else {
+            return None;
+        };
+        if !first.rest || !second.rest || remainder.iter().any(|element| element.rest) {
+            return None;
+        }
+        let graph = self.graph();
+        let txn = self.dispatch_txn.borrow();
+        let session = txn.active_session()?;
+        let inferred = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            ) && session.infers(node)
+        };
+        if !inferred(first.value) || !inferred(second.value) {
+            return None;
+        }
+        let arity = session.implied_arity(first.value)?;
+        if arity > remainder.len() {
+            return None;
+        }
+        Some((
+            first.value,
+            remainder[..arity].to_vec(),
+            second.value,
+            remainder[arity..].to_vec(),
+        ))
     }
 
     /// Recover the input of an exact homomorphic mapped target. The only
@@ -7538,6 +7588,103 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// The checker's TS2590 recovery for the intersection `node` when it
+    /// refuses the intersection's cross product (`getIntersectionType`),
+    /// holding `node` as the type beyond the checker's limit; `None` when
+    /// the checker builds it.
+    ///
+    /// The arms are read as the checker holds them: a nested intersection
+    /// flattens and a name stands for the type it resolves to, so an
+    /// intersection of union aliases is weighed by those unions. A product
+    /// taken whole under the checker's limit stays under it however the
+    /// checker divides it, so only a product at the limit is weighed as the
+    /// checker weighs it
+    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)).
+    pub(super) fn intersection_too_complex(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let graph = self.graph();
+        let mut arms: Vec<SemanticNodeId> = Vec::new();
+        let mut stack: Vec<SemanticNodeId> = vec![node];
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut any_union = false;
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let resolved = if current == node {
+                current
+            } else {
+                match graph.node_data(current).as_deref() {
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::Alias(_)
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+                    ) => match self.unwrap_identity_carrier_for_relation(current) {
+                        IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                        IdentityCarrierUnwrap::Unresolvable => current,
+                    },
+                    _ => current,
+                }
+            };
+            match graph.node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Intersection(members)) if resolved == current => {
+                    stack.extend(members.iter().rev().copied());
+                }
+                Some(SemanticNodeData::Intersection(_)) => stack.push(resolved),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic, ..
+                })) if diagnostic.code
+                    == crate::semantic_query::CheckerDiagnosticCode::UnionTooComplex =>
+                {
+                    return Some(crate::semantic_query::checker_policy::checker_recovery(
+                        graph,
+                        *diagnostic,
+                        Some(node),
+                    ));
+                }
+                Some(SemanticNodeData::Union(_)) => {
+                    any_union = true;
+                    arms.push(resolved);
+                }
+                _ => arms.push(resolved),
+            }
+        }
+        if !any_union {
+            return None;
+        }
+        let whole = cross_product_union(
+            arms.iter()
+                .map(|arm| match graph.node_data(*arm).as_deref() {
+                    Some(SemanticNodeData::Union(members)) => ProductFactor::Union(members.len()),
+                    _ => ProductFactor::Single,
+                }),
+            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
+        );
+        if whole.is_ok() {
+            return None;
+        }
+        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+            self.dispatch_txn
+                .borrow()
+                .relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_null_checks,
+        );
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let refused = super::canonical_algebra::intersection_cross_product_refused(
+            graph,
+            &arms,
+            nullability,
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        refused.map(|diagnostic| {
+            crate::semantic_query::checker_policy::checker_recovery(graph, diagnostic, Some(node))
+        })
+    }
+
     /// The pair a relation decides in place of `(source, target)` when
     /// either side is a written intersection whose canonical intersection
     /// differs from it (`getIntersectionType`: `string & ('a' | 1)` IS
@@ -7555,6 +7702,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if !is_intersection(source) && !is_intersection(target) {
             return None;
+        }
+        // An intersection whose cross product the checker refuses is its
+        // TS2590 recovery, which relates as `any`.
+        let source_recovery = if is_intersection(source) {
+            self.intersection_too_complex(source)
+        } else {
+            None
+        };
+        let target_recovery = if source == target {
+            source_recovery
+        } else if is_intersection(target) {
+            self.intersection_too_complex(target)
+        } else {
+            None
+        };
+        if source_recovery.is_some() || target_recovery.is_some() {
+            return Some((
+                source_recovery.unwrap_or(source),
+                target_recovery.unwrap_or(target),
+            ));
         }
         let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
             self.dispatch_txn
@@ -8173,6 +8340,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `...infer Rest` element binds the remaining source
                 // elements as a tuple through the active session.
                 let rest_on_source = matches!(occurrence.variance, VariancePhase::Contravariant);
+                // Exactly two variadic elements the session infers
+                // (`[...A, ...B]`) split a fixed-length tuple at the first's
+                // implied arity, the checker's slice by `impliedArity`.
+                if let Some(split) = self.implied_arity_split(
+                    if rest_on_source { &s_els } else { &t_els },
+                    if rest_on_source { &t_els } else { &s_els },
+                ) {
+                    let (first, first_slice, second, second_slice) = split;
+                    let first_slice = graph.intern_node(SemanticNodeData::Tuple {
+                        elements: Arc::from(first_slice.into_boxed_slice()),
+                        readonly: false,
+                    });
+                    let second_slice = graph.intern_node(SemanticNodeData::Tuple {
+                        elements: Arc::from(second_slice.into_boxed_slice()),
+                        readonly: false,
+                    });
+                    results.push(
+                        if self.relation_deposit(first, first_slice, occurrence)
+                            && self.relation_deposit(second, second_slice, occurrence)
+                        {
+                            assignable(bindings)
+                        } else {
+                            RelationResult::Unknown
+                        },
+                    );
+                    return true;
+                }
                 let session_rest = if self.relation_session_active() {
                     let inference_elements = if rest_on_source { &s_els } else { &t_els };
                     inference_elements.iter().position(|e| {
@@ -12089,7 +12283,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
-        for (s_param, t_param) in plan.positions {
+        // Inferring through a target whose rest parameter reads what the
+        // session infers (`(...args: A) => R`, `(...args: [...A, ...B]) =>
+        // R`) reads the source's parameters from that position on as one
+        // labelled tuple, the checker's `applyToParameterTypes`; the
+        // positions before it pair up as usual.
+        let rest_inference = self.inferred_rest_parameters(source, target);
+        let mut positions = plan.positions;
+        if let Some((fixed, _, _)) = rest_inference {
+            positions.truncate(fixed);
+        }
+        for (s_param, t_param) in positions {
             // Contravariant: target param ≤ source param. Under the
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
@@ -12116,6 +12320,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 contravariant
             };
             acc = result_and(acc, pair);
+            if matches!(acc, RelationResult::NotAssignable) {
+                return RelationResult::NotAssignable;
+            }
+        }
+        if let Some((_, target_rest, source_rest)) = rest_inference {
+            let rest = self.relate_member(
+                target_rest,
+                source_rest,
+                bindings,
+                InferPosition::ContravariantParam,
+            );
+            acc = result_and(acc, rest);
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
@@ -12159,6 +12375,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
             InferPosition::Return,
         );
         result_and(acc, r)
+    }
+
+    /// When the active session infers through `target`'s rest parameter —
+    /// its type a type parameter the session infers, or a tuple of such
+    /// variadic elements — the rest's position, its type, and `source`'s
+    /// parameters from that position on as one labelled tuple. `None` for
+    /// every other pair, including a source whose own rest parameter sits
+    /// before that position.
+    fn inferred_rest_parameters(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(usize, SemanticNodeId, SemanticNodeId)> {
+        let graph = self.graph();
+        let inferred = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
+            ) && self
+                .dispatch_txn
+                .borrow()
+                .active_session()
+                .is_some_and(|session| session.infers(node))
+        };
+        let (fixed, rest_type) = {
+            let data = graph.node_data(target)?;
+            let SemanticNodeData::Signature { params, .. } = data.as_ref() else {
+                return None;
+            };
+            let (_, ordinary) = crate::semantic_query::split_this_receiver(params);
+            let (rest, before) = ordinary.split_last()?;
+            if !rest.rest {
+                return None;
+            }
+            (before.len(), rest.ty)
+        };
+        let reads_inference = inferred(rest_type)
+            || matches!(
+                graph.node_data(rest_type).as_deref(),
+                Some(SemanticNodeData::Tuple { elements, .. })
+                    if elements.iter().any(|element| element.rest && inferred(element.value))
+            );
+        if !reads_inference {
+            return None;
+        }
+        {
+            let data = graph.node_data(source)?;
+            let SemanticNodeData::Signature { params, .. } = data.as_ref() else {
+                return None;
+            };
+            let (_, ordinary) = crate::semantic_query::split_this_receiver(params);
+            if ordinary.iter().take(fixed).any(|param| param.rest) {
+                return None;
+            }
+        }
+        let source_rest = self.intern_function_params_tuple_from(source, fixed)?;
+        Some((fixed, rest_type, source_rest))
     }
 
     /// Whether a target signature's result is exactly the checker's `void`

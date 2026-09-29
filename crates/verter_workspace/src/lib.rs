@@ -90,6 +90,8 @@ pub mod module_resolution;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_fs;
 pub mod overlay;
+#[cfg(test)]
+mod overlay_resolution_lane_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "package_classification_tests.rs"]
 mod package_classification_tests;
@@ -190,9 +192,10 @@ pub use package_index::PackageIndex;
 pub use project_key::project_stable_key_from_project;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolution_currency::{
-    AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
-    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
-    ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
+    overlay_value_versions_len, AdmittedResolution, CapturedResolutionWorld, ContentRevision,
+    OverlayWorkCounts, ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion,
+    ResolutionOutcome, ResolutionOverlaySnapshot, ResolutionPublication,
+    ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
 };
 pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;

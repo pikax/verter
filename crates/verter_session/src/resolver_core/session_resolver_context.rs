@@ -18,6 +18,9 @@ pub(crate) struct SessionRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
     request_view: RequestStoreView<'a>,
+    /// The view's overlay, built here only when the store view does not
+    /// already carry it (a store view not derived from this view).
+    fallback_overlay: std::sync::OnceLock<Option<verter_workspace::ResolutionOverlaySnapshot>>,
 }
 
 /// Request-bound session context using the shared `ResolverContext` adapter.
@@ -36,6 +39,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
             inner,
             view,
             request_view: RequestStoreView::new(base, overlay),
+            fallback_overlay: std::sync::OnceLock::new(),
         })
     }
 
@@ -50,6 +54,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
             inner,
             view,
             request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
+            fallback_overlay: std::sync::OnceLock::new(),
         })
     }
 }
@@ -65,6 +70,18 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn session_view(&self) -> Option<&dyn SessionView> {
         Some(self.view)
+    }
+
+    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
+        if let Some(overlay) = self.request_view.base().resolution_overlay() {
+            return Some(overlay);
+        }
+        self.fallback_overlay
+            .get_or_init(|| {
+                let overlay = self.inner.resolution_overlay_snapshot(self.view);
+                (!overlay.is_empty()).then_some(overlay)
+            })
+            .as_ref()
     }
 
     fn complete_canonical(&self, canonical: &str) {
@@ -223,11 +240,12 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        let overlay = self.inner.resolution_overlay_snapshot(self.view);
-        self.inner.resolve_type_dependency_canonical_with_overlay(
-            &overlay,
-            owner_canonical,
-            import_source,
+        crate::resolver_core::resolver_context::type_route_answer(
+            self.inner.resolve_type_dependency_canonical_in(
+                self.resolution_overlay(),
+                owner_canonical,
+                import_source,
+            ),
         )
     }
 }

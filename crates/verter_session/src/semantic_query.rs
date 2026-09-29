@@ -151,7 +151,9 @@ mod checker_diagnostic;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
 };
-pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
+/// The checker compatibility policy: the limits at which the checker gives up
+/// on a type operation, and the diagnostic it reports there.
+pub(crate) mod checker_policy;
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1979,6 +1981,12 @@ pub enum FlowReturnDegradation {
     /// A fabricated `any` is forbidden here: it is indistinguishable from
     /// an authored one at every downstream gate.
     UnmodeledPosition,
+    /// The evaluation composed its value from a member's body-derived
+    /// return whose evaluation closed degraded, read as a type
+    /// (`ReturnType<typeof C.m>`): the usable value is published, and the
+    /// answer carries the member's degradation as this typed reason rather
+    /// than publishing clean.
+    PartialInterior,
 }
 
 /// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
@@ -5706,7 +5714,17 @@ pub enum QueryError {
     /// as that recovery, carrying the diagnostic that produced it. Never a
     /// stand-in for something this substrate cannot answer — those stay
     /// typed gaps.
-    CheckerRecovery(CheckerDiagnostic),
+    CheckerRecovery {
+        /// The diagnostic the checker reports.
+        diagnostic: CheckerDiagnostic,
+        /// The type itself where the checker gives up at one of its limits
+        /// ([`checker_policy`]) and Verter still names it: the answer
+        /// beyond the checker's limit, for a consumer that wants the type
+        /// rather than the checker's recovery. Nothing reads it as the
+        /// recovery: the recovery is `any`, and this is a retained leaf of
+        /// the node, never a descendant a semantic walk enters.
+        beyond: Option<SemanticNodeId>,
+    },
 }
 
 impl QueryError {
@@ -5723,7 +5741,7 @@ impl QueryError {
         match self {
             QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
-            | QueryError::CheckerRecovery(_) => false,
+            | QueryError::CheckerRecovery { .. } => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5858,7 +5876,16 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
-            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
+            (
+                Self::CheckerRecovery {
+                    diagnostic: a_d,
+                    beyond: a_b,
+                },
+                Self::CheckerRecovery {
+                    diagnostic: b_d,
+                    beyond: b_b,
+                },
+            ) => a_d == b_d && a_b == b_b,
             _ => false,
         }
     }
@@ -5893,7 +5920,7 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
-            Self::CheckerRecovery(_) => 21,
+            Self::CheckerRecovery { .. } => 21,
         }
     }
 }
@@ -5949,7 +5976,10 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
             | Self::OpenSurface => {}
-            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
+            Self::CheckerRecovery { diagnostic, beyond } => {
+                diagnostic.hash(state);
+                beyond.hash(state);
+            }
         }
     }
 }
@@ -8924,7 +8954,7 @@ pub enum SemanticQueryKey {
     ///   unwrapping on the current path is the checker's recursive
     ///   thenable: TS1062, with the arm dropped from an enclosing union and
     ///   otherwise the checker's error type as the answer
-    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   (`Opaque(QueryError::CheckerRecovery { .. })`, reading as `any`) —
     ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
     ///   not expand, an exhausted budget, or any other unsettled shape is
@@ -11003,10 +11033,13 @@ mod tests {
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
             QueryError::UnmodeledPosition,
-            QueryError::CheckerRecovery(CheckerDiagnostic {
-                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                operation: CheckerDiagnosticOperation::LibAwaited,
-            }),
+            QueryError::CheckerRecovery {
+                diagnostic: CheckerDiagnostic {
+                    code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: CheckerDiagnosticOperation::LibAwaited,
+                },
+                beyond: None,
+            },
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

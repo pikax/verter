@@ -2503,15 +2503,8 @@ fn dependent_type_parameter_default_substitutes_earlier_bindings() {
 }
 
 // ---------------------------------------------------------------------------
-// Ambient `Function.prototype.call` rebasing
+// Ambient `call` through its declared generic signature
 // ---------------------------------------------------------------------------
-
-/// The vendored non-generic ambient `call`.
-const AMBIENT_PLAIN_CALL: &str = r#"
-interface Function {
-  call(this: Function, thisArg: any, ...argArray: any[]): any;
-}
-"#;
 
 /// The strict ambient `call`, whose own type parameters bind the receiver,
 /// the argument tuple, and the return.
@@ -2583,140 +2576,6 @@ fn ambient_lib_host(lib: &str, canonical: &str, source: &str) -> Arc<VerterHost>
     host
 }
 
-const ANCHORED_CALLABLE_SOURCE: &str = r#"
-export declare const anchored: (x: string) => 1;
-"#;
-
-/// The ambient `call` member of `anchored`'s apparent surface.
-fn ambient_call_member(
-    host: &Arc<VerterHost>,
-    dispatch: &ProjectSemanticDispatch<'_>,
-) -> SemanticNodeId {
-    let env = host.host_view_env_hashes_for(PROTOTYPE_CALL_CANONICAL);
-    let project_identity = host
-        .host_view_project_identity_for(PROTOTYPE_CALL_CANONICAL)
-        .fold_u32();
-    let anchored = match dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
-            crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(
-                    Arc::from(PROTOTYPE_CALL_CANONICAL),
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                ),
-                name: Arc::from("anchored"),
-            },
-            project_identity,
-            env.type_env_hash,
-            env.lib_env_hash,
-        ),
-        path: Arc::from([]),
-        context: crate::semantic_query::TypeOfContext::new(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
-            ),
-            env.resolve_env_hash,
-        ),
-    }) {
-        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-        other => panic!("`typeof anchored` must resolve, got {other:?}"),
-    };
-    match dispatch.execute_type_node(SemanticQueryKey::ProjectMember {
-        base: anchored,
-        member: Arc::from("call"),
-        mode: crate::semantic_query::ProjectionMode::Expanded,
-    }) {
-        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-        other => panic!("the apparent `call` member must resolve, got {other:?}"),
-    }
-}
-
-/// Rebasing the ambient `.call` onto a ROOTLESS callable keeps the rebased
-/// call's return. The rebased sub-call closed its own component, so its
-/// value is already final — a return-equation HOLD on it could never be
-/// solved, because a rootless winner is refused by the shared-cache
-/// admission fence and so never reaches the completed-member ledger the
-/// equation reads. The fence is about publication; the enclosing equation
-/// takes the value it has in hand as a concrete seed.
-///
-/// Mutation recipe: hold the outer equation on the rebased identity
-/// unconditionally and this call degrades to `Undecidable`.
-#[test]
-fn prototype_call_rebase_onto_a_rootless_callable_keeps_its_return() {
-    let host = ambient_lib_host(
-        AMBIENT_PLAIN_CALL,
-        PROTOTYPE_CALL_CANONICAL,
-        ANCHORED_CALLABLE_SOURCE,
-    );
-    let store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let graph = dispatch.graph();
-    let call_member = ambient_call_member(&host, &dispatch);
-    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-    let rootless_return = graph.intern_node(SemanticNodeData::Literal(
-        verter_type_expr::LiteralValue::String("rootless".into()),
-    ));
-    // An ANONYMOUS callable: no authored occurrence, so its winner is
-    // `SignatureCandidateOrigin::Rootless`.
-    let extracted = graph.intern_node(SemanticNodeData::Signature {
-        kind: SignatureKind::Call,
-        params: Arc::from(
-            vec![FunctionParam::synthetic(None, string, false, false)].into_boxed_slice(),
-        ),
-        return_type: rootless_return,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-        occurrence: None,
-        return_carrier: SignatureReturnCarrier::Declared(rootless_return),
-        signature_span: None,
-        return_type_span: None,
-        predicate: None,
-        is_abstract: false,
-    });
-    let key = prototype_call_key(&dispatch, call_member, extracted, vec![undefined, string]);
-    let result = match dispatch.execute_resolve_call(key) {
-        super::call_resolve::ResolveCallStep::Complete(result) => result,
-        other => panic!("the rebased `.call` must complete, got {other:?}"),
-    };
-    let ResolvedCallResult::Selected { return_type, .. } = result else {
-        panic!("the rebased `.call` selects a signature, got {result:?}");
-    };
-    assert_eq!(
-        host.project_node_to_type_expr_for_test(return_type),
-        Some(verter_type_expr::TypeExpr::string_literal("rootless")),
-        "the outer call returns the rebased callable's declared return"
-    );
-}
-
-/// A `ResolveCallKey` for `<receiver>.call(<args…>)` authored in the
-/// prototype-call fixture.
-fn prototype_call_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    callee: SemanticNodeId,
-    receiver: SemanticNodeId,
-    args: Vec<SemanticNodeId>,
-) -> ResolveCallKey {
-    ResolveCallKey {
-        point: ProgramPointId {
-            canonical_id: Arc::from(PROTOTYPE_CALL_CANONICAL),
-            offset: 0,
-        },
-        callee,
-        kind: CallKind::Call,
-        receiver: Some(receiver),
-        args: Arc::from(
-            args.into_iter()
-                .map(eager)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        ),
-        explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        flow: crate::semantic_query::FlowNarrowingKey::empty(),
-        context: dispatch.resolve_call_context_for(PROTOTYPE_CALL_CANONICAL),
-    }
-}
-
 const EXPLICIT_CALL_SOURCE: &str = r#"
 export declare const bound: (this: { x: number }, n: number) => string;
 export function withExplicitTypeArgs() {
@@ -2727,16 +2586,11 @@ export function withoutExplicitTypeArgs() {
 }
 "#;
 
-/// Explicit type arguments authored on `.call` bind the AMBIENT method's
-/// own type parameters. Rebasing onto the extracted callable discards them
-/// — the extracted callable is a different function and never accepts
-/// them.
-///
-/// Mutation recipe: carry the ambient method's explicit type arguments
-/// onto the rebased callee and the explicit row stops resolving while the
-/// implicit one keeps passing.
+/// A `.call` resolves through the ambient method's own generic signature:
+/// inferred, its `R` is the extracted callable's return; explicit type
+/// arguments bind the ambient method's own type parameters.
 #[test]
-fn prototype_call_rebase_discards_the_ambient_methods_explicit_type_args() {
+fn a_call_through_the_ambient_generic_call_reads_the_callable() {
     let host = ambient_lib_host(
         AMBIENT_STRICT_CALL,
         PROTOTYPE_CALL_CANONICAL,
@@ -2746,7 +2600,7 @@ fn prototype_call_rebase_discards_the_ambient_methods_explicit_type_args() {
     assert_eq!(
         source_flow_type(&host, PROTOTYPE_CALL_CANONICAL, "withoutExplicitTypeArgs"),
         string,
-        "an inferred `.call` rebases onto the extracted callable"
+        "an inferred `.call` returns the extracted callable's return"
     );
     assert_eq!(
         source_flow_type(&host, PROTOTYPE_CALL_CANONICAL, "withExplicitTypeArgs"),
@@ -4628,4 +4482,59 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
         "the complete evaluation closes the operator, got {element:?}"
     );
     assert_eq!(cached(&control), 1, "the complete call warms");
+}
+
+/// The call-boundary binder walk over `A2<T>`, for `type A0<T> = T |
+/// undefined; type A1<T> = A0<T>; type A2<T> = A1<T>`, on a fresh host whose
+/// dispatch nests at most `query_depth` query boundaries.
+fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve::BinderReach {
+    let host = host();
+    upsert_source(
+        &host,
+        CANONICAL,
+        "type A0<T> = T | undefined;\ntype A1<T> = A0<T>;\ntype A2<T> = A1<T>;\nexport {};\n",
+    );
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    dispatch.set_connected_limits_for_tests(
+        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+        query_depth,
+    );
+    let graph = dispatch.graph();
+    let t = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("ChainT"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("A2"),
+        },
+        args: Arc::from(vec![t].into_boxed_slice()),
+    });
+    dispatch.deposit_at_top_level_for_tests(chain, t)
+}
+
+/// A binder behind aliases is found by instantiating them one at a time;
+/// an instantiation the walk cannot read leaves the reach unknown, never
+/// absent — absent would widen the deposit as if the binder were deeper.
+/// Mutation: read an unreadable instantiation as expanding to nothing;
+/// the refused walk answers `Absent`.
+#[test]
+fn a_binder_behind_an_unread_alias_is_unknown_never_absent() {
+    assert_eq!(
+        binder_reach_through_an_alias_chain(super::connected_demand::MAX_CONNECTED_QUERY_DEPTH),
+        super::call_resolve::BinderReach::Present
+    );
+    assert_eq!(
+        binder_reach_through_an_alias_chain(0),
+        super::call_resolve::BinderReach::Incomplete
+    );
 }
