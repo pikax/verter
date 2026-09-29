@@ -2585,6 +2585,14 @@ impl HostStoreView {
                     Some(format!("StrictSelfRootWorld rejected expected={world:?}"))
                 }
             }
+            crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+                let mut described = None;
+                receipt.all_leaves(|leaf| {
+                    described = self.describe_invalid_fact(leaf);
+                    described.is_none()
+                });
+                described.map(|leaf| format!("Receipt {receipt:?} rejected: {leaf}"))
+            }
         }
     }
 
@@ -3105,6 +3113,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 .validates_domain_aggregate_in_population(aggregate, fact, self.view_population()),
             crate::resolver_core::FactVersionRef::StrictSelfRootWorld(world) => {
                 self.strict_self_root_world_identity() == Some(*world)
+            }
+            crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+                receipt.all_leaves(|leaf| crate::resolver_core::StoreView::validates(self, leaf))
             }
         }
     }

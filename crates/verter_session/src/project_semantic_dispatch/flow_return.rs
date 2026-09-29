@@ -2541,7 +2541,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+        let started = crate::resolver_core::resolver_context::mark_evidence();
         let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let ended = crate::resolver_core::resolver_context::mark_evidence();
         let refused = refusals.observed();
         drop(refusals);
         let observed = frame.finish();
@@ -2568,16 +2570,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None => crate::resolver_core::reuse::ObservedRefusal::None,
         };
         let reuse = crate::resolver_core::reuse::classify_reuse(refusal, complete);
-        if reuse.is_request_reusable() {
+        if reuse.is_request_reusable() && self.closed_as_own_root(&key, queued_before) {
             if let FlowReturnStep::Complete(value) = &step {
-                self.complete_flow_result(
-                    &key,
-                    queued_before,
+                // Hierarchical evidence: the completed result's reads —
+                // its own facts and the receipts of what it consumed —
+                // become its receipt, which replaces them in every scope
+                // live around it and is all a later consumer observes.
+                let receipt = crate::resolver_core::resolver_context::complete_with_receipt(
+                    &started, &ended, &reads,
+                );
+                self.dispatch_txn.borrow_mut().flow.results.complete(
+                    key.clone(),
                     super::dispatch_txn::TransactionFlowResult {
                         value: value.clone(),
                         reuse,
                         replay: super::dispatch_txn::FlowMemberReuse {
-                            reads,
+                            reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                                facts: std::sync::Arc::from(vec![receipt]),
+                                non_cacheable: reads.non_cacheable,
+                            },
                             observed_self_roots: observed.observed_self_roots,
                             canonical_evidence_deposited: self.canonical_evidence_epoch.get()
                                 != evidence_epoch,
@@ -2589,30 +2600,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         step
     }
 
-    /// Record `key`'s completed result on this transaction — only if THIS
-    /// evaluation queued it, i.e. it closed as its own proven inline SCC
-    /// root, so its value came only from work inside its frame. A frame
+    /// Whether THIS evaluation of `key` queued its member, i.e. it closed
+    /// as its own proven inline SCC root, so its value came only from work
+    /// inside its frame — the only result the transaction keeps. A frame
     /// that closed provisionally queued nothing yet, and a member closed
     /// inside a larger component also rests on frames outside its own.
     /// Members queued at or after `queued_before` are this evaluation's: no
     /// machinery root can drain the queue while an inline frame is open,
     /// and a nested frame cannot share its key (the re-entry intercept
     /// holds it).
-    fn complete_flow_result(
-        &self,
-        key: &FlowReturnKey,
-        queued_before: usize,
-        result: super::dispatch_txn::TransactionFlowResult,
-    ) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let queued_here = txn
+    fn closed_as_own_root(&self, key: &FlowReturnKey, queued_before: usize) -> bool {
+        self.dispatch_txn
+            .borrow()
             .flow
             .completed_members
             .get(queued_before..)
-            .is_some_and(|queued| queued.iter().any(|member| &member.key == key));
-        if queued_here {
-            txn.flow.results.complete(key.clone(), result);
-        }
+            .is_some_and(|queued| queued.iter().any(|member| &member.key == key))
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).

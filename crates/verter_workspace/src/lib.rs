@@ -156,17 +156,18 @@ pub use engine::{
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use fact_cache::{
-    compaction_domain, AggregateBasisSeed, AggregateGenerations, AggregatePopulation,
-    AggregateStamp, CompactionDomain, CompletionOverlayState, DerivedFactKind,
-    DomainGenerationFact, FactAttribution, FactHash16, FactVersionRef, FactVersionValidator,
-    LiveAggregateCounters, OverlayId, ParseEnvHash, ParseFactRef, ProgramAnalysisFactRef,
-    ProgramAnalysisFunctionRef, ReadSetSignature, RequestCompletion, ResolutionRootsStamp,
-    ResolveImportsFactRef, RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp,
-    SessionOverlayFingerprint, SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains,
-    ViewPopulation, ViewPopulationParent, CANDIDATE_CAP,
+    compaction_domain, drop_subsumed_receipts, validates_through_receipts, AggregateBasisSeed,
+    AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain,
+    CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
+    FactVersionRef, FactVersionValidator, LiveAggregateCounters, OverlayId, ParseEnvHash,
+    ParseFactRef, ProgramAnalysisFactRef, ProgramAnalysisFunctionRef, ReadSetSignature,
+    ReceiptWalk, RequestCompletion, ResolutionRootsStamp, ResolveImportsFactRef, ResultReceipt,
+    RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp, SessionOverlayFingerprint,
+    SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains, ViewPopulation,
+    ViewPopulationParent, CANDIDATE_CAP,
 };
 pub use fact_read_set::{
-    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation,
+    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, ObservationMark,
     FACT_DOMAIN_PRECISE_MAX, FACT_SIGNATURE_CAP,
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
