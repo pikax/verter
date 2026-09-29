@@ -8,6 +8,7 @@ use crate::documents::line_index::LineIndex;
 
 pub(crate) const TYPE_EXPANSION_BUDGET_CODE: &str = "verter/type-expansion-budget";
 pub(crate) const TYPE_QUERY_DEPTH_LIMIT_CODE: &str = "verter/type-query-depth-limit";
+pub(crate) const TYPE_MEMORY_LIMIT_CODE: &str = "verter/type-memory-limit";
 
 /// Convert a `DiagnosticsSnapshot` from verter_session into LSP `Diagnostic` items.
 pub fn map_diagnostics(snapshot: &DiagnosticsSnapshot, line_index: &LineIndex) -> Vec<Diagnostic> {
@@ -34,6 +35,7 @@ pub(crate) fn map_projection_limit_diagnostics(
     enum OperationalLimit {
         ProjectionWork,
         ConnectedQueryDepth,
+        ConnectedMemory,
     }
 
     let mut seen = HashSet::new();
@@ -50,6 +52,11 @@ pub(crate) fn map_projection_limit_diagnostics(
                     OperationalLimit::ConnectedQueryDepth,
                     TYPE_QUERY_DEPTH_LIMIT_CODE,
                     "Type evaluation exceeded Verter's safe connected-query depth limit.",
+                ),
+                ExpansionStopReason::ConnectedMemoryLimit => (
+                    OperationalLimit::ConnectedMemory,
+                    TYPE_MEMORY_LIMIT_CODE,
+                    "Type evaluation exceeded Verter's safe memory budget.",
                 ),
                 _ => continue,
             };

@@ -400,6 +400,46 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
         .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
 }
 
+/// Relate the type named `source` to the type named `target`, both declared
+/// in `scope_canonical_id`, as one connected demand under
+/// `construction_byte_limit` when given: whether the source is assignable,
+/// and the work units and construction bytes the demand charged.
+pub fn relate_named_types_for_tests(
+    host: &crate::VerterHost,
+    scope_canonical_id: &str,
+    source: &str,
+    target: &str,
+    construction_byte_limit: Option<usize>,
+) -> (bool, usize, usize) {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    if let Some(limit) = construction_byte_limit {
+        dispatch.set_construction_byte_limit_for_tests(limit);
+    }
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Expanded,
+    );
+    let lower = |name: &str| {
+        let expr = verter_type_expr::TypeExpr::Ref {
+            name: std::sync::Arc::from(name),
+            type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        };
+        dispatch
+            .lower_type_expr_in_scope_with_context(scope_canonical_id, &expr, context)
+            .unwrap_or_else(|| panic!("`{name}` lowers in {scope_canonical_id}"))
+    };
+    let (source, target) = (lower(source), lower(target));
+    let step = dispatch.execute_relate(dispatch.relate_key_for(source, target));
+    let usage = dispatch.connected_demand_usage();
+    (
+        matches!(
+            step,
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
+        ),
+        usage.work,
+        usage.bytes,
+    )
+}
+
 /// Integration-test shim that drives the
 /// `substitute_semantic_type_param` helper so its hash-cons
 /// discriminator tests can exercise the memo with controlled

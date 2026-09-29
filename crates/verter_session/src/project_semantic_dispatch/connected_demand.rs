@@ -31,28 +31,46 @@ use crate::semantic_query::PartialReasonSet;
 /// relation at most, on the shape its relation-complexity limit is reached
 /// by: a union arm scanning a union target of object types charges the
 /// alternative and its pair's worklist step (measured: 22,329 units for the
-/// 20,100 comparisons of 200 reversed arms). Pinned by a test until the
-/// cap below is sized by it.
-#[cfg(test)]
+/// 20,100 comparisons of 200 reversed arms).
 pub(super) const RELATION_UNITS_PER_COMPARISON: usize = 2;
 
+/// The construction bytes one structured comparison reserves: what a pair
+/// the relation relates holds live at its peak — its frame, its memo entry
+/// and its proof (measured: 1.9 KB per pair relating 200 reversed object
+/// arms). Provisional: the per-pair footprint and this charge are sized
+/// together in the combined performance phase.
+pub(super) const RELATION_PAIR_BYTES: usize = 2_048;
+
 /// Work-unit cap for one connected semantic demand: the operational
-/// backstop.
-///
-/// It is NOT yet above the checker's relation-complexity envelope
+/// backstop, sized from the checker's relation-complexity envelope
 /// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
-/// `RELATION_UNITS_PER_COMPARISON` units each, 4,000,000 units): work
-/// units do not bound memory, and a relation holds about 1.6 KB per
-/// structured pair it relates, so sized there a union scan of 1,800
-/// reversed object arms would hold gigabytes. Until construction bytes are
-/// charged beside work, the cap stays here, and a relation the checker
-/// completes between about 130,000 and 2,000,000 comparisons ends as typed
-/// incompleteness rather than the checker's answer.
+/// [`RELATION_UNITS_PER_COMPARISON`] units each). Work units do not bound
+/// memory; the construction-byte rail
+/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does, and on a relation it binds
+/// first: at [`RELATION_PAIR_BYTES`] per comparison it stops a relation
+/// near 262,000 comparisons as typed incompleteness, until the per-pair
+/// footprint shrinks.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
-pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
+pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize =
+    crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
+        * RELATION_UNITS_PER_COMPARISON;
 /// Nested query-boundary cap for one connected semantic demand.
 pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
+/// Construction-byte allowance for one connected semantic demand: the bytes
+/// it reserves before it builds, never refunded within the demand, so the
+/// allowance bounds what the demand holds at its peak. Provisional: sized
+/// with the per-unit footprint in the combined performance phase.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
+
+/// What one connected demand has charged so far: its work units and its
+/// construction bytes.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DemandUsage {
+    pub(crate) work: usize,
+    pub(crate) bytes: usize,
+}
 
 /// The one signal the ledger observes from outside its own accounting:
 /// whether the owning request has been cancelled.
@@ -91,6 +109,8 @@ pub(crate) struct ConnectedDemandLedger<'a> {
     active: Cell<bool>,
     work_used: Cell<usize>,
     work_limit: Cell<usize>,
+    bytes_used: Cell<usize>,
+    bytes_limit: Cell<usize>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     tripped: Cell<PartialReasonSet>,
@@ -102,6 +122,8 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("active", &self.active.get())
             .field("work_used", &self.work_used.get())
             .field("work_limit", &self.work_limit.get())
+            .field("bytes_used", &self.bytes_used.get())
+            .field("bytes_limit", &self.bytes_limit.get())
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
             .field("tripped", &self.tripped.get())
@@ -117,6 +139,8 @@ impl<'a> ConnectedDemandLedger<'a> {
             active: Cell::new(false),
             work_used: Cell::new(0),
             work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            bytes_used: Cell::new(0),
+            bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
             query_depth: Cell::new(0),
             query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
             tripped: Cell::new(PartialReasonSet::empty()),
@@ -135,6 +159,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         let root = !self.active.get();
         if root {
             self.work_used.set(0);
+            self.bytes_used.set(0);
             self.query_depth.set(0);
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
@@ -266,6 +291,41 @@ impl<'a> ConnectedDemandLedger<'a> {
         self.work_used.set(work_used + consumed);
     }
 
+    /// Reserve `bytes` of construction before building what they hold.
+    /// `Err` carries the sticky trip set when the demand cannot pay for them
+    /// ([`PartialReasonSet::CONNECTED_MEMORY_LIMIT`] when this reservation
+    /// is the one refused).
+    pub(crate) fn reserve_bytes(&self, bytes: usize) -> Result<(), PartialReasonSet> {
+        verter_debug_assert!(
+            self.active.get(),
+            "construction bytes must be reserved inside a connected-demand guard"
+        );
+        if self.cancellation.is_cancelled() {
+            return Err(self.record_trip(PartialReasonSet::CANCELLED));
+        }
+        let tripped = self.tripped.get();
+        if !tripped.is_empty() {
+            return Err(tripped);
+        }
+        let used = self.bytes_used.get();
+        match used.checked_add(bytes) {
+            Some(total) if total <= self.bytes_limit.get() => {
+                self.bytes_used.set(total);
+                Ok(())
+            }
+            _ => Err(self.record_trip(PartialReasonSet::CONNECTED_MEMORY_LIMIT)),
+        }
+    }
+
+    /// What the active demand has charged so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn usage(&self) -> DemandUsage {
+        DemandUsage {
+            work: self.work_used.get(),
+            bytes: self.bytes_used.get(),
+        }
+    }
+
     /// The `(limit, actual, rail)` triple describing why the demand tripped,
     /// for the budget-exceeded carrier the dispatcher reports. Purely
     /// operational reporting — the ledger owns the numbers, so no consumer
@@ -279,6 +339,12 @@ impl<'a> ConnectedDemandLedger<'a> {
                 usize::from(self.query_depth_limit.get()),
                 u64::from(self.query_depth.get()),
                 "connected-query-depth",
+            )
+        } else if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
+            (
+                self.bytes_limit.get(),
+                self.bytes_used.get() as u64,
+                "construction-bytes",
             )
         } else {
             (
@@ -299,6 +365,24 @@ impl<'a> ConnectedDemandLedger<'a> {
         );
         self.work_limit.set(work);
         self.query_depth_limit.set(depth);
+    }
+
+    /// Replace the construction-byte allowance. Test-only, and refused inside
+    /// an active demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn set_byte_limit_for_tests(&self, bytes: usize) {
+        assert!(
+            !self.active.get(),
+            "test limits must be set before entering a connected demand"
+        );
+        self.bytes_limit.set(bytes);
+    }
+
+    /// The construction bytes the last connected demand reserved. Test-only:
+    /// kept after the demand ends, and reset when the next one enters.
+    #[cfg(test)]
+    pub(super) fn bytes_used_for_tests(&self) -> usize {
+        self.bytes_used.get()
     }
 
     /// The work units the last connected demand charged. Test-only: kept

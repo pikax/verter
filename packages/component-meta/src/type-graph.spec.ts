@@ -316,6 +316,7 @@ describe("decodeComponentMetaPayload", () => {
   it("decodes distinct connected projection limit reasons", () => {
     expect(ExpansionStopReason.PROJECTION_WORK_LIMIT).toBe(13);
     expect(ExpansionStopReason.CONNECTED_QUERY_DEPTH_LIMIT).toBe(14);
+    expect(ExpansionStopReason.CONNECTED_MEMORY_LIMIT).toBe(15);
 
     const payload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Limited.vue",
@@ -348,6 +349,20 @@ describe("decodeComponentMetaPayload", () => {
             ],
           },
         },
+        {
+          name: "wide",
+          type: { kind: "ref", name: "Wide" },
+          typeExpansion: {
+            exactness: "incomplete",
+            executionStatus: "interrupted",
+            diagnostics: [
+              {
+                reason: "connectedMemoryLimit",
+                context: "connected demand exhausted its construction-byte budget",
+              },
+            ],
+          },
+        },
       ],
     });
 
@@ -355,6 +370,7 @@ describe("decodeComponentMetaPayload", () => {
     expect(native.props.map((prop) => prop.typeExpansion?.diagnostics[0]?.reason)).toEqual([
       "projectionWorkLimit",
       "connectedQueryDepthLimit",
+      "connectedMemoryLimit",
     ]);
   });
 
