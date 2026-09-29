@@ -263,6 +263,9 @@ struct Lifecycle {
 struct Shared<P: ?Sized> {
     /// Read by queries; written ONLY by the actor.
     serving: StdRwLock<Option<Serving<P>>>,
+    /// The engine tier of the most recent serving incarnation, recorded by
+    /// the actor at every install; written ONLY by the actor.
+    last_serving_id: StdRwLock<Option<&'static str>>,
     epochs: EpochMint,
     lifecycle: StdMutex<Lifecycle>,
     query_watch: Arc<StdMutex<QueryWatch>>,
@@ -274,6 +277,13 @@ impl<P: ?Sized> Shared<P> {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn last_serving_id(&self) -> Option<&'static str> {
+        *self
+            .last_serving_id
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn serving_epoch(&self) -> Option<ProviderEpoch> {
@@ -370,6 +380,7 @@ where
     ) -> Self {
         let shared = Arc::new(Shared {
             serving: StdRwLock::new(None),
+            last_serving_id: StdRwLock::new(None),
             epochs: EpochMint::new(),
             lifecycle: StdMutex::new(Lifecycle {
                 phase: Phase::Idle,
@@ -380,7 +391,13 @@ where
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
-        tokio::spawn(run_actor(command_rx, Arc::clone(&shared), log_name));
+        let demand_driven = policy.on_demand.is_some();
+        tokio::spawn(run_actor(
+            command_rx,
+            Arc::clone(&shared),
+            log_name,
+            demand_driven,
+        ));
         Self {
             state: Arc::new(HubState {
                 shared,
@@ -970,6 +987,7 @@ async fn run_actor<P>(
     mut command_rx: mpsc::UnboundedReceiver<Command<P>>,
     shared: Arc<Shared<P>>,
     log_name: &'static str,
+    demand_driven: bool,
 ) where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
@@ -1032,7 +1050,32 @@ async fn run_actor<P>(
                             Ok(Ok(())) => Ok(AppliedReceipt {
                                 epoch: Some(serving.epoch),
                             }),
-                            Ok(Err(error)) => Err(error),
+                            Ok(Err(error)) => {
+                                // A failed forward is DIVERGENCE: the mutation
+                                // is recorded in the desired state but this
+                                // engine never accepted it, so the epoch must
+                                // not keep serving content the recorded state
+                                // no longer describes. Reconcile before any
+                                // query serves again — the desired state
+                                // (rejected mutation included) replays into
+                                // the next engine — while the submitter keeps
+                                // the forward's own error.
+                                if demand_driven {
+                                    // An on-demand instance never respawns on
+                                    // its own: retire fail-closed now; the next
+                                    // query demand establishes a fresh engine
+                                    // and replays the desired state into it.
+                                    retire(&shared, serving.epoch).await;
+                                } else {
+                                    // An explicit instance reconciles through
+                                    // its armed crash monitor — the same
+                                    // bounded recover() path as a crash: retire
+                                    // the epoch, respawn within the budget,
+                                    // replay before install.
+                                    serving.crash_signal.notify_one();
+                                }
+                                Err(error)
+                            }
                             // The forward is dropped; its desired state and
                             // every queued mutation survive for the next engine.
                             Err(Interrupt::Retired(retired)) => {
@@ -1108,6 +1151,12 @@ async fn run_actor<P>(
                 match outcome {
                     Ok(()) => {
                         let epoch = shared.epochs.mint();
+                        // Record the installed engine's tier BEFORE releasing
+                        // it into the serving cell: from that instant
+                        // `provider_id()` must name it even after it retires —
+                        // it is the tier that minted the completion envelopes
+                        // still in flight.
+                        let provider_id = provider.provider_id();
                         let previous = shared
                             .serving
                             .write()
@@ -1117,6 +1166,10 @@ async fn run_actor<P>(
                                 epoch,
                                 crash_signal,
                             });
+                        *shared
+                            .last_serving_id
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider_id);
                         if let Some(previous) = previous {
                             // Never two live incarnations: a replaced engine is
                             // torn down, not orphaned, and its monitor released.

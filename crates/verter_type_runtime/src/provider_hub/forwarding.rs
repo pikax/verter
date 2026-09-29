@@ -12,13 +12,23 @@ where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
     fn provider_id(&self) -> &'static str {
-        // The engine identity is stable across establishments (the establisher
-        // always produces the same provider type), so read it from the serving
-        // incarnation when present, else from the establisher's user label.
+        // The engine identity is tier-accurate while an incarnation serves.
+        // Between incarnations the LAST serving tier is the truthful identity:
+        // it is the engine that minted the completion envelopes still in
+        // flight, which is exactly what the LSP's envelope check compares
+        // against — a fixed establisher label can misidentify that tier (a
+        // fallback chain labelled "tsgo" whose serving incarnation fell back
+        // to tsserver) and get every envelope it minted rejected. The
+        // establisher's user label covers only an instance that has never
+        // served (no envelopes can exist yet). This is not a misidentifying
+        // cache: each tier fails closed on a foreign `CompletionResolveData`
+        // variant, so a stale id can never route a foreign resolve key to the
+        // wrong engine.
         self.state
             .shared
             .serving()
             .map(|serving| serving.provider.provider_id())
+            .or_else(|| self.state.shared.last_serving_id())
             .unwrap_or_else(|| self.state.establisher.user_label())
     }
 

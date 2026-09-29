@@ -130,6 +130,16 @@ enum MockCall {
         content: String,
         project_file_name: String,
     },
+    RegisterCarrierMetadata {
+        source_path: String,
+        companion_path: String,
+        content: String,
+        project_file_name: String,
+    },
+    ActivateCarrier {
+        companion_path: String,
+        script_kind: crate::traits::CarrierScriptKind,
+    },
 }
 
 fn call_path(call: &MockCall) -> &str {
@@ -142,6 +152,8 @@ fn call_path(call: &MockCall) -> &str {
         MockCall::ConfigurePaths { base_url, .. } => base_url,
         MockCall::UpdateWorkspaceFolders { .. } => "",
         MockCall::RegisterCarrierMember { companion_path, .. } => companion_path,
+        MockCall::RegisterCarrierMetadata { companion_path, .. } => companion_path,
+        MockCall::ActivateCarrier { companion_path, .. } => companion_path,
     }
 }
 
@@ -161,6 +173,9 @@ struct MockInner {
     /// When set, `update_file` BLOCKS on the gate before recording — an engine
     /// holding a state update beyond its submitter's deadline.
     update_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    /// When set, every `update_file` FAILS without recording — an engine
+    /// rejecting a state update it was forwarded (the divergence shape).
+    update_fails: std::sync::atomic::AtomicBool,
     shutdowns: AtomicUsize,
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
@@ -188,6 +203,7 @@ impl MockProvider {
                 hover_gate: parking_lot::Mutex::new(None),
                 configure_gate: parking_lot::Mutex::new(None),
                 update_gate: parking_lot::Mutex::new(None),
+                update_fails: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
@@ -206,6 +222,14 @@ impl MockProvider {
     /// Restore the instant hover default (lifts a killer gate).
     fn clear_blocking_failing_hover(&self) {
         *self.inner.hover_gate.lock() = None;
+    }
+
+    /// Make every subsequent `update_file` FAIL with a transport-shaped error
+    /// without recording — the engine-rejects-a-forwarded-update shape.
+    fn set_failing_updates(&self) {
+        self.inner
+            .update_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Install an event tap and return its receiver. Calls recorded after this
@@ -263,11 +287,15 @@ impl TypeProvider for MockProvider {
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let inner = Arc::clone(&self.inner);
         let gate = inner.update_gate.lock().clone();
+        let fails = inner.update_fails.load(std::sync::atomic::Ordering::SeqCst);
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await;
+            }
+            if fails {
+                return Err(TypeProviderError::new("mock update failure"));
             }
             record_call(&inner, MockCall::UpdateFile { path, content });
             Ok(())
@@ -294,6 +322,50 @@ impl TypeProvider for MockProvider {
             content: content.to_string(),
             project_file_name: project_file_name.to_string(),
         });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn register_carrier_metadata<'a>(
+        &'a self,
+        source_path: &'a str,
+        companion_path: &'a str,
+        content: &'a str,
+        project_file_name: &'a str,
+    ) -> ProviderFuture<'a, ()> {
+        self.record(MockCall::RegisterCarrierMetadata {
+            source_path: source_path.to_string(),
+            companion_path: companion_path.to_string(),
+            content: content.to_string(),
+            project_file_name: project_file_name.to_string(),
+        });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn activate_carrier_member(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        project_file_name: &str,
+        script_kind: crate::traits::CarrierScriptKind,
+    ) -> ProviderFuture<'_, ()> {
+        let _ = (source_path, project_file_name);
+        self.record(MockCall::ActivateCarrier {
+            companion_path: companion_path.to_string(),
+            script_kind,
+        });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [crate::traits::CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        for member in members {
+            self.record(MockCall::ActivateCarrier {
+                companion_path: member.companion_path.clone(),
+                script_kind: member.script_kind,
+            });
+        }
         Box::pin(async { Ok(()) })
     }
 
@@ -2608,6 +2680,12 @@ fn held_state(calls: &[MockCall]) -> HeldState {
                 companion_path,
                 content,
                 project_file_name,
+            }
+            | MockCall::RegisterCarrierMetadata {
+                source_path,
+                companion_path,
+                content,
+                project_file_name,
             } => {
                 held.carriers.insert(
                     companion_path.clone(),
@@ -2618,7 +2696,7 @@ fn held_state(calls: &[MockCall]) -> HeldState {
                     ),
                 );
             }
-            MockCall::Hover { .. } => {}
+            MockCall::Hover { .. } | MockCall::ActivateCarrier { .. } => {}
         }
     }
     held
@@ -2889,6 +2967,229 @@ async fn a_forwarded_mutation_runs_under_the_submitters_absolute_deadline() {
         vec![Some(deadline), None],
         "the engine sees the caller's own deadline across the hub queue, and none \
          for an un-deadlined caller"
+    );
+}
+
+/// A failed forward is DIVERGENCE, not a footnote: the mutation is recorded
+/// in the desired state while the engine never accepted it, so the epoch
+/// must not keep serving content the recorded state no longer describes.
+///
+/// The explicit-hub shape: the diverged epoch is retired through the same
+/// recovery path as a crash (bounded respawn, replay-before-install), the
+/// submitter keeps the forward's own error, and the failed mutation reaches
+/// the replacement through the replay.
+#[tokio::test(start_paused = true)]
+async fn a_failed_forward_retires_the_epoch_and_replays_before_serving_again() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+
+    provider.open_file("/p/A.ts", "const a = 1;").await.unwrap();
+    initial.set_failing_updates();
+    let failure = provider
+        .update_file("/p/A.ts", "const a = 2;")
+        .await
+        .expect_err("the failed forward must still reach its submitter as an error");
+    assert!(
+        failure.message.contains("mock update failure"),
+        "the submitter keeps the forward's own error, got {failure:?}"
+    );
+
+    // The diverged epoch cannot keep serving: queries fail closed while the
+    // recovery reconciles it.
+    await_down(&provider).await;
+    assert!(
+        initial.inner.shutdowns.load(Ordering::SeqCst) >= 1,
+        "the diverged engine must be torn down, not left serving stale content"
+    );
+
+    // Reconciliation: the respawn replays the desired state — the recorded
+    // but rejected update included — before any query serves again.
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    provider
+        .get_hover("/p/A.ts", 3)
+        .await
+        .expect("the replacement serves after the replay");
+    assert_eq!(
+        replacement
+            .calls()
+            .iter()
+            .filter(|call| matches!(
+                call,
+                MockCall::OpenFile { path, content }
+                    if path == "/p/A.ts" && content == "const a = 2;"
+            ))
+            .count(),
+        1,
+        "the recorded-but-rejected update must reach the replacement through the \
+         replay: {:?}",
+        replacement.calls()
+    );
+}
+
+/// The on-demand shape of the same reconciliation: no eager respawn. The
+/// diverged epoch retires fail-closed, and the NEXT demand establishes a
+/// fresh engine that replays the desired state (failed mutation included)
+/// before it answers.
+#[tokio::test]
+async fn an_on_demand_hub_reconciles_a_failed_forward_on_the_next_demand() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let initial = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let hub = on_demand_hub(ScriptedBackend::new(
+        vec![initial.clone(), replacement.clone()],
+        &attempts,
+    ));
+
+    // A query demand establishes the first engine; a mutation alone never does.
+    hub.get_hover("/p/A.ts", 0).await.unwrap();
+    hub.open_file("/p/A.ts", "const a = 1;").await.unwrap();
+
+    initial.set_failing_updates();
+    let failure = hub
+        .update_file("/p/A.ts", "const a = 2;")
+        .await
+        .expect_err("the failed forward must still reach its submitter as an error");
+    assert!(
+        failure.message.contains("mock update failure"),
+        "the submitter keeps the forward's own error, got {failure:?}"
+    );
+    assert!(
+        !hub.is_serving(),
+        "the diverged on-demand epoch retires immediately — fail closed"
+    );
+
+    // The next demand reconciles: a fresh engine, the desired state replayed
+    // into it (the rejected update included), and only then the answer.
+    hub.get_hover("/p/A.ts", 3)
+        .await
+        .expect("the fresh engine serves");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        replacement
+            .calls()
+            .iter()
+            .filter(|call| matches!(
+                call,
+                MockCall::OpenFile { path, content }
+                    if path == "/p/A.ts" && content == "const a = 2;"
+            ))
+            .count(),
+        1,
+        "the recorded-but-rejected update must reach the fresh engine through \
+         the replay: {:?}",
+        replacement.calls()
+    );
+}
+
+/// Between incarnations the hub's engine identity is the tier that LAST
+/// served — the engine that minted the completion envelopes still in flight
+/// — never the establisher's fixed user label. A managed fallback chain
+/// whose establisher is labelled one tier while a different tier actually
+/// served must keep reporting that serving tier after the engine retires,
+/// or the LSP completion-resolve envelope check rejects every envelope the
+/// retired incarnation minted.
+#[tokio::test]
+async fn a_retired_hub_keeps_reporting_the_tier_that_last_served() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let engine = MockProvider::new("tsserver");
+    let provider = establish_hub(
+        ScriptedBackend::new(vec![engine], &attempts),
+        Arc::new(TracingNotifier),
+    )
+    .await;
+    assert_eq!(
+        provider.provider_id(),
+        "tsserver",
+        "while serving, the hub reports the serving incarnation's tier"
+    );
+
+    provider
+        .shutdown()
+        .await
+        .expect("the deliberate teardown completes");
+    assert!(
+        provider.serving_epoch().is_none(),
+        "the hub must be down after shutdown"
+    );
+    assert_eq!(
+        provider.provider_id(),
+        "tsserver",
+        "between incarnations the hub reports the tier that last served, not the \
+         establisher's fixed label"
+    );
+}
+
+/// An explicitly activated carrier replays through its RECORDED parsing
+/// mode: metadata registration first, then one activation carrying the
+/// stored `CarrierScriptKind` — never `register_carrier_member`'s
+/// path-based inference (TSX for every non-`.jsx` companion), which would
+/// reactivate a recovered carrier in a different parsing mode than the live
+/// activation used.
+#[tokio::test(start_paused = true)]
+async fn an_activated_carrier_replays_with_its_recorded_script_kind() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial, replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/SvelteKind.svelte.tsx";
+
+    provider
+        .register_carrier_metadata(
+            "/p/SvelteKind.svelte",
+            companion,
+            "content",
+            "/p/tsconfig.json",
+        )
+        .await
+        .unwrap();
+    provider
+        .activate_carrier_member(
+            "/p/SvelteKind.svelte",
+            companion,
+            "/p/tsconfig.json",
+            crate::traits::CarrierScriptKind::Js,
+        )
+        .await
+        .unwrap();
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    await_down(&provider).await;
+    await_live(&provider).await;
+
+    let calls = replacement.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::RegisterCarrierMember { .. }))
+            .count(),
+        0,
+        "an explicitly activated carrier must not replay through the member \
+         registration's path-inferred kind: {calls:?}"
+    );
+    let metadata = calls
+        .iter()
+        .position(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMetadata { companion_path, .. } if companion_path == companion
+        ))
+        .expect("the carrier's metadata is registered first");
+    let activation = calls
+        .iter()
+        .position(|call| matches!(
+            call,
+            MockCall::ActivateCarrier { companion_path, script_kind: crate::traits::CarrierScriptKind::Js }
+                if companion_path == companion
+        ))
+        .unwrap_or_else(|| {
+            panic!("the replay must activate the carrier with its recorded Js kind: {calls:?}")
+        });
+    assert!(
+        metadata < activation,
+        "metadata registration precedes the kind-carrying activation: {calls:?}"
     );
 }
 

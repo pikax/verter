@@ -1001,25 +1001,6 @@ async fn try_spawn_tsgo(
     .await
 }
 
-/// [`try_spawn_tsgo`] for the shared route's managed fallback: the owned
-/// engine it establishes keeps its INITIAL start off the
-/// `$/verter/typeProviderStarted` channel, because the route attests that the
-/// managed engine stays cold until an observed attach failure and that
-/// attestation is asserted over exactly this channel. A crash replacement is
-/// still announced, so the editor's pid tracking follows the fresh child.
-async fn try_spawn_tsgo_shared_fallback(
-    workspace_root: &str,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
-) -> Result<Arc<dyn TypeProvider>, String> {
-    try_spawn_tsgo_with_request(
-        workspace_root,
-        client_cell,
-        None,
-        tsgo_resilient::OwnedStartAnnouncements::RecoveryOnly,
-    )
-    .await
-}
-
 /// [`try_spawn_tsgo`] with an explicit toolchain-resolution request (the seam the
 /// admission tests drive).
 ///
@@ -1130,6 +1111,25 @@ fn wrap_owned_admission(
     Arc::new(TsgoCompositeProvider::new(owned, Arc::clone(host), None)) as Arc<dyn TypeProvider>
 }
 
+/// The wire policy for the managed fallback's structural start announcements,
+/// decided by the route's attestation state: only a session holding the editor
+/// rendezvous attests that the managed engine stays cold until an observed
+/// attach failure — the promise `RecoveryOnly` keeps off the
+/// `$/verter/typeProviderStarted` channel. Every other route through the
+/// wrapper (the managed fallback with no editor-owned engine behind it)
+/// announces its INITIAL start too, so the editor's pid set tracks that child
+/// for orphan cleanup from the first serve, exactly like the explicit `tsgo`
+/// route.
+fn managed_fallback_start_announcements(
+    cold_attested: bool,
+) -> tsgo_resilient::OwnedStartAnnouncements {
+    if cold_attested {
+        tsgo_resilient::OwnedStartAnnouncements::RecoveryOnly
+    } else {
+        tsgo_resilient::OwnedStartAnnouncements::All
+    }
+}
+
 /// Build the shared-first provider without starting a managed process. The lazy
 /// fallback records every lifecycle/configuration update and invokes the managed
 /// engine chain at most once, only after the composite has observed that the
@@ -1142,7 +1142,8 @@ fn wrap_owned_admission(
 /// workspace tsserver instead of leaving the session without semantics. When
 /// the tsserver tier serves, the client is told the truth: an updated
 /// `$/verter/typeProviderStatus` reports the tsserver topology, and the
-/// serving-tier advisory (if any) is shown.
+/// serving-tier advisory (if any) is shown. The fallback's structural start
+/// announcements follow [`managed_fallback_start_announcements`].
 fn wrap_shared_first_admission(
     args: &CliArgs,
     host: &Arc<VerterHost>,
@@ -1153,6 +1154,8 @@ fn wrap_shared_first_admission(
     let tsdk = args.tsdk.clone();
     let plugin_path = args.plugin_path.clone();
     let host_for_fallback = Arc::clone(host);
+    let cold_attested = args.shared_rendezvous().is_some();
+    let announcements = managed_fallback_start_announcements(cold_attested);
     let fallback = Arc::new(lazy_managed::new_lazy_managed(move || {
         let workspace_root = workspace_root_owned.clone();
         let tsdk = tsdk.clone();
@@ -1160,7 +1163,10 @@ fn wrap_shared_first_admission(
         let host = Arc::clone(&host_for_fallback);
         let client_cell = Arc::clone(&client_cell);
         async move {
-            match try_spawn_tsgo_shared_fallback(&workspace_root, &client_cell).await {
+            let spawned =
+                try_spawn_tsgo_with_request(&workspace_root, &client_cell, None, announcements)
+                    .await;
+            match spawned {
                 Ok(provider) => Ok(provider),
                 Err(tsgo_reason) => {
                     tracing::warn!(

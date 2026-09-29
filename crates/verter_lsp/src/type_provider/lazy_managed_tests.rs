@@ -929,7 +929,7 @@ async fn a_cancelled_demand_never_starts_another_activation() {
         "the factory must have actually started once, else this test proves nothing"
     );
 
-    // The next request lands inside the cooldown window.
+    // The next request joins the activation that is still in flight.
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(150),
         provider.get_hover("/w/a.tsx", 0),
@@ -938,7 +938,7 @@ async fn a_cancelled_demand_never_starts_another_activation() {
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
-        "a cancelled activation must arm the cooldown: the next request must not spawn \
-         another managed child"
+        "a cancelled demand must not start another activation: the next request must join \
+         the in-flight one instead of spawning another managed child"
     );
 }
