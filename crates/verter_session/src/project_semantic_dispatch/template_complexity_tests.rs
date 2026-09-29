@@ -211,7 +211,6 @@ fn the_limit_answers_the_same_cold_warm_and_reordered() {
 /// `"not-any"`, `` "x" extends `${A}-${B}` ? 1 : 2 `` is `2`, and `` "x"
 /// extends `${A2}-${B}` ? 1 : 2 `` is `any` under TS2590.
 #[test]
-#[ignore = "a union keeps the string literals a template literal type in it matches, so a span over-counts its constituents"]
 fn a_union_absorbs_the_literals_its_template_matches() {
     let source = format!(
         "{IS_ANY}type A = {} | `a${{number}}`;\n{}{}",
@@ -228,6 +227,58 @@ fn a_union_absorbs_the_literals_its_template_matches() {
             ("IsAny<`${A}-${B}`>", "\"not-any\""),
             ("\"x\" extends `${A}-${B}` ? 1 : 2", "2"),
             ("\"x\" extends `${A2}-${B}` ? 1 : 2", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The union's literal reduction (`removeRedundantLiteralTypes`, then
+/// `removeStringLiteralsMatchedByTemplateLiterals`): `string` absorbs a
+/// template literal type and a string mapping, and a pattern literal type
+/// absorbs every string literal (a string enum member included) whose
+/// slices fit its placeholders, each text matched leftmost. A written union
+/// is that reduced union too: `type U = "a" | string` is `string`.
+///
+/// Measured on TypeScript 7.0.2 (all four settings agree), with `enum E { A
+/// = "a7", B = "zz" }`, `type U = "a" | string`, `type P = "a1" |
+/// `a${number}`` and `type R = "ab" | `${string}${string}``: each probe below
+/// prints as its row's answer.
+#[test]
+fn a_union_drops_the_literals_its_patterns_match() {
+    let source = "enum E { A = \"a7\", B = \"zz\" }\n\
+                  type U = \"a\" | string;\n\
+                  type P = \"a1\" | `a${number}`;\n\
+                  type R = \"ab\" | `${string}${string}`;\n";
+    let failures = mismatches(
+        source,
+        &[
+            ("\"a1\" | `a${number}`", "`a${number}`"),
+            ("\"ab\" | `a${number}`", "\"ab\" | `a${number}`"),
+            ("\"A\" | Uppercase<string>", "Uppercase<string>"),
+            ("\"a\" | Uppercase<string>", "\"a\" | Uppercase<string>"),
+            ("string | `a${number}`", "string"),
+            ("string | Uppercase<string>", "string"),
+            (
+                "\"1e3\" | \" 1\" | \"x\" | `${number}`",
+                "\"x\" | `${number}`",
+            ),
+            (
+                "\"0x10\" | \"-0\" | \"1.5\" | `${bigint}`",
+                "\"1.5\" | `${bigint}`",
+            ),
+            (
+                "\"a-b\" | \"ab\" | `${string}-${string}`",
+                "\"ab\" | `${string}-${string}`",
+            ),
+            ("E.A | E.B | `a${number}`", "E.B | `a${number}`"),
+            (
+                "\"a1b\" | `a${number}b` | \"a1c\"",
+                "\"a1c\" | `a${number}b`",
+            ),
+            ("\"ab\" | `${string}${string}`", "string"),
+            ("U", "string"),
+            ("P", "`a${number}`"),
+            ("R", "string"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));

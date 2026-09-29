@@ -16091,6 +16091,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
                 drop(data);
+                // The span is the union the checker holds: its literal
+                // reduction runs first (a pattern absorbs the literals it
+                // matches).
+                let reduced = self.intern_normalized_union(
+                    &members,
+                    crate::semantic_query::NullabilityPolicy::Strict,
+                );
+                let members: Arc<[SemanticNodeId]> = match graph.node_data(reduced).as_deref() {
+                    Some(SemanticNodeData::Union(reduced)) => reduced.members_arc(),
+                    _ => Arc::from(vec![reduced].into_boxed_slice()),
+                };
                 let mut out: Vec<TemplateConstituent> = Vec::new();
                 let mut seen: FxHashSet<TemplateConstituent> = FxHashSet::default();
                 for member in members.iter() {
@@ -16150,6 +16161,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if holes.is_empty() {
             let text = texts.pop().expect("one text per hole plus one");
             return graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
+        }
+        // Every text empty and every hole `string`: the template is `string`
+        // (`${string}${string}` spells any string).
+        let is_string = |hole: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*hole).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+        };
+        if texts.iter().all(String::is_empty) && holes.iter().all(is_string) {
+            return holes[0];
         }
         if let [hole] = holes.as_slice() {
             if texts.iter().all(String::is_empty)
