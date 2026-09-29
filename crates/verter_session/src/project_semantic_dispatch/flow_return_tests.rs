@@ -3074,21 +3074,34 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     });
 }
 
-/// A deeply nested array literal that trips the shallow leaf-lowering
-/// budget (`> MAX_SEMANTIC_INFERENCE_DEPTH` nesting levels).
-fn budget_tripping_array() -> String {
-    let levels = 70;
-    let mut out = String::new();
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push('[');
-    }
-    out.push('0');
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push(']');
-    }
-    out
+/// A leaf whose lowering trips the shallow leaf-lowering work budget
+/// (`> MAX_SEMANTIC_INFERENCE_WORK` visits): a `satisfies` over a
+/// conditional holding a 5,000-element array literal, which the leaf
+/// lowering infers whole ([`budget_tripping_content_trips_when_lowered`]).
+fn budget_tripping_content() -> String {
+    format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    )
+}
+
+/// The budget-tripping content trips when it IS lowered: returned, the
+/// function's evaluation answers the leaf lowering's typed budget failure.
+/// The two tests below read it unlowered, which only this makes a proof.
+#[test]
+fn budget_tripping_content_trips_when_lowered() {
+    let source = format!(
+        "export function pf() {{ return {}; }}\n",
+        budget_tripping_content()
+    );
+    assert_eq!(
+        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+            crate::semantic_query::FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            )
+        ))
+    );
 }
 
 /// The demand slice is the ONLY lowered content: an UNREAD binding's
@@ -3105,7 +3118,7 @@ fn flow_return_unread_binding_content_never_lowers() {
         input_id: "/ws/unread-content.ts".to_string(),
         source: Arc::from(format!(
             "export function sliced() {{\n  const unused = {};\n  return 2;\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/unread-content.ts")
@@ -3136,7 +3149,7 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
         input_id: "/ws/member-sibling-content.ts".to_string(),
         source: Arc::from(format!(
             "export function memberSliced() {{\n  return {{ a: {}, b: 1 }};\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/member-sibling-content.ts")
@@ -3934,14 +3947,75 @@ fn staged_flow_proof(
     .expect("a clean re-staged value mints a proof")
 }
 
-/// A completed member marked reusable answers a later demand on its
-/// transaction with its proven value, and REPLAYS what its evaluation read
-/// into the scopes live at the demanding site — the fact into the live
-/// tracer, the canonical self-root onto the live build frame, and the
-/// canonical-evidence epoch — so a build that consumes the reused value
-/// is rooted exactly as if it had re-evaluated it.
+/// A flow result completed on the transaction answers a later demand on it
+/// with its proven value, and REPLAYS what its evaluation read into the
+/// scopes live at the demanding site — the fact into the live tracer, the
+/// canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value is
+/// rooted exactly as if it had re-evaluated it.
 #[test]
 fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::Shared);
+}
+
+/// A completed result whose persistent admission was refused for a typed,
+/// deterministic reason still answers the rest of its transaction — its
+/// completion does not depend on its retention — and the refusal travels
+/// with it: the live tracer that consumes it is refused too, and its reads
+/// are replayed as for any other completed result.
+#[test]
+fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::RequestOnly(
+        crate::resolver_core::reuse::NonCacheableRefusal::new(
+            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        ),
+    ));
+}
+
+/// An incomplete result, or one refused for a transient or unattributed
+/// reason, never enters the transaction's result table: a later demand
+/// evaluates it again rather than freezing a degraded answer.
+#[test]
+fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
+    use crate::resolver_core::reuse::{NoReuseCause, ReuseClass};
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let value = flow_result_value(dispatch, key.clone());
+        for reuse in [
+            ReuseClass::NoReuse(NoReuseCause::Incomplete),
+            ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            )),
+            ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
+                verter_workspace::NonCacheablePropagation::Transitive,
+            )),
+        ] {
+            let mut txn = dispatch.dispatch_txn.borrow_mut();
+            txn.flow.results.complete(
+                key.clone(),
+                super::dispatch_txn::TransactionFlowResult {
+                    value: value.clone(),
+                    reuse,
+                    replay: super::dispatch_txn::FlowMemberReuse {
+                        reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                            facts: Arc::from(Vec::new()),
+                            non_cacheable: false,
+                        },
+                        observed_self_roots: Vec::new(),
+                        canonical_evidence_deposited: false,
+                    },
+                },
+            );
+            assert!(
+                !txn.flow.results.contains(&key),
+                "{reuse:?} must not answer a later demand on the transaction"
+            );
+        }
+    });
+}
+
+fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
     let host = make_scc_host();
     with_dispatch(&host, |dispatch| {
         let key = scc_key(dispatch, "scCleanA");
@@ -3955,26 +4029,21 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
         };
         let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
             (Arc::from("/ws/replayed.ts"), [6; 16]);
-        dispatch
-            .dispatch_txn
-            .borrow_mut()
-            .flow
-            .completed_members
-            .push(super::dispatch_txn::CompletedFlowReturnMember {
-                key: key.clone(),
-                result: staged_flow_proof(&key, value.clone()),
-                inline_flight: None,
-                self_roots: Vec::new(),
-                materialized: crate::semantic_query::demand::MaterializedSet::default(),
-                reuse: Some(super::dispatch_txn::FlowMemberReuse {
+        dispatch.dispatch_txn.borrow_mut().flow.results.complete(
+            key.clone(),
+            super::dispatch_txn::TransactionFlowResult {
+                value: value.clone(),
+                reuse,
+                replay: super::dispatch_txn::FlowMemberReuse {
                     reads: crate::resolver_core::resolver_context::RecordedFactReads {
                         facts: Arc::from(vec![fact.clone()]),
                         non_cacheable: false,
                     },
                     observed_self_roots: vec![root.clone()],
                     canonical_evidence_deposited: true,
-                }),
-            });
+                },
+            },
+        );
         let epoch = dispatch.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
         let (step, read_set) = host
@@ -3990,8 +4059,16 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
             ),
             other => panic!("a reusable member answers Complete, got {other:?}"),
         }
-        let crate::resolver_core::FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
-            panic!("the live tracer seals a cacheable signature");
+        let signature = match (read_set.finalise(), reuse.is_shared()) {
+            (crate::resolver_core::FactReadSetFinalise::Ok(signature), true) => signature,
+            (crate::resolver_core::FactReadSetFinalise::NonCacheable(signature), false) => {
+                signature
+            }
+            (other, shared) => panic!(
+                "a {} result seals the live tracer {}, got {other:?}",
+                if shared { "shared" } else { "request-only" },
+                if shared { "cacheable" } else { "non-cacheable" }
+            ),
         };
         assert!(
             signature.contains(&fact),

@@ -97,9 +97,8 @@ pub enum ValueDescent<'a, 'ast> {
     /// An array literal: every element (a spread's argument included) is a
     /// WHOLE-value input of the array's value — the element type is the
     /// union of every element's type, so no element can be demanded at
-    /// only part of its value. A literal nesting array literals deeper
-    /// than the shallow inference's budget is a [`Self::Leaf`] instead
-    /// ([`array_nest_exceeds_inference_budget`]).
+    /// only part of its value. At any depth: both halves walk a nest of
+    /// array literals level by level.
     Array(&'a ArrayExpression<'ast>),
     /// A branch JOIN: EVERY arm provides the whole value, so a demand
     /// for the join's value (or for a projection under it) is a demand
@@ -177,42 +176,6 @@ pub enum ValueDescent<'a, 'ast> {
     Leaf,
 }
 
-/// Whether `array` nests array literals (as elements or spread
-/// arguments, through parentheses) more levels deep than the shallow
-/// per-expression inference's nesting budget. Such a nest answers as a
-/// whole through that inference, which charges the budget and reports
-/// its typed exhaustion, so the flow substrate never descends it level by
-/// level. The walk stops at the budget: it visits no level past it.
-#[must_use]
-pub fn array_nest_exceeds_inference_budget(array: &ArrayExpression<'_>) -> bool {
-    let mut level: Vec<&ArrayExpression<'_>> = vec![array];
-    for _ in 0..crate::analysis::type_eval_build::MAX_SEMANTIC_INFERENCE_DEPTH {
-        let mut next = Vec::new();
-        for array in level {
-            for element in &array.elements {
-                let mut value = match element {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
-                    other => match other.as_expression() {
-                        Some(expression) => expression,
-                        None => continue,
-                    },
-                };
-                while let Expression::ParenthesizedExpression(paren) = value {
-                    value = &paren.expression;
-                }
-                if let Expression::ArrayExpression(inner) = value {
-                    next.push(&**inner);
-                }
-            }
-        }
-        if next.is_empty() {
-            return false;
-        }
-        level = next;
-    }
-    true
-}
-
 /// The value-structural disposition of `expression` — ONE step. A caller
 /// that must reach a non-transparent form re-enters on the inner
 /// expression of [`ValueDescent::Transparent`] /
@@ -232,9 +195,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
             ValueDescent::TypeCarrier(&inner.expression)
         }
         Expression::ObjectExpression(object) => ValueDescent::Object(object),
-        Expression::ArrayExpression(array) if array_nest_exceeds_inference_budget(array) => {
-            ValueDescent::Leaf
-        }
         Expression::ArrayExpression(array) => ValueDescent::Array(array),
         Expression::ConditionalExpression(conditional) => ValueDescent::Branches(conditional),
         // Matched BEFORE the call-position guard: an await is a modeled

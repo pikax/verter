@@ -89,6 +89,25 @@ struct LazyResolutionCacheKey {
     phase: ResolvePhase,
     kind: ResolveRequestKind,
     population: ResolutionPopulation,
+    lane: ResolutionLane,
+}
+
+/// Bound on the overlay lane's slot count (see `Engine::overlay_lane_order`).
+pub(crate) const OVERLAY_LANE_SLOT_CAP: usize = 4096;
+
+/// Whose answers a resolution slot holds.
+///
+/// A request overlay that changes a resolution fact answers in its own
+/// lane, so an overlay answer never occupies — or evicts from — a slot the
+/// workspace reads. Every overlay shares that one lane: its candidates are
+/// told apart by their witnesses (an overlay-changed fact is versioned in
+/// the overlay's own version space), never by an overlay identity in the
+/// key, so a request whose overlay leaves a query's facts alone reuses the
+/// answer another request's overlay produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ResolutionLane {
+    Workspace,
+    RequestOverlay,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +125,12 @@ pub(crate) struct ResolutionOperation<'a> {
     expected_published: Option<&'a Arc<crate::published_state::PublishedRoot>>,
     input_ledger: &'a mut crate::resolver::InputResolutionLedger,
     final_validate: &'a dyn Fn() -> bool,
+    /// The request overlay this operation resolves through, if any. A
+    /// required part of the operation rather than a reader hook: the Engine
+    /// composes the overlay reader itself, so no wrapper around a reader
+    /// can drop the overlay and have its answers versioned as the
+    /// workspace values they replace.
+    overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
 }
 
 impl<'a> ResolutionOperation<'a> {
@@ -118,10 +143,11 @@ impl<'a> ResolutionOperation<'a> {
             expected_published: Some(expected_published),
             input_ledger,
             final_validate,
+            overlay: None,
         }
     }
 
-    fn unpinned(
+    pub(crate) fn unpinned(
         input_ledger: &'a mut crate::resolver::InputResolutionLedger,
         final_validate: &'a dyn Fn() -> bool,
     ) -> Self {
@@ -129,7 +155,18 @@ impl<'a> ResolutionOperation<'a> {
             expected_published: None,
             input_ledger,
             final_validate,
+            overlay: None,
         }
+    }
+
+    /// Resolve through `overlay`'s effective view. An empty overlay is the
+    /// workspace view itself.
+    pub(crate) fn over(
+        mut self,
+        overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
+    ) -> Self {
+        self.overlay = overlay.filter(|overlay| !overlay.is_empty());
+        self
     }
 }
 
@@ -368,7 +405,8 @@ impl BaselineFold {
 ///  6. `project_graph` (read only — write is rare)
 ///  7. `package_index` (read or write)
 ///  8. `dir_index` (read or write)
-///  9. `lazy_resolution_cache` (read or write)
+///  9. `lazy_resolution_cache` (read or write), then `overlay_lane_order`
+///     — taken ONLY while the cache write lock is held
 /// 10. `content_transitions` / `subtree_transitions` (read or write)
 ///
 /// **`resolution_world_write` outranks BOTH evidence ledgers.** Gate → ledger
@@ -400,6 +438,13 @@ pub(crate) struct Engine {
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
     lazy_resolution_cache: RwLock<FxHashMap<LazyResolutionCacheKey, LazyResolutionCandidates>>,
+    /// The overlay lane's slots in admission order — the lane's bound. An
+    /// overlay-only importer or specifier adds slots the workspace never
+    /// retires, so the lane is capped at [`OVERLAY_LANE_SLOT_CAP`] slots and
+    /// the oldest is evicted first (evicting a valid slot only forces a
+    /// recompute). Mutated ONLY under the `lazy_resolution_cache` write
+    /// lock, so the two move as one.
+    overlay_lane_order: Mutex<std::collections::VecDeque<LazyResolutionCacheKey>>,
     /// Per-canonical pending-evidence ledger: canonicals whose content
     /// transitioned through [`Self::bump_content_generation_for`] and whose
     /// resolution-visible evidence has not been re-observed yet. The bump
@@ -596,6 +641,7 @@ impl Engine {
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
             lazy_resolution_cache: RwLock::new(FxHashMap::default()),
+            overlay_lane_order: Mutex::new(std::collections::VecDeque::new()),
             pending_resolution_refresh: RwLock::new(rustc_hash::FxHashSet::default()),
             evidence_verified_generation: RwLock::new(FxHashMap::default()),
             content_generation: AtomicU64::new(1),
@@ -2193,6 +2239,7 @@ impl Engine {
                         base,
                         session,
                         population,
+                        overlay: None,
                     }),
                 });
             }
@@ -2412,6 +2459,7 @@ impl Engine {
                 phase: context.phase,
                 kind: context.kind,
                 population,
+                lane: ResolutionLane::Workspace,
             })
             .and_then(|slot| slot.last())
             .map(|entry| entry.query.clone())
@@ -2435,6 +2483,29 @@ impl Engine {
                 phase: context.phase,
                 kind: context.kind,
                 population,
+                lane: ResolutionLane::Workspace,
+            })
+            .map_or(0, |slot| slot.len())
+    }
+
+    /// [`Self::lazy_resolution_slot_len_for_test`] for the overlay lane.
+    #[cfg(test)]
+    pub(crate) fn overlay_resolution_slot_len_for_test(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        context: verter_semantic::resolver_core::ResolutionContext,
+        population: ResolutionPopulation,
+    ) -> usize {
+        self.lazy_resolution_cache
+            .read()
+            .get(&LazyResolutionCacheKey {
+                importer_id: importer_id.to_owned(),
+                specifier: specifier.to_owned(),
+                phase: context.phase,
+                kind: context.kind,
+                population,
+                lane: ResolutionLane::RequestOverlay,
             })
             .map_or(0, |slot| slot.len())
     }
@@ -2453,8 +2524,19 @@ impl Engine {
         let edges = self.edges.read();
         let package_index = self.package_index.read();
         let published = self.load_published();
+        let (resolution_slots, overlay_resolution_slots) = {
+            let cache = self.lazy_resolution_cache.read();
+            let overlay_slots = cache
+                .keys()
+                .filter(|key| key.lane == ResolutionLane::RequestOverlay)
+                .count();
+            (cache.len() - overlay_slots, overlay_slots)
+        };
 
         WorkspaceResourceSnapshot {
+            resolution_slots,
+            overlay_resolution_slots,
+            overlay_value_versions: crate::resolution_currency::overlay_value_versions_len(),
             overlay_entries: overlay.len(),
             overlay_bytes: overlay.approx_bytes(),
             snapshot_entries: snapshot.len(),
@@ -3020,6 +3102,7 @@ impl Engine {
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+        request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         signature: &crate::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
@@ -3096,8 +3179,12 @@ impl Engine {
         for canonical in &targets {
             let canonical = canonical.as_ref();
             // An overlay-shadowed canonical's reader observation is
-            // overlay-effective; it must not overwrite base evidence.
-            if self.overlay.read().has_overlay(canonical) {
+            // overlay-effective; it must not overwrite base evidence —
+            // whether the editor overlay or the reader's request overlay
+            // shadows it.
+            if self.overlay.read().has_overlay(canonical)
+                || request_overlay.is_some_and(|overlay| overlay.covers(canonical))
+            {
                 continue;
             }
             let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
@@ -3357,8 +3444,18 @@ impl Engine {
             expected_published,
             input_ledger,
             final_validate,
+            overlay: request_overlay,
         } = operation;
         crate::probe_scope!(RESOLVE_IN_PUBLISHED);
+        let overlay_reader;
+        let reader: &dyn crate::traits::WorkspaceRead = match request_overlay {
+            Some(overlay) => {
+                overlay_reader =
+                    crate::resolution_currency::OverlaySnapshotReader::new(reader, overlay);
+                &overlay_reader
+            }
+            None => reader,
+        };
         let population = reader.resolution_population();
         let cache_key = LazyResolutionCacheKey {
             importer_id: importer_id.to_string(),
@@ -3366,15 +3463,19 @@ impl Engine {
             phase: ctx.phase,
             kind: ctx.kind,
             population,
+            lane: ResolutionLane::Workspace,
         };
-        let request_local_snapshot = reader.resolution_snapshot_is_request_local();
+        let overlay_key = LazyResolutionCacheKey {
+            lane: ResolutionLane::RequestOverlay,
+            ..cache_key.clone()
+        };
         loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
             let captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
-            let Some(captured) = captured else {
+            let Some(mut captured) = captured else {
                 #[cfg(test)]
                 resolution_test_hooks::record_return_only();
                 return ResolutionOutcome::refused(
@@ -3382,6 +3483,19 @@ impl Engine {
                     verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
                 );
             };
+            // A request overlay answers from its own effective world: every
+            // fact it changes is versioned in the overlay's version space, so
+            // the witness this attempt records never passes for the
+            // workspace value the overlay replaced.
+            if let Some(overlay) = request_overlay {
+                captured.world = overlay.effective_world(&captured.world);
+            }
+            // An overlay that changes no resolution fact of this world
+            // resolves exactly as the workspace does — every value the
+            // reader returns is the workspace's — so it answers in the
+            // workspace lane, publishing and reusing workspace decisions.
+            // Only an overlay that changes a fact answers in its own lane.
+            let overlay_lane = captured.world.composes_request_overlay();
             if expected_published.is_some_and(|expected| {
                 !captured
                     .world
@@ -3410,17 +3524,26 @@ impl Engine {
             transaction.lock().observe(exact_fact.clone());
             let observed_exact_version = captured.world.fact_version(&exact_fact);
 
-            let candidates: LazyResolutionCandidates = {
+            // The workspace slot always; the overlay lane's slot too under an
+            // overlay that changes a fact. A workspace candidate is reused
+            // under an overlay only when its witness validates against the
+            // overlay's effective world — every fact it observed, negative
+            // probes included, still holds with the overlay in place.
+            let candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> = {
                 crate::probe_scope!(RESOLVE_CANDIDATE_READ);
-                if request_local_snapshot {
-                    LazyResolutionCandidates::new()
-                } else {
-                    self.lazy_resolution_cache
-                        .read()
-                        .get(&cache_key)
-                        .cloned()
-                        .unwrap_or_default()
-                }
+                let cache = self.lazy_resolution_cache.read();
+                let workspace = cache
+                    .get(&cache_key)
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| (ResolutionLane::Workspace, entry.clone()));
+                let overlay = overlay_lane
+                    .then(|| cache.get(&overlay_key))
+                    .flatten()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| (ResolutionLane::RequestOverlay, entry.clone()));
+                workspace.chain(overlay).collect()
             };
             // Every retained candidate is screened against the captured
             // world's exact fact, not just the most recent one: a slot that
@@ -3430,7 +3553,7 @@ impl Engine {
             let mut rejected_exact_targets = Vec::new();
             {
                 crate::probe_scope!(RESOLVE_SCREEN_EXACT);
-                for candidate in candidates.iter() {
+                for (_, candidate) in candidates.iter() {
                     let candidate_exact_version =
                         candidate.signature.resolution_fact_version(&exact_fact);
                     if candidate_exact_version.is_some()
@@ -3477,6 +3600,7 @@ impl Engine {
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ProjectSelection);
 
             let mut reused = false;
+            let mut restated_witness = false;
             let mut publish_candidate = false;
 
             // Reader-driven evidence refresh for the retained candidates' own
@@ -3485,9 +3609,13 @@ impl Engine {
             let mut refreshed = false;
             {
                 crate::probe_scope!(RESOLVE_REFRESH_EVID);
-                for entry in candidates.iter() {
-                    refreshed |=
-                        self.refresh_resolution_evidence(reader, evidence, &entry.signature);
+                for (_, entry) in candidates.iter() {
+                    refreshed |= self.refresh_resolution_evidence(
+                        reader,
+                        evidence,
+                        request_overlay,
+                        &entry.signature,
+                    );
                 }
             }
             if refreshed {
@@ -3514,7 +3642,7 @@ impl Engine {
             // exact or resolver-derived — republishes through the same slot.
             let reusable = {
                 crate::probe_scope!(RESOLVE_REUSE_FIND);
-                candidates.iter().find(|entry| {
+                candidates.iter().find(|(_, entry)| {
                     let candidate_context = {
                         crate::probe_scope!(RESOLVE_REUSE_CTX);
                         Self::complete_provider_context(
@@ -3549,16 +3677,30 @@ impl Engine {
             // A witness the declared evidence source cannot re-observe is
             // not a witness this attempt may stand on. See
             // `witness_evidence_is_unenumerable`.
-            let reusable = reusable.filter(|entry| {
+            let reusable = reusable.filter(|(_, entry)| {
                 !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
             });
-            let result = if let Some(entry) = reusable {
+            let result = if let Some((lane, entry)) = reusable {
                 // The DAG's reuse seam. The reused candidate's signature
                 // is NOT folded in: the outcome roots on this query's own
                 // decision node, whose version reverse propagation keeps
                 // honest, so a warm answer no longer restates every leaf
                 // the candidate transitively touched.
-                transaction.lock().set_query(entry.query.clone());
+                //
+                // Unless no such node speaks for this view: an overlay-lane
+                // candidate has none, and a workspace decision the overlay
+                // reaches reads as moved. Such a reuse restates the
+                // candidate's own witness — just validated against this
+                // world — instead.
+                let mut transaction = transaction.lock();
+                transaction.set_query(entry.query.clone());
+                let node = ResolutionFactKey::decision(entry.query.clone());
+                if *lane == ResolutionLane::RequestOverlay
+                    || captured.world.request_overlay_reaches(&node)
+                {
+                    transaction.adopt_witness(&entry.signature);
+                    restated_witness = true;
+                }
                 reused = true;
                 entry.result.clone()
             } else {
@@ -3756,7 +3898,7 @@ impl Engine {
                 );
             }
             if publish_candidate
-                && !request_local_snapshot
+                && !overlay_lane
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
                 && {
                     crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
@@ -3798,7 +3940,35 @@ impl Engine {
                     .import_resolution_cache_miss_count
                     .fetch_add(1, Ordering::Relaxed);
             }
-            if publish_candidate && !request_local_snapshot {
+            if publish_candidate && overlay_lane {
+                // An overlay answer enters the overlay lane with its own
+                // witness and no decision node: the decision graph is the
+                // workspace's, and a node for an overlay answer would be a
+                // workspace fact the workspace cannot see.
+                if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
+                    crate::probe_scope!(RESOLVE_ADMIT);
+                    let mut cache = self.lazy_resolution_cache.write();
+                    let new_slot = !cache.contains_key(&overlay_key);
+                    let _ = admit_resolution_candidate(
+                        cache.entry(overlay_key.clone()).or_default(),
+                        LazyResolutionCacheEntry {
+                            result: result.clone(),
+                            query,
+                            signature,
+                        },
+                    );
+                    if new_slot {
+                        let mut order = self.overlay_lane_order.lock();
+                        order.push_back(overlay_key.clone());
+                        while order.len() > OVERLAY_LANE_SLOT_CAP {
+                            if let Some(oldest) = order.pop_front() {
+                                cache.remove(&oldest);
+                            }
+                        }
+                    }
+                    published = true;
+                }
+            } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
                     crate::probe_scope!(RESOLVE_ADMIT);
                     let evicted = admit_resolution_candidate(
@@ -3842,12 +4012,12 @@ impl Engine {
             //   request view can root on it and warm-hit through that
             //   same view.
             //
-            // A request-local snapshot publishes no node, so it keeps its
+            // An overlay-lane answer publishes no node, so it keeps its
             // precise observation set: rooting on a node that does not
-            // exist would be a witness nothing can ever invalidate.
-            if !request_local_snapshot
-                && matches!(&admission, SignatureAdmission::Cacheable(_))
-                && (published || reused)
+            // exist would be a witness nothing can ever invalidate. So does
+            // a reuse that restated its candidate's witness.
+            if matches!(&admission, SignatureAdmission::Cacheable(_))
+                && ((published && !overlay_lane) || (reused && !restated_witness))
             {
                 if let Some(query) = query.clone() {
                     let node = ResolutionFactKey::decision(query);
@@ -3865,7 +4035,11 @@ impl Engine {
                         ])));
                 }
             }
-            if !request_local_snapshot && matches!(&admission, SignatureAdmission::Cacheable(_)) {
+            // The workspace's own edge store records only what the
+            // workspace resolved: a request overlay's answer, even one
+            // resolution-equivalent to the workspace's, may be for an
+            // importer's overlay-only specifier.
+            if request_overlay.is_none() && matches!(&admission, SignatureAdmission::Cacheable(_)) {
                 input_ledger.commit_loaded_inputs(reader);
                 if let Some(ref result) = result {
                     self.edges

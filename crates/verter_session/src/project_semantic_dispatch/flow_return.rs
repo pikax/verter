@@ -63,10 +63,6 @@ use verter_semantic::analysis::flow::{
     FlowBindingMap, FlowBindingRef as FlowProductSubject, FunctionBodySkeleton, SkeletonBindingId,
 };
 
-/// The combinations [`ProjectSemanticDispatch::distribute_intersection`]
-/// distributes before it keeps the undistributed intersection.
-const INTERSECTION_DISTRIBUTION_CAP: usize = 64;
-
 /// A distributed intersection and whether one combination's collapse was
 /// left undecided (kept, as a superset).
 pub(super) struct DistributedIntersection {
@@ -996,8 +992,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// prints as the checker prints it. An `ordered` intersection (one
     /// whose members may carry call signatures, where member order is
     /// overload order) keeps every combination, and the origin, in factor
-    /// order. `None` when the combinations exceed
-    /// [`INTERSECTION_DISTRIBUTION_CAP`].
+    /// order.
+    ///
+    /// The combinations are the checker's ([`Self::intersection_parts`]): a
+    /// cross product the checker refuses is its TS2590 recovery, holding
+    /// the undistributed intersection as the type beyond the checker's
+    /// limit. `None` when every factor is empty, or when the connected-work
+    /// ledger stops the distribution (the demand is then partial).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1005,14 +1006,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
         nullability: crate::semantic_query::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
-        use super::relation::ComparabilityVerdict;
-        let combinations = factors
-            .iter()
-            .try_fold(1usize, |count, arms| count.checked_mul(arms.len()))?;
-        if combinations == 0 || combinations > INTERSECTION_DISTRIBUTION_CAP {
+        if factors.iter().any(Vec::is_empty) {
             return None;
         }
         let graph = self.graph();
+        let mut undecided = false;
+        let parts =
+            match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
+                Ok(Some(parts)) => parts,
+                Ok(None) => return None,
+                Err(diagnostic) => {
+                    let beyond = self.intern_intersection_members(origin, ordered);
+                    return Some(DistributedIntersection {
+                        node: crate::semantic_query::checker_policy::checker_recovery(
+                            graph,
+                            diagnostic,
+                            Some(beyond),
+                        ),
+                        undecided,
+                    });
+                }
+            };
+        let origin_count: usize = origin
+            .iter()
+            .map(|node| self.constituent_count(*node))
+            .sum();
+        let distributed: usize = parts.iter().map(|part| self.constituent_count(*part)).sum();
+        let node = if parts.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        } else if distributed > origin_count
+            && parts.iter().any(|part| {
+                matches!(
+                    graph.node_data(*part).as_deref(),
+                    Some(SemanticNodeData::Intersection(_))
+                )
+            })
+        {
+            self.intern_intersection_members(origin, ordered)
+        } else {
+            self.intern_normalized_union(&parts, nullability)
+        };
+        Some(DistributedIntersection { node, undecided })
+    }
+
+    /// The combinations of `factors` that survive, each interned, in the
+    /// checker's order: three or more factors divide in half, each half
+    /// distributed on its own and the two results distributed over each
+    /// other; two or fewer take the cross product, checked against the
+    /// checker's limit before a combination is formed
+    /// ([`checker_policy::cross_product_union`](crate::semantic_query::checker_policy::cross_product_union)).
+    /// `Err` is the TS2590 fact; `Ok(None)` a connected-work trip, folded
+    /// into the demand as partial. Every combination is charged to the
+    /// connected-work ledger.
+    fn intersection_parts(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        divided: bool,
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+        undecided: &mut bool,
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::CheckerDiagnostic> {
+        use super::relation::ComparabilityVerdict;
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let graph = self.graph();
+        if factors.len() >= 3 {
+            let middle = factors.len() / 2;
+            let mut halves: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(2);
+            for half in [&factors[..middle], &factors[middle..]] {
+                let parts = match half {
+                    [only] => only.clone(),
+                    _ => match self.intersection_parts(
+                        half,
+                        false,
+                        nullability,
+                        ordered,
+                        undecided,
+                    )? {
+                        Some(parts) => parts,
+                        None => return Ok(None),
+                    },
+                };
+                // The half is a union: identical constituents are one.
+                let mut seen = rustc_hash::FxHashSet::default();
+                halves.push(
+                    parts
+                        .into_iter()
+                        .filter(|part| seen.insert(*part))
+                        .collect(),
+                );
+            }
+            return self.intersection_parts(&halves, true, nullability, ordered, undecided);
+        }
+        let combinations = cross_product_union(
+            factors.iter().map(|arms| match arms.len() {
+                0 => ProductFactor::Never,
+                1 => ProductFactor::Single,
+                width => ProductFactor::Union(width),
+            }),
+            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
+        )?;
         let nullish = |node: SemanticNodeId| {
             matches!(
                 graph.node_data(node).as_deref(),
@@ -1036,64 +1128,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => false,
             }
         };
-        let mut undecided = false;
+        // A part of a `divided` half is an intersection: its members join
+        // the combination.
+        let members_of = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Intersection(members)) if divided => {
+                members.iter().copied().collect()
+            }
+            _ => vec![node],
+        };
+        // Whether one pair collapses the intersection it meets in (and whether
+        // that was left undecided), asked once per pair: every combination
+        // that holds the pair shares the answer.
+        let mut pair_verdicts: rustc_hash::FxHashMap<
+            (SemanticNodeId, SemanticNodeId),
+            (bool, bool),
+        > = rustc_hash::FxHashMap::default();
+        let mut collapses_pair = |left: SemanticNodeId, right: SemanticNodeId| {
+            *pair_verdicts.entry((left, right)).or_insert_with(|| {
+                if nullability.is_strict()
+                    && ((nullish(left) && object_type(right))
+                        || (nullish(right) && object_type(left)))
+                {
+                    return (true, false);
+                }
+                match self.nodes_comparable(left, right) {
+                    ComparabilityVerdict::Disjoint(proof)
+                        if proof.checker_reduces_intersection_to_never() =>
+                    {
+                        (true, false)
+                    }
+                    ComparabilityVerdict::Undecided => (false, true),
+                    _ => (false, false),
+                }
+            })
+        };
         let mut parts: Vec<SemanticNodeId> = Vec::new();
-        let mut combination: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
+        // Each member with the factor it came from: members of one part of a
+        // divided half were paired when that part was formed.
+        let mut combination: Vec<(usize, SemanticNodeId)> = Vec::with_capacity(factors.len());
+        let mut members: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
         for mut index in 0..combinations {
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                return Ok(None);
+            }
             combination.clear();
-            for arms in factors {
-                combination.push(arms[index % arms.len()]);
+            for (factor, arms) in factors.iter().enumerate() {
+                combination.extend(
+                    members_of(arms[index % arms.len()])
+                        .into_iter()
+                        .map(|member| (factor, member)),
+                );
                 index /= arms.len();
             }
             let mut collapses = false;
-            'pairs: for (position, left) in combination.iter().enumerate() {
-                for right in &combination[position + 1..] {
-                    if left == right {
+            'pairs: for (position, (left_factor, left)) in combination.iter().enumerate() {
+                for (right_factor, right) in &combination[position + 1..] {
+                    if left == right || left_factor == right_factor {
                         continue;
                     }
-                    if nullability.is_strict()
-                        && ((nullish(*left) && object_type(*right))
-                            || (nullish(*right) && object_type(*left)))
-                    {
+                    let (collapsed, pair_undecided) = collapses_pair(*left, *right);
+                    *undecided |= pair_undecided;
+                    if collapsed {
                         collapses = true;
                         break 'pairs;
-                    }
-                    match self.nodes_comparable(*left, *right) {
-                        ComparabilityVerdict::Disjoint(proof)
-                            if proof.checker_reduces_intersection_to_never() =>
-                        {
-                            collapses = true;
-                            break 'pairs;
-                        }
-                        ComparabilityVerdict::Undecided => undecided = true,
-                        _ => {}
                     }
                 }
             }
             if !collapses {
-                parts.push(self.intern_intersection_members(&combination, ordered));
+                members.clear();
+                members.extend(combination.iter().map(|(_, member)| *member));
+                parts.push(self.intern_intersection_members(&members, ordered));
             }
         }
-        let origin_count: usize = origin
-            .iter()
-            .map(|node| self.constituent_count(*node))
-            .sum();
-        let distributed: usize = parts.iter().map(|part| self.constituent_count(*part)).sum();
-        let node = if parts.is_empty() {
-            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-        } else if distributed > origin_count
-            && parts.iter().any(|part| {
-                matches!(
-                    graph.node_data(*part).as_deref(),
-                    Some(SemanticNodeData::Intersection(_))
-                )
-            })
-        {
-            self.intern_intersection_members(origin, ordered)
-        } else {
-            self.intern_normalized_union(&parts, nullability)
-        };
-        Some(DistributedIntersection { node, undecided })
+        Ok(Some(parts))
     }
 
     /// One intersection of `members`: canonical, or, when `ordered`, the
@@ -2172,10 +2280,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    return the `Hold` sentinel.
     /// 2. **Warm read** — a validated published `Complete` result
     ///    (carrier-validated).
-    /// 3. **Transaction reuse** — the key already closed on this
-    ///    transaction as a proven inline SCC root whose reads were recorded
-    ///    clean; they are replayed into the scopes live now (see
-    ///    [`Self::reusable_completed_flow_member`]).
+    /// 3. **Transaction reuse** — the key already completed on this
+    ///    transaction as a proven inline SCC root whose reads were
+    ///    recorded; they, and its refusal if any, are replayed into the
+    ///    scopes live now (see [`Self::reusable_completed_flow_member`]).
     /// 4. **Instantiation transfer** — an instantiated key whose
     ///    uninstantiated answer is already in hand (warm, or reusable on
     ///    this transaction) is that answer under the key's substitution,
@@ -2243,13 +2351,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.graph().get_flow_return_result(self.ctx, key)
     }
 
-    /// The proven value of `key` when it already closed on this transaction
-    /// as a reusable inline member, after replaying what its evaluation
-    /// read into the scopes live now.
+    /// The proven value of `key` when it already completed on this
+    /// transaction (the demand-keyed [`FlowResultTable`](super::dispatch_txn::FlowResultTable)),
+    /// after replaying what its evaluation read, and its refusal if its
+    /// persistent admission is refused, into the scopes live now.
     ///
-    /// Such a member is proven but not yet published: its publish is
-    /// batched behind the machinery root, so the warm read cannot see it,
-    /// and without this every later demand re-evaluated the body. A body
+    /// Such a result is proven but not published yet, or never: its publish
+    /// is batched behind the machinery root, which may also refuse it, so
+    /// the warm read cannot be relied on, and without this every later
+    /// demand re-evaluated the body. A body
     /// whose callee is demanded both generically and under a call's
     /// instantiation — each of which re-demands both forms of ITS callee —
     /// then doubled per level: a generic call chain was exponential in its
@@ -2261,27 +2371,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// builds is its reads: the replay fans the recorded facts into the
     /// live tracers, re-deposits the canonical self-roots on the live
     /// build frame, and advances the canonical-evidence epoch when the
-    /// evaluation did. Only a CLEAN evaluation is reusable, so it had no
-    /// partial, cache-suppressing or non-cacheable rail to replay.
+    /// evaluation did, and a result whose persistent admission was refused
+    /// replays that refusal, so its consumers are refused exactly as the
+    /// evaluation refused them. Only a COMPLETE evaluation is kept, so it
+    /// had no partial rail to replay.
     fn reusable_completed_flow_member(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        let (value, reuse) = {
-            let txn = self.dispatch_txn.borrow();
-            let member = txn
-                .flow
-                .completed_members
-                .iter()
-                .rev()
-                .find(|member| &member.key == key)?;
-            let reuse = member.reuse.clone()?;
-            (member.result.value().clone(), reuse)
-        };
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&reuse.reads.facts);
-        self.deposit_operand_self_roots(&reuse.observed_self_roots);
-        if reuse.canonical_evidence_deposited {
+        let completed = self.dispatch_txn.borrow().flow.results.get(key)?.clone();
+        let replay = &completed.replay;
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        completed.reuse.replay_refusal();
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
             self.canonical_evidence_epoch
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
         }
-        Some(value)
+        Some(completed.value)
     }
 
     /// The return of an instantiated `key` read off its function's
@@ -2502,6 +2606,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         let run = || {
+            #[cfg(test)]
+            if self
+                .ctx
+                .host_for_fact_tracer_install()
+                .test_force
+                .force_flow_member_fenced_serve_for_tests
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                );
+            }
             let idx = self.flow_frame_open(&key);
             self.prepare_flow_return_demand(&key, idx);
             let evaluated = self.evaluate_flow_return(&key);
@@ -2533,7 +2649,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+        let started = crate::resolver_core::resolver_context::mark_evidence();
         let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let ended = crate::resolver_core::resolver_context::mark_evidence();
+        let refused = refusals.observed();
+        drop(refusals);
         let observed = frame.finish();
         let folded_partial =
             crate::request_context::current_cold_compute_completeness().is_partial();
@@ -2543,47 +2664,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The frame's rails reach the enclosing build exactly as if they had
         // folded there directly: OR, union and deduplicated roots commute.
         self.fold_observed_frame_into_top(&observed);
-        let clean = matches!(step, FlowReturnStep::Complete(_))
-            && !reads.non_cacheable
+        // Completion and retention are separate verdicts. A complete value
+        // whose persistent admission is refused for a typed, deterministic
+        // reason is still reusable for the rest of this transaction; an
+        // unattributed or transient refusal, or any partial taint, is not.
+        let complete = matches!(step, FlowReturnStep::Complete(_))
             && !observed.result_is_partial
-            && !observed.cache_suppress
             && !folded_partial;
-        if clean {
-            self.offer_flow_member_reuse(
-                &key,
-                queued_before,
-                super::dispatch_txn::FlowMemberReuse {
-                    reads,
-                    observed_self_roots: observed.observed_self_roots,
-                    canonical_evidence_deposited: self.canonical_evidence_epoch.get()
-                        != evidence_epoch,
-                },
-            );
+        let refusal = match refused {
+            Some(reason) => crate::resolver_core::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                crate::resolver_core::reuse::ObservedRefusal::Unattributed
+            }
+            None => crate::resolver_core::reuse::ObservedRefusal::None,
+        };
+        let reuse = crate::resolver_core::reuse::classify_reuse(refusal, complete);
+        if reuse.is_request_reusable() && self.closed_as_own_root(&key, queued_before) {
+            if let FlowReturnStep::Complete(value) = &step {
+                // Hierarchical evidence: the completed result's reads —
+                // its own facts and the receipts of what it consumed —
+                // become its receipt, which replaces them in every scope
+                // live around it and is all a later consumer observes.
+                let receipt = crate::resolver_core::resolver_context::complete_with_receipt(
+                    &started, &ended, &reads,
+                );
+                self.dispatch_txn.borrow_mut().flow.results.complete(
+                    key.clone(),
+                    super::dispatch_txn::TransactionFlowResult {
+                        value: value.clone(),
+                        reuse,
+                        replay: super::dispatch_txn::FlowMemberReuse {
+                            reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                                facts: std::sync::Arc::from(vec![receipt]),
+                                non_cacheable: reads.non_cacheable,
+                            },
+                            observed_self_roots: observed.observed_self_roots,
+                            canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                                != evidence_epoch,
+                        },
+                    },
+                );
+            }
         }
         step
     }
 
-    /// Mark the member `key` just closed as reusable on this transaction —
-    /// only if THIS evaluation queued it, i.e. it closed as its own proven
-    /// inline SCC root. A frame that closed provisionally queued nothing
-    /// yet, and an older member under the same key was produced by a
-    /// different evaluation than the one recorded. Members queued at or
-    /// after `queued_before` are this evaluation's: no machinery root can
-    /// drain the queue while an inline frame is open, and a nested frame
-    /// cannot share its key (the re-entry intercept holds it).
-    fn offer_flow_member_reuse(
-        &self,
-        key: &FlowReturnKey,
-        queued_before: usize,
-        reuse: super::dispatch_txn::FlowMemberReuse,
-    ) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let Some(queued) = txn.flow.completed_members.get_mut(queued_before..) else {
-            return;
-        };
-        if let Some(member) = queued.iter_mut().rev().find(|member| &member.key == key) {
-            member.reuse = Some(reuse);
-        }
+    /// Whether THIS evaluation of `key` queued its member, i.e. it closed
+    /// as its own proven inline SCC root, so its value came only from work
+    /// inside its frame — the only result the transaction keeps. A frame
+    /// that closed provisionally queued nothing yet, and a member closed
+    /// inside a larger component also rests on frames outside its own.
+    /// Members queued at or after `queued_before` are this evaluation's: no
+    /// machinery root can drain the queue while an inline frame is open,
+    /// and a nested frame cannot share its key (the re-entry intercept
+    /// holds it).
+    fn closed_as_own_root(&self, key: &FlowReturnKey, queued_before: usize) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .flow
+            .completed_members
+            .get(queued_before..)
+            .is_some_and(|queued| queued.iter().any(|member| &member.key == key))
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
@@ -4652,9 +4793,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     inline_flight,
                                     self_roots,
                                     materialized,
-                                    // Attached by the inline executor once
-                                    // it knows what the evaluation read.
-                                    reuse: None,
                                 },
                             );
                         }
@@ -5268,6 +5406,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
+        #[cfg(test)]
+        FLOW_EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + 1));
         self.with_relation_environment_of(&key.function.declaration_slot.defining_canonical, || {
             self.evaluate_flow_return_in_own_environment(key)
         })
@@ -7319,6 +7459,9 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
                     | SliceCall::TaggedTemplate(inner) => slice_expr_reads_frame(inner),
                     SliceCall::Member { receiver, .. } => slice_expr_reads_frame(receiver),
                     SliceCall::OnValue { object, .. } => slice_expr_reads_frame(object),
+                    SliceCall::OnElement { object, index } => {
+                        slice_expr_reads_frame(object) || slice_expr_reads_frame(index)
+                    }
                     SliceCall::OptionalChain { root, .. } => slice_expr_reads_frame(root),
                     SliceCall::LocalFunctionShadow | SliceCall::OnHeritage { .. } => false,
                 }
@@ -7454,6 +7597,10 @@ fn expression_effect_tree(
                         children.push(callee)
                     }
                     SliceCall::OnValue { object, .. } => children.push(object),
+                    SliceCall::OnElement { object, index } => {
+                        children.push(object);
+                        children.push(index);
+                    }
                     SliceCall::OptionalChain { root, .. } => children.push(root),
                     _ => {}
                 }
@@ -9145,6 +9292,19 @@ struct EvolvingPart {
     arm: ReductionArm,
     fresh: bool,
     fresh_values: Vec<SemanticNodeId>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many flow-return bodies this thread evaluated
+    /// ([`ProjectSemanticDispatch::evaluate_flow_return`]); test-only.
+    static FLOW_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many flow-return bodies this thread evaluated so far (test-only).
+#[cfg(test)]
+pub(crate) fn flow_evaluations_for_tests() -> usize {
+    FLOW_EVALUATIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -22662,6 +22822,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// A call of member `member` of the value `object`, its receiver:
+    /// resolved through the executor, which reads the receiver, else through
+    /// the one call sink.
+    fn call_member_of_value(
+        &mut self,
+        object: SemanticNodeId,
+        member: &Arc<str>,
+        site: crate::flow_slice_content::SliceCallSite,
+        arguments: &crate::flow_slice_content::SliceCallArguments,
+    ) -> Positional<CallValue> {
+        self.call_receivers.insert(site.span(), object);
+        let Some(callee) = self
+            .project_path_navigate(object, std::slice::from_ref(member))
+            .filter(|callee| {
+                !matches!(
+                    self.dispatch.graph().node_data(*callee).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                )
+            })
+        else {
+            return self.degraded_unrepresentable_callee();
+        };
+        if let Some(value) = self.eval_call_via_resolve_call(callee, site, arguments) {
+            return value;
+        }
+        self.call_return_of_callee_node(callee, site)
+    }
+
     /// Evaluate one flow expression to a graph node.
     ///
     /// [`Positional`] — so this function cannot report a FRAME failure at
@@ -24301,6 +24489,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                // A call of an `any` value (a call's `any` result) is the
+                // checker's untyped call: `any`.
+                if matches!(
+                    graph.node_data(signature).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                ) {
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
+                }
                 // A generic callee infers its clause from the arguments
                 // through the executor, as a binding-held one does.
                 if self.call_group_needs_executor(signature, site) {
@@ -24777,6 +24973,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 heritage,
                 member,
                 static_side,
+                this,
             } => {
                 // `super.m()` — the base member through the HERITAGE
                 // surface. The heritage expression's value type (the base
@@ -24799,8 +24996,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return self.degraded_unrepresentable_callee();
                 };
                 // The base member's polymorphic `this` is this class's own
-                // `this`, which the heritage read does not carry: it stays
-                // unbound, and the call sink gives the typed marker.
+                // `this`, never the base's instance; a frame whose `this`
+                // this evaluator cannot read leaves it unbound, and the call
+                // sink gives the typed marker.
+                let callee = if self.dispatch.receiver_this_types(callee).is_empty() {
+                    callee
+                } else {
+                    match this.as_ref().map(|this| self.eval_this(this)) {
+                        Some(Positional::Value(receiver)) => {
+                            self.dispatch.bind_callee_receiver(callee, receiver)
+                        }
+                        Some(Positional::Hold) => return Positional::Hold,
+                        Some(Positional::Unmodeled) | None => callee,
+                    }
+                };
                 self.call_return_of_callee_node(callee, site)
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
@@ -24898,11 +25107,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     )
                 };
                 let mut callee_node = receiver;
+                // The object the called member is read off: the call's
+                // receiver, which the executor route reads.
+                let mut object = receiver;
                 for name in member.iter() {
                     // A member of an `any` receiver is `any`.
                     if is_any(callee_node) {
                         break;
                     }
+                    object = callee_node;
                     let this_source = self.this_member_source(callee_node, name);
                     let Some(read) = this_source
                         .and_then(|source| self.receiver_non_public_member(source, name))
@@ -24925,6 +25138,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if is_any(callee_node) {
                     return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
+                self.call_receivers.insert(site.span(), object);
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
                 }
@@ -25069,22 +25283,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                self.call_receivers.insert(site.span(), object);
-                let Some(callee) = self
-                    .project_path_navigate(object, std::slice::from_ref(member))
-                    .filter(|callee| {
-                        !matches!(
-                            self.dispatch.graph().node_data(*callee).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        )
-                    })
-                else {
-                    return self.degraded_unrepresentable_callee();
+                self.call_member_of_value(object, member, site, arguments)
+            }
+            crate::flow_slice_content::SliceCall::OnElement { object, index } => {
+                // `t[k]()`: the key is a binding read (a leaf, evaluated
+                // here), and its literal type names the member of the
+                // object the call resolves over, the object its receiver.
+                // A key of any other type is the typed marker.
+                let object = match self.call_operand_value(object, site) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                if let Some(value) = self.eval_call_via_resolve_call(callee, site, arguments) {
-                    return value;
-                }
-                self.call_return_of_callee_node(callee, site)
+                let key = match self.eval_expr(index) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                let member: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::String(name),
+                    )) => Arc::from(name.as_str()),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Number(value),
+                    )) if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 => {
+                        Arc::from(format!("{}", *value as i64).as_str())
+                    }
+                    _ => return self.degraded_unrepresentable_callee(),
+                };
+                self.call_member_of_value(object, &member, site, arguments)
             }
             crate::flow_slice_content::SliceCall::Construct(constructor) => {
                 // `new C(…)` — the checker's `resolveNewExpression`: the
