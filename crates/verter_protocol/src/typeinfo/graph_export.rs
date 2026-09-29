@@ -600,11 +600,15 @@ impl<'a> GraphExporter<'a> {
                     },
                 ))
             }
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 let name_id = self.string_id(name);
+                let constraint_node_id = match constraint {
+                    Some(constraint) => self.expr_node(constraint, depth + 1),
+                    None => 0,
+                };
                 self.push_node(graph_type_node::Kind::InferNode(GraphInfer {
                     name_id,
-                    constraint_node_id: 0,
+                    constraint_node_id,
                 }))
             }
             TypeExpr::Rest(inner) => {

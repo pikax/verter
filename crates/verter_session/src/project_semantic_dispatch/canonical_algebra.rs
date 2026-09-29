@@ -3454,13 +3454,15 @@ fn compare_shallow(
             D::Infer {
                 name: na,
                 binder: ba,
+                constraint: ca,
             },
             D::Infer {
                 name: nb,
                 binder: bb,
+                constraint: cb,
             },
-        )
-        | (
+        ) => na == nb && ba == bb && push_opt(work, *ca, *cb),
+        (
             D::InferRef {
                 name: na,
                 binder: ba,

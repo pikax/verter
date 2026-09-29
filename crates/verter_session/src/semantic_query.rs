@@ -9872,10 +9872,12 @@ pub enum SemanticNodeData {
     /// Modelled as an explicit variant rather than
     /// encoded via scope overloading (rejects anti-pattern #3 — scope-
     /// as-discriminator). The `name` is the infer binding name the
-    /// `true` branch will substitute the bound type into.
+    /// `true` branch will substitute the bound type into; `constraint` is
+    /// the declared `infer X extends C` constraint.
     Infer {
         name: Arc<str>,
         binder: InferBinderId,
+        constraint: Option<SemanticNodeId>,
     },
     /// A true-branch REFERENCE to an in-scope `infer` binder — the node
     /// a `Ref { name }` occurrence resolves to through the conditional's
@@ -10355,12 +10357,14 @@ impl PartialEq for SemanticNodeData {
                 Self::Infer {
                     name: a,
                     binder: ab,
+                    constraint: ac,
                 },
                 Self::Infer {
                     name: b,
                     binder: bb,
+                    constraint: bc,
                 },
-            ) => a == b && ab == bb,
+            ) => a == b && ab == bb && ac == bc,
             (
                 Self::InferRef {
                     name: a,
@@ -10555,9 +10559,14 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name, binder } => {
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => {
                 name.hash(state);
                 binder.hash(state);
+                constraint.hash(state);
             }
             Self::InferRef { name, binder } => {
                 name.hash(state);

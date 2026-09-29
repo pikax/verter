@@ -943,6 +943,15 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
                 at(false_branch)
             )
         }
+        // An `infer` declaration prints with its constraint; a reference to
+        // one is its name.
+        SemanticNodeData::Infer {
+            name, constraint, ..
+        } => match constraint {
+            Some(constraint) => format!("infer {name} extends {}", at(*constraint)),
+            None => format!("infer {name}"),
+        },
+        SemanticNodeData::InferRef { name, .. } => name.to_string(),
         SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {

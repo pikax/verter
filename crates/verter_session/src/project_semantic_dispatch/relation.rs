@@ -202,6 +202,9 @@ pub(crate) enum InferPatternShape {
     /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
     /// template literal pattern.
     TemplateLiteral,
+    /// `T extends Box<infer P>` — `Infer` sites among the type arguments
+    /// of a reference to a generic declaration.
+    Reference,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -812,6 +815,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
@@ -882,6 +886,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
         let member_key = self.relate_key_for(string, number);
@@ -933,6 +938,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -4279,6 +4285,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
+                // A reference infers from its type arguments.
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 _ if self.subtree_contains_infer(node) => return None,
                 _ => {}
             }
@@ -4358,6 +4368,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // `infer` placeholders an element reaches through
+                        // structure or a reference (`[PE<infer M, any>]`)
+                        // are sites of the same pattern.
+                        for node in self
+                            .structural_infer_sites(element.value)
+                            .unwrap_or_default()
+                        {
+                            if let Some(SemanticNodeData::Infer { name, .. }) =
+                                graph.node_data(node).as_deref()
+                            {
+                                sites.push(InferParamSite {
+                                    node,
+                                    name: Arc::clone(name),
+                                    priority: InferenceCandidatePriority::Argument,
+                                });
+                            }
+                        }
                     }
                 }
                 (!sites.is_empty())
@@ -4456,6 +4484,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
+            }
+            Some(SemanticNodeData::InstantiationRef { .. }) => {
+                let sites: Vec<InferParamSite> = self
+                    .structural_infer_sites(target)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|node| match graph.node_data(node).as_deref() {
+                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                            node,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::Argument,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::Reference, sites, None))
             }
             Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
                 let sites: Vec<InferParamSite> = expressions
@@ -5795,6 +5840,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::Infer {
             name: base_name,
             binder: base_binder,
+            ..
         }) = graph.node_data(base_infer).as_deref().cloned()
         else {
             return Vec::new();
@@ -8411,8 +8457,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
-        // Two references to one generic declaration relate by their type
-        // arguments' variance before any structural comparison.
+        // Two references to one generic declaration infer from, and relate
+        // by, their type arguments' variance before any structural
+        // comparison.
+        if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            return result;
+        }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }
@@ -10358,7 +10408,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     graph.node_data(hole).as_deref(),
                     Some(SemanticNodeData::Infer { .. })
                 ) {
-                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    // A constrained hole converts its capture first
+                    // (`infer N extends number` takes `"42"` as `42`).
+                    match self.template_capture(slice, hole) {
+                        Some(capture) => {
+                            undecided |= !self.relation_deposit(hole, capture, occurrence);
+                        }
+                        None => undecided = true,
+                    }
                     continue;
                 }
                 match self.valid_for_template_placeholder(slice, hole) {

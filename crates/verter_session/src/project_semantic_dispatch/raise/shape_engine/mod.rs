@@ -185,6 +185,7 @@ enum RaisedTerm {
     },
     Infer {
         name: Arc<str>,
+        constraint: Option<RaisedShapeKey>,
     },
     /// Standalone `readonly` / rest `...T` (only reachable through
     /// [`type_expr_to_key`] over a caller-supplied `&TypeExpr`; the raiser
@@ -730,7 +731,7 @@ trait RaisedShapeAlgebra {
     // -- Leaves --
     fn primitive(&mut self, kind: PrimitiveName) -> Self::Out;
     fn literal(&mut self, value: LiteralValue) -> Self::Out;
-    fn infer(&mut self, name: Arc<str>) -> Self::Out;
+    fn infer(&mut self, name: Arc<str>, constraint: Option<Self::Out>) -> Self::Out;
     fn unknown(&mut self, value: UnknownValue) -> Self::Out;
     /// A TYPED resolver-control sentinel reaching the reverse boundary (an
     /// alias / type-param cycle, a sub-result raise miss, an unrepresentable

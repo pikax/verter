@@ -642,6 +642,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             )),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(TypeExpr::Ref {
                 name: Arc::from("T"),
@@ -653,6 +654,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(inner),
             false_type: Arc::new(loser),
@@ -935,6 +937,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("UnsupportedObjectPosition"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let signature = |kind, value| {
         graph.intern_node(SemanticNodeData::Signature {
@@ -1975,6 +1978,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Rest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let rest_pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2069,6 +2073,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("ExactRest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2147,6 +2152,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Tail"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -7311,6 +7317,7 @@ fn infer_in_closed_conditional_binds_via_relation() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: binder.clone(),
+        constraint: None,
     });
     let true_branch = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),
@@ -7384,11 +7391,13 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = simple_object(&graph, &[("a", infer_x)]);
     let true_branch = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let false_branch = primitive(&graph, PrimitiveKind::Never);
 
@@ -13900,6 +13909,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -14029,6 +14039,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = call_sig(infer_u, string_node);
 
@@ -14061,6 +14072,7 @@ fn reverse_test_binders(
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from(infer_name),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
@@ -14716,6 +14728,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let mapper_parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("<reverse-mapper>"),
@@ -15458,6 +15471,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("AbortFencedT"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let key = dispatch.relation_key_with_inference(dispatch.relate_key_for(string, infer));
     assert!(
@@ -15953,6 +15967,7 @@ fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("InactiveU"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = reverse_test_target(
         &graph,
@@ -19864,6 +19879,7 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let label_obj = simple_object(&graph, &[("label", string_ty)]);
     let node_cond = graph.intern_node(SemanticNodeData::Conditional {
@@ -26396,7 +26412,8 @@ fn typeof_instantiation_args_do_not_clobber_same_name_infer_declaration() {
     assert_eq!(
         expect_object_property(extends, "boxed", "extends carrier surface"),
         verter_type_expr::TypeExpr::Infer {
-            name: "T".to_string()
+            name: "T".to_string(),
+            constraint: None,
         },
         "the `infer T` declaration survives in the extends position"
     );
@@ -28459,6 +28476,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let string_ty = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
@@ -28618,6 +28636,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
@@ -28699,6 +28718,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let root = graph.intern_node(SemanticNodeData::Array {
         element: infer_t,

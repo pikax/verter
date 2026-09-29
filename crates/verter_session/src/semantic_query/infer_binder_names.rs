@@ -15,6 +15,7 @@ use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr};
 pub(crate) enum InferSyntaxPathStep {
     ParenthesizedInner,
     RestInner,
+    InferConstraint,
     KeyOfOperand,
     ArrayElement,
     UnionArm(u32),
@@ -169,11 +170,13 @@ impl std::fmt::Debug for InferSyntaxPath {
     }
 }
 
-/// One declaration introduced by a conditional's `extends` pattern.
+/// One declaration introduced by a conditional's `extends` pattern, with
+/// the constraint its first declaration writes (`infer X extends C`).
 #[derive(Debug, Clone)]
-pub(crate) struct InferDeclarationSite {
+pub(crate) struct InferDeclarationSite<'a> {
     pub(crate) name: Arc<str>,
     pub(crate) path: InferSyntaxPath,
+    pub(crate) constraint: Option<&'a TypeExpr>,
 }
 
 /// Visit every direct typed child of `expr`.
@@ -188,9 +191,13 @@ pub(crate) fn for_each_type_expr_child<'a>(
     match expr {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown(_) => {}
+        TypeExpr::Infer { constraint, .. } => {
+            if let Some(constraint) = constraint {
+                visit(InferSyntaxPathStep::InferConstraint, constraint);
+            }
+        }
         TypeExpr::Parenthesized(inner) => visit(InferSyntaxPathStep::ParenthesizedInner, inner),
         TypeExpr::Rest(inner) => visit(InferSyntaxPathStep::RestInner, inner),
         TypeExpr::KeyOf(inner) => visit(InferSyntaxPathStep::KeyOfOperand, inner),
@@ -405,22 +412,23 @@ fn index_subtree_paths(
 /// Discover exactly the declarations owned by one conditional `extends`
 /// pattern. A nested conditional is a new lexical owner, so its subtree is
 /// deliberately not visited by the enclosing collector.
-pub(crate) fn collect_extends_infer_declarations(
-    extends: &TypeExpr,
+pub(crate) fn collect_extends_infer_declarations<'a>(
+    extends: &'a TypeExpr,
     extends_path: &InferSyntaxPath,
-) -> Vec<InferDeclarationSite> {
+) -> Vec<InferDeclarationSite<'a>> {
     let mut declarations = Vec::new();
     let mut pending = vec![(extends, extends_path.clone())];
     while let Some((expr, path)) = pending.pop() {
         match expr {
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 if !declarations
                     .iter()
-                    .any(|site: &InferDeclarationSite| site.name.as_ref() == name.as_str())
+                    .any(|site: &InferDeclarationSite<'a>| site.name.as_ref() == name.as_str())
                 {
                     declarations.push(InferDeclarationSite {
                         name: Arc::from(name.as_str()),
                         path,
+                        constraint: constraint.as_deref(),
                     });
                 }
             }
