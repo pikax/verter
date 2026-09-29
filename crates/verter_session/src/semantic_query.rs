@@ -1979,6 +1979,12 @@ pub enum FlowReturnDegradation {
     /// A fabricated `any` is forbidden here: it is indistinguishable from
     /// an authored one at every downstream gate.
     UnmodeledPosition,
+    /// The evaluation composed its value from a member's body-derived
+    /// return whose evaluation closed degraded, read as a type
+    /// (`ReturnType<typeof C.m>`): the usable value is published, and the
+    /// answer carries the member's degradation as this typed reason rather
+    /// than publishing clean.
+    PartialInterior,
 }
 
 /// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`

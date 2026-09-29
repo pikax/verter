@@ -1868,19 +1868,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ([`DeclaredLiteralFreshness::WideningMembers`]): a read of it widens
     /// as a bare literal does (`k.r` over `readonly r = 1` is `number` at a
     /// return).
+    ///
+    /// A type parameter receiver reads through its constraint, and a union
+    /// receiver widens when every arm's declaration of the member holds a
+    /// fresh literal (the union property's type is their union, fresh when
+    /// it is one literal: `K | K2` over `class K2 extends K {}` reads
+    /// `number`; a union of two different literals is no fresh literal, so
+    /// `K | KS` reads `1 | 2`).
     pub(super) fn instance_member_read_widens(
         &self,
         instance: SemanticNodeId,
         member: &str,
     ) -> bool {
+        let instance = self.type_parameter_apparent_receiver(instance);
+        let arms: Vec<SemanticNodeId> = match self.graph().node_data(instance).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![instance],
+        };
+        arms.into_iter().all(|arm| {
+            let arm = self.type_parameter_apparent_receiver(arm);
+            self.instance_member_literal_is_fresh(arm, member) == Some(true)
+        })
+    }
+
+    /// Whether the declaration `member` of the class instance `instance`
+    /// reads off — the receiver's own, else the nearest base class or
+    /// interface that declares it (`class K2 extends K {}` reads `K`'s
+    /// `r`) — declares it by a fresh literal. `None` when the receiver is
+    /// no class reference or nothing in its ancestry declares it.
+    fn instance_member_literal_is_fresh(
+        &self,
+        instance: SemanticNodeId,
+        member: &str,
+    ) -> Option<bool> {
         use verter_type_expr::facts::DeclaredLiteralFreshness;
         let identity = match self.graph().node_data(instance).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
-            _ => return false,
+            _ => return None,
         };
-        // The member's declaration decides: the receiver's own, else the
-        // nearest base class or interface that declares it (`class K2
-        // extends K {}` reads `K`'s `r`).
         let ancestry = self.class_heritage_ancestry(&identity);
         self.deposit_operand_self_roots(&ancestry.observed);
         for declaration in std::iter::once(&identity).chain(ancestry.ancestors.iter()) {
@@ -1898,7 +1923,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
                 });
             if widens {
-                return true;
+                return Some(true);
             }
             let declares = self
                 .ctx
@@ -1914,10 +1939,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .any(|key| key.as_string() == Some(member))
                 });
             if declares {
-                return false;
+                return Some(false);
             }
         }
-        false
+        None
+    }
+
+    /// The type a member read off `receiver` reads through: a type
+    /// parameter's constraint (the checker's apparent type of a type
+    /// parameter), followed through a chain of constrained parameters. Any
+    /// other receiver, an unconstrained parameter, a polymorphic `this`
+    /// binder and a constraint cycle read as they are.
+    pub(super) fn type_parameter_apparent_receiver(
+        &self,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut current = receiver;
+        loop {
+            let next = match graph.node_data(current).as_deref() {
+                Some(SemanticNodeData::TypeParam {
+                    constraint: Some(constraint),
+                    param_index,
+                    ..
+                }) if *param_index != super::substitute::THIS_BINDER_INDEX => *constraint,
+                _ => return current,
+            };
+            if !visited.insert(current) {
+                return receiver;
+            }
+            current = next;
+        }
     }
 
     /// Whether a read of the value `path` names, in `canonical`'s `owner`

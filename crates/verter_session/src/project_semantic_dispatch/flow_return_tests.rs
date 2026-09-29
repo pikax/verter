@@ -4561,16 +4561,21 @@ fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
 }
 
 /// A binding WRITTEN in the try and read in the catch: the throw can
-/// precede the write, so the read must degrade rather than publish the
-/// entry value clean. tsgo: `{ v: "before" | "inside" }`.
+/// precede the write, so the catch reads the entry value and the written
+/// one — the catch is entered from the try's entry and from every mutation
+/// in it. tsc 7.0.2: `{ v: "before" | "inside" }`.
 #[test]
-fn flow_return_try_written_binding_degrades_at_catch_read() {
-    let (_, degradation) = flow_expr_for_script(
+fn flow_return_try_written_binding_joins_at_catch_read() {
+    let (expr, degradation) = flow_expr_for_script(
         "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }",
     );
+    assert_eq!(degradation, None);
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("before"),
+            string_literal("inside"),
+        ])]
     );
 }
 
@@ -5161,10 +5166,15 @@ fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
 
 #[test]
 fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    // A catch merges the try's entry with the state after each write and at
+    // each throw point of its block: `0`, `x = 1`, `x = 'b'`, `x = true`
+    // and the three throws are its seven predecessors. A finally merges the
+    // normal completion and the entry with each write and throw of the try
+    // and each pending return: seven again.
     for (source, predecessors) in [
         ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 4),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 4),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 7),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 7),
     ] {
         let (result, joins) = flow_source_probe_observed(source, true);
         assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
@@ -10321,25 +10331,25 @@ fn flow_return_finally_identity_membership_scales_with_written_subjects() {
 
 #[test]
 fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
-    // The existing catch policy retains its conditional-definition refusal.
-    // An unused binder must neither block the string write nor replace that
-    // established boundary with a product-selection failure.
+    // An unused binder must neither block the catch's write nor replace it
+    // with a product-selection failure. The write of `'s'` to `let x = 0`
+    // holds the declared `number` (the checker's assignment rule; tsc 7.0.2
+    // answers `number`), so the read is clean.
     for clause in ["catch(e)", "catch"] {
         let source =
             format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
         let result = flow_source_probe(&source);
         let FlowSourceProbe::Value {
             expr,
-            degradation:
-                Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
-            candidates: 0,
+            degradation: None,
+            candidates: 1,
         } = result
         else {
             panic!("{source}: {result:?}");
         };
         assert_eq!(
             expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
     }
     assert_eq!(
@@ -10689,15 +10699,22 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
         assert_eq!(member_types(&expr, "v"), expected, "{case}");
     }
     // The CHANGING write read inside the finally: the entering fact does
-    // not describe the written try end, so it cannot stand at the join,
-    // and the read of the clause-flagged value fails closed rather than
-    // publishing the pre-try `string` clean.
-    let (_, degradation) = flow_expr_cold_warm(
+    // not describe the written try end, so it cannot stand at the join;
+    // the finally reads the pre-try `string` and the written `number`
+    // (tsc 7.0.2: `{ v: string | number; } | { v: boolean; }`).
+    let (expr, degradation) = flow_expr_cold_warm(
         "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { return { v: p } } } return { v: true } }",
     );
+    assert_eq!(degradation, None, "changing write read inside the finally");
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+        member_types(&expr, "v"),
+        vec![
+            boolean,
+            verter_type_expr::TypeExpr::union(vec![
+                number,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ]),
+        ],
         "changing write read inside the finally"
     );
 }
@@ -11635,4 +11652,78 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     };
     assert_eq!(acquisitions(1), vec![1], "one caller");
     assert_eq!(acquisitions(4), vec![1; 4], "four callers");
+}
+
+/// Functions whose flow return is the checker's answer (TypeScript 7.0.2,
+/// all four settings) but whose evaluation CLOSES WITHOUT ITS PROOF: the
+/// finalizer's verdict is partial (an obligation left pending, or a typed
+/// gap), so the `FlowReturn` read is `ReturnOnly` with
+/// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`] —
+/// while the host flow-return boundary publishes the value clean, because
+/// the value itself carries no typed degradation.
+const UNPROVEN_CORRECT_RETURNS: &str = r#"
+declare function f<T>(x: T): T;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+declare function assertString(x: unknown): asserts x is string;
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+export function dpArrow(cb = () => 7) { return cb; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+"#;
+
+/// A correct flow answer closes with its proof: the `FlowReturn` read is
+/// complete, so a publication boundary that honours the verdict keeps it
+/// clean. The completeness design keeps every correct clean answer clean
+/// and admits no unproven one as exact, so these proofs must close before
+/// the boundary surfaces a partial verdict.
+///
+/// What the lane gives (each read `ReturnOnly`, `FLOW_RETURN_UNVERIFIED`):
+/// - `wContextual` (`1`): verdict partial, `IncompleteObligations`.
+/// - `dpArrow` (`() => number`): verdict partial, `Gap(ClosureCapture)`.
+/// - `p12` (`string`): verdict partial, `IncompleteObligations`.
+/// - `inSequence` (`string | number`): verdict partial,
+///   `IncompleteObligations`.
+///
+/// The same holds for `pReject` (`Promise<never>`, library-backed, in
+/// `differential_global_library_tests`), `guardedInSequence` and
+/// `sig_classStaticBlockAssigns`.
+#[test]
+#[ignore = "a correct flow answer closes with its proof"]
+fn a_correct_flow_answer_closes_with_its_proof() {
+    const FILE: &str = "/ws/unproven.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(FILE.to_string()),
+        input_id: FILE.to_string(),
+        source: Arc::from(UNPROVEN_CORRECT_RETURNS),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let mut unproven = Vec::new();
+    for name in ["wContextual", "dpArrow", "p12", "inSequence"] {
+        with_dispatch(&host, |dispatch| {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(FILE),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(FILE),
+                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: crate::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+            if read.result_is_partial {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            }
+        });
+    }
+    assert!(unproven.is_empty(), "{}", unproven.join("\n"));
 }

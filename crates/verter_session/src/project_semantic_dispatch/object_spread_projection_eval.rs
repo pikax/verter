@@ -768,6 +768,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Union(arms) => {
                 let arms = arms.members_arc();
                 drop(data);
+                // The object literal's own spread operand first merges a
+                // union of one object type and arms that spread into an
+                // empty object (the checker's
+                // `tryMergeUnionOfObjectTypeAndEmptyObject`): `{ ...o?.x }`
+                // copies `x`'s properties as optional ones, never a union
+                // of the copy and `{}`.
+                if depth == 0 {
+                    match self.merge_object_or_empty_union(&arms) {
+                        Some(UnionSpreadMerge::Empty) => return Ok(states),
+                        Some(UnionSpreadMerge::Partial(surface)) => {
+                            let mut alternative = self.surface_spread_alternative(&surface);
+                            for member in &mut alternative.members {
+                                member.presence = PositiveKeyPresence::Optional;
+                            }
+                            return Ok(states
+                                .into_iter()
+                                .map(|mut state| {
+                                    self.merge_spread_alternative(
+                                        &mut state,
+                                        &alternative,
+                                        context.optional_property_policy(),
+                                    );
+                                    state
+                                })
+                                .collect());
+                        }
+                        None => {}
+                    }
+                }
                 let product = states.len().saturating_mul(arms.len());
                 if arms.len() > DISTRIBUTION_CAP || product > DISTRIBUTION_CAP {
                     return Err(EvalFailure::DistributionLimit {
@@ -901,6 +930,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         Ok(merged)
+    }
+
+    /// The checker's `tryMergeUnionOfObjectTypeAndEmptyObject` over a spread
+    /// operand's union `arms`: every arm spreading into an empty object
+    /// merges to nothing; exactly one other arm, an object surface, merges
+    /// to its anonymous partial (every property optional). `None` for any
+    /// other union, which distributes.
+    fn merge_object_or_empty_union(&self, arms: &[SemanticNodeId]) -> Option<UnionSpreadMerge> {
+        let mut object = None;
+        for arm in arms.iter().copied() {
+            let arm = self.normalize_spread_operand_node(arm);
+            let data = self.graph().node_data(arm)?;
+            match data.as_ref() {
+                data if spreads_into_empty_object(data) => {}
+                SemanticNodeData::Object(surface) if object.is_none() => {
+                    object = Some(surface.clone());
+                }
+                _ => return None,
+            }
+        }
+        Some(match object {
+            None => UnionSpreadMerge::Empty,
+            Some(surface) => UnionSpreadMerge::Partial(surface),
+        })
     }
 
     fn surface_spread_alternative(
@@ -1222,6 +1275,41 @@ fn taint_indices(state: &mut EvalState) {
             index.spans(),
             index.declaration_origin().cloned(),
         );
+    }
+}
+
+/// What [`ProjectSemanticDispatch::merge_object_or_empty_union`] merged a
+/// spread operand's union to.
+enum UnionSpreadMerge {
+    /// Every arm spreads into an empty object.
+    Empty,
+    /// The one object arm, read as its anonymous partial.
+    Partial(crate::semantic_query::SurfaceView),
+}
+
+/// The checker's `isEmptyObjectTypeOrSpreadsIntoEmptyObject`: an empty
+/// object type, or a nullish, boolean-, number-, bigint- or string-like
+/// type, or `object`.
+fn spreads_into_empty_object(data: &SemanticNodeData) -> bool {
+    match data {
+        SemanticNodeData::Primitive(
+            PrimitiveKind::Null
+            | PrimitiveKind::Undefined
+            | PrimitiveKind::Boolean
+            | PrimitiveKind::Number
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::String
+            | PrimitiveKind::Object,
+        )
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::TemplateLiteral { .. } => true,
+        SemanticNodeData::Object(surface) => {
+            surface.positive_members().is_empty()
+                && surface.call_signatures.is_empty()
+                && surface.construct_signatures.is_empty()
+                && surface.index_signatures.is_empty()
+        }
+        _ => false,
     }
 }
 
