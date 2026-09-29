@@ -33,6 +33,7 @@ import {
   type VerterRenderProfile,
   type BundlerWarn,
 } from "./core/compiler";
+import { resolveThroughBundler, type ResolveHook } from "./core/bundler-resolve";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
@@ -179,26 +180,6 @@ async function fileExistsThroughWorkspaceOrDisk(pathname: string): Promise<boole
   }
 }
 
-type ResolveHook = (
-  source: string,
-  importer: string,
-  options: { skipSelf: true },
-) => Promise<unknown> | unknown;
-
-function resolvedIdFromHookResult(result: unknown): string | null {
-  if (!result) return null;
-  if (typeof result === "string") {
-    return result.startsWith("\0") || result.includes("?") ? null : result;
-  }
-  if (typeof result !== "object") return null;
-
-  const resolved = result as { id?: unknown; external?: unknown };
-  if (resolved.external) return null;
-  if (typeof resolved.id !== "string") return null;
-  if (resolved.id.startsWith("\0") || resolved.id.includes("?")) return null;
-  return resolved.id;
-}
-
 /**
  * Resolves external sources and type-dependency imports from an upsert result.
  * Shared between `transform()` and `buildStart()` (preCompile).
@@ -223,7 +204,7 @@ async function resolveUpsertDependencies(
       // while keeping the host-minted canonical ID as the VFS identity.
       const absPath = path.resolve(path.dirname(filename), specifier);
       const hookReadId = resolveId
-        ? resolvedIdFromHookResult(await resolveId(specifier, filename, { skipSelf: true }))
+        ? await resolveThroughBundler(resolveId, specifier, filename)
         : null;
       let extSource = hookReadId
         ? await readTextFileThroughWorkspaceOrDisk(hookReadId)
@@ -265,9 +246,7 @@ async function resolveUpsertDependencies(
     for (const specifier of dependencySpecifiers) {
       // Try bundler resolve hook first (if available)
       if (resolveId) {
-        const resolvedId = resolvedIdFromHookResult(
-          await resolveId(specifier, filename, { skipSelf: true }),
-        );
+        const resolvedId = await resolveThroughBundler(resolveId, specifier, filename);
         if (resolvedId) {
           if (resolvedId.endsWith(".vue")) {
             resolutions.push({ specifier, resolvedCanonicalId: normalizePath(resolvedId) });

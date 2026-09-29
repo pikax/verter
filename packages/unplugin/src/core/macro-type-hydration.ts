@@ -15,12 +15,7 @@
 import { dirname, join, parse, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import type { VerterHost, HostDependencyResolution, Workspace } from "@verter/native";
-
-type ResolveHook = (
-  source: string,
-  importer: string,
-  options: { skipSelf: true },
-) => Promise<unknown> | unknown;
+import { resolveThroughBundler, type ResolveHook } from "./bundler-resolve";
 
 /**
  * Minimal file access interface used by this module.
@@ -158,19 +153,6 @@ function parseBareSpecifier(specifier: string): { pkgName: string; subPath: stri
   return { pkgName: specifier.slice(0, slashIdx), subPath: specifier.slice(slashIdx + 1) };
 }
 
-function resolvedIdFromHookResult(result: unknown): string | null {
-  if (!result) return null;
-  if (typeof result === "string") {
-    return result.startsWith("\0") || result.includes("?") ? null : result;
-  }
-  if (typeof result !== "object") return null;
-  const resolved = result as { id?: unknown; external?: unknown };
-  if (resolved.external) return null;
-  if (typeof resolved.id !== "string") return null;
-  if (resolved.id.startsWith("\0") || resolved.id.includes("?")) return null;
-  return resolved.id;
-}
-
 /**
  * Find the declaration entry point for a package given the runtime entry.
  * Walks up from the resolved runtime file to find `package.json`, then
@@ -288,7 +270,7 @@ async function resolveTypeImportPath(
   resolveId?: ResolveHook,
 ): Promise<string | null> {
   if (resolveId) {
-    const result = resolvedIdFromHookResult(await resolveId(source, importer, { skipSelf: true }));
+    const result = await resolveThroughBundler(resolveId, source, importer);
     if (result) {
       const normalizedResult = normalizePath(result);
       // Closure traversal never walks into packages: a non-relative
@@ -506,9 +488,7 @@ export async function hydrateMacroTypeDeps(
 
     // Try bundler resolve hook
     if (resolveId) {
-      const result = resolvedIdFromHookResult(
-        await resolveId(specifier, filename, { skipSelf: true }),
-      );
+      const result = await resolveThroughBundler(resolveId, specifier, filename);
       if (result) resolvedPath = result;
     }
 
@@ -649,9 +629,7 @@ export async function hydrateMacroTypeDeps(
     // Try to resolve via bundler hook first
     let runtimeEntry: string | null = null;
     if (resolveId) {
-      const result = resolvedIdFromHookResult(
-        await resolveId(specifier, filename, { skipSelf: true }),
-      );
+      const result = await resolveThroughBundler(resolveId, specifier, filename);
       if (result) runtimeEntry = result;
     }
 

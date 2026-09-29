@@ -1808,6 +1808,52 @@ defineProps<AnimationOptions>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 
+  it("a bundler resolver that throws for a types-only package subpath still hydrates the declaration", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // The subpath is exported only under the `types` condition, so a bundler
+    // resolving with runtime conditions throws (rolldown does) rather than
+    // returning null. The transform must fall back to the package declaration.
+    const pkgDir = join(tempDir, "node_modules", "@scope", "audit-types");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@scope/audit-types",
+        type: "module",
+        exports: { "./audit": { types: "./audit.ts" } },
+      }),
+    );
+    writeFileSync(
+      join(pkgDir, "audit.ts"),
+      "export type AuditChain = { steps: string[] };\nexport interface AuditProps { chain: AuditChain; label?: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { AuditProps } from "@scope/audit-types/audit"
+defineProps<AuditProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@scope/audit-types/audit") {
+        throw new Error(`"./audit" is not exported under the conditions ["import"]`);
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(resolveSpy).toHaveBeenCalledWith("@scope/audit-types/audit", filename, {
+      skipSelf: true,
+    });
+    const code = result.code;
+    expect(code).toContain("chain");
+    expect(code).toContain("label");
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
   it("transform with relative type deps works via hydration (existing behavior preserved)", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
