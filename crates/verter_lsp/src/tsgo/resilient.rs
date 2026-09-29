@@ -77,6 +77,22 @@ impl ProviderEstablisher<TsgoOwnedProvider> for TsgoOwnedBackend {
     }
 }
 
+/// The wire policy for the owned engine's structural start announcements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedStartAnnouncements {
+    /// Announce every engine start (`$/verter/typeProviderStarted`). The
+    /// policy of every route whose managed engine is editor-visible from its
+    /// first serve — the tsgo route, and the tsserver override reclassified
+    /// onto it.
+    All,
+    /// Announce only crash replacements. The policy of the shared route's
+    /// managed fallback: the route attests "managed TSGO remains cold until an
+    /// observed attach failure", and that attestation is asserted over the
+    /// started-announcement channel, so the fallback's first serve must stay
+    /// off it. See [`LspNotifier::recovery_only`].
+    RecoveryOnly,
+}
+
 /// Establish the production OWNED dual-surface tsgo engine through its hub:
 /// ONE `tsgo --lsp` with the `--api` checker attached, recovered (re-spawned,
 /// re-attached, replayed) by the hub on every crash within `max_restarts`.
@@ -88,10 +104,15 @@ pub async fn establish_owned(
     root_uri: String,
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
+    announcements: OwnedStartAnnouncements,
 ) -> Result<ProviderHub<TsgoOwnedProvider>, TypeProviderError> {
+    let notifier = match announcements {
+        OwnedStartAnnouncements::All => LspNotifier::new(client, "tsgo"),
+        OwnedStartAnnouncements::RecoveryOnly => LspNotifier::recovery_only(client, "tsgo"),
+    };
     let hub = ProviderHub::new(
         TsgoOwnedBackend { tsgo_bin, root_uri },
-        Arc::new(LspNotifier::new(client, "tsgo")),
+        Arc::new(notifier),
         HubPolicy::explicit(max_restarts),
     );
     hub.establish().await?;

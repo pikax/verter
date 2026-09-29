@@ -88,6 +88,16 @@ pub enum NotifySeverity {
     Error,
 }
 
+/// Which kind of engine start a structural announcement describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineStart {
+    /// A fresh engine began serving this instance — its first installation, or
+    /// a re-activation after a failed attempt or a settled cooldown.
+    Initial,
+    /// A replacement engine took over from a crashed one within recovery.
+    Recovery,
+}
+
 /// Notification interface for provider lifecycle events.
 ///
 /// The LSP implements this to call `client.show_message()`.
@@ -103,9 +113,14 @@ pub trait ProviderNotifier: Send + Sync + 'static {
     /// its engine down and rebuilt it mid-flight is not a clean latency
     /// measurement, and nothing else on the wire says so.
     ///
+    /// [`EngineStart`] lets an adapter distinguish a first serve from a crash
+    /// replacement: the wire contract of a shared route attests its managed
+    /// fallback stays cold, so its adapter may announce replacements only,
+    /// while a route whose engine is announced at startup announces both.
+    ///
     /// Deliberately has no default body: a silent default is how a provider
     /// silently inherits behaviour it was supposed to override.
-    fn provider_started(&self, pid: Option<u32>);
+    fn provider_started(&self, pid: Option<u32>, start: EngineStart);
 }
 
 /// No-op notifier (logs via tracing only).
@@ -120,8 +135,8 @@ impl ProviderNotifier for TracingNotifier {
         }
     }
 
-    fn provider_started(&self, pid: Option<u32>) {
-        tracing::info!("type provider started (pid: {pid:?})");
+    fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
+        tracing::info!("type provider started (pid: {pid:?}, {start:?})");
     }
 }
 
@@ -640,7 +655,9 @@ where
                                 flight_state.establisher.log_name(),
                                 epoch.0
                             );
-                            flight_state.notifier.provider_started(pid);
+                            flight_state
+                                .notifier
+                                .provider_started(pid, EngineStart::Initial);
                         }
                         Err(error) => tracing::warn!(
                             "{} establishment failed: {error}",
@@ -886,7 +903,9 @@ where
                     NotifySeverity::Info,
                     "TypeScript server restarted successfully.".to_string(),
                 );
-                state.notifier.provider_started(installed.pid);
+                state
+                    .notifier
+                    .provider_started(installed.pid, EngineStart::Recovery);
                 return;
             }
             Err(error) => {

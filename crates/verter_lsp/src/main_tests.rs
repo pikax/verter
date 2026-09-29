@@ -248,8 +248,13 @@ async fn configured_workspace_admits_then_spawns() {
         cache_root: None,
         host_exe: None,
     };
-    let result =
-        try_spawn_tsgo_with_request(&root.to_string_lossy(), &client_cell, Some(request)).await;
+    let result = try_spawn_tsgo_with_request(
+        &root.to_string_lossy(),
+        &client_cell,
+        Some(request),
+        tsgo_resilient::OwnedStartAnnouncements::All,
+    )
+    .await;
     // The two assertions below fail on different worlds. `log.exists()` is the
     // primary claim — admission passed and the resolver THEN spawned — and it
     // already catches a tier-1 leak by itself: a leaked engine validates before

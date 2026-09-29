@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{Notify, Semaphore};
+use futures_util::StreamExt as _;
+use tokio::sync::{Notify, OnceCell, Semaphore};
+use tower_lsp_server::Client;
 
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
@@ -571,5 +573,151 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
             MockCall::ResolveCompletion { path, .. } if path == "/project/src/App.vue.tsx"
         )),
         "resolve_completion should be forwarded to the inner provider"
+    );
+}
+
+// ── Structural start announcements on the real LSP wire ───────────────────
+//
+// The shared-tsgo route attests "managed TSGO remains cold until an observed
+// attach failure", and the editor-neutral contract asserts exactly that over
+// the `$/verter/typeProviderStarted` channel: no started notification may
+// appear while the relay is alive. The composite still activates the managed
+// fallback for carriers whose generated units are not admitted to their
+// owning project, so the fallback's notifier — not its lifecycle — is what
+// keeps that attestation truthful on the wire.
+
+/// A handshake-only `LanguageServer` so a real
+/// [`tower_lsp_server::Client`](Client) with its outgoing socket exists
+/// in-process for the wire tests below.
+struct HandshakeOnlyServer;
+
+impl tower_lsp_server::LanguageServer for HandshakeOnlyServer {
+    async fn initialize(
+        &self,
+        _params: tower_lsp_server::ls_types::InitializeParams,
+    ) -> Result<tower_lsp_server::ls_types::InitializeResult, tower_lsp_server::jsonrpc::Error>
+    {
+        Ok(tower_lsp_server::ls_types::InitializeResult::default())
+    }
+
+    async fn shutdown(&self) -> Result<(), tower_lsp_server::jsonrpc::Error> {
+        Ok(())
+    }
+}
+
+/// Drive one real [`Client`] through a completed handshake and return it with
+/// the outgoing socket the editor would read. Structural start announcements
+/// are suppressed by the client until the server is initialized, so the
+/// handshake is part of the fixture, not optional setup. The socket is the
+/// undrained server→client stream: every notification the client sends lands
+/// there, in order.
+async fn initialized_client_with_socket() -> (Arc<OnceCell<Client>>, tower_lsp_server::ClientSocket)
+{
+    let client_cell: Arc<OnceCell<Client>> = Arc::new(OnceCell::new());
+    let cell_for_init = Arc::clone(&client_cell);
+    let (mut service, socket) = tower_lsp_server::LspService::new(move |client| {
+        let _ = cell_for_init.set(client);
+        HandshakeOnlyServer
+    });
+    use tower_service::Service as _;
+    let params = serde_json::to_value(tower_lsp_server::ls_types::InitializeParams::default())
+        .expect("initialize params serialize");
+    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
+        .params(params)
+        .id(1)
+        .finish();
+    futures_util::future::poll_fn(|cx| service.poll_ready(cx))
+        .await
+        .expect("the service accepts the handshake");
+    let _ = service.call(initialize).await;
+    (client_cell, socket)
+}
+
+/// The shared route's managed fallback: the engine's INITIAL start must stay
+/// off the `$/verter/typeProviderStarted` wire (the attested promise), while a
+/// crash REPLACEMENT is still announced so the editor's pid tracking follows
+/// the fresh child.
+///
+/// RED against the pre-fix announce-everything notifier: the initial engine's
+/// pid reaches the wire, which is exactly the CI failure shape ("managed
+/// fallback was activated: startedKinds=[\"tsgo\"]").
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_announced() {
+    let (client_cell, wire) = initialized_client_with_socket().await;
+    let mut wire = wire;
+
+    let initial = MockTypeProvider::new();
+    initial.set_child_pid(Some(4321));
+    let replacement = MockTypeProvider::new();
+    replacement.set_child_pid(Some(8765));
+
+    let spawn_gate = Arc::new(Semaphore::new(0));
+    let initial_crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>> =
+        Arc::new(parking_lot::Mutex::new(None));
+    let provider = ProviderHub::new(
+        TestBackend {
+            initial: parking_lot::Mutex::new(Some(initial)),
+            initial_crash_notify: Arc::clone(&initial_crash_notify),
+            replacement,
+            spawn_gate: Arc::clone(&spawn_gate),
+        },
+        Arc::new(LspNotifier::recovery_only(Arc::clone(&client_cell), "tsgo")),
+        HubPolicy::explicit(3),
+    );
+    provider
+        .establish()
+        .await
+        .expect("the first establishment installs the initial engine");
+    let crash_notify = initial_crash_notify
+        .lock()
+        .clone()
+        .expect("the initial engine received its crash signal");
+
+    assert!(
+        wait_for_restarting(&provider, &crash_notify).await,
+        "inner provider should be down (restarting) after crash notify"
+    );
+    spawn_gate.add_permits(1);
+
+    // Drain the outgoing wire until the respawn's announcement. Every item is
+    // inspected, so an initial-start announcement is caught wherever it lands.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut started = Vec::new();
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("the respawn must announce itself on the wire within 30s");
+        let message = tokio::time::timeout(remaining, wire.next())
+            .await
+            .expect("the respawn announcement arrives within the bound")
+            .expect("the wire stays open while the hub serves");
+        if message.method() != "$/verter/typeProviderStarted" {
+            continue;
+        }
+        let params = message.params().expect("started carries params");
+        let pid = params
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .expect("started carries a numeric pid");
+        let kind = params
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .expect("started carries a provider kind");
+        assert_eq!(kind, "tsgo", "the fallback engine is announced as tsgo");
+        assert_ne!(
+            pid, 4321,
+            "the shared fallback's INITIAL engine start must stay off the wire — the route \
+             attests the managed engine stays cold, and that attestation is asserted \
+             over exactly this channel"
+        );
+        started.push(pid);
+        if pid == 8765 {
+            break;
+        }
+    }
+    assert_eq!(
+        started,
+        vec![8765],
+        "exactly one structural start — the crash replacement — may reach the wire"
     );
 }

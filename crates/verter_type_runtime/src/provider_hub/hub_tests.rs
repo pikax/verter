@@ -29,8 +29,8 @@ use verter_identity::identity::ProviderEpoch;
 
 use super::desired::{DesiredMutation, Lane};
 use super::{
-    AppliedReceipt, EstablishFuture, HubPolicy, NotifySeverity, ProviderEstablisher, ProviderHub,
-    ProviderNotifier, QueryFingerprint, TracingNotifier,
+    AppliedReceipt, EngineStart, EstablishFuture, HubPolicy, NotifySeverity, ProviderEstablisher,
+    ProviderHub, ProviderNotifier, QueryFingerprint, TracingNotifier,
 };
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
@@ -546,9 +546,10 @@ async fn a_respawned_provider_is_announced_structurally() {
         .await
         .unwrap();
     assert_eq!(
-        harness.notifier.started().len(),
-        1,
-        "the hub announces the child it established itself — exactly once"
+        harness.notifier.started(),
+        vec![(None, EngineStart::Initial)],
+        "the hub announces the child it established itself — exactly once, as an \
+         initial start"
     );
 
     harness.crash_current_generation();
@@ -560,10 +561,11 @@ async fn a_respawned_provider_is_announced_structurally() {
     harness.notifier.await_started(2).await;
 
     assert_eq!(
-        harness.notifier.started().len(),
-        2,
-        "a post-crash respawn must announce its fresh child structurally, got \
-         messages={:?}",
+        harness.notifier.started(),
+        vec![(None, EngineStart::Initial), (None, EngineStart::Recovery)],
+        "a post-crash respawn must announce its fresh child structurally as a \
+         RECOVERY start (the classification an adapter's wire policy keys on), \
+         got messages={:?}",
         harness.notifier.messages()
     );
 }
@@ -573,7 +575,7 @@ async fn a_respawned_provider_is_announced_structurally() {
 #[derive(Default)]
 struct RecordingNotifier {
     messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
-    started: parking_lot::Mutex<Vec<Option<u32>>>,
+    started: parking_lot::Mutex<Vec<(Option<u32>, EngineStart)>>,
     /// Signalled on every structural start announcement — event-driven
     /// synchronization for tests awaiting a respawn.
     started_signal: Notify,
@@ -584,7 +586,7 @@ impl RecordingNotifier {
         self.messages.lock().clone()
     }
 
-    fn started(&self) -> Vec<Option<u32>> {
+    fn started(&self) -> Vec<(Option<u32>, EngineStart)> {
         self.started.lock().clone()
     }
 
@@ -616,8 +618,8 @@ impl ProviderNotifier for RecordingNotifier {
         self.messages.lock().push((severity, message));
     }
 
-    fn provider_started(&self, pid: Option<u32>) {
-        self.started.lock().push(pid);
+    fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
+        self.started.lock().push((pid, start));
         self.started_signal.notify_one();
     }
 }

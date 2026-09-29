@@ -414,6 +414,7 @@ async fn vue_only_owner_preserves_managed_lsp_mutation_diagnostics() {
         root_uri,
         Arc::new(OnceCell::<Client>::new()),
         3,
+        verter_lsp::tsgo::resilient::OwnedStartAnnouncements::All,
     )
     .await
     .expect("establish the production owned tsgo engine");

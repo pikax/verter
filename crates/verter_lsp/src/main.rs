@@ -992,7 +992,32 @@ async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<Arc<dyn TypeProvider>, String> {
-    try_spawn_tsgo_with_request(workspace_root, client_cell, None).await
+    try_spawn_tsgo_with_request(
+        workspace_root,
+        client_cell,
+        None,
+        tsgo_resilient::OwnedStartAnnouncements::All,
+    )
+    .await
+}
+
+/// [`try_spawn_tsgo`] for the shared route's managed fallback: the owned
+/// engine it establishes keeps its INITIAL start off the
+/// `$/verter/typeProviderStarted` channel, because the route attests that the
+/// managed engine stays cold until an observed attach failure and that
+/// attestation is asserted over exactly this channel. A crash replacement is
+/// still announced, so the editor's pid tracking follows the fresh child.
+async fn try_spawn_tsgo_shared_fallback(
+    workspace_root: &str,
+    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+) -> Result<Arc<dyn TypeProvider>, String> {
+    try_spawn_tsgo_with_request(
+        workspace_root,
+        client_cell,
+        None,
+        tsgo_resilient::OwnedStartAnnouncements::RecoveryOnly,
+    )
+    .await
 }
 
 /// [`try_spawn_tsgo`] with an explicit toolchain-resolution request (the seam the
@@ -1022,6 +1047,7 @@ async fn try_spawn_tsgo_with_request(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     request: Option<verter_tsgo_api::toolchain::discovery::ResolutionRequest>,
+    announcements: tsgo_resilient::OwnedStartAnnouncements,
 ) -> Result<Arc<dyn TypeProvider>, String> {
     // The SPAWN PRECONDITION, checked FIRST: owned tsgo is project-bound, so
     // require AT LEAST ONE configured project ANYWHERE under the workspace
@@ -1075,10 +1101,15 @@ async fn try_spawn_tsgo_with_request(
     // features + the user-facing diagnostics (gated on the carrier's resolved
     // `BoundProject` by the admission layer). A probe / wire-gate / attach
     // failure fails closed rather than silently degrading the typecheck oracle.
-    let owned =
-        tsgo_resilient::establish_owned(tsgo_bin.clone(), root_uri, Arc::clone(client_cell), 3)
-            .await
-            .map_err(|error| format!("found tsgo at {tsgo_bin}, but {error}"))?;
+    let owned = tsgo_resilient::establish_owned(
+        tsgo_bin.clone(),
+        root_uri,
+        Arc::clone(client_cell),
+        3,
+        announcements,
+    )
+    .await
+    .map_err(|error| format!("found tsgo at {tsgo_bin}, but {error}"))?;
     tracing::info!("TSGO owned dual-surface provider started (--api attached, hub-managed)");
     Ok(Arc::new(owned))
 }
@@ -1129,7 +1160,7 @@ fn wrap_shared_first_admission(
         let host = Arc::clone(&host_for_fallback);
         let client_cell = Arc::clone(&client_cell);
         async move {
-            match try_spawn_tsgo(&workspace_root, &client_cell).await {
+            match try_spawn_tsgo_shared_fallback(&workspace_root, &client_cell).await {
                 Ok(provider) => Ok(provider),
                 Err(tsgo_reason) => {
                     tracing::warn!(
