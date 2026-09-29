@@ -129,6 +129,18 @@ Per-engine availability matrix: `display_signature` — both engines wherever th
 
 ### Per-Project tsserver Routing (`tsserver/project_router.rs`)
 
+Generated-unit requests and writes bind through `ProviderHub::bind_project` and
+`admit_request_with`. The LSP retains the exact `PublishedRoot` used by the
+canonical resolver and supplies a live publication/content/project-generation
+reader; the hub binds that basis to the actual serving provider and epoch.
+The workspace membership query mints the complete proof for the requested
+unit set. Warm same-basis requests reuse the hub admission, while an excluded,
+missing, stale or wrong-project proof refuses before a provider query or write.
+Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
+Generated state is retained only after an applied receipt. Recovery discards
+the old epoch's generated overlays; the replacement requires fresh admission
+before receiving them. Request answers are fenced again at settlement.
+
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 
 - **Engine identity** is `(owning tsconfig, real canonical `tsserver.js`)`. Two projects that resolve the same install share one process; two projects on different TypeScript versions never do.

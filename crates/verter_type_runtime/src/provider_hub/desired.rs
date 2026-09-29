@@ -10,6 +10,7 @@ use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
+use super::admission::AdmittedRequest;
 use crate::protocol::TypeProviderError;
 use crate::traits::{CarrierActivation, CarrierScriptKind, TypeProvider};
 
@@ -154,12 +155,28 @@ pub(super) struct DesiredState {
     path_configs: Vec<DesiredPathConfig>,
     workspace_folders: Vec<serde_json::Value>,
     carriers: BTreeMap<String, DesiredCarrier>,
+    admitted: HashMap<String, AdmittedRequest>,
 }
 
 impl DesiredState {
+    /// Discover the only mutation that must be suppressed before forwarding.
+    pub(super) fn disposition(&self, mutation: &DesiredMutation) -> Disposition {
+        match mutation {
+            DesiredMutation::Load { path, .. }
+                if self
+                    .files
+                    .get(path)
+                    .is_some_and(|file| file.mode == FileMode::Open) =>
+            {
+                Disposition::Shadowed
+            }
+            _ => Disposition::Forward,
+        }
+    }
+
     /// Record a mutation's durable effect.
     pub(super) fn apply(&mut self, mutation: &DesiredMutation, lane: Lane) -> Disposition {
-        match mutation {
+        let disposition = match mutation {
             DesiredMutation::Open { path, content } | DesiredMutation::Update { path, content } => {
                 self.record_file(path, content, FileMode::Open, lane)
             }
@@ -261,7 +278,40 @@ impl DesiredState {
                 }
                 Disposition::Forward
             }
+        };
+        if disposition == Disposition::Forward {
+            for path in mutation.touched_paths() {
+                self.admitted.remove(&path);
+            }
         }
+        disposition
+    }
+
+    /// Mark successfully applied generated state. A replacement needs a new
+    /// serving-epoch admission before any of these units can be written again.
+    pub(super) fn record_admitted(
+        &mut self,
+        mutation: &DesiredMutation,
+        admissions: &[AdmittedRequest],
+    ) {
+        for (path, admission) in mutation.touched_paths().into_iter().zip(admissions) {
+            self.admitted.insert(path, admission.clone());
+        }
+    }
+
+    fn replay_admitted(&self, path: &str) -> bool {
+        !self.admitted.contains_key(path)
+    }
+
+    /// Once replacement replay has finished, remove old-epoch generated state.
+    /// Otherwise a later discovery load could be shadowed by an open overlay
+    /// that the replacement never received.
+    pub(super) fn discard_admitted(&mut self) {
+        for path in self.admitted.keys() {
+            self.files.remove(path);
+            self.carriers.remove(path);
+        }
+        self.admitted.clear();
     }
 
     fn activate(
@@ -337,6 +387,9 @@ impl DesiredState {
         let mut files: Vec<(&String, &DesiredFile)> = self.files.iter().collect();
         files.sort_unstable_by_key(|(_, file)| file.first_live);
         for (path, file) in files {
+            if !self.replay_admitted(path) {
+                continue;
+            }
             let replayed = match (file.mode, file.lane) {
                 (FileMode::Open, Lane::Foreground) => provider.open_file(path, &file.content),
                 (FileMode::Open, Lane::Normal) => provider.open_file_normal(path, &file.content),
@@ -366,6 +419,9 @@ impl DesiredState {
         // different parsing mode than the live activation used.
         let mut activations: Vec<CarrierActivation> = Vec::new();
         for (companion_path, carrier) in &self.carriers {
+            if !self.replay_admitted(companion_path) {
+                continue;
+            }
             let registration = if carrier.active && carrier.script_kind.is_none() {
                 provider.register_carrier_member(
                     &carrier.source_path,

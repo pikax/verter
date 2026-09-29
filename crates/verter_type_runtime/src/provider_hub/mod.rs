@@ -67,12 +67,17 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::protocol::TypeProviderError;
 use crate::traits::TypeProvider;
 
+mod admission;
 mod desired;
 mod epoch;
 mod forwarding;
 mod quarantine;
 mod transport;
 
+pub use admission::{
+    AdmissionRefusal, AdmittedRequest, OverlayFileKind, OverlayMutation, OverlayPriority,
+    ProjectBasis, ProjectBindingInput, ProjectWitness,
+};
 use desired::{DesiredMutation, DesiredState, Disposition, Lane};
 use epoch::EpochMint;
 use quarantine::{InFlightGuard, QueryFingerprint, QueryWatch};
@@ -269,6 +274,7 @@ struct Shared<P: ?Sized> {
     epochs: EpochMint,
     lifecycle: StdMutex<Lifecycle>,
     query_watch: Arc<StdMutex<QueryWatch>>,
+    admission: StdMutex<admission::AdmissionState>,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -312,6 +318,15 @@ enum Command<P: ?Sized> {
         lane: Lane,
         deadline: Option<tokio::time::Instant>,
         ack: oneshot::Sender<Result<AppliedReceipt, TypeProviderError>>,
+    },
+    /// An admitted generated unit is forwarded only to the exact serving
+    /// incarnation. It is never put in desired state for unproven replay.
+    ApplyOverlay {
+        mutation: DesiredMutation,
+        admissions: Vec<AdmittedRequest>,
+        lane: Lane,
+        deadline: Option<tokio::time::Instant>,
+        ack: oneshot::Sender<Result<AppliedReceipt, AdmissionRefusal>>,
     },
     /// The engine serving `epoch` died: retire it so queries fail closed.
     Retire {
@@ -388,6 +403,7 @@ where
                 last_failure: None,
             }),
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
+            admission: StdMutex::new(admission::AdmissionState::default()),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
@@ -1003,6 +1019,94 @@ async fn run_actor<P>(
             },
         };
         match command {
+            Command::ApplyOverlay {
+                mutation,
+                admissions,
+                lane,
+                deadline,
+                ack,
+            } => {
+                let current = || {
+                    admissions
+                        .iter()
+                        .try_for_each(|admission| admission::check_current(&shared, admission))
+                };
+                let result = if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                    Err(AdmissionRefusal::DeadlineElapsed)
+                } else {
+                    match current() {
+                        Err(reason) => Err(reason),
+                        Ok(()) => {
+                            let serving = shared
+                                .serving()
+                                .expect("admission checked serving provider");
+                            let disposition = desired.disposition(&mutation);
+                            if disposition == Disposition::Shadowed {
+                                Ok(AppliedReceipt {
+                                    epoch: Some(serving.epoch),
+                                })
+                            } else {
+                                let forwarding = async {
+                                    let forwarded = desired::forward(
+                                        serving.provider.as_ref(),
+                                        &mutation,
+                                        lane,
+                                    );
+                                    match deadline {
+                                        Some(at) => {
+                                            crate::deadline::with_deadline_at(at, forwarded).await
+                                        }
+                                        None => forwarded.await,
+                                    }
+                                };
+                                match await_receptive(
+                                    forwarding,
+                                    Some(serving.epoch),
+                                    &mut command_rx,
+                                    &mut queued,
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {
+                                        match current() {
+                                            Ok(()) => {
+                                                desired.apply(&mutation, lane);
+                                                desired.record_admitted(&mutation, &admissions);
+                                                Ok(AppliedReceipt {
+                                                    epoch: Some(serving.epoch),
+                                                })
+                                            }
+                                            Err(reason) => {
+                                                // A publication raced the forward. The engine
+                                                // may now contain an unadmitted unit, so it cannot
+                                                // serve or replay that state into another epoch.
+                                                retire(&shared, serving.epoch).await;
+                                                Err(reason)
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(_)) => {
+                                        // A partial provider write cannot be allowed to serve.
+                                        retire(&shared, serving.epoch).await;
+                                        Err(AdmissionRefusal::ProviderWriteFailed)
+                                    }
+                                    Err(Interrupt::Retired(retired)) => {
+                                        retire(&shared, serving.epoch).await;
+                                        let _ = retired.send(());
+                                        Err(AdmissionRefusal::StaleProvider)
+                                    }
+                                    Err(Interrupt::Shutdown(done)) => {
+                                        shutdown_serving(&shared).await;
+                                        let _ = done.send(());
+                                        Err(AdmissionRefusal::StaleProvider)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                let _ = ack.send(result);
+            }
             Command::Mutate {
                 mutation,
                 lane,
@@ -1150,6 +1254,7 @@ async fn run_actor<P>(
                     };
                 match outcome {
                     Ok(()) => {
+                        desired.discard_admitted();
                         let epoch = shared.epochs.mint();
                         // Record the installed engine's tier BEFORE releasing
                         // it into the serving cell: from that instant

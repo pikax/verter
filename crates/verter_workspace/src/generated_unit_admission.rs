@@ -58,7 +58,9 @@ pub enum GeneratedUnitNonAdmissionReason {
 /// determining configuration; any change to `include`/`files`/`exclude`, to the
 /// unit set, or to which projects claim a unit changes it.
 ///
-/// In-process only (it keys in-memory caches); never persisted.
+/// In-process only (it keys in-memory caches); never persisted. A separate
+/// snapshot pointer on the admitted proof ties it to the immutable membership
+/// snapshot for provider-hub admission; the fingerprint alone is not authority.
 ///
 /// A fingerprint is an IDENTITY, not a proof: it names which admission a cached
 /// decision was made under. The proof that units may be written is
@@ -90,6 +92,10 @@ pub struct AdmittedGeneratedUnits {
     /// Sorted, de-duplicated.
     units: Vec<CanonicalPath>,
     fingerprint: GeneratedUnitAdmissionFingerprint,
+    /// In-process identity of the immutable membership snapshot that minted
+    /// this proof. A retained publication prevents address reuse while the
+    /// proof is used to admit a provider write.
+    snapshot_identity: usize,
 }
 
 impl AdmittedGeneratedUnits {
@@ -115,6 +121,11 @@ impl AdmittedGeneratedUnits {
     #[must_use]
     pub fn fingerprint(&self) -> GeneratedUnitAdmissionFingerprint {
         self.fingerprint
+    }
+
+    #[must_use]
+    pub fn snapshot_identity(&self) -> usize {
+        self.snapshot_identity
     }
 }
 
@@ -189,6 +200,7 @@ pub fn decide_generated_unit_admission(
                 tsconfig_path: owning_tsconfig.clone(),
                 units,
                 fingerprint: GeneratedUnitAdmissionFingerprint(hasher.finish()),
+                snapshot_identity: std::ptr::from_ref(snapshot) as usize,
             });
         }
         return GeneratedUnitAdmission::NotAdmitted(GeneratedUnitNonAdmission {
@@ -231,6 +243,7 @@ pub fn decide_generated_unit_admission(
             tsconfig_path: owning_tsconfig.clone(),
             units,
             fingerprint: GeneratedUnitAdmissionFingerprint(hasher.finish()),
+            snapshot_identity: std::ptr::from_ref(snapshot) as usize,
         })
     } else {
         GeneratedUnitAdmission::NotAdmitted(GeneratedUnitNonAdmission { offending })

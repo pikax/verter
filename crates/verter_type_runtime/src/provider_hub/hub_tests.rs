@@ -36,6 +36,247 @@ use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::TsserverTypeProvider;
 
+#[tokio::test]
+async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis,
+        ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        basis.clone(),
+        Arc::clone(&reader),
+    );
+    let witness = harness.provider.bind_project(input.clone()).unwrap();
+    assert!(witness.same_binding(&harness.provider.bind_project(input).unwrap()));
+    assert!(matches!(
+        harness
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), None),
+        Err(AdmissionRefusal::MissingGeneratedProof)
+    ));
+    assert!(matches!(
+        harness.provider.admit_request(&witness, &[], Some(&proof)),
+        Err(AdmissionRefusal::IncompleteGeneratedProof)
+    ));
+    assert!(engine.calls().is_empty());
+    let admitted = harness
+        .provider
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    let resolutions = AtomicUsize::new(0);
+    for _ in 0..2 {
+        harness
+            .provider
+            .admit_request_with(&witness, std::slice::from_ref(&unit), || {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                proof.clone()
+            })
+            .unwrap();
+    }
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    let other_hub = make_harness(engine.clone(), MockProvider::new("tsgo")).await;
+    assert!(matches!(
+        other_hub
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof)),
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert!(engine.calls().is_empty());
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::File {
+                path: unit.as_str().into(),
+                content: "export {};".into(),
+                kind: OverlayFileKind::Open,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.calls().len(), 1);
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_eq!(
+        replacement.calls().len(),
+        0,
+        "a replacement has no admission for the old provider's generated unit"
+    );
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "old epoch".into(),
+                    kind: OverlayFileKind::Update,
+                    priority: OverlayPriority::Foreground,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert_eq!(replacement.calls().len(), 0);
+
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        1,
+        1,
+    );
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "stale".into(),
+                    kind: OverlayFileKind::Open,
+                    priority: OverlayPriority::Foreground,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert_eq!(engine.calls().len(), 1);
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(3).await;
+    assert_eq!(replacement.calls().len(), 0, "a stale proof cannot replay");
+
+    let rebuilt = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let rebuilt_basis = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&rebuilt))),
+        1,
+        1,
+    );
+    *live.lock().unwrap() = rebuilt_basis.clone();
+    let rebound = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            Vec::new(),
+            rebuilt_basis.clone(),
+            Arc::clone(&reader),
+        ))
+        .unwrap();
+    assert!(matches!(
+        harness
+            .provider
+            .admit_request(&rebound, std::slice::from_ref(&unit), Some(&proof)),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert_eq!(engine.calls().len(), 1);
+    let fresh_proof = decide_generated_unit_admission(
+        &rebuilt,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    let fresh_admission = harness
+        .provider
+        .admit_request(&rebound, std::slice::from_ref(&unit), Some(&fresh_proof))
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &fresh_admission,
+            OverlayMutation::File {
+                path: unit.as_str().into(),
+                content: "fresh epoch".into(),
+                kind: OverlayFileKind::Load,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement.calls().len(),
+        1,
+        "fresh admission must reach replacement despite the old open overlay"
+    );
+    let changed_references = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            vec!["d:/ws/referenced/tsconfig.json".into()],
+            rebuilt_basis,
+            reader,
+        ))
+        .unwrap();
+    assert!(!rebound.same_binding(&changed_references));
+    assert!(matches!(
+        harness.provider.check_admission(&fresh_admission),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+}
+
 // @ai-generated
 #[test]
 fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {

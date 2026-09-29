@@ -25,10 +25,10 @@ use verter_session::external_ts::{
 };
 use verter_session::VerterHost;
 use verter_workspace::published_state::PublishedRoot;
-use verter_workspace::workspace_snapshot::WorkspaceSnapshot;
 use verter_workspace::{decide_generated_unit_admission, CanonicalPath, GeneratedUnitAdmission};
 
 use crate::external_ts::TsgoEngineBackend;
+use verter_type_runtime::provider_hub::{ProjectBasis, ProjectBindingInput};
 
 /// The bootstrap engine version the OWNED gate resolves + mints the witness with.
 ///
@@ -58,7 +58,7 @@ pub struct BoundCarrier {
     bound: BoundProject,
     binding: ProjectBinding,
     generation: u64,
-    snapshot: Arc<WorkspaceSnapshot>,
+    basis: ResolvedPublication,
 }
 
 impl std::fmt::Debug for BoundCarrier {
@@ -102,11 +102,81 @@ impl BoundCarrier {
     #[must_use]
     pub fn admit_generated_units(&self, units: &[CanonicalPath]) -> GeneratedUnitAdmission {
         decide_generated_unit_admission(
-            self.snapshot.as_ref(),
+            self.basis.published.snapshot.as_ref(),
             &CanonicalPath::new(self.binding.tsconfig_uri()),
             units,
         )
     }
+
+    /// Retain the publication that supplied both ownership and membership.
+    #[must_use]
+    pub fn published(&self) -> &Arc<PublishedRoot> {
+        &self.basis.published
+    }
+}
+
+/// The exact publication and generations observed with one resolver answer.
+/// A later caller must not re-read the generations and attach them to an old
+/// project binding.
+#[derive(Clone)]
+pub struct ResolvedPublication {
+    pub published: Arc<PublishedRoot>,
+    pub content_generation: u64,
+    pub project_generation: u64,
+}
+
+impl ResolvedPublication {
+    #[must_use]
+    pub fn current(host: &VerterHost) -> Option<Self> {
+        let ws_read = host.workspace_read();
+        Some(Self {
+            published: ws_read.published_root()?,
+            content_generation: ws_read.content_generation(),
+            project_generation: host.project_type_store().current_project_generation(),
+        })
+    }
+}
+
+impl PartialEq for ResolvedPublication {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.published, &other.published)
+            && self.content_generation == other.content_generation
+            && self.project_generation == other.project_generation
+    }
+}
+
+impl Eq for ResolvedPublication {}
+
+/// Project resolver facts translated into the hub's provider-neutral basis.
+/// The live reader fences publication replacement and content/project drift at
+/// bind, request admission, and the actor's provider-visible write point.
+pub fn hub_binding_input(
+    host: &Arc<VerterHost>,
+    source: &str,
+    binding: &ProjectBinding,
+    resolved: ResolvedPublication,
+) -> ProjectBindingInput {
+    let basis = ProjectBasis::new(
+        resolved.published,
+        resolved.content_generation,
+        resolved.project_generation,
+    );
+    let host = Arc::clone(host);
+    let current = Arc::new(move || {
+        let current = ResolvedPublication::current(&host)?;
+        Some(ProjectBasis::new(
+            current.published,
+            current.content_generation,
+            current.project_generation,
+        ))
+    });
+    ProjectBindingInput::new(
+        normalize_canonical_id(source),
+        binding.tsconfig_uri().to_string(),
+        binding.references().iter().map(|r| r.to_string()).collect(),
+        basis,
+        current,
+    )
 }
 
 /// The outcome of resolving a carrier source to its owning configured project. Only
@@ -180,6 +250,19 @@ pub fn resolve_carrier(
         .map(|(resolution, generation, _)| (resolution, generation))
 }
 
+/// The same resolver result with its exact publication retained for hub
+/// admission. A later publication with a repeated scalar generation is a
+/// distinct basis and cannot reuse this binding.
+#[must_use]
+pub fn resolve_carrier_with_publication(
+    host: &VerterHost,
+    source: &str,
+    ts_version: Arc<str>,
+    readiness_mode: OwnershipReadinessMode,
+) -> Option<(CarrierOwnershipResolution, u64, ResolvedPublication)> {
+    resolve_carrier_over_snapshot(host, source, ts_version, readiness_mode)
+}
+
 /// [`resolve_carrier`] plus the exact workspace snapshot the resolution was decided over,
 /// for a caller that must decide a FURTHER membership fact against the same publication.
 fn resolve_carrier_over_snapshot(
@@ -187,10 +270,15 @@ fn resolve_carrier_over_snapshot(
     source: &str,
     ts_version: Arc<str>,
     readiness_mode: OwnershipReadinessMode,
-) -> Option<(CarrierOwnershipResolution, u64, Arc<WorkspaceSnapshot>)> {
+) -> Option<(CarrierOwnershipResolution, u64, ResolvedPublication)> {
     let ws_read = host.workspace_read();
     let published = ws_read.published_root()?;
     let generation = published.snapshot.generation.0;
+    let basis = ResolvedPublication {
+        published: Arc::clone(&published),
+        content_generation: ws_read.content_generation(),
+        project_generation: host.project_type_store().current_project_generation(),
+    };
     // The env-dims reader is keyed on a MEMBER canonical of the resolved project
     // (the resolved carrier source), NOT the tsconfig path: a tsconfig file is
     // normally outside the project's membership set, so keying the per-canonical
@@ -225,11 +313,7 @@ fn resolve_carrier_over_snapshot(
         &env_dims_source,
         ownership_ready,
     );
-    Some((
-        resolver.resolve(source, None),
-        generation,
-        Arc::clone(&published.snapshot),
-    ))
+    Some((resolver.resolve(source, None), generation, basis))
 }
 
 /// How [`resolve_carrier`] treats a PRESENT-but-cold published snapshot.
@@ -266,7 +350,7 @@ pub enum OwnershipReadinessMode {
 #[must_use]
 pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBinding {
     let ts_version: Arc<str> = Arc::from(OWNED_GATE_BOOTSTRAP_VERSION);
-    let Some((resolution, generation, snapshot)) = resolve_carrier_over_snapshot(
+    let Some((resolution, generation, basis)) = resolve_carrier_over_snapshot(
         host.as_ref(),
         source,
         Arc::clone(&ts_version),
@@ -286,7 +370,7 @@ pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBin
                     bound,
                     binding,
                     generation,
-                    snapshot,
+                    basis,
                 })),
                 Err(_) => CarrierBinding::EnsureFailed,
             }
