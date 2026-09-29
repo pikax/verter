@@ -1711,7 +1711,12 @@ impl SliceExpr {
                         receiver: value, ..
                     }
                     | SliceCall::Construct(value)
-                    | SliceCall::TaggedTemplate(value) => take(value, out),
+                    | SliceCall::TaggedTemplate(value)
+                    | SliceCall::OptionalChain { root: value, .. } => take(value, out),
+                    SliceCall::OnElement { object, index } => {
+                        take(object, out);
+                        take(index, out);
+                    }
                     _ => {}
                 }
                 if let Some(arguments) = Arc::get_mut(&mut arguments.0) {
@@ -1880,6 +1885,8 @@ enum ObjectAwait<'e, 'x> {
         method_kind: Option<verter_type_expr::ObjectMethodKind>,
         spans: verter_type_expr::MemberSpans,
         widen_member: bool,
+        /// The value's syntax, whose context sensitivity the member takes.
+        syntax: &'e Expression<'x>,
     },
 }
 
@@ -1889,6 +1896,43 @@ enum ObjectStep<'e, 'x> {
     Descend(&'e Expression<'x>, ExprMode, bool),
     Done(Box<SliceExpr>),
 }
+
+/// An array literal's lowering in progress, stepped by
+/// [`Lowerer::array_step`]: the elements lowered so far, the next
+/// element, and the element the literal waits on (with whether it is a
+/// spread's argument).
+struct ArrayFrame<'e, 'x> {
+    array: &'e oxc_ast::ast::ArrayExpression<'x>,
+    policy: ObjectMemberPolicy,
+    elements: Vec<SliceArrayElement>,
+    next: usize,
+    awaiting: Option<(&'e Expression<'x>, bool)>,
+}
+
+impl<'e, 'x> ArrayFrame<'e, 'x> {
+    fn new(array: &'e oxc_ast::ast::ArrayExpression<'x>, policy: ObjectMemberPolicy) -> Self {
+        Self {
+            array,
+            policy,
+            elements: Vec::with_capacity(array.elements.len()),
+            next: 0,
+            awaiting: None,
+        }
+    }
+}
+
+/// What an [`ArrayFrame`] needs next: an element lowered (in the const
+/// context, or as any value), or nothing — its value.
+enum ArrayStep<'e, 'x> {
+    Descend(&'e Expression<'x>, bool),
+    Done(Box<SliceExpr>),
+}
+
+/// The mode an array literal's element lowers in: its fresh literal kept,
+/// for the literal's own policy to widen or pin.
+const ARRAY_ELEMENT_MODE: ExprMode = ExprMode::BindingInit {
+    preserve_literal: true,
+};
 
 /// A conditional's lowering waiting on its branches (see
 /// [`Lowerer::conditional_start`]).
@@ -2193,6 +2237,9 @@ pub enum SliceExpr {
     MemberOf {
         object: Box<SliceExpr>,
         member: Arc<str>,
+        /// The authored member expression's span: the identity a consuming
+        /// position matches the read's freshness by.
+        span: verter_span::Span,
     },
     /// A non-null assertion over a flow expression (`a!`): the checker's
     /// non-nullable type of the operand's value.
@@ -2565,6 +2612,89 @@ fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
     )
 }
 
+/// The parts of an optional chain holding exactly one call off a static
+/// member path rooted at an identifier: the root, the member links to the
+/// callee, the call, and the static member links read off its value —
+/// each link with its `?.`-authored optionality.
+struct OptionalCallChainParts<'e, 'a> {
+    root: &'e oxc_ast::ast::IdentifierReference<'a>,
+    links: Arc<[(Arc<str>, bool)]>,
+    call: &'e oxc_ast::ast::CallExpression<'a>,
+    after: Arc<[(Arc<str>, bool)]>,
+}
+
+/// [`OptionalCallChainParts`] of `element`; `None` for any other chain
+/// (a computed or private link, a second call, a non-identifier root),
+/// which keeps the rails it always had.
+fn optional_call_chain_parts<'e, 'a>(
+    element: &'e oxc_ast::ast::ChainElement<'a>,
+) -> Option<OptionalCallChainParts<'e, 'a>> {
+    let mut after: Vec<(Arc<str>, bool)> = Vec::new();
+    let mut current = match element {
+        oxc_ast::ast::ChainElement::CallExpression(call) => {
+            return optional_call_chain_callee(call, Arc::from([]));
+        }
+        oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+            after.push((Arc::from(member.property.name.as_str()), member.optional));
+            &member.object
+        }
+        _ => return None,
+    };
+    // bounded-loop: one step per authored link of the chain.
+    loop {
+        match current {
+            Expression::StaticMemberExpression(member) => {
+                after.push((Arc::from(member.property.name.as_str()), member.optional));
+                current = &member.object;
+            }
+            Expression::CallExpression(call) => {
+                after.reverse();
+                return optional_call_chain_callee(call, Arc::from(after));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The callee half of [`optional_call_chain_parts`]: `call`'s callee is an
+/// identifier or a static member path rooted at one, with no type
+/// arguments (an explicitly instantiated call keeps its rails).
+fn optional_call_chain_callee<'e, 'a>(
+    call: &'e oxc_ast::ast::CallExpression<'a>,
+    after: Arc<[(Arc<str>, bool)]>,
+) -> Option<OptionalCallChainParts<'e, 'a>> {
+    if call.type_arguments.is_some() {
+        return None;
+    }
+    let mut links: Vec<(Arc<str>, bool)> = Vec::new();
+    let mut current = &call.callee;
+    // bounded-loop: one step per authored link of the callee path.
+    let root = loop {
+        match current {
+            Expression::Identifier(root) => break root,
+            Expression::StaticMemberExpression(member) => {
+                links.push((Arc::from(member.property.name.as_str()), member.optional));
+                current = &member.object;
+            }
+            _ => return None,
+        }
+    };
+    // A chain with no `?.` anywhere is not an optional chain.
+    if !call.optional
+        && !links.iter().any(|(_, optional)| *optional)
+        && !after.iter().any(|(_, optional)| *optional)
+    {
+        return None;
+    }
+    links.reverse();
+    Some(OptionalCallChainParts {
+        root,
+        links: Arc::from(links),
+        call,
+        after,
+    })
+}
+
 /// The [`SliceCallSite`] of one authored `new` expression.
 fn construct_site(new: &oxc_ast::ast::NewExpression<'_>) -> SliceCallSite {
     authored_call_site(
@@ -2647,6 +2777,23 @@ pub enum SliceCall {
     /// A direct call on a nested function value (an IIFE) — the call's
     /// value is the nested function's evaluated return.
     Nested(Box<SliceExpr>),
+    /// The call an optional chain holds (`g?.()`, `o.m?.()`, `o?.m()`,
+    /// `o?.m?.()`, `g?.().length`): the callee is `root` read through the
+    /// static member `links`, called — through its own nullish strip when
+    /// the call is authored `?.()` — exactly as a member callee is, and
+    /// `after` are the static member links read off the call's value.
+    /// Every link carries its `?.`-authored optionality. The chain
+    /// short-circuits to `undefined` on each edge a strip removes a
+    /// nullish arm on, so its value is the read with `undefined` beside
+    /// it exactly when a strip removed arms (the checker's optional-chain
+    /// marker), and `undefined` alone when a stripped base is nullish
+    /// through and through.
+    OptionalChain {
+        root: Box<SliceExpr>,
+        links: Arc<[(Arc<str>, bool)]>,
+        optional_call: bool,
+        after: Arc<[(Arc<str>, bool)]>,
+    },
     /// A call on a parameter or in-scope local binding of function type —
     /// the call's value is the binding's signature return (a shadowed
     /// name is never a flow obligation edge).
@@ -2691,6 +2838,9 @@ pub enum SliceCall {
         /// Whether the member declaring this frame is STATIC — its `super`
         /// reads the base constructor's own side, not its prototype.
         static_side: bool,
+        /// The calling class's own `this`, which a base member's
+        /// polymorphic `this` is bound to.
+        this: Option<SliceThis>,
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
@@ -2715,6 +2865,13 @@ pub enum SliceCall {
     OnValue {
         object: Box<SliceExpr>,
         member: Arc<str>,
+    },
+    /// A call of an element of a value whose key this frame evaluates
+    /// (`t[k]()`): the object is the call's receiver, and the key's
+    /// literal type names the member the call resolves over.
+    OnElement {
+        object: Box<SliceExpr>,
+        index: Box<SliceExpr>,
     },
     /// A tagged template: a call of its tag, lowered as a flow value like
     /// a constructor, whose arguments are the template strings and then
@@ -3163,6 +3320,12 @@ pub struct SliceObjectMember {
     /// annotation, a setter's parameter annotation. `false` for every
     /// other member.
     pub accessor_annotated: bool,
+    /// Whether the member is context sensitive (the checker's
+    /// `isContextSensitive` of a property assignment or method): a function
+    /// value its context types, or a literal holding one. A call's first
+    /// inference pass reads such a member as the non-inferring
+    /// `anyFunctionType` (`SkipContextSensitive`).
+    pub context_sensitive: bool,
 }
 
 /// The unsupported-construct classification.
@@ -4647,6 +4810,46 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
     }
 }
 
+/// The object and key of an element call's callee (`t[k]()`).
+struct CallElement<'e, 'x> {
+    object: &'e Expression<'x>,
+    key: CallElementKey<'e, 'x>,
+}
+
+/// An element call's key: a name written as a literal, or a binding read
+/// whose type names it.
+enum CallElementKey<'e, 'x> {
+    Name(Arc<str>),
+    Read(&'e Expression<'x>),
+}
+
+/// The key of an element call this lowering models: a string or
+/// no-substitution template literal, an integral numeric literal, or a
+/// bare identifier read. `None` for any other key expression.
+fn call_element_key<'e, 'x>(key: &'e Expression<'x>) -> Option<CallElementKey<'e, 'x>> {
+    match unwrap_parenthesized(key) {
+        Expression::StringLiteral(literal) => {
+            Some(CallElementKey::Name(Arc::from(literal.value.as_str())))
+        }
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+            .quasis
+            .first()
+            .and_then(|quasi| quasi.value.cooked.as_ref())
+            .map(|cooked| CallElementKey::Name(Arc::from(cooked.as_str()))),
+        Expression::NumericLiteral(literal)
+            if literal.value.is_finite()
+                && literal.value.fract() == 0.0
+                && literal.value.abs() < 1e15 =>
+        {
+            Some(CallElementKey::Name(Arc::from(
+                format!("{}", literal.value as i64).as_str(),
+            )))
+        }
+        Expression::Identifier(_) => Some(CallElementKey::Read(key)),
+        _ => None,
+    }
+}
+
 /// The address of `expression` in its arena, its identity while the
 /// program it belongs to lives.
 fn expression_address(expression: &Expression<'_>) -> usize {
@@ -6053,6 +6256,7 @@ pub(crate) mod lowering_probe {
     pub(crate) struct LoweringWork {
         pub(crate) guard_classifications: AtomicUsize,
         pub(crate) expressions: AtomicUsize,
+        pub(crate) declaration_lookup_visits: AtomicUsize,
         pub(crate) scanned_classes: AtomicUsize,
     }
     thread_local! {
@@ -6079,6 +6283,10 @@ pub(crate) mod lowering_probe {
     }
     pub(crate) fn expression() {
         record(|work| &work.expressions);
+    }
+    /// One node a local function declaration lookup visits.
+    pub(super) fn declaration_lookup_visit() {
+        record(|work| &work.declaration_lookup_visits);
     }
     pub(super) fn scanned_class() {
         record(|work| &work.scanned_classes);
@@ -10844,6 +11052,14 @@ impl<'a> Lowerer<'a> {
                             )));
                         }
                     }
+                    if let Some(disposition) = self.optional_chain_discriminant_guard(
+                        subject_side,
+                        literal_side,
+                        negated,
+                        false,
+                    ) {
+                        return disposition;
+                    }
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
@@ -10899,6 +11115,14 @@ impl<'a> Lowerer<'a> {
                 for (subject_side, literal_side) in
                     [(&binary.left, &binary.right), (&binary.right, &binary.left)]
                 {
+                    if let Some(disposition) = self.optional_chain_discriminant_guard(
+                        subject_side,
+                        literal_side,
+                        negated,
+                        true,
+                    ) {
+                        return disposition;
+                    }
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
@@ -12770,6 +12994,80 @@ impl<'a> Lowerer<'a> {
     /// not — a SUBSET of the checker's type, which drops a real
     /// contributor and is worse than the superset a missing narrow
     /// produces.
+    /// `root?.k === literal` (`==` with `loose`, `!==` / `!=` with
+    /// `negated`) against a literal that is neither `null` nor
+    /// `undefined`: a discriminant comparison of `root.k` (the checker's
+    /// `narrowTypeByDiscriminantProperty`) and, with `strictNullChecks`,
+    /// the optional chain's containment (`narrowTypeByOptionalChainContainment`):
+    /// on the edge where the chain equals the literal, `root` is not
+    /// nullish. `None` for any other chain, which keeps its rails.
+    fn optional_chain_discriminant_guard(
+        &self,
+        subject_side: &Expression<'_>,
+        literal_side: &Expression<'_>,
+        negated: bool,
+        loose: bool,
+    ) -> Option<GuardDisposition> {
+        let Expression::ChainExpression(chain) = unwrap_parenthesized(subject_side) else {
+            return None;
+        };
+        let (object, key) = match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(member) if member.optional => {
+                (&member.object, Arc::from(member.property.name.as_str()))
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(member) if member.optional => {
+                (&member.object, literal_member_key(&member.expression)?)
+            }
+            _ => return None,
+        };
+        let root = self.narrow_subject_of(object)?;
+        if !root.path.is_empty() {
+            return None;
+        }
+        let literal = guard_literal_of(literal_side, self.source)?;
+        if matches!(
+            literal,
+            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+        ) {
+            return None;
+        }
+        let member = SliceNarrowSubject {
+            root: root.root.clone(),
+            path: Arc::from([key]),
+        };
+        if self.subject_root_carries_an_unmentioned_narrowing(&member) {
+            return Some(GuardDisposition::Unexpressible);
+        }
+        let discriminant = SliceGuard::EqLiteral {
+            subject: member,
+            literal,
+            negated,
+            loose,
+        };
+        if !self.nullability.is_strict() {
+            return Some(GuardDisposition::modeled(discriminant));
+        }
+        // The edge where the chain holds the literal: `root` is neither
+        // `null` nor `undefined`. The other edge adds nothing.
+        let nullish: Arc<[SliceGuard]> = Arc::from(
+            [SliceGuardLiteral::Null, SliceGuardLiteral::Undefined]
+                .into_iter()
+                .map(|literal| SliceGuard::EqLiteral {
+                    subject: root.clone(),
+                    literal,
+                    negated: !negated,
+                    loose: false,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Some(GuardDisposition::modeled(if negated {
+            SliceGuard::Or(Arc::from([SliceGuard::Or(nullish), discriminant]))
+        } else {
+            SliceGuard::And(Arc::from([SliceGuard::And(nullish), discriminant]))
+        }))
+    }
+
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
         let mut current = reference_candidate(expression);
@@ -14437,6 +14735,8 @@ impl<'a> Lowerer<'a> {
         call: &'e oxc_ast::ast::CallExpression<'x>,
         mode: ExprMode,
         on_value: &mut Option<&'e oxc_ast::ast::StaticMemberExpression<'x>>,
+        on_call: &mut Option<&'e Expression<'x>>,
+        on_element: &mut Option<CallElement<'e, 'x>>,
     ) -> SliceExpr {
         if let Expression::Identifier(callee) = &call.callee {
             let name = callee.name.as_str();
@@ -14580,10 +14880,40 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
+        // A call of a call's value (`f.bind(t)(1)`, `g(1)()`): the callee is
+        // the value the inner call evaluates to, arguments and receiver
+        // included, never the inner callee's argument-blind return.
+        if let Expression::CallExpression(inner) = unwrap_parenthesized(&call.callee) {
+            if !inner.optional && !call.optional {
+                *on_call = Some(&call.callee);
+                return SliceExpr::Elided;
+            }
+        }
+        // A call of an element (`t["m"]()`, `t[0]()`, `t[k]()`): the object
+        // is a flow value and the call's receiver, and the member is the
+        // key's name, a literal's written, a read's evaluated.
+        if let Expression::ComputedMemberExpression(member) = unwrap_parenthesized(&call.callee) {
+            if !member.optional && !call.optional {
+                if let Some(key) = call_element_key(&member.expression) {
+                    *on_element = Some(CallElement {
+                        object: &member.object,
+                        key,
+                    });
+                    return SliceExpr::Elided;
+                }
+            }
+        }
         // A member call on a constructed value or an object
         // literal: the object is a flow value, never a leaf answer.
         if let Expression::StaticMemberExpression(member) = unwrap_parenthesized(&call.callee) {
-            if value_rooted_member_object(&member.object) {
+            // So is a member call on a function this frame declares
+            // (`h.call(…)`): the object is the declared function's value.
+            let local_function = matches!(
+                unwrap_parenthesized(&member.object),
+                Expression::Identifier(object)
+                    if matches!(self.classify_occurrence(object.span), NameBinding::NestedFunction)
+            );
+            if local_function || value_rooted_member_object(&member.object) {
                 *on_value = Some(member);
                 return SliceExpr::Elided;
             }
@@ -14787,7 +15117,8 @@ impl<'a> Lowerer<'a> {
         //
         // An object literal lowers as a frame of the same stack
         // (`Task::Object`), which resumes with each child it asks for: a
-        // member value nested in a member value costs no native level.
+        // member value nested in a member value costs no native level. An
+        // array literal does too (`Task::Array`), element by element.
         enum Task<'e, 'a> {
             Lower(&'e Expression<'a>, ExprMode),
             /// [`Lowerer::lower_in_const_context`]'s lowering.
@@ -14795,6 +15126,7 @@ impl<'a> Lowerer<'a> {
             Build(OperatorShape),
             Branches(ConditionalStart),
             Object(ObjectFrame<'e, 'a>),
+            Array(ArrayFrame<'e, 'a>),
             /// A call recording its whole-value arguments
             /// ([`Lowerer::record_call_step`]), waiting on the one it
             /// asked for last.
@@ -14812,6 +15144,15 @@ impl<'a> Lowerer<'a> {
                 &'e oxc_ast::ast::StaticMemberExpression<'a>,
                 ExprMode,
             ),
+            /// A call of a call's value, waiting on that value.
+            CallOnCallValue(&'e oxc_ast::ast::CallExpression<'a>, ExprMode),
+            /// A call of an element, waiting on its object (and its key,
+            /// when the key is not written as a literal name).
+            CallOnElement(
+                &'e oxc_ast::ast::CallExpression<'a>,
+                Option<Arc<str>>,
+                ExprMode,
+            ),
             /// A member read off a value-rooted object, waiting on the
             /// object: a chain of reads costs no native level.
             ReadOnValue(&'e oxc_ast::ast::StaticMemberExpression<'a>),
@@ -14821,6 +15162,9 @@ impl<'a> Lowerer<'a> {
             CallArguments(Box<CallArgumentsFrame<'e, 'a>>),
             /// An `await` waiting on its operand.
             Awaited,
+            /// An optional chain's call, lowered once its arguments are
+            /// recorded.
+            OptionalCall(Box<OptionalCallChainParts<'e, 'a>>, ExprMode),
         }
         /// Push what a call's frame-lowered argument lowering asks for next.
         fn continue_call_arguments<'e, 'a>(
@@ -14884,6 +15228,10 @@ impl<'a> Lowerer<'a> {
                         tasks.push(Task::Object(ObjectFrame::new(object, whole, mode, policy)));
                         continue;
                     }
+                    if let Some((array, policy)) = self.array_literal_lowering(expr) {
+                        tasks.push(Task::Array(ArrayFrame::new(array, policy)));
+                        continue;
+                    }
                     // An `await x` lowers its operand through its own arm
                     // and the evaluator unwraps the resolved value through
                     // the lib `Awaited` surface (see [`Self::lower_expr_level`]):
@@ -14892,6 +15240,37 @@ impl<'a> Lowerer<'a> {
                         tasks.push(Task::Awaited);
                         tasks.push(Task::Lower(&awaited.argument, mode));
                         continue;
+                    }
+                    // An optional chain holding one call lowers its call
+                    // through the shared call path — whole-value argument
+                    // recording, then its frame-lowered arguments — under
+                    // the same write-effect rail every optional chain root
+                    // takes.
+                    if let Expression::ChainExpression(chain) = unwrap_parenthesized(expr) {
+                        if let Some(parts) =
+                            optional_call_chain_parts(&chain.expression).filter(|parts| {
+                                !self.optional_chain_root_has_prior_flow_change(parts.root)
+                                    // An argument the short-circuit discards
+                                    // must not write: its effect happens on
+                                    // one edge only.
+                                    && parts.call.arguments.iter().all(|argument| {
+                                        argument.as_expression().is_some_and(|argument| {
+                                            optional_chain_discarded_expr_has_no_syntactic_effect(
+                                                self.walks.program(),
+                                                argument,
+                                            )
+                                        })
+                                    })
+                            })
+                        {
+                            let call = parts.call;
+                            tasks.push(Task::OptionalCall(Box::new(parts), mode));
+                            if let Some(mut frame) = self.record_call_start(call) {
+                                let child = self.record_call_step(&mut frame, None);
+                                continue_call_record(frame, child, &mut tasks);
+                            }
+                            continue;
+                        }
                     }
                     let mut transparent = None;
                     let mut deferred_call = None;
@@ -14926,6 +15305,26 @@ impl<'a> Lowerer<'a> {
                         (None, None, None) => values.push(value),
                     }
                 }
+                Task::OptionalCall(parts, mode) => {
+                    let OptionalCallChainParts {
+                        root,
+                        links,
+                        call,
+                        after,
+                    } = *parts;
+                    let lowered = SliceExpr::Call(
+                        SliceCall::OptionalChain {
+                            root: Box::new(self.lower_identifier_read(root, mode)),
+                            links,
+                            optional_call: call.optional,
+                            after,
+                        },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    );
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
                 Task::Awaited => {
                     let operand = values.pop().expect("the await's operand");
                     values.push(SliceExpr::Awaited {
@@ -14939,7 +15338,34 @@ impl<'a> Lowerer<'a> {
                 }
                 Task::CallCallee(expr, call, mode) => {
                     let mut on_value = None;
-                    let lowered = self.lower_call_expression(expr, call, mode, &mut on_value);
+                    let mut on_call = None;
+                    let mut on_element = None;
+                    let lowered = self.lower_call_expression(
+                        expr,
+                        call,
+                        mode,
+                        &mut on_value,
+                        &mut on_call,
+                        &mut on_element,
+                    );
+                    if let Some(CallElement { object, key }) = on_element {
+                        match key {
+                            CallElementKey::Name(name) => {
+                                tasks.push(Task::CallOnElement(call, Some(name), mode));
+                            }
+                            CallElementKey::Read(index) => {
+                                tasks.push(Task::CallOnElement(call, None, mode));
+                                tasks.push(Task::Lower(index, mode));
+                            }
+                        }
+                        tasks.push(Task::Lower(object, mode));
+                        continue;
+                    }
+                    if let Some(callee) = on_call {
+                        tasks.push(Task::CallOnCallValue(call, mode));
+                        tasks.push(Task::Lower(callee, mode));
+                        continue;
+                    }
                     match on_value {
                         Some(member) => {
                             self.open_value_rooted_reads += 1;
@@ -14967,12 +15393,42 @@ impl<'a> Lowerer<'a> {
                     let step = self.call_arguments_frame(lowered, call, mode);
                     continue_call_arguments(step, &mut tasks, &mut values);
                 }
+                Task::CallOnElement(call, name, mode) => {
+                    let callee = match name {
+                        Some(member) => SliceCall::OnValue {
+                            object: Box::new(values.pop().expect("the element's object")),
+                            member,
+                        },
+                        None => {
+                            let index = values.pop().expect("the element's key");
+                            SliceCall::OnElement {
+                                object: Box::new(values.pop().expect("the element's object")),
+                                index: Box::new(index),
+                            }
+                        }
+                    };
+                    let lowered =
+                        SliceExpr::Call(callee, call_site(call), SliceCallArguments::none());
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
+                Task::CallOnCallValue(call, mode) => {
+                    let callee = values.pop().expect("the called call's value");
+                    let lowered = SliceExpr::Call(
+                        SliceCall::Nested(Box::new(callee)),
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    );
+                    let step = self.call_arguments_frame(lowered, call, mode);
+                    continue_call_arguments(step, &mut tasks, &mut values);
+                }
                 Task::ReadOnValue(member) => {
                     let object = values.pop().expect("the member's object");
                     self.open_value_rooted_reads -= 1;
                     values.push(SliceExpr::MemberOf {
                         object: Box::new(object),
                         member: Arc::from(member.property.name.as_str()),
+                        span: member.span.into(),
                     });
                 }
                 Task::CallArguments(frame) => {
@@ -14996,9 +15452,28 @@ impl<'a> Lowerer<'a> {
                             mode,
                             ObjectMemberPolicy::ConstAssert,
                         ))),
-                        ValueDescent::Array(array) => values
-                            .push(self.lower_array_literal(array, ObjectMemberPolicy::ConstAssert)),
+                        ValueDescent::Array(array) => tasks.push(Task::Array(ArrayFrame::new(
+                            array,
+                            ObjectMemberPolicy::ConstAssert,
+                        ))),
                         _ => tasks.push(Task::Lower(expr, mode)),
+                    }
+                }
+                Task::Array(mut frame) => {
+                    let delivered = frame
+                        .awaiting
+                        .is_some()
+                        .then(|| values.pop().expect("the element the literal asked for"));
+                    match self.array_step(&mut frame, delivered) {
+                        ArrayStep::Done(value) => values.push(*value),
+                        ArrayStep::Descend(child, const_context) => {
+                            tasks.push(Task::Array(frame));
+                            tasks.push(if const_context {
+                                Task::LowerConst(child, ARRAY_ELEMENT_MODE)
+                            } else {
+                                Task::Lower(child, ARRAY_ELEMENT_MODE)
+                            });
+                        }
                     }
                 }
                 Task::Object(mut frame) => {
@@ -16070,31 +16545,86 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Lower an array literal to [`SliceExpr::Array`] under an object
-    /// literal's member policy. Every element is its own evaluated
-    /// position — the planner opened each one (a spread's argument for a
-    /// spread) as a child site of the array — so an element outside the
-    /// demand selection rides the typed `Elided` carrier, exactly as an
-    /// object member value does. A fresh element literal widens (the
-    /// element slot is mutable) unless the policy keeps literals or a
-    /// const assertion pins that element; under `as const` a nested
-    /// object or array literal is in the const context too.
+    /// literal's member policy ([`Self::array_step`]).
     fn lower_array_literal(
         &mut self,
         array: &oxc_ast::ast::ArrayExpression<'_>,
         policy: ObjectMemberPolicy,
     ) -> SliceExpr {
-        let const_asserted = policy == ObjectMemberPolicy::ConstAssert;
-        let mode = ExprMode::BindingInit {
-            preserve_literal: true,
-        };
-        let mut elements = Vec::with_capacity(array.elements.len());
-        for element in &array.elements {
+        // [`Self::lower_expr`] steps an array literal from its own stack;
+        // here the same steps run with each element lowered in place.
+        let mut frame = ArrayFrame::new(array, policy);
+        let mut delivered = None;
+        loop {
+            match self.array_step(&mut frame, delivered.take()) {
+                ArrayStep::Done(value) => return *value,
+                ArrayStep::Descend(expression, const_context) => {
+                    delivered = Some(if const_context {
+                        self.lower_in_const_context(expression, ARRAY_ELEMENT_MODE)
+                    } else {
+                        self.lower_expr(expression, ARRAY_ELEMENT_MODE)
+                    });
+                }
+            }
+        }
+    }
+
+    /// The array literal [`Self::lower_expr`] lowers as a frame of its
+    /// stack, with its element policy: the literal itself (widening its
+    /// elements), or a type carrier over one whose policy decides its
+    /// elements' literals. `None` for every other expression — the same
+    /// decisions [`Self::lower_expr_level`] reaches the literal through,
+    /// exactly as [`Self::object_literal_lowering`]'s.
+    fn array_literal_lowering<'e, 'x>(
+        &self,
+        expr: &'e Expression<'x>,
+    ) -> Option<(&'e oxc_ast::ast::ArrayExpression<'x>, ObjectMemberPolicy)> {
+        match value_descent(expr) {
+            ValueDescent::Array(array) => Some((array, ObjectMemberPolicy::Widen)),
+            ValueDescent::TypeCarrier(inner) => {
+                if matches!(
+                    value_descent(unwrap_parenthesized(inner)),
+                    ValueDescent::Object(_) | ValueDescent::Array(_)
+                ) && satisfies_target(expr).is_some()
+                {
+                    return None;
+                }
+                let policy = member_literal_policy(expr, self.source)?;
+                match value_descent(inner) {
+                    ValueDescent::Array(array) => Some((array, policy)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Step an array literal's lowering until it needs an element lowered
+    /// or is done, with the element it asked for last `delivered`. Every
+    /// element is its own evaluated position — the planner opened each
+    /// one (a spread's argument for a spread) as a child site of the
+    /// array — so an element outside the demand selection rides the typed
+    /// `Elided` carrier, exactly as an object member value does.
+    fn array_step<'e, 'x>(
+        &mut self,
+        frame: &mut ArrayFrame<'e, 'x>,
+        delivered: Option<SliceExpr>,
+    ) -> ArrayStep<'e, 'x> {
+        if let Some(value) = delivered {
+            let (expression, spread) = frame
+                .awaiting
+                .take()
+                .expect("an element delivered to no request");
+            self.push_array_element(frame, expression, spread, value);
+        }
+        while let Some(element) = frame.array.elements.get(frame.next) {
+            frame.next += 1;
             let (expression, spread) = match element {
                 oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                     (&spread.argument, true)
                 }
                 oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
-                    elements.push(SliceArrayElement::Elision);
+                    frame.elements.push(SliceArrayElement::Elision);
                     continue;
                 }
                 other => match other.as_expression() {
@@ -16102,41 +16632,56 @@ impl<'a> Lowerer<'a> {
                     None => continue,
                 },
             };
-            let value = if !self.value_span_selected(expression.span()) {
+            if !self.value_span_selected(expression.span()) {
                 // The elided element still RUNS at the literal's
                 // evaluation: its effects take the fail-closed scan.
                 self.scan_unmodeled_position_effects(expression);
-                SliceExpr::Elided
-            } else if const_asserted {
-                self.lower_in_const_context(expression, mode)
-            } else {
-                self.lower_expr(expression, mode)
-            };
-            if spread {
-                elements.push(SliceArrayElement::Spread { source: value });
+                self.push_array_element(frame, expression, spread, SliceExpr::Elided);
                 continue;
             }
-            let pinned = !policy.widens_member_literals()
-                || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                    expression,
-                    self.source,
-                );
-            let (value, pre_widening) = if pinned || !widens_mutable_slot_literals(&value) {
-                (value, None)
-            } else {
-                let widened = widen_mutable_slot_literals(value.clone());
-                (widened, Some(Box::new(value)))
-            };
-            elements.push(SliceArrayElement::Value {
-                value,
-                freshness: expression_freshness(expression),
-                pre_widening,
-            });
+            frame.awaiting = Some((expression, spread));
+            return ArrayStep::Descend(expression, frame.policy == ObjectMemberPolicy::ConstAssert);
         }
-        SliceExpr::Array {
-            elements: Arc::from(elements.into_boxed_slice()),
-            const_asserted,
+        ArrayStep::Done(Box::new(SliceExpr::Array {
+            elements: Arc::from(std::mem::take(&mut frame.elements).into_boxed_slice()),
+            const_asserted: frame.policy == ObjectMemberPolicy::ConstAssert,
+        }))
+    }
+
+    /// Add an element's lowered `value` to the literal: a spread's source
+    /// as it is, and a value with its freshness — a fresh element literal
+    /// widens (the element slot is mutable) unless the policy keeps
+    /// literals or a const assertion pins that element; under `as const`
+    /// a nested object or array literal is in the const context too.
+    fn push_array_element(
+        &self,
+        frame: &mut ArrayFrame<'_, '_>,
+        expression: &Expression<'_>,
+        spread: bool,
+        value: SliceExpr,
+    ) {
+        if spread {
+            frame
+                .elements
+                .push(SliceArrayElement::Spread { source: value });
+            return;
         }
+        let pinned = !frame.policy.widens_member_literals()
+            || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                expression,
+                self.source,
+            );
+        let (value, pre_widening) = if pinned || !widens_mutable_slot_literals(&value) {
+            (value, None)
+        } else {
+            let widened = widen_mutable_slot_literals(value.clone());
+            (widened, Some(Box::new(value)))
+        };
+        frame.elements.push(SliceArrayElement::Value {
+            value,
+            freshness: expression_freshness(expression),
+            pre_widening,
+        });
     }
 
     /// Whether an initializer is a bare `null` or a FREE `undefined`,
@@ -16159,7 +16704,7 @@ impl<'a> Lowerer<'a> {
     /// (TypeScript's `isConstContext`), and every other form lowers as it
     /// would anywhere else.
     /// A template literal with holes in a const context: its holes lowered
-    /// as values of this frame, the text around them kept raw. `None` for
+    /// as values of this frame, the text around them cooked. `None` for
     /// any other expression.
     fn lower_const_template(&mut self, expression: &Expression<'_>) -> Option<SliceExpr> {
         let Expression::TemplateLiteral(template) = unwrap_parenthesized(expression) else {
@@ -16171,7 +16716,7 @@ impl<'a> Lowerer<'a> {
         let quasis: Arc<[Arc<str>]> = template
             .quasis
             .iter()
-            .map(|quasi| Arc::from(quasi.value.raw.as_str()))
+            .map(|quasi| Arc::from(verter_type_expr_oxc::template_element_text(&quasi.value)))
             .collect();
         let holes: Arc<[SliceExpr]> = template
             .expressions
@@ -16280,6 +16825,7 @@ impl<'a> Lowerer<'a> {
                 },
                 member: Arc::from(member.to_vec().into_boxed_slice()),
                 static_side: heritage_access.static_side,
+                this: self.keyword_this(),
             },
             call_site(call),
             SliceCallArguments::none(),
@@ -16428,7 +16974,18 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
-                } => self.push_object_value(frame, key, method_kind, spans, widen_member, value),
+                    syntax,
+                } => {
+                    let context_sensitive = member_context_sensitive(syntax, &value);
+                    self.push_object_value(
+                        frame,
+                        key,
+                        (method_kind, spans),
+                        widen_member,
+                        context_sensitive,
+                        value,
+                    )
+                }
             }
         }
         while let Some(property) = frame.object.properties.get(frame.next) {
@@ -16537,6 +17094,10 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    context_sensitive: !is_accessor(method_kind)
+                        && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
+                            Some(value_expression),
+                        ),
                 })));
             return None;
         }
@@ -16594,6 +17155,11 @@ impl<'a> Lowerer<'a> {
                     readonly: false,
                     spans,
                     accessor_annotated,
+                    // An accessor is no context-sensitive member.
+                    context_sensitive: !is_accessor(method_kind)
+                        && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
+                            Some(value_expression),
+                        ),
                 })));
             return None;
         }
@@ -16629,6 +17195,7 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    context_sensitive: false,
                 })));
             return None;
         }
@@ -16653,7 +17220,14 @@ impl<'a> Lowerer<'a> {
             {
                 let name = Arc::clone(name);
                 let value = self.lower_assigned_value(value_expression, &name, frame.mode);
-                self.push_object_value(frame, key, method_kind, spans, widen_member, value);
+                self.push_object_value(
+                    frame,
+                    key,
+                    (method_kind, spans),
+                    widen_member,
+                    false,
+                    value,
+                );
                 None
             }
             // A const-asserted member keeps its literal in every
@@ -16664,6 +17238,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
+                    syntax: value_expression,
                 };
                 Some(ObjectStep::Descend(
                     value_expression,
@@ -16679,6 +17254,7 @@ impl<'a> Lowerer<'a> {
                     method_kind,
                     spans,
                     widen_member,
+                    syntax: value_expression,
                 };
                 Some(ObjectStep::Descend(value_expression, frame.mode, false))
             }
@@ -16691,9 +17267,12 @@ impl<'a> Lowerer<'a> {
         &mut self,
         frame: &mut ObjectFrame<'_, '_>,
         key: SliceObjectKey,
-        method_kind: Option<verter_type_expr::ObjectMethodKind>,
-        spans: verter_type_expr::MemberSpans,
+        (method_kind, spans): (
+            Option<verter_type_expr::ObjectMethodKind>,
+            verter_type_expr::MemberSpans,
+        ),
         widen_member: bool,
+        context_sensitive: bool,
         value: SliceExpr,
     ) {
         let (value, assignment_value) = if widen_member && widens_mutable_slot_literals(&value) {
@@ -16713,6 +17292,7 @@ impl<'a> Lowerer<'a> {
                 readonly: frame.policy.readonly(),
                 spans,
                 accessor_annotated: false,
+                context_sensitive,
             })));
     }
 
@@ -17067,6 +17647,8 @@ impl<'a> Lowerer<'a> {
         }
         impl<'a> Visit<'a> for Finder<'a> {
             fn visit_statement(&mut self, statement: &Statement<'a>) {
+                #[cfg(test)]
+                lowering_probe::declaration_lookup_visit();
                 let span = statement.span();
                 if self.found.is_none()
                     && span.start <= self.name.start
@@ -17076,6 +17658,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             fn visit_expression(&mut self, expression: &Expression<'a>) {
+                #[cfg(test)]
+                lowering_probe::declaration_lookup_visit();
                 let span = expression.span();
                 if self.found.is_none()
                     && span.start <= self.name.start
@@ -17129,58 +17713,20 @@ impl<'a> Lowerer<'a> {
                 // signatures, never its implementation's (the checker's
                 // `getSignaturesOfSymbol` drops the implementation when
                 // overloads precede it): its value is not the declaration
-                // this reads.
-                if self.declaration_has_overloads(function) {
+                // this reads. The skeleton recorded each bodiless
+                // declaration of the runtime variable when it discovered it.
+                if gate
+                    .bindings
+                    .runtime_declarations(candidate)
+                    .iter()
+                    .any(|declaration| gate.skeleton.binding(*declaration).overload_signature)
+                {
                     return None;
                 }
                 return Some((function, gate, own_frame));
             }
         }
         None
-    }
-
-    /// Whether the function declaration `function` has overload signatures:
-    /// bodiless declarations of its name in the statement list it sits in.
-    fn declaration_has_overloads(&self, function: &oxc_ast::ast::Function<'_>) -> bool {
-        let Some(id) = function.id.as_ref() else {
-            return false;
-        };
-        struct Siblings<'n> {
-            declaration: oxc_span::Span,
-            name: &'n str,
-            overloaded: Option<bool>,
-        }
-        impl<'a> Visit<'a> for Siblings<'_> {
-            fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
-                if self.overloaded.is_some() {
-                    return;
-                }
-                let holds_declaration = statements.iter().any(|statement| {
-                    matches!(statement, Statement::FunctionDeclaration(sibling)
-                        if sibling.span == self.declaration)
-                });
-                if holds_declaration {
-                    self.overloaded = Some(statements.iter().any(|statement| {
-                        matches!(statement, Statement::FunctionDeclaration(sibling)
-                            if sibling.body.is_none()
-                                && sibling
-                                    .id
-                                    .as_ref()
-                                    .is_some_and(|id| id.name.as_str() == self.name))
-                    }));
-                    return;
-                }
-                walk::walk_statements(self, statements);
-            }
-        }
-        let mut siblings = Siblings {
-            declaration: function.span,
-            name: id.name.as_str(),
-            overloaded: None,
-        };
-        self.walks
-            .with_node_stack(self.program.span, || siblings.visit_program(self.program));
-        siblings.overloaded == Some(true)
     }
 
     /// Whether `argument` of a `return` is a bare call of this frame's own
@@ -19721,4 +20267,25 @@ fn leaf_answer_is_fabricated_at_a_call_position(ty: &TypeExpr, expr: &Expression
     }
     verter_type_expr::referenced_names(ty).embeds_any
         && verter_semantic::analysis::flow::value_composes_unmodeled_call(expr)
+}
+
+/// Whether an object literal member of kind `method_kind` is an accessor.
+fn is_accessor(method_kind: Option<verter_type_expr::ObjectMethodKind>) -> bool {
+    matches!(
+        method_kind,
+        Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set)
+    )
+}
+
+/// Whether a data member whose value is `syntax`, lowered to `value`, is
+/// context sensitive: a nested object literal is when one of its members
+/// is (each lowered with its own flag, so the literal is not scanned
+/// again), any other value as its syntax is.
+fn member_context_sensitive(syntax: &Expression<'_>, value: &SliceExpr) -> bool {
+    match value {
+        SliceExpr::Object { entries, .. } => entries.iter().any(
+            |entry| matches!(entry, SliceObjectEntry::Member(member) if member.context_sensitive),
+        ),
+        _ => verter_semantic::analysis::type_eval_build::indexed_context_sensitive(Some(syntax)),
+    }
 }

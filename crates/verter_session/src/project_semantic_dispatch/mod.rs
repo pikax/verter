@@ -170,7 +170,6 @@ pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
-pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
@@ -428,6 +427,12 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// How many type-level reads this dispatch made of a member's
+    /// body-derived return whose evaluation closed degraded
+    /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
+    /// the dispatch the request builds, and the host flow-return boundary
+    /// reads it around its one evaluation.
+    pub(super) degraded_member_reads: std::cell::Cell<u32>,
     /// Runtime evidence injected into the cold build for the EXACT key the
     /// active force targets. Paired with that target key so the merge never
     /// leaks into a transitively nested build the target key's own
@@ -586,6 +591,20 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
     }
 }
 
+impl ProjectSemanticDispatch<'_> {
+    /// `key`'s flow return, and whether its evaluation read a member's
+    /// degraded body-derived return as a type — a fact the value's own
+    /// nodes do not carry, which the published answer must not drop.
+    pub(crate) fn execute_flow_return_observing_degraded_read(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> (crate::semantic_query::FlowReturnStep, bool) {
+        let before = self.degraded_member_reads.get();
+        let step = self.execute_flow_return(key);
+        (step, self.degraded_member_reads.get() != before)
+    }
+}
+
 /// Panic-safe RAII frame for the dispatch's
 /// [`ProjectSemanticDispatch::lexical_demand_scope`] stack: pushes the
 /// member-access/call-site canonical on construction and pops it on drop,
@@ -668,6 +687,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            degraded_member_reads: std::cell::Cell::new(0),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             dispatch_txn: std::cell::RefCell::new(
@@ -2028,22 +2048,30 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Tri-state outcome of
-/// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
-/// shared conditional branch-selection oracle, factored out of
+/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`] —
+/// the ONE shared conditional branch-selection oracle, factored out of
 /// `build_conditional`'s relation path (the infer-pattern cases and the
 /// full memoised relation engine, both through the sole relation
 /// authority `execute(SemanticQueryKey::Relate)`) and reused by the
 /// key-domain closedness classifiers in `raise.rs` for
 /// selected-branch-only classification.
-/// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
-/// the lattice-extreme checks that semantically use both branches
-/// (`any`) or dominate (`error`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConditionalBranchSelection {
     True,
     False,
+    /// The checker defers the conditional (`getConditionalType`): an
+    /// operand is generic, or the check fails the restrictive relation
+    /// while its permissive instantiation still relates. An `error` check
+    /// is kept too, the carrier dominating both branches.
     Deferred,
+    /// The checker decides the conditional and the lane cannot: the
+    /// relation it asks is undecided (`Unknown`, a budget, a coinductive
+    /// assumption), the `extends` pattern is one the lane does not infer
+    /// from, or an `any` check meets a pattern. The conditional is
+    /// published as a typed gap
+    /// ([`PartialReasonSet::UNDECIDED_CONDITIONAL`](crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL)),
+    /// never as the checker's answer.
+    Undecided,
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -4234,6 +4262,8 @@ mod differential_global_library_tests;
 #[cfg(test)]
 mod differential_harness_tests;
 #[cfg(test)]
+mod differential_inference_tests;
+#[cfg(test)]
 mod differential_literal_tests;
 #[cfg(test)]
 mod differential_module_tests;
@@ -4309,6 +4339,12 @@ mod truthiness_domain_tests;
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
 mod type_syntax_depth_tests;
+#[cfg(test)]
+mod undecided_call_tests;
+#[cfg(test)]
+mod undecided_conditional_tests;
+#[cfg(test)]
+mod unique_symbol_key_tests;
 #[cfg(test)]
 mod unique_symbol_widening_tests;
 #[cfg(test)]

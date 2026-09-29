@@ -434,3 +434,70 @@ fn a_const_spread_of_an_accessor_is_never_read_as_its_signature() {
         .collect();
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// Spreads of a union of one object type and types that spread into an empty
+/// object (`undefined`, `null`, `{}`), measured with tsc 7.0.2.
+const UNION_SPREADS: &str = r##"
+export function spMember(o: { x?: { label: string } }) { return { ...o.x }; }
+export function spEmptyArm(v: { a: number } | {}) { return { ...v }; }
+export function spNull(v: { a: number; b?: string } | null) { return { ...v, c: 1 }; }
+export function spLeft(v?: { a: number }) { return { a: "s" as const, ...v }; }
+export function spLeftOpt(v: { a?: number }) { return { a: "s" as const, ...v }; }
+"##;
+
+/// An object literal's spread of a union of one object type and types that
+/// spread into an empty object copies the object's properties as optional
+/// ones (the checker's `tryMergeUnionOfObjectTypeAndEmptyObject`): `{
+/// ...o.x }` over `x?: { label: string }` is `{ label?: string | undefined;
+/// }`, never `{ label: string } | {}`. Without `strictNullChecks` the
+/// nullish arm is absent and the object spreads whole.
+#[test]
+fn a_spread_of_an_object_or_empty_union_copies_optional_properties() {
+    let matrix = Matrix::new(UNION_SPREADS);
+    let failures = matrix.nullness(&[
+        (
+            Read::Return("spMember"),
+            "{ label?: string | undefined; }",
+            "{ label: string; }",
+        ),
+        (
+            Read::Return("spEmptyArm"),
+            "{ a?: number | undefined; }",
+            "{ a?: number; }",
+        ),
+        (
+            Read::Return("spNull"),
+            "{ a?: number | undefined; b?: string; c: number; }",
+            "{ a: number; b?: string; c: number; }",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A spread's optional property over a property the literal already has is
+/// the union of both (`{ a: number | "s"; }`).
+///
+/// What the lane gives:
+/// - `spLeftOpt` (a declared optional member): the lane measured `{ a:
+///   <opaque OpenSurface>; }` under all four settings.
+/// - `spLeft` (the merged partial of `{ a: number } | undefined`): the
+///   same `{ a: <opaque OpenSurface>; }` with `strictNullChecks`; without
+///   it the object spreads whole and the lane answers `{ a: number; }`.
+#[test]
+#[ignore = "an optional spread property over an existing one is the union of both"]
+fn an_optional_spread_property_over_an_existing_one_is_their_union() {
+    let matrix = Matrix::new(UNION_SPREADS);
+    let failures = matrix.nullness(&[
+        (
+            Read::Return("spLeft"),
+            "{ a: number | \"s\"; }",
+            "{ a: number; }",
+        ),
+        (
+            Read::Return("spLeftOpt"),
+            "{ a: number | \"s\"; }",
+            "{ a: number | \"s\"; }",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

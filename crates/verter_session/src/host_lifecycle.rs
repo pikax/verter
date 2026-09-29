@@ -275,6 +275,20 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
+        self.resolve_for_persistent_state_in(None, parent_canonical_id, import_source, ctx)
+    }
+
+    /// [`Self::resolve_for_persistent_state`] against one resolution
+    /// snapshot: the workspace's own view (`None`), or a request overlay's
+    /// effective view. ONE entry, so the importer mapping, the witness and
+    /// the admission contract cannot differ between the two.
+    pub(crate) fn resolve_for_persistent_state_in(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> verter_workspace::ResolutionPublication {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
         // context. The request context supplies the actual published-project
@@ -288,9 +302,17 @@ impl VerterHost {
             } else {
                 Arc::from(parent_canonical_id)
             };
-        let outcome = self
-            .ws()
-            .resolve_import_outcome(importer.as_ref(), import_source, ctx);
+        let outcome = match overlay {
+            None => self
+                .ws()
+                .resolve_import_outcome(importer.as_ref(), import_source, ctx),
+            Some(overlay) => self.ws().resolve_import_outcome_with_overlay(
+                overlay,
+                importer.as_ref(),
+                import_source,
+                ctx,
+            ),
+        };
         #[cfg(test)]
         self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
         let publication = outcome.into_publication();
@@ -318,78 +340,6 @@ impl VerterHost {
             .into_iter()
             .filter_map(|canonical| view.source(&canonical).map(|source| (canonical, source)));
         verter_workspace::ResolutionOverlaySnapshot::new(upserts, view.tombstoned_canonicals())
-    }
-
-    pub(crate) fn resolve_for_persistent_state_with_overlay(
-        &self,
-        overlay: &verter_workspace::ResolutionOverlaySnapshot,
-        parent_canonical_id: &str,
-        import_source: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> verter_workspace::ResolutionPublication {
-        let importer =
-            if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
-                crate::request_context::current_request_context()
-                    .map(|request| Arc::clone(&request.canonical_id))
-                    .unwrap_or_else(|| Arc::from(parent_canonical_id))
-            } else {
-                Arc::from(parent_canonical_id)
-            };
-        let outcome = self.ws().resolve_import_outcome_with_overlay(
-            overlay,
-            importer.as_ref(),
-            import_source,
-            ctx,
-        );
-        #[cfg(test)]
-        self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
-        let publication = outcome.into_publication();
-        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
-        publication
-    }
-
-    /// The overlay-aware sibling of
-    /// [`crate::VerterHost::resolve_type_dependency_canonical`]: the shared
-    /// TS-first type-route policy (TypeImport → ESM fallback →
-    /// re-normalise) resolved against a session's overlay.
-    pub(crate) fn resolve_type_dependency_canonical_with_overlay(
-        &self,
-        overlay: &verter_workspace::ResolutionOverlaySnapshot,
-        owner_canonical: &str,
-        import_source: &str,
-    ) -> Option<String> {
-        let type_lane = self.resolve_for_persistent_state_with_overlay(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-            },
-        );
-        let type_lane = match type_lane {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => return None,
-        };
-        if let Some(resolved) = type_lane {
-            return Some(resolved);
-        }
-        match self.resolve_for_persistent_state_with_overlay(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
-            },
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => None,
-        }
     }
 
     /// Compute the preferred alias-based import specifier for a target file.

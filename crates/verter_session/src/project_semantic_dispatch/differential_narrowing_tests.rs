@@ -423,6 +423,12 @@ export function dOptional(o: Opt) { if (o.k === undefined) return o; throw 0; }
 export function dOptionalElse(o: Opt) { if (o.k === "a") return o; throw 0; }
 export function dOptChain(s: Shape | undefined) { if (s?.kind === "circle") return s; throw 0; }
 export function dOptChainNe(s: Shape | undefined) { if (s?.kind !== "circle") return s; throw 0; }
+export function dOptChainNull(s: Shape | null) { if (s?.kind === "square") return s; throw 0; }
+export function dOptChainElse(s: Shape | undefined) { if (s?.kind === "circle") throw 0; return s; }
+export function dOptChainElem(s: Shape | undefined) { if (s?.["kind"] === "tri") return s; throw 0; }
+export function dOptChainLoose(s: Shape | undefined) { if (s?.kind == "tri") return s; throw 0; }
+export function dOptChainMember(s: Shape | undefined) { if (s?.kind === "circle") return s.r; throw 0; }
+export function dOptChainTernary(s: Shape | undefined) { return s?.kind === "circle" ? s : 0; }
 export function dElemAccess(s: Shape) { if (s["kind"] === "tri") return s; throw 0; }
 export function dTernary(s: Shape) { return s.kind === "circle" ? s.r : s.kind === "square" ? s.s : s.t; }
 export function dExhaust(s: Shape) { switch (s.kind) { case "circle": return 1; case "square": return 2; case "tri": return 3; } }
@@ -492,27 +498,31 @@ fn a_destructured_parameter_discriminant_narrows_its_sibling() {
 }
 
 /// `s?.kind === "circle"` narrows `s` to `Circle` (the `undefined` arm cannot
-/// produce the literal), and `!==` keeps `undefined` beside the other members.
-///
-/// What the lane gives:
-/// - `dOptChain`: the checker answers `Circle`; the lane measured `Shape |
-///   undefined` degraded by FlowGap(GuardNarrowing); measured `Shape` degraded
-///   by FlowGap(GuardNarrowing).
-/// - `dOptChainNe`: the checker answers `Square | Tri | undefined` (strict),
-///   `Square | Tri` (strictNullChecks off), `Square | Tri | undefined`
-///   (noImplicitAny off), `Square | Tri` (both off); the lane measured `Shape |
-///   undefined` degraded by FlowGap(GuardNarrowing); measured `Shape` degraded
-///   by FlowGap(GuardNarrowing).
+/// produce the literal), and `!==` keeps `undefined` beside the other members
+/// (tsc 7.0.2, all four settings).
 #[test]
-#[ignore = "an optional-chain discriminant comparison narrows the chain's root"]
 fn an_optional_chain_discriminant_narrows_the_chain_root() {
     let matrix = Matrix::new(DISCRIMINANTS);
-    let mut failures = matrix.returns(&[("dOptChain", "Circle")]);
-    failures.extend(matrix.nullness(&[(
-        Read::Return("dOptChainNe"),
-        "Square | Tri | undefined",
-        "Square | Tri",
-    )]));
+    let mut failures = matrix.returns(&[
+        ("dOptChain", "Circle"),
+        ("dOptChainNull", "Square"),
+        ("dOptChainElem", "Tri"),
+        ("dOptChainLoose", "Tri"),
+        ("dOptChainMember", "number"),
+        ("dOptChainTernary", "0 | Circle"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (
+            Read::Return("dOptChainNe"),
+            "Square | Tri | undefined",
+            "Square | Tri",
+        ),
+        (
+            Read::Return("dOptChainElse"),
+            "Square | Tri | undefined",
+            "Square | Tri",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -844,6 +854,31 @@ fn a_call_of_a_degraded_member_return_is_never_read_clean() {
     ]
     .iter()
     .map(|(function, answer)| (Read::Return(function), vec![*answer; 4]))
+    .collect();
+    let wrong: Vec<String> = matrix
+        .verdicts(&rows)
+        .into_iter()
+        .flatten()
+        .filter(|verdict| !verdict.matched && verdict.class != "GAP")
+        .map(|verdict| verdict.lane)
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A degraded member return read as a type (`ReturnType<typeof CS.is>`,
+/// `ReturnType<CM['m']>`) reaches the published answer as a typed
+/// degradation, never clean: the checker answers `Record<string, number>`
+/// (TypeScript 7.0.2, all four settings), the lane the unnarrowed union.
+#[test]
+fn a_degraded_member_return_read_as_a_type_is_never_published_clean() {
+    let matrix = Matrix::new(DEGRADED_MEMBER_RETURNS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = [
+        "ReturnType<typeof CS.is>",
+        "ReturnType<CM['m']>",
+        "ReturnType<typeof CG.is>",
+    ]
+    .iter()
+    .map(|text| (Read::Type(text), vec!["Record<string, number>"; 4]))
     .collect();
     let wrong: Vec<String> = matrix
         .verdicts(&rows)

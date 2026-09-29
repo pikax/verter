@@ -428,7 +428,8 @@ impl FilesystemWorkspace {
     }
 
     /// Resolve against an immutable, request-local snapshot of every
-    /// filesystem observation made by the resolver.
+    /// filesystem observation made by the resolver — through `overlay`'s
+    /// effective view when one is given.
     ///
     /// A discovery pass records live VFS/OS observations but is necessarily
     /// ReturnOnly. After the observation set is revalidated, the Engine reruns
@@ -438,6 +439,7 @@ impl FilesystemWorkspace {
     fn resolve_import_at_published_snapshot(
         &self,
         published: &Arc<crate::published_state::PublishedRoot>,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         importer_id: &str,
         specifier: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
@@ -459,7 +461,8 @@ impl FilesystemWorkspace {
                         published,
                         &mut input_ledger,
                         &|| true,
-                    ),
+                    )
+                    .over(overlay),
                 );
             if matches!(
                 discovery.non_admission_reason(),
@@ -499,7 +502,8 @@ impl FilesystemWorkspace {
                             final_valid.set(valid);
                             valid
                         },
-                    ),
+                    )
+                    .over(overlay),
                 );
             if final_valid.get() {
                 return outcome;
@@ -526,81 +530,13 @@ impl FilesystemWorkspace {
                 verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
             );
         };
-        let mut input_ledger =
-            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
-
-        loop {
-            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
-            let discovery = {
-                let reader =
-                    crate::resolution_currency::OverlaySnapshotReader::new(&recorder, overlay);
-                self.engine
-                    .resolve_import_outcome_for_published_in_operation(
-                        &reader,
-                        self.resolution_evidence_source(),
-                        importer_id,
-                        specifier,
-                        ctx,
-                        crate::engine::ResolutionOperation::pinned(
-                            &published,
-                            &mut input_ledger,
-                            &|| true,
-                        ),
-                    )
-            };
-            if matches!(
-                discovery.non_admission_reason(),
-                Some(
-                    verter_audit::NonAdmissionReason::ResolutionViewSuperseded
-                        | verter_audit::NonAdmissionReason::BudgetExceeded
-                )
-            ) {
-                return discovery;
-            }
-            input_ledger.discard_staged_loaded_inputs();
-
-            let frozen = recorder.freeze();
-            if !frozen.revalidate() {
-                if input_ledger.charge_outer_restart(self).is_err() {
-                    return crate::resolution_currency::ResolutionOutcome::refused(
-                        None,
-                        verter_audit::NonAdmissionReason::BudgetExceeded,
-                    );
-                }
-                continue;
-            }
-            let final_valid = std::cell::Cell::new(true);
-            let outcome = {
-                let reader =
-                    crate::resolution_currency::OverlaySnapshotReader::new(&frozen, overlay);
-                self.engine
-                    .resolve_import_outcome_for_published_in_operation(
-                        &reader,
-                        self.resolution_evidence_source(),
-                        importer_id,
-                        specifier,
-                        ctx,
-                        crate::engine::ResolutionOperation::pinned(
-                            &published,
-                            &mut input_ledger,
-                            &|| {
-                                let valid = frozen.complete() && frozen.revalidate();
-                                final_valid.set(valid);
-                                valid
-                            },
-                        ),
-                    )
-            };
-            if final_valid.get() {
-                return outcome;
-            }
-            if input_ledger.charge_outer_restart(self).is_err() {
-                return crate::resolution_currency::ResolutionOutcome::refused(
-                    None,
-                    verter_audit::NonAdmissionReason::BudgetExceeded,
-                );
-            }
-        }
+        self.resolve_import_at_published_snapshot(
+            &published,
+            Some(overlay),
+            importer_id,
+            specifier,
+            ctx,
+        )
     }
 
     /// Record a resolution-derived parsed-edge batch against an immutable,
@@ -2113,7 +2049,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                 verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
             );
         };
-        self.resolve_import_at_published_snapshot(&published, importer_id, specifier, ctx)
+        self.resolve_import_at_published_snapshot(&published, None, importer_id, specifier, ctx)
     }
 
     fn resolve_import_outcome_with_overlay(
@@ -2133,7 +2069,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         specifier: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
-        self.resolve_import_at_published_snapshot(published, importer_id, specifier, ctx)
+        self.resolve_import_at_published_snapshot(published, None, importer_id, specifier, ctx)
     }
 
     fn resolve_import_for_project(

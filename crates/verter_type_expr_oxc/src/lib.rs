@@ -55,6 +55,18 @@ mod type_parameter_scope_tests;
 ///
 /// `source` is the full source text, used for extracting raw text
 /// for `Unknown` fallback nodes and literal values.
+/// The text a template element contributes to the value it builds: its
+/// cooked value (`\n` a newline, `\u{41}` an `A`, a line continuation
+/// nothing), as the checker reads a template literal type and a template
+/// expression. An element with an invalid escape has no cooked value (a
+/// tagged template's, or a template literal type's `\u{zz}`) and is its
+/// raw text, as the checker reads the type (`` `a\u{zz}` `` is
+/// `"a\\u{zz}"`).
+#[must_use]
+pub fn template_element_text<'s>(value: &'s oxc_ast::ast::TemplateElementValue<'_>) -> &'s str {
+    value.cooked.as_ref().unwrap_or(&value.raw).as_str()
+}
+
 pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
     lower_ts_type_with_whole_query(ts_type, source, None)
 }
@@ -336,7 +348,11 @@ fn build_ts_type<'b, 'a>(
 
         // -- Template literal type: `prefix${T}suffix` --
         TSType::TSTemplateLiteralType(tpl) => TypeExpr::TemplateLiteral {
-            quasis: tpl.quasis.iter().map(|q| q.value.raw.to_string()).collect(),
+            quasis: tpl
+                .quasis
+                .iter()
+                .map(|q| template_element_text(&q.value).to_string())
+                .collect(),
             // Exact-size collect straight into the `Arc<[TypeExpr]>`
             // payload — one allocation, no intermediate `Vec`.
             expressions: tpl.types.iter().map(&mut *lower).collect(),
@@ -527,7 +543,7 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
         TSLiteral::TemplateLiteral(tpl) => {
             if tpl.expressions.is_empty() {
                 if let Some(quasi) = tpl.quasis.first() {
-                    TypeExpr::string_literal(quasi.value.raw.as_str())
+                    TypeExpr::string_literal(template_element_text(&quasi.value))
                 } else {
                     TypeExpr::string_literal("")
                 }

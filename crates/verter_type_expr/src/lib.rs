@@ -37,7 +37,9 @@ pub use recursive_traversal::{referenced_names, ReferencedNames, ReferencedTypeN
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
 mod display;
-pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayError};
+pub use display::{
+    push_template_quasi, render_type_expr_display, RenderedTypeExpr, TypeExprDisplayError,
+};
 
 /// Hand-rolled JSON (de)serialisation for [`TypeExpr`]: the
 /// [`serde::Serialize`]/[`serde::Deserialize`] impls,

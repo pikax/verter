@@ -293,7 +293,7 @@ impl ProjectSemanticDispatch<'_> {
                 // unknown ? X : Y` is `X` (the checker adds the false branch
                 // only when the extends type is neither).
                 if matches!(
-                    self.peek_special(extends),
+                    self.peek_special(self.declared_operand_where_written(extends)),
                     Some((SpecialKind::Any | SpecialKind::Unknown, _))
                 ) {
                     return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));

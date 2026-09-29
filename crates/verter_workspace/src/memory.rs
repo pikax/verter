@@ -525,14 +525,18 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         specifier: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
-        let reader = crate::resolution_currency::OverlaySnapshotReader::new(self, overlay);
-        self.engine.resolve_import_outcome_with_evidence(
-            &reader,
-            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            importer_id,
-            specifier,
-            ctx,
-        )
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
+        self.engine
+            .resolve_import_outcome_for_published_in_operation(
+                self,
+                crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+                importer_id,
+                specifier,
+                ctx,
+                crate::engine::ResolutionOperation::unpinned(&mut input_ledger, &|| true)
+                    .over(Some(overlay)),
+            )
     }
 
     fn resolve_import_at_published(

@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
+import {
+  typeExprToDescriptor,
+  buildEvaluatedTypeMap,
+  escapeTemplateQuasi,
+} from "./type-expr-bridge.js";
 import type { NativeTypeExpr, NativeEvaluatedField } from "./type-expr-bridge.js";
 import {
   DecodedTypeGraph,
@@ -1606,5 +1610,17 @@ describe("operator-shaped graph nodes render structurally in display text", () =
   it("renders an unresolvable keyof over an indexed access as type syntax", () => {
     const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 8));
     expect(result).toEqual({ kind: "unknown", rawType: "keyof Theme[color]" });
+  });
+});
+
+describe("escapeTemplateQuasi", () => {
+  // A quasi is cooked text; tsc 7.0.2 prints `x${string}\\`, `a\t${string}`
+  // and a line feed as it is.
+  it("escapes cooked template text as the checker prints it", () => {
+    expect(escapeTemplateQuasi("a`b${c\\d\te\nf\r\ng\b\u0001")).toBe(
+      "a\\`b\\${c\\\\d\\te\nf\\r\\ng\\b\\u0001",
+    );
+    expect(escapeTemplateQuasi("\0")).toBe("\\0");
+    expect(escapeTemplateQuasi("\u00001 $")).toBe("\\x001\\u2028$");
   });
 });
