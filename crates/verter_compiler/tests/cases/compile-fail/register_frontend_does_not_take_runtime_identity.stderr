@@ -1,10 +1,18 @@
-error[E0599]: no associated function or constant named `new` found for struct `CatalogIdentity` in the current scope
+error[E0624]: associated function `ordinary` is private
   --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:25:26
    |
-25 |         CatalogIdentity::new(
-   |                          ^^^ associated function or constant not found in `CatalogIdentity`
+25 |           CatalogIdentity::ordinary(
+   |                            ^^^^^^^^ private associated function
    |
-help: there is a method `ne` with a similar name, but with different arguments
+  ::: src/framework_common/catalog.rs
+   |
+   | /     fn ordinary(
+   | |         adapter_id: FrameworkAdapterId,
+   | |         carrier_language_id: LanguageId,
+   | |         epoch: FrameworkEpochId,
+   | |         capability: CatalogCapability,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
 
 error[E0624]: associated function `new` is private
   --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:28:31
@@ -20,11 +28,17 @@ error[E0624]: associated function `new` is private
 error[E0061]: this function takes 3 arguments but 2 arguments were supplied
   --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:24:13
    |
-24 |     let _ = TypedCapabilityRegistration::register_frontend(
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-32 |         Present(ToolingFrontend),
-   |         ------------------------ argument #2 of type `LanguageId` is missing
+24 |       let _ = TypedCapabilityRegistration::register_frontend(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+25 | /         CatalogIdentity::ordinary(
+26 | |             FrameworkAdapterId::new("tooling"),
+27 | |             LanguageId::new("html"),
+28 | |             FrameworkEpochId::new("html-v1"),
+29 | |             CatalogCapability::Runtime,
+30 | |         ),
+   | |_________- expected `FrameworkAdapterId`, found `CatalogIdentity`
+31 |           Present(ToolingFrontend),
+   |           ------------------------ argument #2 of type `LanguageId` is missing
    |
 note: associated function defined here
   --> src/framework_common/catalog.rs
@@ -33,9 +47,14 @@ note: associated function defined here
    |            ^^^^^^^^^^^^^^^^^
 help: provide the argument
    |
-24 |     let _ = TypedCapabilityRegistration::register_frontend(
-...
-31 |         ),
-32 ~         /* LanguageId */,
-33 ~         Present(ToolingFrontend),
+24 -     let _ = TypedCapabilityRegistration::register_frontend(
+25 -         CatalogIdentity::ordinary(
+26 -             FrameworkAdapterId::new("tooling"),
+27 -             LanguageId::new("html"),
+28 -             FrameworkEpochId::new("html-v1"),
+29 -             CatalogCapability::Runtime,
+30 -         ),
+31 -         Present(ToolingFrontend),
+32 -     );
+24 +     let _ = TypedCapabilityRegistration::register_frontend(/* FrameworkAdapterId */, /* LanguageId */, Present(ToolingFrontend));
    |
