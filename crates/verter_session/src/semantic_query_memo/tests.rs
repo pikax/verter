@@ -690,11 +690,14 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
     }));
     assert!(panicked.is_err(), "build must have unwound via panic");
 
-    // The thread-local recursion stack must be empty (RAII guard) so
+    // The unwound producer closed and its task retired (RAII guards), so
     // the same thread can query the same key without being flagged as
     // same-path recursion.
-    let is_empty = IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().is_empty());
-    assert!(is_empty, "recursion stack must be empty after panic");
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "the unwound producer's task must retire"
+    );
 
     // A subsequent call for the same key must not deadlock. It must
     // be free to start a fresh cold build (the in-flight entry was

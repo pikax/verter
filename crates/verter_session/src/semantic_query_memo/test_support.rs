@@ -22,8 +22,8 @@ impl SemanticGraphStore {
     #[cfg(test)]
     pub(crate) fn wait_graph_counts_for_tests(&self) -> (usize, usize) {
         (
-            self.wait_for_graph.active_owner_count_for_tests(),
-            self.wait_for_graph.wait_count_for_tests(),
+            self.task_registry.active_task_count_for_tests(),
+            self.task_registry.wait_count_for_tests(),
         )
     }
 

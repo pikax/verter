@@ -45,11 +45,15 @@ pub const HOT_PATH_DENYLIST: &[(&str, &str)] = &[
         "verter_compiler",
         "compile::template_data::walk_node_for_extraction",
     ),
-    // Semantic-graph cooperative dispatch loop — every memoized
-    // semantic subquery fans out through this method and each
-    // dispatch is a hot iteration.
+    // Semantic-graph memo protocol — every memoized semantic subquery
+    // begins a claim (the warm lookup) and cold ones claim a producer, so
+    // each dispatch is a hot iteration of both.
     (
         "verter_session",
-        "semantic_query_memo::SemanticGraphStore::execute_cooperative",
+        "semantic_query_memo::producer::SemanticGraphStore::begin_query_claim",
+    ),
+    (
+        "verter_session",
+        "semantic_query_memo::producer::SemanticGraphStore::claim_query",
     ),
 ];

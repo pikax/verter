@@ -1,6 +1,6 @@
-//! Deterministic cooperative wait-cycle tests.
+//! Deterministic task and wait-cycle tests.
 //!
-//! These tests cover the owner/generation substrate directly and drive the
+//! These tests cover the task/generation substrate directly and drive the
 //! real semantic-query singleflight for the cross-thread nonpublication
 //! guarantee.
 
@@ -9,7 +9,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use super::wait_cycle::{WaitCycle, WaitForGraph};
+use super::tasks::{TaskRegistry, WaitCycle};
 use super::*;
 use crate::semantic_query::{ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
@@ -55,36 +55,36 @@ fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) ->
 }
 
 #[test]
-fn two_owner_wait_cycle_is_detected_before_parking() {
-    let graph = WaitForGraph::default();
-    let owner_a = graph.register_owner();
-    let owner_b = graph.register_owner();
+fn two_task_wait_cycle_is_detected_before_parking() {
+    let graph = TaskRegistry::default();
+    let task_a = graph.register_task();
+    let task_b = graph.register_task();
 
     let _a_waits_for_b = graph
-        .register_wait(owner_a.owner(), owner_b.owner())
+        .register_wait(task_a.id(), task_b.id())
         .expect("first edge is acyclic");
     assert!(matches!(
-        graph.register_wait(owner_b.owner(), owner_a.owner()),
+        graph.register_wait(task_b.id(), task_a.id()),
         Err(WaitCycle)
     ));
     assert_eq!(graph.wait_count_for_tests(), 1);
 }
 
 #[test]
-fn three_owner_wait_cycle_is_detected_before_parking() {
-    let graph = WaitForGraph::default();
-    let owner_a = graph.register_owner();
-    let owner_b = graph.register_owner();
-    let owner_c = graph.register_owner();
+fn three_task_wait_cycle_is_detected_before_parking() {
+    let graph = TaskRegistry::default();
+    let task_a = graph.register_task();
+    let task_b = graph.register_task();
+    let task_c = graph.register_task();
 
     let _a_waits_for_b = graph
-        .register_wait(owner_a.owner(), owner_b.owner())
+        .register_wait(task_a.id(), task_b.id())
         .expect("first edge is acyclic");
     let _b_waits_for_c = graph
-        .register_wait(owner_b.owner(), owner_c.owner())
+        .register_wait(task_b.id(), task_c.id())
         .expect("second edge is acyclic");
     assert!(matches!(
-        graph.register_wait(owner_c.owner(), owner_a.owner()),
+        graph.register_wait(task_c.id(), task_a.id()),
         Err(WaitCycle)
     ));
     assert_eq!(graph.wait_count_for_tests(), 2);
@@ -92,16 +92,16 @@ fn three_owner_wait_cycle_is_detected_before_parking() {
 
 #[test]
 fn acyclic_wait_edges_register_and_clean_up_independently() {
-    let graph = WaitForGraph::default();
-    let owner_a = graph.register_owner();
-    let owner_b = graph.register_owner();
-    let owner_c = graph.register_owner();
+    let graph = TaskRegistry::default();
+    let task_a = graph.register_task();
+    let task_b = graph.register_task();
+    let task_c = graph.register_task();
 
     let a_waits_for_b = graph
-        .register_wait(owner_a.owner(), owner_b.owner())
+        .register_wait(task_a.id(), task_b.id())
         .expect("a -> b is acyclic");
     let b_waits_for_c = graph
-        .register_wait(owner_b.owner(), owner_c.owner())
+        .register_wait(task_b.id(), task_c.id())
         .expect("b -> c is acyclic");
     assert_eq!(graph.wait_count_for_tests(), 2);
 
@@ -112,68 +112,68 @@ fn acyclic_wait_edges_register_and_clean_up_independently() {
 }
 
 #[test]
-fn stale_generation_cleanup_cannot_remove_reused_owner_or_wait() {
-    let graph = WaitForGraph::default();
-    let first = graph.register_owner();
-    let stale = first.owner();
+fn stale_generation_cleanup_cannot_remove_reused_task_or_wait() {
+    let graph = TaskRegistry::default();
+    let first = graph.register_task();
+    let stale = first.id();
     drop(first);
 
-    let reused = graph.register_owner();
-    let target = graph.register_owner();
-    assert_eq!(reused.owner().id(), stale.id(), "owner slot must be reused");
+    let reused = graph.register_task();
+    let target = graph.register_task();
+    assert_eq!(reused.id().slot(), stale.slot(), "task slot must be reused");
     assert_ne!(
-        reused.owner().generation(),
+        reused.id().generation(),
         stale.generation(),
         "slot reuse must advance the generation"
     );
     let _wait = graph
-        .register_wait(reused.owner(), target.owner())
-        .expect("reused owner wait is acyclic");
+        .register_wait(reused.id(), target.id())
+        .expect("reused task wait is acyclic");
 
-    graph.unregister_owner_for_tests(stale);
-    graph.remove_wait_for_tests(stale, target.owner());
-    assert!(graph.is_active_for_tests(reused.owner()));
+    graph.retire_for_tests(stale);
+    graph.remove_wait_for_tests(stale, target.id());
+    assert!(graph.is_active_for_tests(reused.id()));
     assert_eq!(graph.wait_count_for_tests(), 1);
 }
 
 #[test]
 fn panic_and_cancel_style_early_return_clean_wait_registrations() {
-    let graph = WaitForGraph::default();
-    let target = graph.register_owner();
+    let graph = TaskRegistry::default();
+    let target = graph.register_task();
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let waiter = graph.register_owner();
+        let waiter = graph.register_task();
         let _wait = graph
-            .register_wait(waiter.owner(), target.owner())
+            .register_wait(waiter.id(), target.id())
             .expect("panic-path wait is acyclic");
-        panic!("simulated owner panic");
+        panic!("simulated task panic");
     }));
     assert!(panicked.is_err());
     assert_eq!(graph.wait_count_for_tests(), 0);
-    assert_eq!(graph.active_owner_count_for_tests(), 1);
+    assert_eq!(graph.active_task_count_for_tests(), 1);
 
-    fn cancelled_early(graph: &WaitForGraph, target: super::wait_cycle::ExecutionOwner) {
-        let waiter = graph.register_owner();
+    fn cancelled_early(graph: &TaskRegistry, target: super::tasks::TaskId) {
+        let waiter = graph.register_task();
         let _wait = graph
-            .register_wait(waiter.owner(), target)
+            .register_wait(waiter.id(), target)
             .expect("cancel-path wait is acyclic");
         // A cancellation return drops both RAII registrations.
     }
-    cancelled_early(&graph, target.owner());
+    cancelled_early(&graph, target.id());
     assert_eq!(graph.wait_count_for_tests(), 0);
-    assert_eq!(graph.active_owner_count_for_tests(), 1);
+    assert_eq!(graph.active_task_count_for_tests(), 1);
 }
 
-fn run_real_singleflight_cycle(owner_count: usize) {
+fn run_real_singleflight_cycle(task_count: usize) {
     let store = Arc::new(SemanticGraphStore::new());
-    let rendezvous = Arc::new(Barrier::new(owner_count));
-    let keys: Arc<[SemanticQueryKey]> = (0..owner_count)
-        .map(|index| key(&format!("Owner{index}")))
+    let rendezvous = Arc::new(Barrier::new(task_count));
+    let keys: Arc<[SemanticQueryKey]> = (0..task_count)
+        .map(|index| key(&format!("Task{index}")))
         .collect::<Vec<_>>()
         .into();
     let saw_return_only = Arc::new(AtomicBool::new(false));
 
-    let handles = (0..owner_count)
+    let handles = (0..task_count)
         .map(|index| {
             let store = Arc::clone(&store);
             let rendezvous = Arc::clone(&rendezvous);
@@ -211,15 +211,15 @@ fn run_real_singleflight_cycle(owner_count: usize) {
         .collect::<Vec<_>>();
 
     for (index, handle) in handles.into_iter().enumerate() {
-        let read = join_within(handle, &format!("cycle owner {index}"));
+        let read = join_within(handle, &format!("cycle task {index}"));
         assert!(
             matches!(read.value, QueryResult::Recursive(_)),
-            "cycle owner must receive the established recursion carrier, got {:?}",
+            "cycle task must receive the established recursion carrier, got {:?}",
             read.value
         );
         assert!(
             read.cache_suppress && read.result_is_partial,
-            "cycle owner must remain ReturnOnly + partial"
+            "cycle task must remain ReturnOnly + partial"
         );
     }
     assert!(
@@ -234,16 +234,16 @@ fn run_real_singleflight_cycle(owner_count: usize) {
     assert_eq!(
         store.wait_graph_counts_for_tests(),
         (0, 0),
-        "all execution owners and wait edges must retire after the calls return"
+        "all execution tasks and wait edges must retire after the calls return"
     );
 }
 
 #[test]
-fn real_singleflight_two_owner_cycle_returns_return_only_and_never_publishes() {
+fn real_singleflight_two_task_cycle_returns_return_only_and_never_publishes() {
     run_real_singleflight_cycle(2);
 }
 
 #[test]
-fn real_singleflight_three_owner_cycle_returns_return_only_and_never_publishes() {
+fn real_singleflight_three_task_cycle_returns_return_only_and_never_publishes() {
     run_real_singleflight_cycle(3);
 }

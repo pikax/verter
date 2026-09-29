@@ -344,8 +344,8 @@ warm-read validator decides how strictly that self-root is checked:
   self-root `FileWholeHash` per observed self-root, merges the traced fact set,
   returns `None` — non-cacheable — on a conflicting self-root hash or a traced
   `FileWholeHash` that disagrees with an observed self-root). The warm-read
-  validator — `execute_cooperative`'s fast path, `get_validated`, the slow-path
-  step-1 recheck, and the relation memo's `get_relation` — validates every
+  validator — the memo protocol's lookup (`begin_query_claim`), `get_validated`,
+  the claim's warm re-read, and the relation memo's `get_relation` — validates every
   self-root strictly via `validate_fact_signature_with_self_roots` /
   `ReadSetSignature::validate_with_self_roots`. `get_unvalidated` has no
   production warm-read caller (test/debug only).
