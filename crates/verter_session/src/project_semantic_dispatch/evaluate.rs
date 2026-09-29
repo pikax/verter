@@ -453,6 +453,11 @@ struct CompositeReduction {
     next: usize,
     views: Vec<SemanticNodeId>,
     named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
+    /// The named arms of an intersection that stand for unions of object
+    /// types: the arm stays the view, and the checker's cross product over
+    /// the unions is still weighed
+    /// ([`ProjectSemanticDispatch::named_intersection_too_complex`]).
+    named_object_unions: Vec<SemanticNodeId>,
     /// Whether the result keeps the names the checker prints as a union's
     /// origin (`U0 | 2`): only at the altitude a type is printed at. A
     /// demand that resolves declarations reads the type set itself (`0 |
@@ -2397,6 +2402,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             next: 0,
             views: Vec::with_capacity(capacity),
             named_unions: Vec::new(),
+            named_object_unions: Vec::new(),
             keep_origin,
             waiting: None,
             completeness: ResultCompleteness::Complete,
@@ -2490,6 +2496,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .all(|member| self.is_composite_scalar(*member))
                 {
                     reduction.views.push(arm);
+                    reduction.named_object_unions.push(arm);
                 } else {
                     reduction
                         .views
@@ -2520,6 +2527,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let arms: &[SemanticNodeId] = &reduction.arms;
         let views = &reduction.views;
         let named_unions = &reduction.named_unions;
+        if !reduction.is_union {
+            if let Some(recovery) = self.named_intersection_too_complex(reduction) {
+                return Some(recovery);
+            }
+        }
         if views.as_slice() == arms {
             return None;
         }
@@ -2584,6 +2596,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => reduced,
         };
         (result != node).then_some(result)
+    }
+
+    /// The checker's TS2590 recovery for an intersection over named
+    /// object unions it refuses to distribute
+    /// ([`Self::intersection_too_complex`]): the intersection stays factored
+    /// while it is read, but its cross product is weighed as the checker
+    /// weighs it. `None` when the checker distributes it.
+    fn named_intersection_too_complex(
+        &self,
+        reduction: &CompositeReduction,
+    ) -> Option<SemanticNodeId> {
+        if reduction.named_object_unions.is_empty() {
+            return None;
+        }
+        self.intersection_too_complex(reduction.node)
     }
 
     /// Advance `walk` — the members of the resolved union a named arm

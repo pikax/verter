@@ -17,7 +17,6 @@
 //! the slot is private to this module.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 
 use smallvec::SmallVec;
 
@@ -75,17 +74,88 @@ thread_local! {
 /// it ran — what a warm hit does with its stored signature.
 #[derive(Default)]
 pub(crate) struct FactReadRecorder {
-    facts: RefCell<HashSet<FactVersionRef>>,
+    /// Every observation in fan-out order (a completed result's collapsed
+    /// into its receipt, see [`collapse_evidence`]).
+    facts: RefCell<Vec<FactVersionRef>>,
     non_cacheable: Cell<bool>,
 }
 
 impl FactReadRecorder {
-    /// The distinct facts observed, and whether a non-cacheable read was.
+    /// The distinct facts observed, in canonical order, and whether a
+    /// non-cacheable read was.
     pub(crate) fn into_parts(self) -> (Vec<FactVersionRef>, bool) {
-        (
-            self.facts.into_inner().into_iter().collect(),
-            self.non_cacheable.get(),
-        )
+        let mut facts = self.facts.into_inner();
+        facts.sort_unstable();
+        facts.dedup();
+        (facts, self.non_cacheable.get())
+    }
+}
+
+/// Where every active tracer and recorder stood at one instant (see
+/// [`mark_evidence`]); two of them, taken when a computation began and when
+/// it ended, bound what it observed.
+pub(crate) struct EvidenceMarks {
+    tracers: SmallVec<[(*const FactReadSetCell, verter_workspace::ObservationMark); 8]>,
+    recorders: SmallVec<[(*const FactReadRecorder, usize); 4]>,
+}
+
+/// Mark every active tracer and recorder: before a result that may
+/// complete with a receipt begins, and again when it ends.
+pub(crate) fn mark_evidence() -> EvidenceMarks {
+    let tracers = ACTIVE_TRACERS.with(|slot| {
+        slot.borrow()
+            .iter()
+            .filter(|ptr| !ptr.is_null())
+            // SAFETY: see module-level SAFETY contract.
+            .map(|&ptr| (ptr, unsafe { &*ptr }.mark()))
+            .collect()
+    });
+    let recorders = ACTIVE_RECORDERS.with(|slot| {
+        slot.borrow()
+            .iter()
+            // SAFETY: see `ACTIVE_RECORDERS`.
+            .map(|&ptr| (ptr, unsafe { &*ptr }.facts.borrow().len()))
+            .collect()
+    });
+    EvidenceMarks { tracers, recorders }
+}
+
+/// The result computed between `start` and `end` completed with
+/// `receipt`: in every scope marked at both and still active, replace what
+/// it observed in that range with the receipt, which stands for exactly
+/// those observations — its evidence was recorded from the same fan-out.
+/// An enclosing scope then holds the completed result's receipt, never a
+/// copy of its facts; what it observed outside the range stays.
+pub(crate) fn collapse_evidence(
+    start: &EvidenceMarks,
+    end: &EvidenceMarks,
+    receipt: &FactVersionRef,
+) {
+    let active: SmallVec<[*const FactReadSetCell; 8]> =
+        ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+    for (ptr, start_mark) in &start.tracers {
+        let Some((_, end_mark)) = end.tracers.iter().find(|(end_ptr, _)| end_ptr == ptr) else {
+            continue;
+        };
+        if active.contains(ptr) {
+            // SAFETY: `ptr` is still on the stack, so its cell is alive.
+            unsafe { &**ptr }.collapse_into_receipt(*start_mark, *end_mark, receipt.clone());
+        }
+    }
+    let active: SmallVec<[*const FactReadRecorder; 4]> = active_recorders();
+    for (ptr, start_len) in &start.recorders {
+        let Some((_, end_len)) = end.recorders.iter().find(|(end_ptr, _)| end_ptr == ptr) else {
+            continue;
+        };
+        if active.contains(ptr) {
+            // SAFETY: `ptr` is still installed, so its recorder is alive.
+            let mut facts = unsafe { &**ptr }.facts.borrow_mut();
+            if start_len <= end_len && *end_len <= facts.len() {
+                facts.splice(*start_len..*end_len, std::iter::once(receipt.clone()));
+            } else {
+                facts.push(receipt.clone());
+            }
+        }
     }
 }
 
@@ -172,10 +242,10 @@ pub(super) fn observe_fan_out(fact: FactVersionRef) {
     verter_audit::attribute_n!(FactObserve, 1);
     for recorder in active_recorders() {
         // SAFETY: see `ACTIVE_RECORDERS`.
-        unsafe { &*recorder }
-            .facts
-            .borrow_mut()
-            .insert(fact.clone());
+        let mut facts = unsafe { &*recorder }.facts.borrow_mut();
+        if facts.last() != Some(&fact) {
+            facts.push(fact.clone());
+        }
     }
     // Collect pointers under a short borrow, then drop the borrow
     // before calling into FactReadSetCell so re-entrant installs

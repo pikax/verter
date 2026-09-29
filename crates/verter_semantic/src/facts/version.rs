@@ -77,6 +77,10 @@ pub fn compaction_domain(fact: &FactVersionRef) -> CompactionDomain {
         // Whole-function body facts derive from file content; their validity
         // moves with the content generation.
         FactVersionRef::ProgramAnalysis(_) => CompactionDomain::Content,
+        // A receipt stands for another result's whole evidence, which
+        // carries its own domains; it is never a bucket domain compaction
+        // lifts.
+        FactVersionRef::Receipt(_) => CompactionDomain::Content,
     }
 }
 
@@ -486,6 +490,11 @@ pub enum FactVersionRef {
     /// Terminal witness for a set of structural self-roots that was
     /// strictly validated in one exact effective view before publication.
     StrictSelfRootWorld(StrictSelfRootWorld),
+    /// The receipt of a completed result this computation consumed: that
+    /// result's own evidence, shared rather than copied. Valid exactly
+    /// when every fact reachable through it is (see
+    /// [`crate::facts::receipt`]).
+    Receipt(crate::facts::receipt::ResultReceipt),
 }
 
 /// How one fact attributes to canonical files.
@@ -520,6 +529,12 @@ pub enum FactAttribution<'a> {
     /// A terminal structural self-root witness. It names no canonical and
     /// is deliberately distinct from a whole-domain aggregate.
     StrictSelfRootWorld,
+    /// A consumed result's receipt ([`FactVersionRef::Receipt`]). It
+    /// names no canonical itself; the canonicals and aggregated domains
+    /// its evidence reaches are its summaries
+    /// ([`crate::facts::receipt::ResultReceipt::canonicals`]), which a
+    /// consumer projecting a signature must read.
+    ResultReceipt,
 }
 
 impl FactVersionRef {
@@ -546,6 +561,7 @@ impl FactVersionRef {
             Self::ProjectGeneration { .. } => FactAttribution::ProjectScalar,
             Self::DomainGeneration(aggregate) => FactAttribution::DomainAggregate(aggregate.domain),
             Self::StrictSelfRootWorld(_) => FactAttribution::StrictSelfRootWorld,
+            Self::Receipt(_) => FactAttribution::ResultReceipt,
         }
     }
 
@@ -563,7 +579,8 @@ impl FactVersionRef {
             // signature claim a self-root it does not have.
             FactAttribution::ProjectScalar
             | FactAttribution::DomainAggregate(_)
-            | FactAttribution::StrictSelfRootWorld => None,
+            | FactAttribution::StrictSelfRootWorld
+            | FactAttribution::ResultReceipt => None,
         }
     }
 }

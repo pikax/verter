@@ -1223,6 +1223,14 @@ export function methodCall2() { return obj2.m.call(ctx, 1); }
 export function methodBind2() { return obj2.m.bind(ctx); }
 export function localArrow() { const g = (x: number) => x > 0; return g.call(undefined, 1); }
 export function nestedDecl() { function h(a: number) { return a > 0; } return h.call(undefined, 1); }
+declare function opt(a: number, b?: string): void;
+declare function three(a: number, b: string, c: boolean): number;
+export function boundAll() { return add.bind(undefined, 1, 2); }
+export function boundAllCalled() { return add.bind(undefined, 1, 2)(); }
+export function boundOptional() { return opt.bind(null, 1); }
+export function boundTwoOfThree() { return three.bind(null, 1, "s"); }
+export function boundOneOfThree() { return three.bind(null, 1); }
+export function boundGeneric() { return id.bind(null, 1); }
 export function idCall() { return id.call(null, 1); }
 export function idApply() { return id.apply(null, [1]); }
 export function ovCall() { return ov.call(null, 1); }
@@ -1275,26 +1283,28 @@ fn function_call_apply_and_bind_are_any_without_strict_bind_call_apply() {
         ("methodCall2", "any"),
         ("methodBind2", "any"),
         ("localArrow", "any"),
+        ("nestedDecl", "any"),
+        ("idCall", "any"),
+        ("ovCall", "any"),
+        ("idBind", "any"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on):
-/// `bind` gives `(x: number) => string` over `f` and both methods (their
-/// `this` omitted), `(b: number) => number` for `add` partially applied,
-/// and its calls `string` and `number`; `call` / `apply` over the
-/// generic `id` are `unknown` and over the overloaded `ov` `number`,
-/// `bind` over them their own types; a nested function declaration's
-/// `call` is `boolean`.
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics, through `CallableFunction`'s generic signatures: `bind`
+/// with no bound argument gives `(x: number) => string` over `f` and both
+/// methods (their `this` omitted, `OmitThisParameter`) and its call
+/// `string`; `call` / `apply` over the generic `id` are `unknown` (its
+/// base signature) and over the overloaded `ov` `number` (its last
+/// signature); `bind` over them is their own type; a nested function
+/// declaration's `call` is `boolean`.
 #[test]
-#[ignore = "Function bind, and call or apply over a generic, overloaded or nested-declared function, degrade as an unrepresentable callee"]
 fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
     let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
     let failures = matrix.returns(&[
         ("bound", "(x: number) => string"),
         ("boundCalled", "string"),
-        ("boundPartial", "(b: number) => number"),
-        ("boundPartialCalled", "number"),
         ("methodBind", "(x: number) => string"),
         ("methodBind2", "(x: number) => string"),
         ("idCall", "unknown"),
@@ -1305,6 +1315,43 @@ fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
         ("ovBind", "{ (x: string): string; (x: number): number; }"),
         ("nestedDecl", "boolean"),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics: `bind` with bound arguments takes its second overload,
+/// which splits the function's parameters as `[...A, ...B]` at the number
+/// of bound arguments — `add.bind(undefined, 1)` is `(b: number) =>
+/// number`, `add.bind(undefined, 1, 2)` `() => number`, `three` bound at
+/// one and at two arguments `(b: string, c: boolean) => number` and `(c:
+/// boolean) => number`, the generic `id` bound at one `() => unknown` (its
+/// base signature) — and a call of a bound value is the function's return.
+#[test]
+fn a_partially_applied_bind_reads_its_remaining_parameters() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.returns(&[
+        ("boundPartial", "(b: number) => number"),
+        ("boundPartialCalled", "number"),
+        ("boundAll", "() => number"),
+        ("boundAllCalled", "number"),
+        ("boundOneOfThree", "(b: string, c: boolean) => number"),
+        ("boundTwoOfThree", "(c: boolean) => number"),
+        ("boundGeneric", "() => unknown"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2: `opt.bind(null, 1)` over `opt(a: number, b?: string)`
+/// is `(b?: string | undefined) => void`, `(b?: string) => void` without
+/// `strictNullChecks` — the optional parameter stays optional in the split.
+#[test]
+fn a_partially_applied_bind_keeps_an_optional_parameter() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.nullness(&[(
+        Read::Return("boundOptional"),
+        "(b?: string | undefined) => void",
+        "(b?: string) => void",
+    )]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

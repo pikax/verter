@@ -90,6 +90,8 @@ pub mod module_resolution;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_fs;
 pub mod overlay;
+#[cfg(test)]
+mod overlay_resolution_lane_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "package_classification_tests.rs"]
 mod package_classification_tests;
@@ -156,17 +158,18 @@ pub use engine::{
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use fact_cache::{
-    compaction_domain, AggregateBasisSeed, AggregateGenerations, AggregatePopulation,
-    AggregateStamp, CompactionDomain, CompletionOverlayState, DerivedFactKind,
-    DomainGenerationFact, FactAttribution, FactHash16, FactVersionRef, FactVersionValidator,
-    LiveAggregateCounters, OverlayId, ParseEnvHash, ParseFactRef, ProgramAnalysisFactRef,
-    ProgramAnalysisFunctionRef, ReadSetSignature, RequestCompletion, ResolutionRootsStamp,
-    ResolveImportsFactRef, RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp,
-    SessionOverlayFingerprint, SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains,
-    ViewPopulation, ViewPopulationParent, CANDIDATE_CAP,
+    compaction_domain, drop_subsumed_receipts, validates_through_receipts, AggregateBasisSeed,
+    AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain,
+    CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
+    FactVersionRef, FactVersionValidator, LiveAggregateCounters, OverlayId, ParseEnvHash,
+    ParseFactRef, ProgramAnalysisFactRef, ProgramAnalysisFunctionRef, ReadSetSignature,
+    ReceiptWalk, RequestCompletion, ResolutionRootsStamp, ResolveImportsFactRef, ResultReceipt,
+    RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp, SessionOverlayFingerprint,
+    SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains, ViewPopulation,
+    ViewPopulationParent, CANDIDATE_CAP,
 };
 pub use fact_read_set::{
-    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation,
+    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, ObservationMark,
     FACT_DOMAIN_PRECISE_MAX, FACT_SIGNATURE_CAP,
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
@@ -189,9 +192,10 @@ pub use package_index::PackageIndex;
 pub use project_key::project_stable_key_from_project;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolution_currency::{
-    AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
-    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
-    ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
+    overlay_value_versions_len, AdmittedResolution, CapturedResolutionWorld, ContentRevision,
+    OverlayWorkCounts, ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion,
+    ResolutionOutcome, ResolutionOverlaySnapshot, ResolutionPublication,
+    ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
 };
 pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;

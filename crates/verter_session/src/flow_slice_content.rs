@@ -14906,7 +14906,14 @@ impl<'a> Lowerer<'a> {
         // A member call on a constructed value or an object
         // literal: the object is a flow value, never a leaf answer.
         if let Expression::StaticMemberExpression(member) = unwrap_parenthesized(&call.callee) {
-            if value_rooted_member_object(&member.object) {
+            // So is a member call on a function this frame declares
+            // (`h.call(…)`): the object is the declared function's value.
+            let local_function = matches!(
+                unwrap_parenthesized(&member.object),
+                Expression::Identifier(object)
+                    if matches!(self.classify_occurrence(object.span), NameBinding::NestedFunction)
+            );
+            if local_function || value_rooted_member_object(&member.object) {
                 *on_value = Some(member);
                 return SliceExpr::Elided;
             }

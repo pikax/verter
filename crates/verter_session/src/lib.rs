@@ -107,6 +107,8 @@ mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
 mod overlay_promotion_isolation_tests;
 #[cfg(test)]
+mod overlay_resolution_snapshot_tests;
+#[cfg(test)]
 mod overlay_template_conversion_isolation_tests;
 #[cfg(test)]
 mod prepared_decl_import_route_witness_tests;

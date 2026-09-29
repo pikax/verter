@@ -279,6 +279,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.evaluate_closed_operator(current)
                     }
                 }
+                // An instantiated conditional reduces as the checker's
+                // `getConditionalType` does on instantiation; one still open
+                // stays the deferred shell the query hands back.
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    distributive,
+                    pending,
+                } => match crate::semantic_query::SemanticQueryApi::execute_type_node(
+                    self,
+                    crate::semantic_query::SemanticQueryKey::Conditional {
+                        check: *check,
+                        extends: *extends,
+                        true_branch: *true_branch_ref,
+                        false_branch: *false_branch_ref,
+                        distributive: *distributive,
+                        pending: pending.clone(),
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(output) => output.value,
+                    _ => current,
+                },
                 _ if parts.iter().all(|part| reduced_part(*part) == *part) => current,
                 SemanticNodeData::Array { readonly, .. } => graph.intern_preserving_scope(
                     current,

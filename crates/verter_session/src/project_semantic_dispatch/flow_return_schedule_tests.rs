@@ -2200,3 +2200,337 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         );
     }
 }
+
+/// Completion is not retention: a chain whose every callee evaluation is
+/// refused persistent admission for a deterministic reason (a fenced
+/// serve, forced inside each inline evaluation, and on every cold build)
+/// still evaluates each level exactly once, and answers the chain's value
+/// — each completed callee answers the rest of the transaction however its
+/// publication fares, and none is published.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+/// `{ v: number; tag: "c"; }` at every length.
+#[test]
+fn a_chain_refused_persistent_admission_evaluates_each_level_once() {
+    for levels in [8usize, 64] {
+        let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+        host.test_force
+            .force_fenced_serve_for_tests
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        host.test_force
+            .force_flow_member_fenced_serve_for_tests
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = super::flow_return::flow_evaluations_for_tests();
+        let (outcome, completed) = with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, PATH, "witness");
+            let outcome = eval_key_on(&host, dispatch, key);
+            (outcome, dispatch.dispatch_txn.borrow().flow.results.len())
+        });
+        let evaluations = super::flow_return::flow_evaluations_for_tests() - before;
+        assert_eq!(
+            completed, levels,
+            "{levels} levels: every callee completes on the transaction, refused or not"
+        );
+        let Outcome::Value {
+            ty,
+            degradation: None,
+            candidates: 0,
+        } = &outcome
+        else {
+            panic!("{levels} levels: a complete value, published nowhere: {outcome:?}");
+        };
+        assert_tagged_value(
+            &Outcome::Value {
+                ty: ty.clone(),
+                degradation: None,
+                candidates: 1,
+            },
+            &[TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)],
+        );
+        assert_eq!(
+            evaluations,
+            levels + 1,
+            "{levels} levels: each of the {} functions evaluates once",
+            levels + 1
+        );
+    }
+}
+
+/// The witness's published read-set signature, and every kept result's
+/// replay of one plain chain `levels` long, evaluated cold in a fresh host.
+fn chain_evidence(
+    levels: usize,
+) -> (
+    Outcome,
+    crate::fact_signature_helpers::ReadSetSignature,
+    Vec<crate::resolver_core::resolver_context::RecordedFactReads>,
+) {
+    let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, PATH, "witness");
+        let outcome = eval_key_on(&host, dispatch, key.clone());
+        let signature = dispatch
+            .graph()
+            .entry_read_set_signature_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+            .expect("the witness is published");
+        let replays = (0..levels)
+            .map(|level| {
+                let callee = key_of(dispatch, PATH, &format!("p{level}"));
+                dispatch
+                    .dispatch_txn
+                    .borrow()
+                    .flow
+                    .results
+                    .get(&callee)
+                    .unwrap_or_else(|| panic!("p{level} completed on the transaction"))
+                    .replay
+                    .reads
+                    .clone()
+            })
+            .collect();
+        (outcome, signature, replays)
+    })
+}
+
+/// The receipt a completed callee's replay consists of.
+#[track_caller]
+fn replayed_receipt(
+    reads: &crate::resolver_core::resolver_context::RecordedFactReads,
+) -> verter_workspace::ResultReceipt {
+    match reads.facts.as_ref() {
+        [crate::resolver_core::FactVersionRef::Receipt(receipt)] => receipt.clone(),
+        other => panic!("a completed result replays exactly its receipt, got {other:?}"),
+    }
+}
+
+/// A chain's evidence grows with its length, never with its prefixes:
+/// every completed callee is answered by one receipt holding its own reads
+/// and the receipt of the callee it consumed, so each level's evidence has
+/// the same few entries at any depth, and the witness's published
+/// signature is its own reads and one receipt — the same length for 200
+/// levels as for 1,100, past the 1,024 entries a flat signature could hold
+/// and still admitted.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+/// `{ v: number; tag: "c"; }` at every length.
+#[test]
+fn a_chains_evidence_grows_linearly_in_its_length() {
+    let mut shapes = Vec::new();
+    for levels in [200usize, 1_100] {
+        let (outcome, signature, replays) = chain_evidence(levels);
+        assert_tagged_value(&outcome, &[number()]);
+        let receipts: Vec<_> = replays.iter().map(replayed_receipt).collect();
+        let widest = receipts
+            .iter()
+            .map(|receipt| receipt.facts().len())
+            .max()
+            .unwrap_or(0);
+        for (level, receipt) in receipts.iter().enumerate().skip(1) {
+            let below = &receipts[level - 1];
+            assert!(
+                receipt.facts().iter().any(|fact| matches!(
+                    fact,
+                    crate::resolver_core::FactVersionRef::Receipt(child) if child == below
+                )),
+                "p{level}'s evidence holds p{}'s receipt",
+                level - 1
+            );
+        }
+        let top = receipts.last().expect("a chain has a top");
+        let mut leaves = 0usize;
+        assert!(top.all_leaves(|_| {
+            leaves += 1;
+            true
+        }));
+        assert!(
+            leaves >= levels,
+            "the top receipt reaches every level's reads: {leaves} leaves for {levels} levels"
+        );
+        assert!(
+            signature.facts.iter().any(|fact| matches!(
+                fact,
+                crate::resolver_core::FactVersionRef::Receipt(receipt) if receipt == top
+            )),
+            "the witness's signature holds the top callee's receipt: {:?}",
+            signature.facts
+        );
+        shapes.push((widest, signature.facts.len()));
+    }
+    assert_eq!(
+        shapes[0], shapes[1],
+        "each level's evidence, and the witness's signature, keep one size at every length"
+    );
+}
+
+/// A published chain answers warm across requests through its receipts,
+/// and stays sound under partial eviction: with a middle callee's own
+/// candidate evicted the witness's receipt still names every read beneath
+/// it, so the witness is served warm and unchanged, and the evicted callee
+/// recomputes to the same answer.
+#[test]
+fn a_chain_answers_warm_through_its_receipts_and_survives_partial_eviction() {
+    let levels = 64;
+    let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+    let eval = |name: &str| {
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, PATH, name);
+            eval_key_on(&host, dispatch, key)
+        })
+    };
+    let cold = eval("witness");
+    assert_tagged_value(&cold, &[number()]);
+    let before = super::flow_return::flow_evaluations_for_tests();
+    assert_eq!(eval("witness"), cold, "served warm");
+    assert_eq!(
+        super::flow_return::flow_evaluations_for_tests(),
+        before,
+        "a warm witness evaluates nothing"
+    );
+    let middle = format!("p{}", levels / 2);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, PATH, &middle);
+        dispatch
+            .graph()
+            .evict_family_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+    });
+    assert_eq!(
+        eval("witness"),
+        cold,
+        "the witness survives its callee's eviction"
+    );
+    assert_eq!(
+        super::flow_return::flow_evaluations_for_tests(),
+        before,
+        "and is still served warm"
+    );
+    assert_tagged_value(&eval(&middle), &[number()]);
+}
+
+/// An edit reaches every result whose receipt reaches the edited reads,
+/// and only those: an edit to a module no callee reads leaves the witness
+/// of a module chain served warm; an edit to the chain's first module
+/// changes the witness; reverting it restores the first answer.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): over the 16-module
+/// non-generic chain `witness` is `{ v: number; tag: "c"; }`; with `m0`
+/// returning `{ v: x > 0, tag: "c" as const }` it is
+/// `{ v: boolean; tag: "c"; }`.
+#[test]
+fn an_edit_reaches_exactly_the_results_whose_receipts_read_it() {
+    // The edited chain re-evaluates through nested flow demands, as the
+    // middle-edit test above does, so it runs on the same 8 MiB stack.
+    on_stack(
+        8 << 20,
+        edit_reaches_exactly_the_results_whose_receipts_read_it,
+    );
+}
+
+fn edit_reaches_exactly_the_results_whose_receipts_read_it() {
+    let files = module_chain(16, false);
+    let mut sources: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let unrelated = ("/ws/cov/schedule/unrelated.ts", "export const u = 1;\n");
+    sources.push(unrelated);
+    let host = host_with(&sources);
+    let entry = files.last().expect("a chain has a last module").0.clone();
+    let witness = || {
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, &entry, "witness"))
+        })
+    };
+    let upsert = |path: &str, source: &str| {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(source),
+            file_language: lang(path),
+            aliases: Vec::new(),
+        });
+    };
+    let first = witness();
+    assert_tagged_value(&first, &[number()]);
+
+    upsert(unrelated.0, "export const u = 2;\n");
+    let before = super::flow_return::flow_evaluations_for_tests();
+    assert_eq!(witness(), first, "an unrelated edit keeps the witness");
+    assert_eq!(
+        super::flow_return::flow_evaluations_for_tests(),
+        before,
+        "an edit no receipt reads keeps the witness warm"
+    );
+
+    let leaf = files[0].0.clone();
+    upsert(
+        &leaf,
+        "export function c0(x: number) { return { v: x > 0, tag: \"c\" as const }; }\n",
+    );
+    let edited = witness();
+    let Outcome::Value {
+        ty,
+        degradation: None,
+        ..
+    } = &edited
+    else {
+        panic!("the edited chain answers a value: {edited:?}");
+    };
+    assert_tagged_value(
+        &Outcome::Value {
+            ty: ty.clone(),
+            degradation: None,
+            candidates: 1,
+        },
+        &[TypeExpr::Primitive(PrimitiveName::Boolean)],
+    );
+    upsert(&leaf, &files[0].1);
+    let reverted = witness();
+    let Outcome::Value {
+        ty,
+        degradation: None,
+        ..
+    } = &reverted
+    else {
+        panic!("the reverted chain answers a value: {reverted:?}");
+    };
+    assert_tagged_value(
+        &Outcome::Value {
+            ty: ty.clone(),
+            degradation: None,
+            candidates: 1,
+        },
+        &[number()],
+    );
+}
+
+/// The answer does not depend on which results completed first: a chain
+/// whose middle callee was demanded (and published) in an earlier request
+/// answers its witness exactly as a chain evaluated from the witness
+/// alone, and both are admitted.
+#[test]
+fn a_chains_answer_is_the_same_whatever_completed_first() {
+    let levels = 32;
+    let witness_only = {
+        let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+        })
+    };
+    let middle_first = {
+        let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+        let middle = with_dispatch(&host, |dispatch| {
+            eval_key_on(
+                &host,
+                dispatch,
+                key_of(dispatch, PATH, &format!("p{}", levels / 2)),
+            )
+        });
+        assert_tagged_value(&middle, &[number()]);
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+        })
+    };
+    assert_tagged_value(&witness_only, &[number()]);
+    assert_eq!(witness_only, middle_first);
+}
