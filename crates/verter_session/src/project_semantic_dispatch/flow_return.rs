@@ -2280,10 +2280,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    return the `Hold` sentinel.
     /// 2. **Warm read** — a validated published `Complete` result
     ///    (carrier-validated).
-    /// 3. **Transaction reuse** — the key already closed on this
-    ///    transaction as a proven inline SCC root whose reads were recorded
-    ///    clean; they are replayed into the scopes live now (see
-    ///    [`Self::reusable_completed_flow_member`]).
+    /// 3. **Transaction reuse** — the key already completed on this
+    ///    transaction as a proven inline SCC root whose reads were
+    ///    recorded; they, and its refusal if any, are replayed into the
+    ///    scopes live now (see [`Self::reusable_completed_flow_member`]).
     /// 4. **Instantiation transfer** — an instantiated key whose
     ///    uninstantiated answer is already in hand (warm, or reusable on
     ///    this transaction) is that answer under the key's substitution,
@@ -2351,13 +2351,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.graph().get_flow_return_result(self.ctx, key)
     }
 
-    /// The proven value of `key` when it already closed on this transaction
-    /// as a reusable inline member, after replaying what its evaluation
-    /// read into the scopes live now.
+    /// The proven value of `key` when it already completed on this
+    /// transaction (the demand-keyed [`FlowResultTable`](super::dispatch_txn::FlowResultTable)),
+    /// after replaying what its evaluation read, and its refusal if its
+    /// persistent admission is refused, into the scopes live now.
     ///
-    /// Such a member is proven but not yet published: its publish is
-    /// batched behind the machinery root, so the warm read cannot see it,
-    /// and without this every later demand re-evaluated the body. A body
+    /// Such a result is proven but not published yet, or never: its publish
+    /// is batched behind the machinery root, which may also refuse it, so
+    /// the warm read cannot be relied on, and without this every later
+    /// demand re-evaluated the body. A body
     /// whose callee is demanded both generically and under a call's
     /// instantiation — each of which re-demands both forms of ITS callee —
     /// then doubled per level: a generic call chain was exponential in its
@@ -2369,27 +2371,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// builds is its reads: the replay fans the recorded facts into the
     /// live tracers, re-deposits the canonical self-roots on the live
     /// build frame, and advances the canonical-evidence epoch when the
-    /// evaluation did. Only a CLEAN evaluation is reusable, so it had no
-    /// partial, cache-suppressing or non-cacheable rail to replay.
+    /// evaluation did, and a result whose persistent admission was refused
+    /// replays that refusal, so its consumers are refused exactly as the
+    /// evaluation refused them. Only a COMPLETE evaluation is kept, so it
+    /// had no partial rail to replay.
     fn reusable_completed_flow_member(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        let (value, reuse) = {
-            let txn = self.dispatch_txn.borrow();
-            let member = txn
-                .flow
-                .completed_members
-                .iter()
-                .rev()
-                .find(|member| &member.key == key)?;
-            let reuse = member.reuse.clone()?;
-            (member.result.value().clone(), reuse)
-        };
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&reuse.reads.facts);
-        self.deposit_operand_self_roots(&reuse.observed_self_roots);
-        if reuse.canonical_evidence_deposited {
+        let completed = self.dispatch_txn.borrow().flow.results.get(key)?.clone();
+        let replay = &completed.replay;
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        completed.reuse.replay_refusal();
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
             self.canonical_evidence_epoch
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
         }
-        Some(value)
+        Some(completed.value)
     }
 
     /// The return of an instantiated `key` read off its function's
@@ -2610,6 +2606,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         let run = || {
+            #[cfg(test)]
+            if self
+                .ctx
+                .host_for_fact_tracer_install()
+                .test_force
+                .force_flow_member_fenced_serve_for_tests
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                );
+            }
             let idx = self.flow_frame_open(&key);
             self.prepare_flow_return_demand(&key, idx);
             let evaluated = self.evaluate_flow_return(&key);
@@ -2641,7 +2649,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+        let started = crate::resolver_core::resolver_context::mark_evidence();
         let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let ended = crate::resolver_core::resolver_context::mark_evidence();
+        let refused = refusals.observed();
+        drop(refusals);
         let observed = frame.finish();
         let folded_partial =
             crate::request_context::current_cold_compute_completeness().is_partial();
@@ -2651,47 +2664,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The frame's rails reach the enclosing build exactly as if they had
         // folded there directly: OR, union and deduplicated roots commute.
         self.fold_observed_frame_into_top(&observed);
-        let clean = matches!(step, FlowReturnStep::Complete(_))
-            && !reads.non_cacheable
+        // Completion and retention are separate verdicts. A complete value
+        // whose persistent admission is refused for a typed, deterministic
+        // reason is still reusable for the rest of this transaction; an
+        // unattributed or transient refusal, or any partial taint, is not.
+        let complete = matches!(step, FlowReturnStep::Complete(_))
             && !observed.result_is_partial
-            && !observed.cache_suppress
             && !folded_partial;
-        if clean {
-            self.offer_flow_member_reuse(
-                &key,
-                queued_before,
-                super::dispatch_txn::FlowMemberReuse {
-                    reads,
-                    observed_self_roots: observed.observed_self_roots,
-                    canonical_evidence_deposited: self.canonical_evidence_epoch.get()
-                        != evidence_epoch,
-                },
-            );
+        let refusal = match refused {
+            Some(reason) => crate::resolver_core::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                crate::resolver_core::reuse::ObservedRefusal::Unattributed
+            }
+            None => crate::resolver_core::reuse::ObservedRefusal::None,
+        };
+        let reuse = crate::resolver_core::reuse::classify_reuse(refusal, complete);
+        if reuse.is_request_reusable() && self.closed_as_own_root(&key, queued_before) {
+            if let FlowReturnStep::Complete(value) = &step {
+                // Hierarchical evidence: the completed result's reads —
+                // its own facts and the receipts of what it consumed —
+                // become its receipt, which replaces them in every scope
+                // live around it and is all a later consumer observes.
+                let receipt = crate::resolver_core::resolver_context::complete_with_receipt(
+                    &started, &ended, &reads,
+                );
+                self.dispatch_txn.borrow_mut().flow.results.complete(
+                    key.clone(),
+                    super::dispatch_txn::TransactionFlowResult {
+                        value: value.clone(),
+                        reuse,
+                        replay: super::dispatch_txn::FlowMemberReuse {
+                            reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                                facts: std::sync::Arc::from(vec![receipt]),
+                                non_cacheable: reads.non_cacheable,
+                            },
+                            observed_self_roots: observed.observed_self_roots,
+                            canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                                != evidence_epoch,
+                        },
+                    },
+                );
+            }
         }
         step
     }
 
-    /// Mark the member `key` just closed as reusable on this transaction —
-    /// only if THIS evaluation queued it, i.e. it closed as its own proven
-    /// inline SCC root. A frame that closed provisionally queued nothing
-    /// yet, and an older member under the same key was produced by a
-    /// different evaluation than the one recorded. Members queued at or
-    /// after `queued_before` are this evaluation's: no machinery root can
-    /// drain the queue while an inline frame is open, and a nested frame
-    /// cannot share its key (the re-entry intercept holds it).
-    fn offer_flow_member_reuse(
-        &self,
-        key: &FlowReturnKey,
-        queued_before: usize,
-        reuse: super::dispatch_txn::FlowMemberReuse,
-    ) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let Some(queued) = txn.flow.completed_members.get_mut(queued_before..) else {
-            return;
-        };
-        if let Some(member) = queued.iter_mut().rev().find(|member| &member.key == key) {
-            member.reuse = Some(reuse);
-        }
+    /// Whether THIS evaluation of `key` queued its member, i.e. it closed
+    /// as its own proven inline SCC root, so its value came only from work
+    /// inside its frame — the only result the transaction keeps. A frame
+    /// that closed provisionally queued nothing yet, and a member closed
+    /// inside a larger component also rests on frames outside its own.
+    /// Members queued at or after `queued_before` are this evaluation's: no
+    /// machinery root can drain the queue while an inline frame is open,
+    /// and a nested frame cannot share its key (the re-entry intercept
+    /// holds it).
+    fn closed_as_own_root(&self, key: &FlowReturnKey, queued_before: usize) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .flow
+            .completed_members
+            .get(queued_before..)
+            .is_some_and(|queued| queued.iter().any(|member| &member.key == key))
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
@@ -4760,9 +4793,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     inline_flight,
                                     self_roots,
                                     materialized,
-                                    // Attached by the inline executor once
-                                    // it knows what the evaluation read.
-                                    reuse: None,
                                 },
                             );
                         }
@@ -5376,6 +5406,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
+        #[cfg(test)]
+        FLOW_EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + 1));
         self.with_relation_environment_of(&key.function.declaration_slot.defining_canonical, || {
             self.evaluate_flow_return_in_own_environment(key)
         })
@@ -9260,6 +9292,19 @@ struct EvolvingPart {
     arm: ReductionArm,
     fresh: bool,
     fresh_values: Vec<SemanticNodeId>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many flow-return bodies this thread evaluated
+    /// ([`ProjectSemanticDispatch::evaluate_flow_return`]); test-only.
+    static FLOW_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many flow-return bodies this thread evaluated so far (test-only).
+#[cfg(test)]
+pub(crate) fn flow_evaluations_for_tests() -> usize {
+    FLOW_EVALUATIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

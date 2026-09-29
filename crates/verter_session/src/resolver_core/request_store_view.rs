@@ -1026,6 +1026,20 @@ impl<'a> RequestStoreView<'a> {
         fact: &FactVersionRef,
         state: CompletionOverlayState,
     ) -> bool {
+        let mut walk = verter_workspace::ReceiptWalk::default();
+        verter_workspace::validates_through_receipts(fact, &mut walk, |leaf| {
+            self.validates_leaf_at_completion_state(leaf, state)
+        })
+    }
+
+    /// One fact that is not a receipt, validated at `state`. A receipt
+    /// never reaches here: [`Self::validates_at_completion_state`] reads it
+    /// through to the facts it reaches.
+    fn validates_leaf_at_completion_state(
+        &self,
+        fact: &FactVersionRef,
+        state: CompletionOverlayState,
+    ) -> bool {
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash } => {
                 if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
@@ -1098,6 +1112,8 @@ impl<'a> RequestStoreView<'a> {
             FactVersionRef::StrictSelfRootWorld(world) => self
                 .strict_self_root_world_at_completion_state(state)
                 .is_some_and(|current| current == *world),
+            // Read through by the caller; fails closed if one ever arrives.
+            FactVersionRef::Receipt(_) => false,
         }
     }
 
@@ -1228,16 +1244,18 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return Err(0);
         }
 
+        let mut walk = verter_workspace::ReceiptWalk::default();
         for (index, fact) in sig.iter().enumerate() {
             self.note_validation_step();
-            let valid = match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                {
-                    self.validates_self_root_at_completion_state(canonical_id, hash)
-                }
-                other => self.validates_at_completion_state(other, state),
-            };
+            let valid =
+                verter_workspace::validates_through_receipts(fact, &mut walk, |leaf| match leaf {
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                    {
+                        self.validates_self_root_at_completion_state(canonical_id, hash)
+                    }
+                    other => self.validates_leaf_at_completion_state(other, state),
+                });
             if !valid {
                 return Err(index);
             }

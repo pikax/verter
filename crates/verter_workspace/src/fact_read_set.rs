@@ -201,7 +201,14 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
     let mut precise: rustc_hash::FxHashMap<BucketKey, usize> = rustc_hash::FxHashMap::default();
     let mut already_lifted: rustc_hash::FxHashSet<BucketKey> = rustc_hash::FxHashSet::default();
     for fact in facts.iter() {
-        if matches!(fact, FactVersionRef::StrictSelfRootWorld(_)) {
+        // A self-root world and a consumed result's receipt are terminal
+        // witnesses of their own: neither is a precise fact of one domain,
+        // and a receipt reaches facts of every domain, so lifting it into
+        // one domain's aggregate would drop the rest.
+        if matches!(
+            fact,
+            FactVersionRef::StrictSelfRootWorld(_) | FactVersionRef::Receipt(_)
+        ) {
             continue;
         }
         let key = (compaction_domain(fact), aggregate_population(fact, basis));
@@ -231,7 +238,10 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
         .collect();
     let mut kept: Vec<FactVersionRef> = Vec::with_capacity(facts.len());
     for fact in facts.drain(..) {
-        if matches!(fact, FactVersionRef::StrictSelfRootWorld(_)) {
+        if matches!(
+            fact,
+            FactVersionRef::StrictSelfRootWorld(_) | FactVersionRef::Receipt(_)
+        ) {
             kept.push(fact);
             continue;
         }
@@ -325,7 +335,21 @@ pub struct FactReadSet {
     /// cannot become stable again, and cannot exempt itself from a
     /// generation it moved.
     mutation_unstable: bool,
+    /// How many times [`Self::canonicalise`] rewrote `observations` in
+    /// place. An [`ObservationMark`] taken before a rewrite no longer
+    /// addresses a suffix of what was observed after it.
+    rewrites: u32,
     _not_send_sync: PhantomData<*const ()>,
+}
+
+/// Where a scope's observations stood at one instant: two marks, taken when
+/// a result's computation began and when it ended, bound exactly what that
+/// computation fanned into the scope (see
+/// [`FactReadSet::collapse_into_receipt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservationMark {
+    len: usize,
+    rewrites: u32,
 }
 
 impl Default for FactReadSet {
@@ -355,6 +379,7 @@ impl FactReadSet {
             non_cacheable_propagation: None,
             aggregate_basis: AggregateGenerations::default(),
             mutation_unstable: false,
+            rewrites: 0,
             _not_send_sync: PhantomData,
         }
     }
@@ -503,6 +528,42 @@ impl FactReadSet {
         }
     }
 
+    /// The mark of everything observed so far.
+    #[inline]
+    #[must_use]
+    pub fn mark(&self) -> ObservationMark {
+        ObservationMark {
+            len: self.observations.len(),
+            rewrites: self.rewrites,
+        }
+    }
+
+    /// Record that a completed result, computed between `start` and `end`,
+    /// is answered by `receipt`: the observations it fanned into this scope
+    /// in that range are replaced by the receipt, which stands for exactly
+    /// them (its evidence was recorded from the same fan-out); anything
+    /// observed after `end` stays. When the observations were rewritten in
+    /// place since `start`, the range no longer exists as such, so the
+    /// receipt is added beside them instead: never a fact lost, only one
+    /// fewer collapse.
+    pub fn collapse_into_receipt(
+        &mut self,
+        start: ObservationMark,
+        end: ObservationMark,
+        receipt: FactVersionRef,
+    ) {
+        let intact = start.rewrites == self.rewrites
+            && end.rewrites == self.rewrites
+            && start.len <= end.len
+            && end.len <= self.observations.len();
+        if intact {
+            self.observations.drain(start.len..end.len);
+            self.observations.insert(start.len, receipt);
+        } else {
+            self.observations.push(receipt);
+        }
+    }
+
     /// Number of observations recorded so far (pre-dedup), counting facts
     /// held in absorbed canonical runs.
     #[inline]
@@ -532,6 +593,7 @@ impl FactReadSet {
     /// [`Self::would_overflow`] peek can call it without disturbing a later
     /// [`Self::finalise`].
     fn canonicalise(&mut self) {
+        self.rewrites = self.rewrites.wrapping_add(1);
         self.observations.sort_unstable_by(compare_fact_refs);
         self.observations.dedup();
         if !self.canonical_runs.is_empty() {
@@ -548,6 +610,8 @@ impl FactReadSet {
         // finalised signature, from every entry point, compact
         // identically.
         let mut canonical = std::mem::take(&mut self.observations).into_vec();
+        // A receipt a sibling receipt consumed is already inside it.
+        crate::fact_cache::drop_subsumed_receipts(&mut canonical);
         compact_domains(&mut canonical, &self.aggregate_basis);
         self.observations = SmallVec::from_vec(canonical);
     }
@@ -719,6 +783,28 @@ impl FactReadSetCell {
     #[inline]
     pub fn absorb_canonical_signature(&self, signature: &Arc<[FactVersionRef]>) {
         self.0.borrow_mut().absorb_canonical_signature(signature);
+    }
+
+    /// The mark of everything observed so far, through `&self`. See
+    /// [`FactReadSet::mark`].
+    #[inline]
+    #[must_use]
+    pub fn mark(&self) -> ObservationMark {
+        self.0.borrow().mark()
+    }
+
+    /// Replace a completed result's observations with its receipt through
+    /// `&self`. See [`FactReadSet::collapse_into_receipt`].
+    #[inline]
+    pub fn collapse_into_receipt(
+        &self,
+        start: ObservationMark,
+        end: ObservationMark,
+        receipt: FactVersionRef,
+    ) {
+        self.0
+            .borrow_mut()
+            .collapse_into_receipt(start, end, receipt);
     }
 
     /// Record a non-cacheable read consumption through `&self`.

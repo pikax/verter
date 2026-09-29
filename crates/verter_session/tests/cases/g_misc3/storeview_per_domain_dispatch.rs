@@ -85,6 +85,9 @@ impl StoreView for TestView {
             // per-domain-method, and this view observes none.
             | FactVersionRef::DomainGeneration(_)
             | FactVersionRef::StrictSelfRootWorld(_) => false,
+            // A consumed result's receipt holds when every fact it reaches
+            // does, each through this same dispatch.
+            FactVersionRef::Receipt(receipt) => receipt.all_leaves(|leaf| self.validates(leaf)),
         }
     }
 

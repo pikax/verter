@@ -312,6 +312,9 @@ pub(crate) fn classify_resolution_observation(fact: &FactVersionRef) -> Resoluti
         | FactVersionRef::DomainGeneration(_)
         | FactVersionRef::ProgramAnalysis(_)
         | FactVersionRef::StrictSelfRootWorld(_) => ResolutionEdgeClass::Terminal,
+        // Another completed result's evidence, reached through its receipt:
+        // it roots the witness as a whole and is never a resolution edge.
+        FactVersionRef::Receipt(_) => ResolutionEdgeClass::Terminal,
     }
 }
 
@@ -1672,6 +1675,11 @@ impl FactVersionValidator for CapturedResolutionWorld {
                         // settled by a resolution-world stamp.
                         crate::fact_cache::AggregatePopulation::View(_) => false,
                     }
+            }
+            // A consumed result's receipt holds exactly when every fact it
+            // reaches does.
+            FactVersionRef::Receipt(receipt) => {
+                receipt.all_leaves(|fact| self.validates_fact_version(fact))
             }
             _ => false,
         }

@@ -263,9 +263,13 @@ pub(crate) fn owner_only_publication_safe(facts: &SessionTemplateClassSemanticFa
                 // one refactor away from becoming `true`, which would
                 // publish a cross-file-dependent compile output under a
                 // key that only tracks the owner's bytes.
+                // A consumed result's receipt stands for another result's
+                // whole evidence, which the owner's bytes cannot vouch for
+                // either.
                 FactAttribution::ProjectScalar
                 | FactAttribution::DomainAggregate(_)
-                | FactAttribution::StrictSelfRootWorld => false,
+                | FactAttribution::StrictSelfRootWorld
+                | FactAttribution::ResultReceipt => false,
             })
 }
 
