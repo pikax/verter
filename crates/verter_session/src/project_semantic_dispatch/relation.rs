@@ -78,13 +78,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
-    provisional_relate_step, redischarge_is_stable, select_inference_candidates,
-    CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
-    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
-    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
+    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
+    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
+    ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
+    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -5624,10 +5624,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .active_session()
             .map(|session| session.projection_candidates_since(checkpoint))
             .unwrap_or_default();
-        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
-        let projection_recovered = !candidate_nodes.is_empty();
+        let winning = super::inference::winning_candidates(&candidates);
+        let projection_recovered = !winning.is_empty();
         let recovered = if projection_recovered {
-            self.relation_combine_candidates(&candidate_nodes, variance)
+            let (candidate_nodes, variance) = winning.inferred_from();
+            self.relation_combine_candidates(candidate_nodes, variance)
         } else {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))

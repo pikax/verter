@@ -387,12 +387,7 @@ fn conditional_inference() {
             read: Read::Type(r#"MV<{ a: "x"; b: (x: string) => void }>"#),
             tsc: [r#""x""#, r#""x""#, r#""x""#, r#""x""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"CO<{ a: (x: "x") => void; b: (x: string) => void }>"#),

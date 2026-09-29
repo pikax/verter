@@ -1475,18 +1475,19 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 /// alone fixes `T`, and the executor hands the withheld argument back with
 /// its contextual type instantiated under that fixed substitution; typed
 /// under it, the argument selects the candidate. Mutation: drop the
-/// context-sensitivity withholding — the lambda's `any` parameter deposits
-/// and beats the literal, and `T` binds `any`. The second half is the
+/// context-sensitivity withholding — the lambda's `any` return deposits
+/// beside the literal, and `T` binds `any`. The second half is the
 /// negative control: the SAME nodes with the argument marked
 /// context-FREE still deposit `any`, proving the assertion tracks the flag
-/// and not the node shapes.
+/// and not the node shapes (TypeScript 7.0.2, in every setting:
+/// `withCallback((item: any) => item, lit)` with `lit: "literal"` is
+/// `any`).
 #[test]
 fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let literal = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("literal".into()),
     ));
@@ -1497,7 +1498,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         default: None,
         display_name: Arc::from("T"),
     });
-    // `cb: (item: T) => unknown`
+    // `cb: (item: T) => T`
     let callback_param = signature(
         &dispatch,
         "callbackParam",
@@ -1505,7 +1506,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         Vec::new(),
-        unknown,
+        t,
     );
     // The authored argument `(item) => item`: an un-annotated parameter
     // lowers to `any`, and so does the arrow's own return.
@@ -1518,7 +1519,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         Vec::new(),
         any,
     );
-    // `declare function withCallback<T>(cb: (item: T) => unknown, item: T): T`
+    // `declare function withCallback<T>(cb: (item: T) => T, item: T): T`
     let with_callback = signature(
         &dispatch,
         "withCallback",
