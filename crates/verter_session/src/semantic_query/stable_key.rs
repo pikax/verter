@@ -1946,6 +1946,7 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
         QueryError::OpenSurface => 20,
         QueryError::UnmodeledPosition => 21,
         QueryError::CheckerRecovery { .. } => 22,
+        QueryError::PermissiveWildcard => 23,
     };
     enc.u8(tag);
     match err {

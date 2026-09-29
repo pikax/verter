@@ -72,6 +72,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::ForeignSemanticOperand
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. } => false,
     }
 }
@@ -107,6 +108,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::RaiseMiss
         | QueryError::OpenSurface
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnmodeledPosition
         | QueryError::CheckerRecovery { .. }
@@ -144,6 +146,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         | QueryError::RaiseMiss
         | QueryError::OpenSurface
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnrepresentableSurface
         // NOT the miss sentinel: the flow marker is a DISTINCT carrier
@@ -218,6 +221,7 @@ mod tests {
             QueryError::IncompleteSemanticOperand {
                 reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
+            QueryError::PermissiveWildcard,
             QueryError::CheckerRecovery {
                 diagnostic: crate::semantic_query::CheckerDiagnostic {
                     code:

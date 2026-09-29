@@ -91,6 +91,7 @@ mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
+mod conditional_decision;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
@@ -2048,13 +2049,10 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`] —
-/// the ONE shared conditional branch-selection oracle, factored out of
-/// `build_conditional`'s relation path (the infer-pattern cases and the
-/// full memoised relation engine, both through the sole relation
-/// authority `execute(SemanticQueryKey::Relate)`) and reused by the
-/// key-domain closedness classifiers in `raise.rs` for
-/// selected-branch-only classification.
+/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`],
+/// the branch-selection step of the conditional query's decision procedure
+/// (`conditional_decision.rs`), through the sole relation authority
+/// `execute(SemanticQueryKey::Relate)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConditionalBranchSelection {
     True,
@@ -4201,6 +4199,8 @@ mod carrier_head_resolution_tests;
 
 #[cfg(test)]
 mod closedness_evaluator_tests;
+#[cfg(test)]
+mod conditional_decision_tests;
 #[cfg(test)]
 mod mapped_key_domain_carrier_tests;
 
