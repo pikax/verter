@@ -4039,9 +4039,9 @@ fn vue_fatal_script_parse_defaults_outputs_without_second_parse() {
 /// admissions.
 #[test]
 fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
-    // One unresolvable wildcard, then a resolvable one. Decision facts make
-    // the former overflow fixture bounded, so the typed refusal seam selects
-    // the same route-walk unrootable exit directly.
+    // One wildcard whose resolution is refused, then a resolvable one. The
+    // walk roots each edge on the witness of the resolution that decided
+    // it, so a refused edge — no witness at all — is the unrootable exit.
     let host = make_host(&[]);
     let barrel = "/workspace/src/index.ts";
     let present = "/workspace/src/present.ts";
@@ -4051,15 +4051,10 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
         barrel,
         "export * from './missing';\nexport * from './present';\n",
     );
-
-    assert!(host.owner_import_route_witness_for_tests(barrel).is_some());
-    host.test_force
-        .force_import_route_witness_refusal_for_tests
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        host.owner_import_route_witness_for_tests(barrel).is_none(),
-        "fixture invariant: the typed refusal seam must make the wildcard witness unrootable",
-    );
+    *host
+        .test_force
+        .force_type_route_refusal_for_specifier
+        .lock() = Some("./missing".to_string());
 
     // The producer-level observable: run the route-entry build inside
     // an installed fact tracer — the SAME wrapper every enclosing cold
@@ -4082,7 +4077,7 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     );
     assert!(
         facts.is_empty(),
-        "precondition: the unresolved wildcard edges cannot be rooted — \
+        "precondition: the refused wildcard edge cannot be rooted — \
          the entry is served with the empty-facts strict-admission signal",
     );
 
@@ -4331,5 +4326,81 @@ fn augmentation_probe_walks_a_barrel_chain_of_any_length() {
     assert!(
         host.owner_has_module_augmentation_dependency(owner),
         "the augmenter at the end of a {BARRELS}-barrel re-export chain is found"
+    );
+}
+
+/// A route walk roots an unresolved `export *` edge on the decision the
+/// walk itself admitted — no witness build resolves the specifier again —
+/// and the cached miss goes stale the moment the wildcard target appears.
+#[test]
+fn a_wildcard_miss_roots_on_the_walks_own_decision() {
+    use crate::host_manage::import_route_witness::witness_builds_for_tests;
+    let host = make_host(&[]);
+    let barrel = "/workspace/src/index.ts";
+    upsert(&host, barrel, "export * from './missing';\n");
+
+    let before = witness_builds_for_tests();
+    assert_eq!(
+        host.resolve_named_type_export_target_shallow(barrel, "Shared"),
+        None
+    );
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        0,
+        "the walk's own admitted decision roots the unresolved edge"
+    );
+
+    upsert(
+        &host,
+        "/workspace/src/missing.ts",
+        "export type Shared = { a: 1 };\n",
+    );
+    assert_eq!(
+        host.resolve_named_type_export_target_shallow(barrel, "Shared"),
+        Some((
+            "/workspace/src/missing.ts".to_string(),
+            "Shared".to_string()
+        )),
+        "the cached miss must not be served once the wildcard target appears"
+    );
+}
+
+/// The owner import surface roots a skipped import on the decision that
+/// skipped it — no witness build resolves the specifier again — and the
+/// surface is rebuilt with the binding once the target appears.
+#[test]
+fn a_skipped_import_roots_on_its_own_decision() {
+    use crate::host_manage::import_route_witness::witness_builds_for_tests;
+    let host = make_host(&[]);
+    let owner = "/workspace/src/index.ts";
+    upsert(
+        &host,
+        owner,
+        "import type { Missing } from './missing';\nexport type Uses = Missing;\n",
+    );
+
+    let before = witness_builds_for_tests();
+    let surface = host
+        .owner_import_surface(owner)
+        .expect("the build serves the surface");
+    assert!(surface.bindings.get("Missing").is_none());
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        0,
+        "the skipping resolution's own witness roots the skip"
+    );
+
+    upsert(
+        &host,
+        "/workspace/src/missing.ts",
+        "export interface Missing { a: 1 }\n",
+    );
+    let surface = host
+        .owner_import_surface(owner)
+        .expect("the build serves the surface");
+    assert!(
+        surface.bindings.get("Missing").is_some(),
+        "the surface computed without the import must not be served once \
+         its target appears"
     );
 }

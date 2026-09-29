@@ -310,7 +310,7 @@ impl<'a> Matrix<'a> {
                     .zip(answers)
                     .map(|(setting, expected)| {
                         let canonical = format!("{}/probe.ts", setting.root);
-                        let observed =
+                        let (observed, diagnostics) =
                             observe_with_deadline(&host, &canonical, &symbol, self.lib.is_some());
                         let matched = match &observed {
                             Observed::Clean(text) => {
@@ -322,6 +322,7 @@ impl<'a> Matrix<'a> {
                             matched,
                             class: observed.class(),
                             lane: observed.describe(),
+                            diagnostics,
                         }
                     })
                     .collect()
@@ -383,6 +384,8 @@ pub(super) struct Verdict {
     pub(super) class: &'static str,
     /// What the lane gave.
     pub(super) lane: String,
+    /// The checker diagnostics the lane recorded for the row, by code.
+    pub(super) diagnostics: Vec<u32>,
 }
 
 /// What the lane gave for one row.
@@ -440,7 +443,7 @@ fn observe_with_deadline(
     canonical: &str,
     symbol: &str,
     scoped: bool,
-) -> Observed {
+) -> (Observed, Vec<u32>) {
     let (sender, receiver) = mpsc::channel();
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
@@ -459,16 +462,17 @@ fn observe_with_deadline(
                         .map(|text| (*text).to_owned())
                 })
                 .unwrap_or_default();
-            Observed::Panicked(message)
+            (Observed::Panicked(message), Vec::new())
         });
         let _ = sender.send(observed);
     });
     match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
         Ok(observed) => observed,
-        Err(RowOverdue::Disconnected) => {
-            Observed::Panicked("the evaluating thread ended with no answer".to_owned())
-        }
-        Err(overdue) => Observed::Overdue(overdue.to_string()),
+        Err(RowOverdue::Disconnected) => (
+            Observed::Panicked("the evaluating thread ended with no answer".to_owned()),
+            Vec::new(),
+        ),
+        Err(overdue) => (Observed::Overdue(overdue.to_string()), Vec::new()),
     }
 }
 
@@ -629,7 +633,7 @@ mod thread_cpu {
     }
 }
 
-fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Observed {
+fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (Observed, Vec<u32>) {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from(canonical),
@@ -644,8 +648,13 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
     let result = match carrier.as_result() {
         Ok(result) => Arc::clone(result),
-        Err(error) => return Observed::NoValue(format!("{error:?}")),
+        Err(error) => return (Observed::NoValue(format!("{error:?}")), Vec::new()),
     };
+    let diagnostics: Vec<u32> = result
+        .checker_diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.code())
+        .collect();
     // The probe's type is read as a consumer reads it: under a request for
     // the probe file, so every judgement takes that project's options.
     let _request = crate::request_context::install_test_request_for(canonical);
@@ -663,13 +672,14 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         )
         .into_complete_node()
     else {
-        return Observed::Partial;
+        return (Observed::Partial, diagnostics);
     };
     let text = print(&dispatch, node, 0);
-    match result.degradation() {
+    let observed = match result.degradation() {
         None => Observed::Clean(text),
         Some(degradation) => Observed::Degraded(text, format!("{degradation:?}")),
-    }
+    };
+    (observed, diagnostics)
 }
 
 /// `node` as the checker prints it.

@@ -182,7 +182,7 @@ Materialising an artifact performs ZERO import resolution.
 - A session request's overlay is ONE resolution snapshot
   (`ResolutionOverlaySnapshot`), built once by `with_session_overlay` and kept
   on the store view. The context resolves through it
-  (`ResolverContext::resolution_overlay`), and the view validates every
+  (`RequestBoundLifecycle::resolution_overlay`), and the view validates every
   resolution fact against the effective world it composes. Facts the overlay
   changes take versions from a reserved overlay space, so an overlay answer
   never serves the workspace and a workspace answer the overlay reaches never

@@ -699,3 +699,21 @@ impl Drop for RetentionCharge {
         }
     }
 }
+
+/// The aggregate account as the workspace's resident resolution state sees
+/// it: each overlay-lane answer and each interned overlay value version is
+/// a [`ChargeClass::Retained`] charge, refused under pressure like any
+/// other warm cache entry (the workspace then serves the answer uncached).
+pub(crate) struct ResolutionRetention(pub(crate) Arc<SemanticRetentionAccount>);
+
+impl verter_workspace::ResolutionRetentionAccount for ResolutionRetention {
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+        self.0
+            .reserve(ChargeClass::Retained, bytes)
+            .admitted()
+            .map(verter_workspace::ResolutionRetentionCharge::new)
+    }
+}

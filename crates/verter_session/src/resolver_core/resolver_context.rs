@@ -680,14 +680,6 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
         None
     }
 
-    /// The request overlay this context resolves through, if its view has
-    /// one — the ONE resolution snapshot of the request (see
-    /// [`crate::store_view_roots::StoreViewRoots::resolution_overlay`]).
-    /// `None` resolves through the workspace view.
-    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
-        None
-    }
-
     /// Return the request-scoped
     /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
     /// this context threads through the request, if any.
@@ -1632,11 +1624,6 @@ where
     #[inline]
     fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         self.0.session_view()
-    }
-
-    #[inline]
-    fn resolution_overlay(&self) -> Option<&verter_workspace::ResolutionOverlaySnapshot> {
-        self.0.resolution_overlay()
     }
 
     #[inline]

@@ -316,6 +316,46 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
+    /// The checker's error type a conditional's check or extends operand,
+    /// written as a name, stands for: the recovery from a diagnostic the
+    /// name's own instantiation raised is the conditional's answer, as the
+    /// checker returns its error type when either operand is it. Read after
+    /// the conditional is related, which has already read the name.
+    pub(super) fn absorb_named_error_operand(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> Option<QueryBuildOutput> {
+        let named = |operand: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(operand).as_deref(),
+                Some(
+                    SemanticNodeData::Alias(_)
+                        | SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::BareRef(_)
+                        | SemanticNodeData::ImportType(_)
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                )
+            )
+        };
+        [check, extends]
+            .into_iter()
+            .filter(|operand| named(*operand))
+            .find_map(|operand| {
+                let resolved = self
+                    .normalize_node_for_structural_fact_demand(
+                        operand,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    )
+                    .into_complete_node()?;
+                matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
+                    .then_some(resolved)
+            })
+            .map(|error| self.absorbed_output(error, [check, extends]))
+    }
+
     // ── Builtin-utility degenerate operands ──────────────────────────────
     /// §22-style absorption table for the native builtin-utility arms:
     /// DIRECT lattice-extreme operands short-circuit the utility before any
