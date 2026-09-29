@@ -298,10 +298,15 @@ fn arrays(depth: usize) -> String {
 /// Read from a loop: the checker-print comparison descends a bounded depth
 /// of its own.
 fn array_nest_on_a_small_stack(source: String) -> (usize, bool) {
+    array_nest_of_on_a_small_stack(source, RETURN)
+}
+
+/// [`array_nest_on_a_small_stack`] for `probe`.
+fn array_nest_of_on_a_small_stack(source: String, probe: &'static str) -> (usize, bool) {
     std::thread::Builder::new()
         .stack_size(1 << 20)
         .spawn(move || {
-            super::checker_probe_lane_tests::with_probe(&source, RETURN, |dispatch, node| {
+            super::checker_probe_lane_tests::with_probe(&source, probe, |dispatch, node| {
                 let graph = dispatch.graph();
                 let mut node = node;
                 let mut depth = 0;
@@ -359,6 +364,32 @@ fn arrays_nested_10000_deep_return_on_production_stacks() {
 #[ignore = "the flow-slice plan budget admits no demand slice of 10,000 nested array literals"]
 fn arrays_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(array_nest_on_a_small_stack(arrays(DEPTH)), (DEPTH, true));
+}
+
+fn module_const_arrays(depth: usize) -> String {
+    format!("export const x = {};\n", wrap(depth, "[", "]"))
+}
+
+/// A module-level `const` initialized with array literals nested 65 deep
+/// declares `number` under 65 array dimensions, as the checker's
+/// declaration does (TypeScript 7.0.2, all four settings): the shallow
+/// declaration inference infers the nest from its explicit stacks.
+#[test]
+fn module_const_arrays_nested_65_deep_answer_on_production_stacks() {
+    assert_eq!(
+        array_nest_of_on_a_small_stack(module_const_arrays(65), "typeof x"),
+        (65, true)
+    );
+}
+
+/// A thousand levels, within the inference's work budget: no level costs a
+/// native one.
+#[test]
+fn module_const_arrays_nested_1000_deep_answer_on_production_stacks() {
+    assert_eq!(
+        array_nest_of_on_a_small_stack(module_const_arrays(1_000), "typeof x"),
+        (1_000, true)
+    );
 }
 
 #[test]
