@@ -41,6 +41,9 @@ pub struct WorkspaceResourceSnapshot {
     pub overlay_resolution_slots: usize,
     /// Interned overlay value versions (process-wide, bounded).
     pub overlay_value_versions: usize,
+    /// Cold resolutions currently in flight (request-scoped: each lives
+    /// from its claim to its producer's settlement).
+    pub resolution_flights: usize,
 }
 
 /// Read-only view of the workspace authority.

@@ -317,6 +317,20 @@ slot cap, oldest first), and `HostRetentionSnapshot` reports both counts
 (`overlay_resolution_slots`, `overlay_value_versions`), as does the churn
 lane's retention line.
 
+**One producer per concurrent cold query.** A cold query that can admit
+claims its query slot's flight (`crate::resolution_flights`), keyed by the
+slot and the execution domain (workspace view or changing overlay).
+Identical concurrent demands subscribe and receive the candidate the
+producer admitted — retained or not — and each adopts it only if it
+validates for its own captured world; otherwise it resolves for itself, so
+incompatible overlays never adopt each other's answers. A subscriber holds
+the flight, not a thread identity, and can poll it instead of waiting; a
+cancelled subscriber (`ResolutionOperation::cancelled_by`) detaches with a
+typed `Cancelled` refusal while the producer runs on; a producer that
+admits nothing, fails or panics abandons the flight and every subscriber
+retries. A thread that owes a flight never waits on another, and no wait
+happens under an Engine lock.
+
 **Carried by the operation, not by a reader.** The overlay is part of the
 Engine's `ResolutionOperation` (`ResolutionOperation::over`), and the Engine
 composes the overlay reader itself. Like the evidence capability below, a

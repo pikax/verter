@@ -156,6 +156,11 @@ pub(crate) struct ResolutionOperation<'a> {
     /// can drop the overlay and have its answers versioned as the
     /// workspace values they replace.
     overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
+    /// The caller's cancellation, checked while this operation waits on a
+    /// concurrent identical query's flight: a cancelled caller detaches
+    /// from the flight (the producer runs on for its other subscribers)
+    /// and returns a typed `Cancelled` refusal.
+    cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> ResolutionOperation<'a> {
@@ -169,6 +174,7 @@ impl<'a> ResolutionOperation<'a> {
             input_ledger,
             final_validate,
             overlay: None,
+            cancelled: None,
         }
     }
 
@@ -181,6 +187,7 @@ impl<'a> ResolutionOperation<'a> {
             input_ledger,
             final_validate,
             overlay: None,
+            cancelled: None,
         }
     }
 
@@ -193,6 +200,28 @@ impl<'a> ResolutionOperation<'a> {
         self.overlay = overlay.filter(|overlay| !overlay.is_empty());
         self
     }
+
+    /// Let the caller's cancellation detach this operation from a flight it
+    /// waits on.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn cancelled_by(mut self, cancelled: &'a dyn Fn() -> bool) -> Self {
+        self.cancelled = Some(cancelled);
+        self
+    }
+}
+
+/// The identity a resolution flight coalesces on: the complete query slot
+/// and the execution domain (the workspace view, or a request overlay that
+/// changes a fact). Overlay flights coalesce across overlays because every
+/// subscriber validates the delivered candidate against its own world.
+type ResolutionFlightKey = (LazyResolutionCacheKey, bool);
+
+/// What a completed flight delivers: the candidate its producer admitted,
+/// with the lane it was retained in.
+#[derive(Debug)]
+struct FlightDelivery {
+    lane: ResolutionLane,
+    entry: LazyResolutionCacheEntry,
 }
 
 /// One bounded multi-candidate resolution slot.
@@ -477,6 +506,12 @@ pub(crate) struct Engine {
     /// The host's aggregate retention account, once installed; the overlay
     /// lane and value table charge their entries to it.
     retention: Arc<crate::overlay_residency::RetentionHook>,
+    /// Cold resolutions in flight, one per query slot and execution domain
+    /// (see [`crate::resolution_flights`]). Request-scoped: a flight lives
+    /// from its claim to its producer's settlement, so the registry holds
+    /// at most one entry per concurrently resolving query. Its lock is a
+    /// leaf; no wait happens under any Engine lock.
+    flights: crate::resolution_flights::ResolutionFlights<ResolutionFlightKey, FlightDelivery>,
     /// Per-canonical pending-evidence ledger: canonicals whose content
     /// transitioned through [`Self::bump_content_generation_for`] and whose
     /// resolution-visible evidence has not been re-observed yet. The bump
@@ -685,6 +720,7 @@ impl Engine {
                 crate::resolution_currency::OVERLAY_VALUE_VERSIONS_CAP,
             )),
             retention,
+            flights: crate::resolution_flights::ResolutionFlights::default(),
             pending_resolution_refresh: RwLock::new(rustc_hash::FxHashSet::default()),
             evidence_verified_generation: RwLock::new(FxHashMap::default()),
             content_generation: AtomicU64::new(1),
@@ -2550,6 +2586,28 @@ impl Engine {
             .len()
     }
 
+    /// Subscribers waiting on the flight of one query slot and domain.
+    #[cfg(test)]
+    pub(crate) fn flight_subscribers_for_test(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        context: verter_semantic::resolver_core::ResolutionContext,
+        population: ResolutionPopulation,
+        overlay_domain: bool,
+    ) -> usize {
+        self.flights.subscribers(&(
+            LazyResolutionCacheKey {
+                importer_id: importer_id.to_owned(),
+                specifier: specifier.to_owned(),
+                phase: context.phase,
+                kind: context.kind,
+                population,
+            },
+            overlay_domain,
+        ))
+    }
+
     /// Candidates the overlay lane holds, across every slot.
     #[cfg(test)]
     pub(crate) fn overlay_lane_item_count_for_test(&self) -> usize {
@@ -2592,6 +2650,7 @@ impl Engine {
             resolution_slots,
             overlay_resolution_slots: self.overlay_lane.len(),
             overlay_value_versions: self.overlay_values.len(),
+            resolution_flights: self.flights.len(),
             overlay_entries: overlay.len(),
             overlay_bytes: overlay.approx_bytes(),
             snapshot_entries: snapshot.len(),
@@ -3500,6 +3559,7 @@ impl Engine {
             input_ledger,
             final_validate,
             overlay: request_overlay,
+            cancelled,
         } = operation;
         crate::probe_scope!(RESOLVE_IN_PUBLISHED);
         let overlay_reader;
@@ -3519,6 +3579,9 @@ impl Engine {
             kind: ctx.kind,
             population,
         };
+        // This demand's lease on its query's flight, once it leads one: held
+        // across retries and settled (completed or abandoned) on return.
+        let mut flight_lease = None;
         loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
             let captured = {
@@ -3694,47 +3757,82 @@ impl Engine {
             // exact change invalidates the candidate through the same rail
             // as any other resolution input, and the recomputed result —
             // exact or resolver-derived — republishes through the same slot.
-            let reusable = {
-                crate::probe_scope!(RESOLVE_REUSE_FIND);
-                candidates.iter().find(|(_, entry)| {
-                    let candidate_context = {
-                        crate::probe_scope!(RESOLVE_REUSE_CTX);
-                        Self::complete_provider_context(
-                            captured.world.base.as_ref(),
-                            selected_context.clone(),
-                            entry.result.as_ref(),
-                            population,
-                            &transaction,
-                        )
-                    };
-                    let Some(candidate_context) = candidate_context else {
-                        return false;
-                    };
-                    let query_matches = {
-                        crate::probe_scope!(RESOLVE_REUSE_QUERY);
-                        let query = ResolutionQueryKey::importer(
-                            importer_id,
-                            specifier,
-                            ctx,
-                            candidate_context,
-                            population,
-                        );
-                        entry.query == query
-                    };
-                    if !query_matches {
-                        return false;
-                    }
-                    crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
-                    entry.signature.validates(captured.world.as_ref())
-                })
+            let reusable_for_this_view = |entry: &LazyResolutionCacheEntry| {
+                let candidate_context = {
+                    crate::probe_scope!(RESOLVE_REUSE_CTX);
+                    Self::complete_provider_context(
+                        captured.world.base.as_ref(),
+                        selected_context.clone(),
+                        entry.result.as_ref(),
+                        population,
+                        &transaction,
+                    )
+                };
+                let Some(candidate_context) = candidate_context else {
+                    return false;
+                };
+                let query_matches = {
+                    crate::probe_scope!(RESOLVE_REUSE_QUERY);
+                    let query = ResolutionQueryKey::importer(
+                        importer_id,
+                        specifier,
+                        ctx,
+                        candidate_context,
+                        population,
+                    );
+                    entry.query == query
+                };
+                if !query_matches {
+                    return false;
+                }
+                crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
+                // A witness the declared evidence source cannot
+                // re-observe is not a witness this attempt may stand
+                // on. See `witness_evidence_is_unenumerable`.
+                entry.signature.validates(captured.world.as_ref())
+                    && !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
             };
-            // A witness the declared evidence source cannot re-observe is
-            // not a witness this attempt may stand on. See
-            // `witness_evidence_is_unenumerable`.
-            let reusable = reusable.filter(|(_, entry)| {
-                !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
-            });
-            let result = if let Some((lane, entry)) = reusable {
+            let mut reusable: Option<(ResolutionLane, LazyResolutionCacheEntry)> = {
+                crate::probe_scope!(RESOLVE_REUSE_FIND);
+                candidates
+                    .iter()
+                    .find(|(_, entry)| reusable_for_this_view(entry))
+                    .cloned()
+            };
+            // A cold query that can admit joins the flight of an identical
+            // concurrent demand instead of running the producer again —
+            // unless it leads the flight already (a retry of its own). A
+            // delivered candidate is adopted only when it validates for THIS
+            // view; otherwise this demand resolves for itself.
+            if reusable.is_none()
+                && exact.is_none()
+                && flight_lease.is_none()
+                && reader.resolution_event_bridge_complete()
+            {
+                match self.flights.claim(&(cache_key.clone(), overlay_lane)) {
+                    crate::resolution_flights::FlightClaim::Lead(lease) => {
+                        flight_lease = Some(lease);
+                    }
+                    crate::resolution_flights::FlightClaim::Direct => {}
+                    crate::resolution_flights::FlightClaim::Join(subscription) => {
+                        match subscription.wait(cancelled) {
+                            crate::resolution_flights::FlightOutcome::Delivered(delivery) => {
+                                if reusable_for_this_view(&delivery.entry) {
+                                    reusable = Some((delivery.lane, delivery.entry.clone()));
+                                }
+                            }
+                            crate::resolution_flights::FlightOutcome::Abandoned => continue,
+                            crate::resolution_flights::FlightOutcome::Detached => {
+                                return ResolutionOutcome::refused(
+                                    None,
+                                    verter_audit::NonAdmissionReason::Cancelled,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let result = if let Some((lane, entry)) = reusable.as_ref() {
                 // The DAG's reuse seam. The reused candidate's signature
                 // is NOT folded in: the outcome roots on this query's own
                 // decision node, whose version reverse propagation keeps
@@ -4004,6 +4102,10 @@ impl Engine {
                     .import_resolution_cache_miss_count
                     .fetch_add(1, Ordering::Relaxed);
             }
+            // What this demand's flight delivers to its subscribers: the
+            // candidate it admitted — retained or not, it is a complete
+            // answer each subscriber may validate for its own view.
+            let mut delivery = None;
             if publish_candidate && overlay_lane {
                 // An overlay answer enters the overlay lane with its own
                 // witness and no decision node: the decision graph is the
@@ -4021,24 +4123,32 @@ impl Engine {
                         signature,
                     };
                     let bytes = entry.retained_bytes(&cache_key);
-                    published = self
-                        .overlay_lane
-                        .insert(cache_key.clone(), entry, bytes, overlay.authority())
-                        .is_some();
+                    let seq = self.overlay_lane.insert(
+                        cache_key.clone(),
+                        entry.clone(),
+                        bytes,
+                        overlay.authority(),
+                    );
+                    published = seq.is_some();
+                    delivery = Some(FlightDelivery {
+                        lane: ResolutionLane::RequestOverlay(seq.unwrap_or(0)),
+                        entry,
+                    });
                 }
             } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
                     crate::probe_scope!(RESOLVE_ADMIT);
+                    let entry = LazyResolutionCacheEntry {
+                        result: result.clone(),
+                        query: query.clone(),
+                        signature,
+                    };
                     let evicted = admit_resolution_candidate(
                         self.lazy_resolution_cache
                             .write()
                             .entry(cache_key.clone())
                             .or_default(),
-                        LazyResolutionCacheEntry {
-                            result: result.clone(),
-                            query: query.clone(),
-                            signature,
-                        },
+                        entry.clone(),
                     );
                     // The candidate, its decision node and the removal of
                     // every aged-out sibling's decision all land under the
@@ -4050,6 +4160,18 @@ impl Engine {
                     }
                     self.publish_resolution_decision(&captured, query, direct_edges);
                     published = true;
+                    delivery = Some(FlightDelivery {
+                        lane: ResolutionLane::Workspace,
+                        entry,
+                    });
+                }
+            }
+            // Settle the flight this demand leads: deliver its candidate,
+            // or — with none admitted — abandon it so every subscriber
+            // retries for itself.
+            if let Some(lease) = flight_lease.take() {
+                if let Some(delivery) = delivery {
+                    lease.complete(delivery);
                 }
             }
             // **The DAG's consumer-facing product.** A cacheable outcome
