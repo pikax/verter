@@ -7033,6 +7033,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let target_data = self.graph().node_data(target);
         let error_swallows = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Opaque(err) if err.is_error_type());
         match (source_data.as_deref(), target_data.as_deref()) {
+            // `any` and the error type are assignable to everything but
+            // `never` (the checker's `[any] extends [never]` is false).
+            (Some(data), Some(SemanticNodeData::Primitive(PrimitiveKind::Never)))
+                if error_swallows(data)
+                    || matches!(data, SemanticNodeData::Primitive(PrimitiveKind::Any)) =>
+            {
+                return Some(RelationResult::NotAssignable);
+            }
             (Some(data), _) | (_, Some(data)) if error_swallows(data) => {
                 return Some(assignable(bindings));
             }
@@ -7810,6 +7818,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // The error-type wildcard fires BEFORE the `(_, Never)` bottom
             // arm — `error` relates bidirectionally like `any` (the same
             // arm order the structural reducer applies).
+            // `any` and the error type are assignable to everything but
+            // `never`.
+            (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))
+                if err.is_error_type() =>
+            {
+                ShallowRelation::NotAssignable
+            }
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Primitive(PrimitiveKind::Never),
+            ) => ShallowRelation::NotAssignable,
             (SemanticNodeData::Opaque(err), _) if err.is_error_type() => {
                 ShallowRelation::Assignable
             }
@@ -9509,6 +9528,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Top / bottom + error-type wildcard ─────────────────────────
         match (&*source_data, &*target_data) {
+            // `any` and the error type are assignable to everything but
+            // `never`.
+            (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))
+                if err.is_error_type() =>
+            {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Primitive(PrimitiveKind::Never),
+            ) => {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
             (SemanticNodeData::Opaque(err), _) if err.is_error_type() => {
                 results.push(assignable(bindings));
                 return;

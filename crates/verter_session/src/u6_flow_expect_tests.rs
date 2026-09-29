@@ -2099,6 +2099,15 @@ pub(crate) mod checker_syntax {
                 e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
+            // The checker prints its error type — the recovery after a
+            // diagnostic it reports — as `any`.
+            (
+                CheckerType::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                    diagnostic,
+                    ..
+                }),
+            ) => diagnostic.recovery() == Some(PrimitiveKind::Any),
             (CheckerType::KeyOf(expected), SemanticNodeData::KeyOf { base }) => {
                 matches_node(dispatch, *base, expected, depth + 1)
             }

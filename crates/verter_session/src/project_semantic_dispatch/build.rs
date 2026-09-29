@@ -4768,48 +4768,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload.as_ref(),
         );
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let binding_scope = DeclarationBindingScope {
+            scope: &scope,
+            scope_payload: scope_payload.as_ref(),
+            shadowing: &shadowing,
+            authored_resolution_debt: authored_resolution_debt.as_ref(),
+        };
+        let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
+            // Skeleton mode preserves open generics: an unbound
+            // parameter binds a TypeParam shell so body lowering
+            // produces TypeParam graph nodes (instead of resolving
+            // T-refs to Opaque(Miss)). The relation engine treats
+            // TypeParam as deferred → Conditional branches stay live
+            // → the cycle gate's ref collector walks both → recursive
+            // refs through nested mapped/template-literal/conditional
+            // bodies become visible to the cycle gate. Every other mode
+            // leaves it unbound, so `Opaque(Miss)` propagates through
+            // the body; callers that genuinely need open-generic access
+            // must explicitly request Skeleton mode.
+            (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
+                let decl_identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(decl_canonical),
+                    owner: decl_owner,
+                    whole_hash: decl_whole_hash,
+                    decl_name: Arc::clone(decl_name),
+                };
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::TypeParam {
+                        decl: decl_identity,
+                        param_index: index as u16,
+                        constraint: None,
+                        default: None,
+                        display_name: Arc::from(param.name.as_str()),
+                    },
+                    scope.clone(),
+                )
+            })
+        };
         let (env, _bindings) = self.bind_declared_type_arguments(
             &prepared,
             args,
-            &DeclarationBindingScope {
-                scope: &scope,
-                scope_payload: scope_payload.as_ref(),
-                shadowing: &shadowing,
-                authored_resolution_debt: authored_resolution_debt.as_ref(),
-            },
+            &binding_scope,
             &mut substitutions,
             context,
-            |index, param| {
-                // Skeleton mode preserves open generics: an unbound
-                // parameter binds a TypeParam shell so body lowering
-                // produces TypeParam graph nodes (instead of resolving
-                // T-refs to Opaque(Miss)). The relation engine treats
-                // TypeParam as deferred → Conditional branches stay live
-                // → the cycle gate's ref collector walks both → recursive
-                // refs through nested mapped/template-literal/conditional
-                // bodies become visible to the cycle gate. Every other mode
-                // leaves it unbound, so `Opaque(Miss)` propagates through
-                // the body; callers that genuinely need open-generic access
-                // must explicitly request Skeleton mode.
-                (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
-                    let decl_identity = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(decl_canonical),
-                        owner: decl_owner,
-                        whole_hash: decl_whole_hash,
-                        decl_name: Arc::clone(decl_name),
-                    };
-                    self.graph().intern_node_with_scope(
-                        SemanticNodeData::TypeParam {
-                            decl: decl_identity,
-                            param_index: index as u16,
-                            constraint: None,
-                            default: None,
-                            display_name: Arc::from(param.name.as_str()),
-                        },
-                        scope.clone(),
-                    )
-                })
-            },
+            unbound_parameter,
         );
 
         // 5. Shallow-lower the body. Collects substitution facts for
@@ -4908,6 +4910,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context,
             authored_resolution_debt.as_ref(),
         );
+
+        // The checker's tail loop (`getConditionalType`): a generic body
+        // whose selected branch is this declaration applied to OTHER
+        // arguments is the next step of one tail run, evaluated here in
+        // place of a nested instantiation, and counted by the checker
+        // compatibility policy. The run fails with TS2589 at the checker's tail limit, or
+        // at once when the arguments come round again (the run can then
+        // never reach a value, so the checker's count is certain to run
+        // out). Each step is charged to the connected-work ledger; a trip
+        // leaves the step's back-edge as a typed partial.
+        let mut tail = crate::semantic_query::checker_policy::ConditionalTail::resumed(0);
+        let mut tail_arguments: Vec<Arc<[SemanticNodeId]>> = vec![Arc::clone(args)];
+        let generic = !prepared.type_parameters.is_empty();
+        while let Some(next) = generic
+            .then(|| self.conditional_tail_arguments(result, decl_canonical, decl_owner, decl_name))
+            .flatten()
+        {
+            if tail_arguments.contains(&next) || !tail.step() {
+                result = crate::semantic_query::checker_policy::checker_recovery(
+                    self.graph(),
+                    crate::semantic_query::CheckerDiagnostic {
+                        code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                        operation: crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail,
+                    },
+                    None,
+                );
+                break;
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                break;
+            }
+            tail_arguments.push(Arc::clone(&next));
+            substitutions.clear();
+            let (next_env, _) = self.bind_declared_type_arguments(
+                &prepared,
+                &next,
+                &binding_scope,
+                &mut substitutions,
+                context,
+                unbound_parameter,
+            );
+            result = self.lower_decl_body_with_provenance(
+                &prepared,
+                &next_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+                authored_resolution_debt.as_ref(),
+            );
+            result = self.backfill_member_index_surface(
+                result,
+                &prepared,
+                &next_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+                authored_resolution_debt.as_ref(),
+            );
+        }
 
         // Cross-file declaration augmentation (`declare module "X"` /
         // `declare global` interface merging from sibling files). Fold every
@@ -13473,6 +13539,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
+        let check = self.checker_error_operand(check).unwrap_or(check);
+        let extends = self.checker_error_operand(extends).unwrap_or(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(absorbed) =
             self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
@@ -13574,6 +13642,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
+        let check = self.checker_error_operand(check).unwrap_or(check);
+        let extends = self.checker_error_operand(extends).unwrap_or(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(output) =
             self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
@@ -13612,6 +13682,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
             }
         }
+    }
+
+    /// The checker's error type a conditional operand stands for: the
+    /// checker instantiates a conditional's check and extends types before
+    /// it relates them, so a name for its error type (the recovery from a
+    /// diagnostic the name's own instantiation raised) IS that error type
+    /// there, and so is a union or intersection with such a member, or an
+    /// intersection whose cross product the checker refuses. The error type
+    /// then dominates the conditional. `None` for any other operand.
+    fn checker_error_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.graph().node_data(operand).as_deref() {
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. },
+            ) => {}
+            // The error type dominates a union or an intersection it is a
+            // member of, and an intersection whose cross product the checker
+            // refuses is its error type.
+            Some(SemanticNodeData::Intersection(arms)) => {
+                let arms = arms.members_arc();
+                return self
+                    .intersection_too_complex(operand)
+                    .or_else(|| arms.iter().find_map(|arm| self.checker_error_operand(*arm)));
+            }
+            Some(SemanticNodeData::Union(arms)) => {
+                let arms = arms.members_arc();
+                return arms.iter().find_map(|arm| self.checker_error_operand(*arm));
+            }
+            _ => return None,
+        }
+        let resolved = self
+            .normalize_node_for_structural_fact_demand(
+                operand,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()?;
+        matches!(
+            self.peek_special(resolved),
+            Some((super::absorb::SpecialKind::Error, _))
+        )
+        .then_some(resolved)
     }
 
     /// The one typed `Cancelled` build output — shared by every builder
@@ -15510,6 +15622,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ) =>
             {
                 Some(args[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// The arguments of the next step of a generic declaration's tail run:
+    /// `result`, its body as lowered, is an application of this very
+    /// declaration (`canonical`, `owner`, `name`) — as the recursive
+    /// back-edge the lowering mints while the declaration is being
+    /// instantiated, or as the application carrier a carrier-preserving
+    /// demand keeps. A generic declaration whose type is an application of
+    /// itself is a conditional that selected that branch; a non-generic
+    /// one names itself directly, which the checker reports as a circular
+    /// alias, and its back-edge stays the recursive reference. `None` for
+    /// any other result, an application nested inside a type included.
+    fn conditional_tail_arguments(
+        &self,
+        result: SemanticNodeId,
+        canonical: &Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        let graph = self.graph();
+        match graph.node_data(result).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name: edge, args })) => {
+                let declared_here = matches!(
+                    graph.node_scope(result),
+                    Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
+                        if canonical_id == *canonical && edge_owner == owner
+                );
+                (edge == name && declared_here).then(|| Arc::clone(args))
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)
+                    .then(|| Arc::clone(args))
             }
             _ => None,
         }
