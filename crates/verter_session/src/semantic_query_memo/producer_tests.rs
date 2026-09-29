@@ -184,3 +184,53 @@ fn same_path_identity_is_scoped_to_one_store() {
     let (other, _) = claim(&second, &host, second_execution.task());
     assert!(matches!(other, Claim::Produce(_)));
 }
+
+/// An inline member flight belongs to the task that opened it for as long as
+/// the flight is open — also after the synchronous entry that opened it has
+/// returned, which is where an obligation root drains its members. A claim
+/// on another thread therefore waits on the member instead of reading the
+/// finished entry's retired task as a cycle and answering with the
+/// recursion carrier, the ReturnOnly partial a consumer reports as an
+/// unraisable source.
+#[test]
+fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
+    let (host, _hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    // The member flight opens inside a synchronous entry, which then returns
+    // while the flight stays open.
+    let flight = {
+        let _entry = store.enter_execution();
+        store
+            .begin_inline_member_flight(key())
+            .expect("a cold key's member flight opens")
+    };
+    std::thread::scope(|scope| {
+        let claimant = scope.spawn(|| {
+            let mut execution = None;
+            let mut capture = ReadCapture::default();
+            match store.acquire_query(&host, key(), &mut execution, &mut capture) {
+                super::producer::Acquired::Produce(_) => "produce",
+                super::producer::Acquired::Read(_) => "read",
+                super::producer::Acquired::Recursive(_) => "recursive",
+            }
+        });
+        // The claimant parks on the open member flight ...
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.test_joiner_on_condvar_count() == 0 && !claimant.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the claimant never parked"
+            );
+            std::thread::yield_now();
+        }
+        // ... and, once the member is abandoned, claims the key itself.
+        store.abort_inline_member_flight(&flight);
+        assert_eq!(
+            claimant.join().expect("the claimant returns"),
+            "produce",
+            "a claim on an open member flight must wait for it, never answer a cycle"
+        );
+    });
+    drop(flight);
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
