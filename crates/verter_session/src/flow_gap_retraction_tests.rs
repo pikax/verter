@@ -948,10 +948,6 @@ fn optional_any_refuses_type_changing_or_effectful_interposed_nodes() {
             "function makeProps(x: any) { return x<string>?.b }",
         ),
         (
-            "call_interposed",
-            "function makeProps(x: any) { return x?.().b }",
-        ),
-        (
             "effectful_call_argument",
             "function makeProps(a: any, x: string | number) { return a?.b(x = \"s\") }",
         ),
@@ -964,6 +960,20 @@ fn optional_any_refuses_type_changing_or_effectful_interposed_nodes() {
         record_trace(id, &trace);
         assert_refused(&trace);
     }
+}
+
+/// A call interposed in an optional chain over `any` is the checker's
+/// untyped call: `x?.().b` is `any` (tsc 7.0.2, all four settings). The
+/// row was refused while the chain's call had no carrier.
+#[test]
+fn optional_call_chain_over_any_is_any() {
+    let trace = run(
+        "call_interposed",
+        "function makeProps(x: any) { return x?.().b }",
+        "makeProps",
+    );
+    record_trace("call_interposed", &trace);
+    assert_complete_warm(&trace, Some(r#"{"kind":"primitive","name":"any"}"#));
 }
 
 #[test]

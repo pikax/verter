@@ -434,6 +434,45 @@ fn calls_nested_10000_deep_lower_on_a_small_stack() {
     assert_eq!(lowerings, 3 * 10_000 - 2);
 }
 
+/// How many expressions lowering `pa`, returning `depth` nested array
+/// literals `[[…[1]…]]`, lowers.
+fn nested_array_lowerings(depth: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let source = format!(
+        "function pa() {{ return {}1{}; }}",
+        "[".repeat(depth),
+        "]".repeat(depth)
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "pa");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.lowering_work.expressions.store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+    )
+    .expect("slice content must build for an indexed function");
+    memo.lowering_work.expressions.load(Ordering::Relaxed)
+}
+
+/// Array literals nested 3,000 deep (a nest the plan budget admits) lower
+/// on a 1 MiB thread, each one lowered once: an array literal is a frame
+/// of `lower_expr`'s task stack, which resumes with each element it asks
+/// for.
+#[test]
+fn arrays_nested_3000_deep_lower_on_a_small_stack() {
+    let lowerings = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| nested_array_lowerings(3_000))
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the lowering returns");
+    assert_eq!(lowerings, 3_000 + 1);
+}
+
 /// How many classes the same-frame effect scans enter while lowering
 /// `pc`, returning `depth` class expressions whose method returns the
 /// next.
@@ -6095,6 +6134,55 @@ fn operator_chains_10000_deep_lower_on_the_worker_stack() {
             operator_chain_depth(returned_expression(&content)),
             depth,
             "{form}"
+        );
+    }
+}
+
+/// How many nodes the local function declaration lookups visit while
+/// lowering `f`, which returns `uses` reads of its local function `g`, in a
+/// program whose unrelated function holds `unrelated` statements.
+fn local_function_lookup_visits(uses: usize, unrelated: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let source = format!(
+        "function unrelated() {{ {} }}\nfunction f() {{ function g() {{ return 1; }} return [{}]; }}",
+        "let u = 0; u++; ".repeat(unrelated),
+        vec!["g"; uses].join(", ")
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "f");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.lowering_work
+        .declaration_lookup_visits
+        .store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+    )
+    .expect("slice content must build for an indexed function");
+    memo.lowering_work
+        .declaration_lookup_visits
+        .load(Ordering::Relaxed)
+}
+
+/// A read of a local function declaration finds the declaration by a
+/// descent that enters only the nodes containing it, and reads whether the
+/// function is overloaded from the skeleton's discovery facts: the work per
+/// read stays the same however many reads the body holds and however large
+/// an unrelated function is. Deciding overloads by walking the whole
+/// program for the declaration's siblings made each read cost the program
+/// size (M reads over N unrelated statements cost M x N visits).
+#[test]
+fn a_local_function_read_visits_a_fixed_number_of_nodes() {
+    let per_read = local_function_lookup_visits(1, 1);
+    assert!(per_read > 0, "the lookup is counted");
+    for (uses, unrelated) in [(1, 64), (8, 1), (8, 256), (32, 256)] {
+        assert_eq!(
+            local_function_lookup_visits(uses, unrelated),
+            uses * per_read,
+            "{uses} reads over {unrelated} unrelated statements"
         );
     }
 }

@@ -132,11 +132,19 @@ impl VerterHost {
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         self.flow_return_request(function, cancellation, |dispatch| {
             let key = dispatch.flow_return_key_with_demand(function, demand);
-            let step = dispatch.execute_flow_return(key);
+            // Typed incompleteness never publishes clean: an answer composed
+            // from a degraded member return carries a typed degradation.
+            let (step, partial) = dispatch.execute_flow_return_observing_degraded_read(key);
             #[cfg(feature = "test-support")]
             crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("evaluated");
             match step {
-                crate::semantic_query::FlowReturnStep::Complete(result) => Ok(Arc::new(result)),
+                crate::semantic_query::FlowReturnStep::Complete(result) => {
+                    Ok(Arc::new(if partial {
+                        result.with_partial_interior()
+                    } else {
+                        result
+                    }))
+                }
                 crate::semantic_query::FlowReturnStep::NoValue(failure) => {
                     Err(FlowReturnError::Failure(failure))
                 }
@@ -412,6 +420,7 @@ fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
         FlowReturnDegradation::UnreducedDeclaredUnion => FlowDegradationTag::UnreducedDeclaredUnion,
         FlowReturnDegradation::UnresolvedValue => FlowDegradationTag::UnresolvedValue,
         FlowReturnDegradation::UnmodeledPosition => FlowDegradationTag::UnmodeledPosition,
+        FlowReturnDegradation::PartialInterior => FlowDegradationTag::PartialInterior,
     }
 }
 
