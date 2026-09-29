@@ -65,6 +65,10 @@ impl ResolutionEpoch {
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionOverlaySnapshot {
     entries: Arc<HashMap<String, Option<Arc<str>>>>,
+    /// Process-unique identity of this snapshot, shared by its clones.
+    /// `0` only for the empty default. Request-local memos key on it; it is
+    /// never part of a published identity.
+    id: u64,
     /// The effective world last composed from this snapshot, keyed by the
     /// identity of the underlying roots it was composed over.
     ///
@@ -72,6 +76,33 @@ pub struct ResolutionOverlaySnapshot {
     /// clones), holds ONE composition, and is replaced — never
     /// accumulated — when the underlying world moves.
     effective: Arc<Mutex<Option<EffectiveOverlayWorld>>>,
+    work: Arc<OverlayWorkCounters>,
+}
+
+static NEXT_OVERLAY_SNAPSHOT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// The overlay-side work one snapshot (and its clones) has performed,
+/// counted apart from the resolver work it enables so a relocated cost
+/// cannot pass for an eliminated one.
+#[derive(Debug, Default)]
+struct OverlayWorkCounters {
+    root_builds: std::sync::atomic::AtomicU64,
+    probes: std::sync::atomic::AtomicU64,
+    manifest_parses: std::sync::atomic::AtomicU64,
+}
+
+/// A snapshot's overlay-side work so far — see
+/// [`ResolutionOverlaySnapshot::work_counts`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayWorkCounts {
+    /// Effective-root constructions (one per underlying root pair).
+    pub root_builds: u64,
+    /// Path probes the overlay reader answered, from the overlay or by
+    /// delegation.
+    pub probes: u64,
+    /// `package.json` projections parsed from overlay bytes.
+    pub manifest_parses: u64,
 }
 
 #[derive(Debug)]
@@ -113,8 +144,52 @@ impl ResolutionOverlaySnapshot {
         }
         Self {
             entries: Arc::new(entries),
+            id: NEXT_OVERLAY_SNAPSHOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effective: Arc::default(),
+            work: Arc::default(),
         }
+    }
+
+    /// Process-unique identity of this snapshot (shared by its clones).
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Whether the overlay carries no upsert and no tombstone — in which
+    /// case its effective view IS the workspace view.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether the overlay upserts or tombstones `canonical_id`.
+    pub(crate) fn covers(&self, canonical_id: &str) -> bool {
+        self.get(canonical_id).is_some()
+    }
+
+    /// The overlay-side work this snapshot (and every clone) has done.
+    #[must_use]
+    pub fn work_counts(&self) -> OverlayWorkCounts {
+        let load = |counter: &std::sync::atomic::AtomicU64| {
+            counter.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        OverlayWorkCounts {
+            root_builds: load(&self.work.root_builds),
+            probes: load(&self.work.probes),
+            manifest_parses: load(&self.work.manifest_parses),
+        }
+    }
+
+    fn count(&self, counter: fn(&OverlayWorkCounters) -> &std::sync::atomic::AtomicU64) {
+        counter(&self.work).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Parse an overlay manifest's bytes — the one place overlay
+    /// `package.json` bytes are parsed, so the work is counted once.
+    fn parse_manifest(&self, source: &str) -> crate::types::PackageManifest {
+        self.count(|work| &work.manifest_parses);
+        crate::package_index::parse_package_json(source)
     }
 
     /// The effective resolution world this overlay composes over
@@ -143,7 +218,8 @@ impl ResolutionOverlaySnapshot {
                 return Arc::clone(&memo.world);
             }
         }
-        let world = match RequestOverlayRoot::build(underlying, &self.entries) {
+        self.count(|work| &work.root_builds);
+        let world = match RequestOverlayRoot::build(underlying, self) {
             Some(root) => Arc::new(CapturedResolutionWorld {
                 base: Arc::clone(&underlying.base),
                 session: underlying.session.clone(),
@@ -588,26 +664,76 @@ const OVERLAY_REALPATH_ABSENT: u64 = OVERLAY_VERSION_SPACE | 4;
 /// Minted overlay versions start above the exact encodings.
 static NEXT_OVERLAY_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(16);
 
-#[cfg(any(test, feature = "test-support"))]
-static OVERLAY_ROOT_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Process-wide count of [`RequestOverlayRoot`] constructions — the
-/// overlay-root work a request performs, counted apart from the resolver
-/// work it enables.
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-pub fn overlay_root_builds_for_test() -> u64 {
-    OVERLAY_ROOT_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// A value with no exact encoding (a directory's member set, a manifest's
-/// resolution projection, a derived decision): a version unique to this
-/// composition, so it equals nothing any other world reports.
+/// A version unique to this call, so it equals nothing any other world
+/// reports: a derived decision the overlay reaches is refused wherever it
+/// was recorded, and never recorded under the overlay itself.
 fn mint_overlay_version() -> ResolutionFactVersion {
     ResolutionFactVersion::fresh(
         OVERLAY_VERSION_SPACE
             | NEXT_OVERLAY_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     )
+}
+
+/// An overlay-effective value with no exact encoding, named by its EXACT
+/// identity: equal values get equal versions in every composition, so an
+/// overlay answer that depends on one stays warm across requests while the
+/// value holds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OverlayValue {
+    /// A directory whose member set the overlay changes: the underlying
+    /// members' version, plus exactly the paths under it whose existence
+    /// the overlay moves (`true` = the overlay makes it a file).
+    Members {
+        directory: String,
+        underlying: ResolutionFactVersion,
+        changed: Box<[(String, bool)]>,
+    },
+    /// A manifest the overlay rewrites or deletes: its resolution
+    /// projection — the identity the Engine itself compares manifests by.
+    Manifest {
+        canonical: String,
+        projection: Option<[u8; 16]>,
+    },
+}
+
+/// Bound on [`OVERLAY_VALUE_VERSIONS`]. An evicted value re-mints on its
+/// next use, which only refuses the witnesses recorded against it.
+const OVERLAY_VALUE_VERSIONS_CAP: usize = 4096;
+
+/// The one resident overlay structure outside a request: the versions of
+/// overlay values with no exact encoding. Bounded FIFO
+/// ([`OVERLAY_VALUE_VERSIONS_CAP`]), superseded by eviction, counted by
+/// [`overlay_value_versions_len`].
+#[derive(Debug, Default)]
+struct OverlayValueVersions {
+    versions: rustc_hash::FxHashMap<OverlayValue, ResolutionFactVersion>,
+    order: std::collections::VecDeque<OverlayValue>,
+}
+
+static OVERLAY_VALUE_VERSIONS: std::sync::LazyLock<Mutex<OverlayValueVersions>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+fn overlay_value_version(value: OverlayValue) -> ResolutionFactVersion {
+    let mut table = OVERLAY_VALUE_VERSIONS.lock();
+    if let Some(version) = table.versions.get(&value) {
+        return *version;
+    }
+    let version = mint_overlay_version();
+    if table.order.len() >= OVERLAY_VALUE_VERSIONS_CAP {
+        if let Some(oldest) = table.order.pop_front() {
+            table.versions.remove(&oldest);
+        }
+    }
+    table.order.push_back(value.clone());
+    table.versions.insert(value, version);
+    version
+}
+
+/// How many overlay values currently hold an interned version (bounded by
+/// an internal cap).
+#[must_use]
+pub fn overlay_value_versions_len() -> usize {
+    OVERLAY_VALUE_VERSIONS.lock().versions.len()
 }
 
 /// One request overlay's effective resolution facts over one captured
@@ -633,18 +759,17 @@ pub(crate) struct RequestOverlayRoot {
 }
 
 impl RequestOverlayRoot {
-    /// `None` when the overlay changes no resolution fact of `world`.
-    fn build(
-        world: &CapturedResolutionWorld,
-        entries: &HashMap<String, Option<Arc<str>>>,
-    ) -> Option<Self> {
-        #[cfg(any(test, feature = "test-support"))]
-        OVERLAY_ROOT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// `None` when the overlay changes no resolution fact of `world`'s
+    /// roots.
+    fn build(world: &CapturedResolutionWorld, overlay: &ResolutionOverlaySnapshot) -> Option<Self> {
         let base_key = |canonical: &str, make: fn(CanonicalResolutionId) -> ResolutionFactKey| {
             make(CanonicalResolutionId::new(canonical.to_owned()))
         };
         let mut primitive = rustc_hash::FxHashMap::default();
-        for (canonical, value) in entries.iter() {
+        // parent directory -> the paths under it whose existence moves.
+        let mut moved: std::collections::BTreeMap<String, Vec<(String, bool)>> =
+            std::collections::BTreeMap::new();
+        for (canonical, value) in overlay.entries.iter() {
             // The underlying value is what the workspace world's own
             // population sees: an editor overlay's path is a file whose
             // realpath is itself, anything else is the recorded base value.
@@ -687,14 +812,10 @@ impl RequestOverlayRoot {
                 );
                 if let Some(index) = canonical.rfind('/') {
                     let parent = if index == 0 { "/" } else { &canonical[..index] };
-                    primitive
-                        .entry(base_key(parent, |canonical| {
-                            ResolutionFactKey::DirectoryMembers {
-                                canonical,
-                                population: ResolutionPopulation::Base,
-                            }
-                        }))
-                        .or_insert_with(mint_overlay_version);
+                    moved
+                        .entry(parent.to_owned())
+                        .or_default()
+                        .push((canonical.clone(), value.is_some()));
                 }
             }
             if realpath_before != Some(realpath_after) {
@@ -707,7 +828,9 @@ impl RequestOverlayRoot {
                 );
             }
             if is_package_manifest_path(canonical) {
-                let after = value.as_deref().map(manifest_resolution_fingerprint);
+                let after = value
+                    .as_deref()
+                    .map(|source| manifest_fingerprint_of(&overlay.parse_manifest(source)));
                 let before: Option<Option<[u8; 16]>> = match editor {
                     Some(session) => Some(session.manifest_fingerprints.get(canonical).copied()),
                     None => world.base.manifest_fingerprints.get(canonical).copied(),
@@ -718,10 +841,31 @@ impl RequestOverlayRoot {
                             canonical,
                             population: ResolutionPopulation::Base,
                         }),
-                        mint_overlay_version(),
+                        overlay_value_version(OverlayValue::Manifest {
+                            canonical: canonical.clone(),
+                            projection: after,
+                        }),
                     );
                 }
             }
+        }
+        for (directory, mut changed) in moved {
+            let key = base_key(&directory, |canonical| {
+                ResolutionFactKey::DirectoryMembers {
+                    canonical,
+                    population: ResolutionPopulation::Base,
+                }
+            });
+            let underlying = world.root_fact_version(&key.in_population(world.population));
+            changed.sort();
+            primitive.insert(
+                key,
+                overlay_value_version(OverlayValue::Members {
+                    directory,
+                    underlying,
+                    changed: changed.into_boxed_slice(),
+                }),
+            );
         }
         if primitive.is_empty() {
             return None;
@@ -1456,16 +1600,23 @@ impl CapturedResolutionWorld {
     }
 
     pub(crate) fn fact_version(&self, key: &ResolutionFactKey) -> ResolutionFactVersion {
+        if let ResolutionPopulation::Session(fingerprint) = key.population() {
+            if self.population != ResolutionPopulation::Session(fingerprint) {
+                return ResolutionFactVersion::INITIAL;
+            }
+        }
+        self.overlay_version(key)
+            .unwrap_or_else(|| self.root_fact_version(key))
+    }
+
+    /// [`Self::fact_version`] read from the two roots alone, ignoring any
+    /// composed request overlay.
+    fn root_fact_version(&self, key: &ResolutionFactKey) -> ResolutionFactVersion {
         match key.population() {
-            ResolutionPopulation::Base => self
-                .overlay_version(key)
-                .unwrap_or_else(|| self.base.fact_version(key)),
+            ResolutionPopulation::Base => self.base.fact_version(key),
             ResolutionPopulation::Session(fingerprint) => {
                 if self.population != ResolutionPopulation::Session(fingerprint) {
                     return ResolutionFactVersion::INITIAL;
-                }
-                if let Some(version) = self.overlay_version(key) {
-                    return version;
                 }
                 if let Some(session) = self.session.as_ref() {
                     let version = session.facts.version(key);
@@ -1490,6 +1641,12 @@ impl CapturedResolutionWorld {
     #[must_use]
     pub fn composes_request_overlay(&self) -> bool {
         self.overlay.is_some()
+    }
+
+    /// Whether a composed request overlay changes `key` (for a derived
+    /// node: reaches one of its dependencies).
+    pub(crate) fn request_overlay_reaches(&self, key: &ResolutionFactKey) -> bool {
+        self.overlay_version(key).is_some()
     }
 }
 
@@ -2145,6 +2302,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
     }
 
     fn probe_path(&self, canonical_id: &str) -> PathProbe {
+        self.overlay.count(|work| &work.probes);
         match self.overlay.get(canonical_id) {
             Some(Some(_)) => PathProbe::File,
             Some(None) => PathProbe::Absent,
@@ -2154,14 +2312,6 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn resolution_event_bridge_complete(&self) -> bool {
         self.inner.resolution_event_bridge_complete()
-    }
-
-    fn resolution_snapshot_is_request_local(&self) -> bool {
-        true
-    }
-
-    fn request_resolution_overlay(&self) -> Option<&ResolutionOverlaySnapshot> {
-        Some(self.overlay)
     }
 
     fn take_resolution_directory_observations(&self) -> Vec<String> {
@@ -2184,7 +2334,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
         match self.overlay.get(canonical_id) {
-            Some(Some(source)) => Some(crate::package_index::parse_package_json(source.as_ref())),
+            Some(Some(source)) => Some(self.overlay.parse_manifest(source.as_ref())),
             Some(None) => None,
             None => self.inner.read_package_manifest(canonical_id),
         }
@@ -2264,7 +2414,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                                 reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
                             });
                     }
-                    Ok(Some(crate::package_index::parse_package_json(&source)))
+                    Ok(Some(self.overlay.parse_manifest(&source)))
                 }
                 None => {
                     let entry = reservation
@@ -2745,6 +2895,24 @@ impl ResolutionTransaction {
             (ResolutionEdgeClass::Terminal, _) => {}
         }
         self.observations.push(fact);
+    }
+
+    /// Restate a reused candidate's witness as this attempt's own.
+    ///
+    /// For a reuse with no decision node to root on: the facts are the ones
+    /// the candidate observed, already validated against this attempt's
+    /// world, so they carry exactly the versions this world reports.
+    pub(crate) fn adopt_witness(&mut self, witness: &crate::ReadSetSignature) {
+        for fact in witness.facts.iter() {
+            if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
+                fact
+            {
+                if !self.observed_keys.insert(resolution.key.clone()) {
+                    continue;
+                }
+            }
+            self.observe_fact(fact.clone());
+        }
     }
 
     /// This attempt's complete direct dependency set, deduped, in

@@ -34,6 +34,13 @@ pub struct WorkspaceResourceSnapshot {
     pub reverse_dep_bucket_count: usize,
     pub package_manifest_count: usize,
     pub published_project_count: usize,
+    /// Resolution candidate slots the workspace itself answers in.
+    pub resolution_slots: usize,
+    /// Resolution candidate slots request overlays answer in — bounded by
+    /// the Engine's overlay-lane cap, oldest slot evicted first.
+    pub overlay_resolution_slots: usize,
+    /// Interned overlay value versions (process-wide, bounded).
+    pub overlay_value_versions: usize,
 }
 
 /// Read-only view of the workspace authority.
@@ -204,48 +211,14 @@ pub trait WorkspaceRead: Send + Sync {
         false
     }
 
-    /// Whether this reader's answers are SCOPED to one request rather than
-    /// to the population its cache key names.
-    ///
-    /// A request-local reader may admit a result after its own final fence,
-    /// but must neither reuse nor populate the shared resolution
-    /// caches/edges: its answers are correct only inside the batch that
-    /// composed it. The overlay snapshot reader is the case — its answers
-    /// are overlay-effective while the enclosing cache key names the
-    /// underlying population, so a published candidate would be served to
-    /// requests that cannot see the overlay.
-    ///
-    /// This is NOT the admission question. A reader that observes the shared
-    /// population but cannot guarantee event-bridge coverage answers
-    /// [`Self::resolution_event_bridge_complete`] `false` instead: it may
-    /// still READ a warm candidate (and should — that is the memo), it
-    /// simply cannot admit one. Conflating the two disables the resolution
-    /// memo wholesale for the backend that answers `true` here, which is a
-    /// silent, suite-invisible cold-path regression rather than a
-    /// correctness fence.
-    fn resolution_snapshot_is_request_local(&self) -> bool {
-        false
-    }
-
-    /// The request overlay this reader layers over the workspace, if any.
-    ///
-    /// The Engine composes it over every world it captures for this reader
-    /// ([`crate::ResolutionOverlaySnapshot::effective_world`]), so an
-    /// overlay-effective observation is versioned in the overlay's own
-    /// version space — never as the workspace value it replaced.
-    fn request_resolution_overlay(
-        &self,
-    ) -> Option<&crate::resolution_currency::ResolutionOverlaySnapshot> {
-        None
-    }
-
     // The live evidence capability is deliberately NOT a hook on this trait.
     // A reader hook is forwarded by every delegating wrapper, and a wrapper
     // that forgets one silently inherits the default. The capability is a
     // required parameter on the Engine's resolution entry points instead,
     // stated once by the backend that owns the Engine — see
     // `crate::resolution_currency::ResolutionEvidenceSource`. Nothing composed
-    // on top of a reader can strip it.
+    // on top of a reader can strip it. A request overlay is carried the same
+    // way, on the Engine's resolution operation, for the same reason.
 
     /// Drain exact directory enumerations performed internally by the most
     /// recent resolver-facing read on the current thread.

@@ -1418,7 +1418,13 @@ fn assert_filesystem_import_churn_limit_is_typed_and_cold(with_overlay: bool) {
             if with_overlay {
                 WorkspaceRead::resolve_import_outcome_with_overlay(
                     &workspace,
-                    &crate::resolution_currency::ResolutionOverlaySnapshot::default(),
+                    &crate::resolution_currency::ResolutionOverlaySnapshot::new(
+                        [(
+                            format!("{root}/overlay-only/scratch.ts"),
+                            Arc::from("export {}\n"),
+                        )],
+                        [],
+                    ),
                     &importer,
                     "pkg",
                     context,
@@ -1446,6 +1452,13 @@ fn assert_filesystem_import_churn_limit_is_typed_and_cold(with_overlay: bool) {
             },
             verter_semantic::resolver_core::ResolutionPopulation::Base,
         ),
+        0
+    );
+    // Nor a warm overlay answer: the overlay variant resolves through an
+    // overlay that changes facts, so it answers in the overlay lane, and a
+    // terminal refusal leaves that lane as cold as the workspace one.
+    assert_eq!(
+        WorkspaceRead::resource_snapshot(&workspace).overlay_resolution_slots,
         0
     );
     assert!(workspace.engine.snapshot.read().read(&manifest).is_none());
@@ -1480,6 +1493,75 @@ fn filesystem_import_churn_limit_stays_typed_and_cold() {
 #[test]
 fn filesystem_overlay_import_churn_limit_stays_typed_and_cold() {
     assert_filesystem_import_churn_limit_is_typed_and_cold(true);
+}
+
+/// An overlay that rewrites a package manifest retargets the overlay view's
+/// bare import and nothing else. What decides is the manifest's resolution
+/// projection: an overlay manifest that keeps it resolves exactly as the
+/// workspace does and reuses the workspace's answer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_overlay_manifest_retargets_by_its_resolution_projection_alone() {
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(8);
+    let a = format!("{root}/node_modules/pkg/a.d.ts");
+    let b = format!("{root}/node_modules/pkg/b.d.ts");
+    let target = |outcome: &crate::resolution_currency::ResolutionOutcome| {
+        outcome.result().map(|result| result.source_id.clone())
+    };
+    let with_manifest = |source: &str| {
+        crate::resolution_currency::ResolutionOverlaySnapshot::new(
+            [(manifest.clone(), Arc::<str>::from(source))],
+            [],
+        )
+    };
+
+    let base = WorkspaceRead::resolve_import_outcome(&workspace, &importer, "pkg", CONTEXT);
+    assert_eq!(target(&base), Some(a.clone()));
+
+    let retargeting = with_manifest(r#"{"name":"pkg","types":"./b.d.ts"}"#);
+    let retargeted = WorkspaceRead::resolve_import_outcome_with_overlay(
+        &workspace,
+        &retargeting,
+        &importer,
+        "pkg",
+        CONTEXT,
+    );
+    assert_eq!(target(&retargeted), Some(b));
+    let population = WorkspaceRead::resolution_population(&workspace);
+    assert_eq!(
+        workspace
+            .engine
+            .overlay_resolution_slot_len_for_test(&importer, "pkg", CONTEXT, population),
+        1,
+        "the retargeted answer lives in the overlay lane"
+    );
+
+    let workspace_again =
+        WorkspaceRead::resolve_import_outcome(&workspace, &importer, "pkg", CONTEXT);
+    assert_eq!(target(&workspace_again), Some(a.clone()));
+    assert!(
+        workspace_again.trace().reused(),
+        "the workspace answer is untouched"
+    );
+
+    let same_projection =
+        with_manifest(r#"{"name":"pkg","types":"./a.d.ts","description":"edited"}"#);
+    let kept = WorkspaceRead::resolve_import_outcome_with_overlay(
+        &workspace,
+        &same_projection,
+        &importer,
+        "pkg",
+        CONTEXT,
+    );
+    assert_eq!(target(&kept), Some(a));
+    assert!(
+        kept.trace().reused(),
+        "a manifest edit outside the resolution projection reuses the workspace answer"
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1956,26 +2038,15 @@ enum ResolveEntry {
 impl ResolveEntry {
     const ALL: [Self; 3] = [Self::Plain, Self::WithOverlay, Self::AtPublished];
 
-    /// Whether this entry READS the shared candidate slot.
-    ///
-    /// `resolve_import_outcome_with_overlay` composes a request-local reader,
-    /// and a request-local reader is handed an EMPTY candidate set
-    /// (`Engine::resolve_import_outcome_in_published`): its answers are
-    /// overlay-effective while the cache key names the underlying population,
-    /// so it may neither publish nor reuse. It therefore resolves cold every
-    /// time, through the frozen replay's own independent re-reads.
-    ///
-    /// The healing assertions below hold for it ANYWAY, and that is the
-    /// point: the evidence capability is stated by the backend at the Engine
-    /// entry, not forwarded by the reader, so a later change that lets this
-    /// entry reuse candidates inherits the healing instead of silently losing
-    /// it.
-    fn reads_candidates(self) -> bool {
-        match self {
-            Self::Plain | Self::AtPublished => true,
-            Self::WithOverlay => false,
-        }
-    }
+    // Every entry READS the shared candidate slot. The overlay entry resolves
+    // through an overlay that creates a file the resolution never reads, so
+    // its effective world changes facts, yet none a workspace candidate
+    // observed: it answers in the overlay lane, reuses the workspace
+    // candidate once that candidate's witness validates against the
+    // overlay's world, and must heal exactly as the plain entry does. The
+    // evidence capability is stated by the backend at the Engine entry, not
+    // forwarded by the reader, which is why the overlay entry inherits the
+    // healing rather than silently losing it.
 
     fn resolve(
         self,
@@ -1988,13 +2059,25 @@ impl ResolveEntry {
             Self::Plain => {
                 WorkspaceRead::resolve_import_outcome(workspace, importer_id, specifier, ctx)
             }
-            Self::WithOverlay => WorkspaceRead::resolve_import_outcome_with_overlay(
-                workspace,
-                &crate::resolution_currency::ResolutionOverlaySnapshot::default(),
-                importer_id,
-                specifier,
-                ctx,
-            ),
+            Self::WithOverlay => {
+                let parent = importer_id
+                    .rsplit_once('/')
+                    .map_or("", |(parent, _)| parent);
+                let overlay = crate::resolution_currency::ResolutionOverlaySnapshot::new(
+                    [(
+                        format!("{parent}/overlay-only/scratch.ts"),
+                        Arc::from("export {}\n"),
+                    )],
+                    [],
+                );
+                WorkspaceRead::resolve_import_outcome_with_overlay(
+                    workspace,
+                    &overlay,
+                    importer_id,
+                    specifier,
+                    ctx,
+                )
+            }
             Self::AtPublished => {
                 let published = workspace
                     .load_published()
@@ -2096,14 +2179,11 @@ fn assert_manifest_rewrite_retargets(entry: ResolveEntry) {
     // caches anything, and the test would discriminate nothing a total
     // refusal would not also pass.
     let warm = entry.resolve(&workspace, &owner, "pkg", CONTEXT);
-    assert_eq!(
+    assert!(
         warm.trace().reused(),
-        entry.reads_candidates(),
-        "precondition ({entry:?}): a candidate-reading entry must REUSE the \
-         published candidate — without a warm serve there is no stale-serve \
-         defect and the healing assertion below is vacuous — and a \
-         request-local entry must NOT, because it is handed an empty \
-         candidate set by contract"
+        "precondition ({entry:?}): every entry must REUSE the published \
+         candidate — without a warm serve there is no stale-serve defect and \
+         the healing assertion below is vacuous"
     );
 
     // The rewrite a package manager performs: new bytes, no event of any kind.
@@ -2182,15 +2262,14 @@ fn assert_snapshot_resident_deletion_kills_candidate(entry: ResolveEntry) {
         cold.trace().published(),
         "precondition: the positive resolution must publish a candidate"
     );
-    assert_eq!(
+    assert!(
         entry
             .resolve(&workspace, &owner, "./dep", CONTEXT)
             .trace()
             .reused(),
-        entry.reads_candidates(),
-        "precondition ({entry:?}): a candidate-reading entry must REUSE the \
-         candidate before the deletion — otherwise there is no stale serve \
-         for the deletion to kill — and a request-local entry must not"
+        "precondition ({entry:?}): every entry must REUSE the candidate before \
+         the deletion — otherwise there is no stale serve for the deletion to \
+         kill"
     );
 
     std::fs::remove_file(&dep_path).unwrap();

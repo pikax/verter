@@ -378,15 +378,20 @@ impl VerterHost {
     ///   ESM-fallback normalization and the absence-sensitive
     ///   `ImportRoute` hash lands on the SAME canonical the route
     ///   traversal would record.
-    pub(crate) fn generation_current_route_resolution(
+    ///
+    /// `overlay` is the resolution snapshot to answer for: the workspace
+    /// view (`None`) or a request overlay's effective view.
+    pub(crate) fn generation_current_route_resolution_in(
         &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         import_source: &str,
         recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
     ) -> verter_workspace::ResolutionPublication<String> {
         match recorded_kind {
             Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr) => self
-                .resolve_for_persistent_state(
+                .resolve_for_persistent_state_in(
+                    overlay,
                     owner_canonical,
                     import_source,
                     verter_semantic::resolver_core::ResolutionContext {
@@ -395,7 +400,27 @@ impl VerterHost {
                     },
                 )
                 .map_result(|resolution| resolution.source_id),
-            _ => self.resolve_route_edge_canonical(owner_canonical, import_source),
+            _ => {
+                verter_audit::attribute_scope!(ImportRouteResolve);
+                self.resolve_type_dependency_canonical_in(overlay, owner_canonical, import_source)
+            }
         }
+    }
+
+    /// [`Self::generation_current_route_resolution_in`] for the workspace
+    /// view.
+    #[cfg(test)]
+    pub(crate) fn generation_current_route_resolution(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.generation_current_route_resolution_in(
+            None,
+            owner_canonical,
+            import_source,
+            recorded_kind,
+        )
     }
 }
