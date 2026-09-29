@@ -692,6 +692,17 @@ pub struct FunctionCapturedRead {
     pub span: verter_span::Span,
 }
 
+/// The exact closure subjects and read dependencies of one callable in a
+/// frame's PARAMETER LIST (`cb = () => a`): no index entry serves it, but
+/// the frame's own resolution names everything it reads and writes from
+/// around it, so its capture set is exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParameterCallableCaptures {
+    pub span: verter_span::Span,
+    pub bindings: CanonicalCaptureIdentity,
+    pub reads: Arc<[FunctionCapturedRead]>,
+}
+
 /// Exact closure subjects and read dependencies of one immediately nested callable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionNestedCaptures {
@@ -842,6 +853,14 @@ pub struct FunctionProgramEntry {
     pub captured_reads: Arc<[FunctionCapturedRead]>,
     /// Immediate child creation sites and their retained read-path dependencies.
     pub nested_captures: Arc<[FunctionNestedCaptures]>,
+    /// The references each parameter-list callable makes to names it does
+    /// not declare, by the callable's span: resolved with the frame's own
+    /// references into [`Self::parameter_callable_captures`].
+    pub(crate) parameter_callable_references:
+        Arc<[(verter_span::Span, Arc<[FunctionReferenceRecord]>)]>,
+    /// The exact captures of each parameter-list callable whose every
+    /// reference resolved (the others keep their typed gap).
+    pub parameter_callable_captures: Arc<[FunctionParameterCallableCaptures]>,
     /// Evaluation-effect call sites.
     pub effects: Arc<[FunctionEffectRecord]>,
     /// Indexed call sites: program point, callee carrier, exact same-file
@@ -1651,6 +1670,41 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                 }
             }
         }
+        // A parameter-list callable's references resolve in this frame's
+        // scopes; every one resolved makes its capture set exact.
+        let mut parameter_callable_captures = Vec::new();
+        for (span, references) in entries[index].parameter_callable_references.iter() {
+            let mut bindings: Vec<FlowBindingIdentity> = Vec::new();
+            let mut reads: Vec<FunctionCapturedRead> = Vec::new();
+            let mut exact = true;
+            for reference in references.iter() {
+                match resolve(&reference.name, reference.span) {
+                    FunctionReferenceBinding::Resolved(identity) => {
+                        if !bindings.contains(&identity) {
+                            bindings.push(identity.clone());
+                        }
+                        if reference.read_role.is_some() {
+                            reads.push(FunctionCapturedRead {
+                                binding: identity,
+                                path: Arc::clone(&reference.path),
+                                span: reference.span,
+                            });
+                        }
+                    }
+                    FunctionReferenceBinding::Free => {}
+                    _ => exact = false,
+                }
+            }
+            if exact {
+                reads.sort_by_key(|read| read.span.start);
+                parameter_callable_captures.push(FunctionParameterCallableCaptures {
+                    span: *span,
+                    bindings: CanonicalCaptureIdentity(Arc::from(bindings.into_boxed_slice())),
+                    reads: Arc::from(reads.into_boxed_slice()),
+                });
+            }
+        }
+        entries[index].parameter_callable_captures = parameter_callable_captures.into();
         // Code no entry serves (a class, a parameter-list callable) is a
         // callable nested here too: its escaping assignments reach the
         // defining frame, this one included.
@@ -4061,6 +4115,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             creates_unserved_callable,
             class_local_scope: _,
             unserved_assignments,
+            parameter_callable_references,
             references,
             source_type_queries,
             type_queries,
@@ -4126,6 +4181,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             descendant_assignments: Arc::from([]),
             captured_reads: Arc::from([]),
             nested_captures: Arc::from([]),
+            parameter_callable_references: parameter_callable_references.into(),
+            parameter_callable_captures: Arc::from([]),
             effects: Arc::from(effects.into_boxed_slice()),
             call_sites: Arc::from(call_sites.into_boxed_slice()),
             control: Arc::from(control.into_boxed_slice()),
@@ -4206,6 +4263,9 @@ struct InventoryVisitor<'sink, 'ast> {
     /// parameter-list callable) makes to names it does not declare
     /// ([`access::EscapingAssignments`]).
     unserved_assignments: Vec<FunctionReferenceRecord>,
+    /// Every reference a parameter-list callable makes to a name it does
+    /// not declare, by the callable's span.
+    parameter_callable_references: Vec<(verter_span::Span, Arc<[FunctionReferenceRecord]>)>,
     references: Vec<FunctionReferenceRecord>,
     source_type_queries: Vec<FunctionSourceTypeQuery>,
     type_queries: Vec<FunctionTypeQuery>,
@@ -4228,6 +4288,26 @@ struct InventoryVisitor<'sink, 'ast> {
 }
 
 impl InventoryVisitor<'_, '_> {
+    /// Record one parameter-list callable's escaping references: its
+    /// assignments reach the enclosing frames as every unserved code's do,
+    /// and its reads and writes together name its captures.
+    fn record_parameter_callable(
+        &mut self,
+        span: verter_span::Span,
+        escaping: access::EscapingAssignments,
+    ) {
+        let (writes, reads) = escaping.into_escaping_references();
+        self.unserved_assignments.extend(writes.iter().cloned());
+        let mut references = reads;
+        references.extend(writes.into_iter().map(|mut write| {
+            write.read_role = None;
+            write
+        }));
+        references.sort_by_key(|reference| reference.span.start);
+        self.parameter_callable_references
+            .push((span, Arc::from(references.into_boxed_slice())));
+    }
+
     fn record_binding(
         &mut self,
         id: &oxc_ast::ast::BindingIdentifier<'_>,
@@ -4415,7 +4495,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_function(it, flags);
-            self.unserved_assignments.extend(escaping.into_escaping());
+            self.record_parameter_callable(it.span.into(), escaping);
         }
     }
 
@@ -4424,7 +4504,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_arrow_function_expression(it);
-            self.unserved_assignments.extend(escaping.into_escaping());
+            self.record_parameter_callable(it.span.into(), escaping);
         }
     }
 

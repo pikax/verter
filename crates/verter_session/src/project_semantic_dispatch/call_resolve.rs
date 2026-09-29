@@ -2033,11 +2033,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // conditional over them, `ThisParameterType<T>`) infers
                 // nothing from the argument: the checker infers first and
                 // checks applicability on the instantiated signature, which
-                // the post-fixation pass below does.
+                // the post-fixation pass below does. That check is the one
+                // that decides the argument, so this inference-time
+                // relation is no undecided outcome the call consumed.
                 RelationStep::Unknown
                     if visible_type_params
                         .iter()
-                        .any(|decl| self.mentions_node(target, decl.param)) => {}
+                        .any(|decl| self.mentions_node(target, decl.param)) =>
+                {
+                    let mut txn = self.dispatch_txn.borrow_mut();
+                    txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(1);
+                }
                 RelationStep::Unknown | RelationStep::Assumed(_) => {
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);

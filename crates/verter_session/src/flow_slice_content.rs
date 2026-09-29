@@ -434,6 +434,9 @@ pub enum SliceStatement {
         /// definitely-falsy arms (the checker's truthiness narrowing for
         /// an assertion signature with no type predicate).
         target: Option<GatedType>,
+        /// The authored assertion call's span (absolute): the evaluator
+        /// records its call evidence against exactly this call.
+        call: verter_span::Span,
     },
     /// A statement call whose callee is a dotted name this half cannot
     /// settle alone (`o.m();`, `obj.run();`): the checker's
@@ -1152,6 +1155,8 @@ pub struct SliceAssertion {
     pub subject: SliceNarrowSubject,
     /// The predicate's target type; `None` for a targetless `asserts x`.
     pub target: Option<GatedType>,
+    /// The authored assertion call's span (absolute).
+    pub call: verter_span::Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1808,7 +1813,8 @@ struct SideChannelMark {
 
 /// Whether a call argument lowers through the frame's own carriers
 /// ([`Lowerer::lower_call_arguments`]): a call that is no immediately
-/// invoked function, or a static member read (through parentheses).
+/// invoked function, a construction, or a static member read (through
+/// parentheses).
 fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
     argument
         .as_expression()
@@ -1818,6 +1824,9 @@ fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
                 unwrap_parenthesized(&call.callee),
                 Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
             ),
+            // A construction is a call of its constructor: the frame
+            // evaluates it, as it does a call argument.
+            Expression::NewExpression(_) => true,
             Expression::StaticMemberExpression(_) => true,
             _ => false,
         })
@@ -5112,8 +5121,18 @@ fn narrowing_spine_calls<'e, 'a>(
 }
 
 /// The statement one applied `asserts` call lowers to.
-fn assertion_statement(SliceAssertion { subject, target }: SliceAssertion) -> SliceStatement {
-    SliceStatement::Assertion { subject, target }
+fn assertion_statement(
+    SliceAssertion {
+        subject,
+        target,
+        call,
+    }: SliceAssertion,
+) -> SliceStatement {
+    SliceStatement::Assertion {
+        subject,
+        target,
+        call,
+    }
 }
 
 /// A region of entered effects: assertions and joins, which always
@@ -13266,9 +13285,15 @@ impl<'a> Lowerer<'a> {
                 let nested =
                     self.collecting_entered_assertions(|this| this.scan_call_operands(call));
                 let own = match assertion {
-                    Some(SliceAssertion { subject, target }) => {
-                        SliceStatement::Assertion { subject, target }
-                    }
+                    Some(SliceAssertion {
+                        subject,
+                        target,
+                        call,
+                    }) => SliceStatement::Assertion {
+                        subject,
+                        target,
+                        call,
+                    },
                     // The statement's OWN call takes the same
                     // prove-or-degrade discipline every other
                     // result-independent position takes, PLUS the
@@ -13560,7 +13585,11 @@ impl<'a> Lowerer<'a> {
                 .get(ordinal)
                 .and_then(|argument| argument.as_expression())?;
             let subject = self.narrow_subject_of(argument)?;
-            Some(SliceAssertion { subject, target })
+            Some(SliceAssertion {
+                subject,
+                target,
+                call: call.span.into(),
+            })
         });
         if assertion.is_none()
             && free_callee.is_some_and(|name| self.assertion_target_is_refused(name, call.span))
