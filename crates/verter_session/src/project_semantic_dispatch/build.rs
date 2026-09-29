@@ -14918,10 +14918,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         diagnostic: crate::semantic_query::CheckerDiagnostic,
     ) -> SemanticNodeId {
-        self.graph()
-            .intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery(
-                diagnostic,
-            )))
+        crate::semantic_query::checker_policy::checker_recovery(self.graph(), diagnostic, None)
     }
 
     /// Whether `reduced` is `relation`'s TS1062 failure for `operand` — the
@@ -14937,7 +14934,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use crate::project_semantic_dispatch::absorb::SpecialKind;
         matches!(
             self.graph().node_data(reduced).as_deref(),
-            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic)))
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
                 if *diagnostic == relation.recursion_diagnostic()
         ) && !matches!(self.peek_special(operand), Some((SpecialKind::Error, _)))
     }
@@ -15598,16 +15595,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// and keeps its identity when the result is the body itself.
     ///
     /// The conditional's recursion into `Awaited<V>` is evaluated the way
-    /// the checker evaluates it and stops where the checker stops: a tail
-    /// run reaching [`LIB_AWAITED_TAIL_STEPS`] or a path reaching
-    /// [`LIB_AWAITED_NESTED_STEPS`] nested steps is the TS2589 recovery. So
-    /// is an application that recurs on its own path: it can never reach a
-    /// value, so the checker's count is certain to run out there.
-    ///
-    /// [`LIB_AWAITED_TAIL_STEPS`]: crate::semantic_query::LIB_AWAITED_TAIL_STEPS
-    /// [`LIB_AWAITED_NESTED_STEPS`]: crate::semantic_query::LIB_AWAITED_NESTED_STEPS
+    /// the checker evaluates it and stops where the checker stops, counted
+    /// by the checker compatibility policy: a tail run reaching the
+    /// conditional tail limit
+    /// ([`CONDITIONAL_TAIL_STEPS`](crate::semantic_query::checker_policy::CONDITIONAL_TAIL_STEPS))
+    /// or a path reaching the instantiation depth
+    /// ([`INSTANTIATION_DEPTH`](crate::semantic_query::checker_policy::INSTANTIATION_DEPTH))
+    /// is the TS2589 recovery. So is an application that recurs on its own
+    /// path: it can never reach a value, so the checker's count is certain
+    /// to run out there.
     fn lib_awaited_node(&self, operand: SemanticNodeId) -> LibAwaited {
-        let mut walk = LibAwaitedWalk::default();
+        let mut walk = LibAwaitedWalk {
+            depth: crate::semantic_query::checker_policy::InstantiationDepth::entered(
+                LIB_AWAITED_ENTRY_DEPTH,
+            ),
+            path: Vec::new(),
+        };
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
@@ -15632,7 +15635,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> LibAwaited {
         let mark = walk.path.len();
         let mut current = operand;
-        let mut tail = tail_start;
+        let mut tail = crate::semantic_query::checker_policy::ConditionalTail::resumed(tail_start);
         let result = loop {
             match self.lib_awaited_application(current, walk) {
                 LibStep::Done(result) => break result,
@@ -15640,8 +15643,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     break self.lib_awaited_nested(value, walk, false);
                 }
                 LibStep::Next(value) => {
-                    tail += 1;
-                    if tail >= crate::semantic_query::LIB_AWAITED_TAIL_STEPS {
+                    if !tail.step() {
                         break LibAwaited::Reduced(self.lib_awaited_too_deep());
                     }
                     if let Err(reasons) = self.charge_connected_work() {
@@ -15658,7 +15660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// A NESTED step to `Awaited<value>`: one through a callback union
     /// (`through_callback_union`), one into a union `value`, two for both.
-    /// The path fails at the checker's nesting limit. A union's arms each
+    /// The path fails at the checker's instantiation depth. A union's arms each
     /// start a fresh tail run; a callback arm continues into a run the
     /// checker enters with one step already counted.
     fn lib_awaited_nested(
@@ -15669,8 +15671,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> LibAwaited {
         let is_union = self.settled_union_arms_of(value).is_some();
         let steps = u32::from(through_callback_union) + u32::from(is_union);
-        walk.nesting += steps;
-        let result = if walk.nesting >= crate::semantic_query::LIB_AWAITED_NESTED_STEPS {
+        let within = walk.depth.enter(steps);
+        let result = if !within {
             LibAwaited::Reduced(self.lib_awaited_too_deep())
         } else if let Err(reasons) = self.charge_connected_work() {
             self.fold_local_partial_completeness(reasons);
@@ -15678,7 +15680,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.lib_awaited_run(value, walk, if is_union { 0 } else { 1 })
         };
-        walk.nesting -= steps;
+        walk.depth.leave(steps);
         result
     }
 
@@ -17587,12 +17589,33 @@ enum LibStep {
     Next(SemanticNodeId),
 }
 
+/// The instantiation depth the checker has entered on reaching the lib
+/// `Awaited<T>` conditional's first application: the alias instantiation
+/// and the conditional it instantiates. Each NESTED step then enters one
+/// level more, so the path fails on its 98th nested step at the checker's
+/// depth of 100.
+///
+/// A nested step either goes through a callback union (an optional or
+/// nullable `onfulfilled`, a union-typed `then`, every `Promise`) or into a
+/// union `V`; a step that does both enters two levels. Measured on
+/// TypeScript 7.0.2: 97 nested steps answer the chain's value (reporting
+/// TS2589 on some shapes while keeping the value), 98 are `any` under
+/// TS2589, whether the application is written directly, through a generic
+/// alias, through a signature, or over `ReturnType`. A TAIL step (`Awaited<X>`
+/// to `Awaited<V>` through a single callback into a non-union `V`) is the
+/// conditional's tail run instead: over chains of distinct thenables `C0 →
+/// C1 → … → number`, 999 steps answer `number`, 1000 are `any` under
+/// TS2589, and a run entered through a callback union starts with one step
+/// already counted (998 further steps answer, 999 fail).
+const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
+
 /// The lib conditional's recursion on one evaluation path, counted the way
 /// the checker counts it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LibAwaitedWalk {
-    /// Nested (non-tail) steps on the path.
-    nesting: u32,
+    /// The checker's instantiation depth along the path: every nested
+    /// (non-tail) step enters it one level deeper.
+    depth: crate::semantic_query::checker_policy::InstantiationDepth,
     /// The applications on the path, for the recurrence that never reaches
     /// a value.
     path: Vec<SemanticNodeId>,

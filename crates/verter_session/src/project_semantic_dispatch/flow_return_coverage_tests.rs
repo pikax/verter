@@ -5726,7 +5726,7 @@ fn checker_recovery_of(
     node: SemanticNodeId,
 ) -> Option<crate::semantic_query::CheckerDiagnostic> {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))) => {
+        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })) => {
             Some(*diagnostic)
         }
         _ => None,
@@ -5969,7 +5969,10 @@ fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
         let (data, raised) = reduced_annotation(&host, name);
         assert_eq!(
             data,
-            SemanticNodeData::Opaque(QueryError::CheckerRecovery(ts2589)),
+            SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                diagnostic: ts2589,
+                beyond: None
+            }),
             "{name}"
         );
         assert_eq!(raised, any(), "{name}: the recovery raises as `any`");
@@ -6258,10 +6261,13 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
     let (data, raised) = reduced_annotation(&host, "libGenericRec");
     assert_eq!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-            operation: CheckerDiagnosticOperation::LibAwaited,
-        }))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            },
+            beyond: None,
+        })
     );
     assert_eq!(raised, any());
     assert_clean_warm(
@@ -6315,10 +6321,13 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
     let (data, raised) = reduced_annotation(&host, "libGrowThen");
     assert_eq!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-            operation: CheckerDiagnosticOperation::LibAwaited,
-        }))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            },
+            beyond: None,
+        })
     );
     assert_eq!(raised, any());
     let under_budget = |name: &str| {
@@ -6521,7 +6530,7 @@ fn lib_awaited_probe(source: &str) -> SemanticNodeData {
 fn is_ts2589(data: &SemanticNodeData) -> bool {
     matches!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })
             if diagnostic.code
                 == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
     )

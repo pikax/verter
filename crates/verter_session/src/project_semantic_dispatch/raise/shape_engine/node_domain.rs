@@ -1855,7 +1855,7 @@ pub(super) fn project_root_summary(
         ),
         SemanticNodeData::Opaque(err) => match err {
             // A checker recovery raises as its recovery primitive.
-            QueryError::RecursiveRef { .. } | QueryError::CheckerRecovery(_) => {
+            QueryError::RecursiveRef { .. } | QueryError::CheckerRecovery { .. } => {
                 RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
             }
             _ => RootOnlySummary::from_summary(summary::opaque_sentinel(err)),
