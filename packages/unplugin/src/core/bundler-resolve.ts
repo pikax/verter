@@ -5,24 +5,35 @@ export type ResolveHook = (
 ) => Promise<unknown> | unknown;
 
 /**
- * Asks the bundler to resolve a dependency specifier to a readable file id.
+ * Outcome of asking the bundler to resolve a dependency specifier.
  *
- * Returns `null` when the bundler has no readable runtime target: no result,
- * an external or virtual id, or a resolver that throws (rolldown throws for a
- * package subpath exported only under the `types` condition). Callers then
- * fall back to their own filesystem or package-declaration resolution.
+ * `id` is a readable file id, or `null` when the bundler has no readable
+ * target (no result, an external or virtual id, or a thrown resolver).
+ * `failure` carries the resolver's error when it threw. Rolldown throws for a
+ * package subpath exported only under the `types` condition, so a caller
+ * first tries its own fallback and rethrows `failure.error` only when that
+ * fallback cannot resolve the specifier either.
  */
+export interface BundlerResolution {
+  readonly id: string | null;
+  readonly failure: { readonly error: unknown } | null;
+}
+
 export async function resolveThroughBundler(
   resolveId: ResolveHook,
   specifier: string,
   importer: string,
-): Promise<string | null> {
+): Promise<BundlerResolution> {
   let result: unknown;
   try {
     result = await resolveId(specifier, importer, { skipSelf: true });
-  } catch {
-    return null;
+  } catch (error) {
+    return { id: null, failure: { error } };
   }
+  return { id: readableId(result), failure: null };
+}
+
+function readableId(result: unknown): string | null {
   if (!result) return null;
   if (typeof result === "string") {
     return result.startsWith("\0") || result.includes("?") ? null : result;

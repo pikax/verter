@@ -14,8 +14,9 @@
  */
 import { dirname, join, parse, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
+import { createRequire } from "module";
 import type { VerterHost, HostDependencyResolution, Workspace } from "@verter/native";
-import { resolveThroughBundler, type ResolveHook } from "./bundler-resolve";
+import { resolveThroughBundler, type BundlerResolution, type ResolveHook } from "./bundler-resolve";
 
 /**
  * Minimal file access interface used by this module.
@@ -153,6 +154,64 @@ function parseBareSpecifier(specifier: string): { pkgName: string; subPath: stri
   return { pkgName: specifier.slice(0, slashIdx), subPath: specifier.slice(slashIdx + 1) };
 }
 
+function findPackageSubpathDeclaration(
+  fa: FileAccess,
+  importer: string,
+  specifier: string,
+): string | null {
+  const { pkgName, subPath } = parseBareSpecifier(specifier);
+  if (!subPath) return null;
+
+  let pkgDir: string | null = null;
+  try {
+    const req = createRequire(importer);
+    pkgDir = dirname(req.resolve(pkgName + "/package.json"));
+  } catch {
+    // `./package.json` is not exported — walk node_modules manually
+    let dir = dirname(importer);
+    const root = parse(dir).root;
+    while (dir !== root) {
+      const candidate = join(dir, "node_modules", pkgName);
+      if (fa.fileExists(normalizePath(join(candidate, "package.json")))) {
+        pkgDir = candidate;
+        break;
+      }
+      dir = dirname(dir);
+    }
+  }
+  if (!pkgDir) return null;
+
+  const absBase = join(pkgDir, subPath);
+  const candidates = [
+    absBase + ".d.ts",
+    absBase + ".d.mts",
+    absBase + "/index.d.ts",
+    absBase + "/index.d.mts",
+    absBase + ".ts",
+    absBase,
+  ];
+  for (const candidate of candidates) {
+    if (fa.fileExists(normalizePath(candidate))) return normalizePath(candidate);
+  }
+  return null;
+}
+
+/**
+ * Finds the declaration file for a package sub-path specifier that has no
+ * runtime target (e.g. one exported only under the `types` condition).
+ */
+export function findPackageSubpathDeclarationFile(
+  specifier: string,
+  importer: string,
+  ws?: Workspace | null,
+): string | null {
+  return findPackageSubpathDeclaration(
+    ws ? fileAccessFromWorkspace(ws) : fileAccessFromDisk(),
+    importer,
+    specifier,
+  );
+}
+
 /**
  * Find the declaration entry point for a package given the runtime entry.
  * Walks up from the resolved runtime file to find `package.json`, then
@@ -269,8 +328,11 @@ async function resolveTypeImportPath(
   fa: FileAccess,
   resolveId?: ResolveHook,
 ): Promise<string | null> {
+  let bundlerFailure: BundlerResolution["failure"] = null;
   if (resolveId) {
-    const result = await resolveThroughBundler(resolveId, source, importer);
+    const resolution = await resolveThroughBundler(resolveId, source, importer);
+    bundlerFailure = resolution.failure;
+    const result = resolution.id;
     if (result) {
       const normalizedResult = normalizePath(result);
       // Closure traversal never walks into packages: a non-relative
@@ -297,7 +359,15 @@ async function resolveTypeImportPath(
     }
   }
 
-  if (!isRelativeImport(source)) return null;
+  if (!isRelativeImport(source)) {
+    // Package imports are hydrated by the entry-level bare-specifier phase. A
+    // resolver that threw for anything other than a package sub-path
+    // declaration (e.g. a broken alias) is the real failure.
+    if (bundlerFailure && !findPackageSubpathDeclaration(fa, importer, source)) {
+      throw bundlerFailure.error;
+    }
+    return null;
+  }
 
   const absBase = resolve(dirname(importer), source);
   const candidates = [
@@ -314,6 +384,7 @@ async function resolveTypeImportPath(
     const normalized = normalizePath(candidate);
     if (fa.fileExists(normalized)) return normalized;
   }
+  if (bundlerFailure) throw bundlerFailure.error;
   return null;
 }
 
@@ -485,11 +556,13 @@ export async function hydrateMacroTypeDeps(
   const remaining: string[] = [];
   for (const specifier of specifiers) {
     let resolvedPath: string | null = null;
+    let bundlerFailure: BundlerResolution["failure"] = null;
 
     // Try bundler resolve hook
     if (resolveId) {
-      const result = await resolveThroughBundler(resolveId, specifier, filename);
-      if (result) resolvedPath = result;
+      const resolution = await resolveThroughBundler(resolveId, specifier, filename);
+      resolvedPath = resolution.id;
+      bundlerFailure = resolution.failure;
     }
 
     // For relative specifiers without a resolve hook, try file probing
@@ -614,9 +687,11 @@ export async function hydrateMacroTypeDeps(
         }
       }
       if (found) continue;
+      if (bundlerFailure) throw bundlerFailure.error;
     }
 
-    // Not resolved — collect for the bare-package specifier handling step
+    // Not resolved — collect for the bare-package specifier handling step,
+    // which re-resolves and owns any resolver failure for the specifier.
     if (!isRelativeImport(specifier)) {
       remaining.push(specifier);
     }
@@ -628,9 +703,11 @@ export async function hydrateMacroTypeDeps(
   for (const specifier of bareSpecifiers) {
     // Try to resolve via bundler hook first
     let runtimeEntry: string | null = null;
+    let bundlerFailure: BundlerResolution["failure"] = null;
     if (resolveId) {
-      const result = await resolveThroughBundler(resolveId, specifier, filename);
-      if (result) runtimeEntry = result;
+      const resolution = await resolveThroughBundler(resolveId, specifier, filename);
+      runtimeEntry = resolution.id;
+      bundlerFailure = resolution.failure;
     }
 
     // If no bundler resolve, try Node resolution
@@ -668,51 +745,15 @@ export async function hydrateMacroTypeDeps(
     }
 
     // Fallback: for sub-path specifiers where runtime resolution failed,
-    // find the package directory and probe for .d.ts files at the sub-path.
+    // probe the package directory for a declaration at the sub-path.
+    if (!entryPath) entryPath = findPackageSubpathDeclaration(fa, filename, specifier);
+
     if (!entryPath) {
-      const { pkgName, subPath } = parseBareSpecifier(specifier);
-      if (subPath) {
-        let pkgDir: string | null = null;
-        try {
-          const { createRequire } = await import("module");
-          const req = createRequire(filename);
-          const pkgJsonPath = req.resolve(pkgName + "/package.json");
-          pkgDir = dirname(pkgJsonPath);
-        } catch {
-          // Try walking node_modules manually
-          let dir = dirname(filename);
-          const root = parse(dir).root;
-          while (dir !== root) {
-            const candidate = join(dir, "node_modules", pkgName);
-            if (fa.fileExists(normalizePath(join(candidate, "package.json")))) {
-              pkgDir = candidate;
-              break;
-            }
-            dir = dirname(dir);
-          }
-        }
-
-        if (pkgDir) {
-          const absBase = join(pkgDir, subPath);
-          const candidates = [
-            absBase + ".d.ts",
-            absBase + ".d.mts",
-            absBase + "/index.d.ts",
-            absBase + "/index.d.mts",
-            absBase + ".ts",
-            absBase,
-          ];
-          for (const candidate of candidates) {
-            if (fa.fileExists(normalizePath(candidate))) {
-              entryPath = normalizePath(candidate);
-              break;
-            }
-          }
-        }
-      }
+      // The bundler threw and no declaration fallback found the import: the
+      // resolver error is the real cause, so surface it.
+      if (bundlerFailure) throw bundlerFailure.error;
+      continue;
     }
-
-    if (!entryPath) continue;
 
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);

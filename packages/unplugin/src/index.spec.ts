@@ -1854,6 +1854,27 @@ defineProps<AuditProps>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 
+  it("a bundler resolver error surfaces when no fallback resolves the import", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    const sfc = `<script setup lang="ts">
+import type { AliasProps } from "@/types"
+defineProps<AliasProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@/types") throw new Error("alias plugin failed to load @/types");
+      return null;
+    });
+
+    await expect(plugin.transform.call({ resolve: resolveSpy }, sfc, filename)).rejects.toThrow(
+      "alias plugin failed to load @/types",
+    );
+  });
+
   it("transform with relative type deps works via hydration (existing behavior preserved)", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
