@@ -4212,6 +4212,8 @@ mod closure_narrowing_tests;
 #[cfg(test)]
 mod conditional_indexed_check_tests;
 #[cfg(test)]
+mod conditional_operand_tests;
+#[cfg(test)]
 mod conditional_tail_tests;
 #[cfg(test)]
 mod const_literal_widening_tests;
