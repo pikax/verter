@@ -167,6 +167,11 @@ pub enum SessionOverlay {
 pub(crate) struct SessionState {
     pub(crate) overlays: HashMap<String, SessionOverlay>,
     pub(crate) generation: u64,
+    /// The session's overlay authority: the workspace holds the session's
+    /// resident request-overlay resolution state under it, across every
+    /// request, and releases that state when the session is released
+    /// (after its last in-flight request).
+    pub(crate) resolution_authority: verter_workspace::OverlayAuthority,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +348,7 @@ impl MetaProject {
             SessionState {
                 overlays: HashMap::new(),
                 generation: 0,
+                resolution_authority: verter_workspace::OverlayAuthority::new(),
             },
         );
         let runtime = SessionRuntime::new(Arc::clone(self));
@@ -1201,7 +1207,7 @@ impl MetaSession {
     /// Binds R17 (session overlays never mutate the base host) and
     /// R18 (the view is passed by explicit `&dyn SessionView`
     /// argument, never via a thread-local).
-    fn with_overlay_view<R>(
+    pub(crate) fn with_overlay_view<R>(
         &self,
         f: impl FnOnce(&dyn crate::session_view::SessionView) -> R,
     ) -> R {
@@ -1211,10 +1217,12 @@ impl MetaSession {
             rustc_hash::FxHashMap::default();
         let mut overlay_tombstones: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut resolution_authority = None;
 
         {
             let sessions = self.project.sessions.read();
             if let Some(state) = sessions.get(&self.id) {
+                resolution_authority = Some(state.resolution_authority.clone());
                 for (canonical, overlay) in state.overlays.iter() {
                     match overlay {
                         SessionOverlay::Upsert { source } => {
@@ -1237,6 +1245,10 @@ impl MetaSession {
             &overlay_hashes,
             &overlay_tombstones,
         );
+        let view = match resolution_authority {
+            Some(authority) => view.with_resolution_authority(authority),
+            None => view,
+        };
         f(&view)
     }
 }

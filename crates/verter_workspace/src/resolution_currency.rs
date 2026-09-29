@@ -69,6 +69,10 @@ pub struct ResolutionOverlaySnapshot {
     /// `0` only for the empty default. Request-local memos key on it; it is
     /// never part of a published identity.
     id: u64,
+    /// The authority the overlay's resident resolution state (overlay-lane
+    /// answers, interned overlay values) is held under — see
+    /// [`crate::overlay_residency`].
+    authority: crate::overlay_residency::OverlayAuthority,
     /// The effective world last composed from this snapshot, keyed by the
     /// identity of the underlying roots it was composed over.
     ///
@@ -124,8 +128,24 @@ struct UnderlyingWorldIdentity {
 static OVERLAY_LOOKUP_NORMALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 impl ResolutionOverlaySnapshot {
+    /// A request overlay with no live domain behind it: its resident
+    /// resolution state is held under a fresh authority, released when this
+    /// snapshot and its clones drop.
     #[must_use]
     pub fn new(
+        upserts: impl IntoIterator<Item = (String, Arc<str>)>,
+        tombstones: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self::new_under(None, upserts, tombstones)
+    }
+
+    /// A request overlay of a live overlay domain (a session): its resident
+    /// resolution state is held under `authority`, and so outlives this
+    /// request until the domain releases the authority. `None` is
+    /// [`Self::new`].
+    #[must_use]
+    pub fn new_under(
+        authority: Option<crate::overlay_residency::OverlayAuthority>,
         upserts: impl IntoIterator<Item = (String, Arc<str>)>,
         tombstones: impl IntoIterator<Item = String>,
     ) -> Self {
@@ -145,9 +165,16 @@ impl ResolutionOverlaySnapshot {
         Self {
             entries: Arc::new(entries),
             id: NEXT_OVERLAY_SNAPSHOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            authority: authority.unwrap_or_default(),
             effective: Arc::default(),
             work: Arc::default(),
         }
+    }
+
+    /// The authority this overlay's resident resolution state is held under.
+    #[must_use]
+    pub fn authority(&self) -> &crate::overlay_residency::OverlayAuthority {
+        &self.authority
     }
 
     /// Process-unique identity of this snapshot (shared by its clones).
@@ -225,6 +252,7 @@ impl ResolutionOverlaySnapshot {
                 session: underlying.session.clone(),
                 population: underlying.population,
                 overlay: Some(Arc::new(root)),
+                overlay_values: underlying.overlay_values.clone(),
             }),
             None if underlying.overlay.is_none() => Arc::clone(underlying),
             None => Arc::new(CapturedResolutionWorld {
@@ -232,6 +260,7 @@ impl ResolutionOverlaySnapshot {
                 session: underlying.session.clone(),
                 population: underlying.population,
                 overlay: None,
+                overlay_values: underlying.overlay_values.clone(),
             }),
         };
         *self.effective.lock() = Some(EffectiveOverlayWorld {
@@ -679,7 +708,7 @@ fn mint_overlay_version() -> ResolutionFactVersion {
 /// overlay answer that depends on one stays warm across requests while the
 /// value holds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum OverlayValue {
+pub(crate) enum OverlayValue {
     /// A directory whose member set the overlay changes: the underlying
     /// members' version, plus exactly the paths under it whose existence
     /// the overlay moves (`true` = the overlay makes it a file).
@@ -696,44 +725,50 @@ enum OverlayValue {
     },
 }
 
-/// Bound on [`OVERLAY_VALUE_VERSIONS`]. An evicted value re-mints on its
-/// next use, which only refuses the witnesses recorded against it.
-const OVERLAY_VALUE_VERSIONS_CAP: usize = 4096;
-
-/// The one resident overlay structure outside a request: the versions of
-/// overlay values with no exact encoding. Bounded FIFO
-/// ([`OVERLAY_VALUE_VERSIONS_CAP`]), superseded by eviction, counted by
-/// [`overlay_value_versions_len`].
-#[derive(Debug, Default)]
-struct OverlayValueVersions {
-    versions: rustc_hash::FxHashMap<OverlayValue, ResolutionFactVersion>,
-    order: std::collections::VecDeque<OverlayValue>,
+impl OverlayValue {
+    /// The bytes one interned version of this value retains.
+    fn retained_bytes(&self) -> usize {
+        let payload = match self {
+            Self::Members {
+                directory, changed, ..
+            } => {
+                directory.len()
+                    + changed
+                        .iter()
+                        .map(|(path, _)| path.len() + std::mem::size_of::<(String, bool)>())
+                        .sum::<usize>()
+            }
+            Self::Manifest { canonical, .. } => canonical.len(),
+        };
+        payload + 2 * std::mem::size_of::<Self>() + std::mem::size_of::<ResolutionFactVersion>()
+    }
 }
 
-static OVERLAY_VALUE_VERSIONS: std::sync::LazyLock<Mutex<OverlayValueVersions>> =
-    std::sync::LazyLock::new(Mutex::default);
+/// Bound on an Engine's [`OverlayValueVersions`] table. An evicted value
+/// re-mints on its next use, which only refuses the witnesses recorded
+/// against it.
+pub(crate) const OVERLAY_VALUE_VERSIONS_CAP: usize = 4096;
 
-fn overlay_value_version(value: OverlayValue) -> ResolutionFactVersion {
-    let mut table = OVERLAY_VALUE_VERSIONS.lock();
-    if let Some(version) = table.versions.get(&value) {
-        return *version;
-    }
-    let version = mint_overlay_version();
-    if table.order.len() >= OVERLAY_VALUE_VERSIONS_CAP {
-        if let Some(oldest) = table.order.pop_front() {
-            table.versions.remove(&oldest);
+/// The Engine's versions of overlay values with no exact encoding, each
+/// held by the overlay authorities whose compositions interned it and
+/// released with the last of them (see [`crate::overlay_residency`]).
+pub(crate) type OverlayValueVersions =
+    crate::overlay_residency::AuthorityHeld<OverlayValue, ResolutionFactVersion>;
+
+/// `value`'s version in `world`'s Engine table, held for `authority`; a
+/// fresh version when the world carries no table.
+fn overlay_value_version(
+    world: &CapturedResolutionWorld,
+    authority: &crate::overlay_residency::OverlayAuthority,
+    value: OverlayValue,
+) -> ResolutionFactVersion {
+    match world.overlay_values.as_ref() {
+        Some(table) => {
+            let bytes = value.retained_bytes();
+            table.get_or_insert(value, bytes, authority, mint_overlay_version)
         }
+        None => mint_overlay_version(),
     }
-    table.order.push_back(value.clone());
-    table.versions.insert(value, version);
-    version
-}
-
-/// How many overlay values currently hold an interned version (bounded by
-/// an internal cap).
-#[must_use]
-pub fn overlay_value_versions_len() -> usize {
-    OVERLAY_VALUE_VERSIONS.lock().versions.len()
 }
 
 /// One request overlay's effective resolution facts over one captured
@@ -841,10 +876,14 @@ impl RequestOverlayRoot {
                             canonical,
                             population: ResolutionPopulation::Base,
                         }),
-                        overlay_value_version(OverlayValue::Manifest {
-                            canonical: canonical.clone(),
-                            projection: after,
-                        }),
+                        overlay_value_version(
+                            world,
+                            &overlay.authority,
+                            OverlayValue::Manifest {
+                                canonical: canonical.clone(),
+                                projection: after,
+                            },
+                        ),
                     );
                 }
             }
@@ -860,11 +899,15 @@ impl RequestOverlayRoot {
             changed.sort();
             primitive.insert(
                 key,
-                overlay_value_version(OverlayValue::Members {
-                    directory,
-                    underlying,
-                    changed: changed.into_boxed_slice(),
-                }),
+                overlay_value_version(
+                    world,
+                    &overlay.authority,
+                    OverlayValue::Members {
+                        directory,
+                        underlying,
+                        changed: changed.into_boxed_slice(),
+                    },
+                ),
             );
         }
         if primitive.is_empty() {
@@ -1495,6 +1538,11 @@ pub struct CapturedResolutionWorld {
     /// see [`ResolutionOverlaySnapshot::effective_world`]. `Some` only when
     /// the overlay changes at least one fact.
     pub(crate) overlay: Option<Arc<RequestOverlayRoot>>,
+    /// The capturing Engine's overlay value table, which a composition
+    /// over this world interns its non-exact overlay values in. `None`
+    /// for a world no Engine captured: such a composition mints fresh
+    /// versions instead.
+    pub(crate) overlay_values: Option<Arc<OverlayValueVersions>>,
 }
 
 impl CapturedResolutionWorld {
@@ -3174,6 +3222,7 @@ mod transaction_contract_tests {
             session: None,
             population: ResolutionPopulation::Base,
             overlay: None,
+            overlay_values: None,
         })
     }
 

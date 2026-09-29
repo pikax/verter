@@ -273,8 +273,8 @@ Probe and realpath values are encoded exactly (`File`/`Absent`, self/none),
 so two requests whose overlays give a path the same effective value agree on
 its version without a digest: an ordinary body edit of an overlaid file keeps
 every answer that depends only on the file existing. Directory-membership
-and manifest values are interned by exact value identity in one bounded
-process-wide table (`overlay_value_versions_len`); an evicted value
+and manifest values are interned by exact value identity in the Engine's
+bounded overlay value table (see Residency below); an evicted value
 re-mints, which only refuses the witnesses recorded against it. A derived
 node the overlay reaches gets a version unique to the composition. A world
 that composes an overlay which changes a fact reports no resolution stamp:
@@ -299,6 +299,23 @@ overlay answer is reused wherever its facts hold. The lane is bounded
 never enters a workspace slot, never folds its observed values into the
 workspace's evidence baseline, and never records a workspace dependency
 edge.
+
+**Residency.** The overlay lane and the overlay value table are the two
+resident overlay structures, and both hold every entry on behalf of OVERLAY
+AUTHORITIES (`verter_workspace::overlay_residency`). A session holds one
+`OverlayAuthority` for its life and hands a clone to every request's
+snapshot (`SessionView::resolution_authority`), so its overlay answers stay
+warm across its requests and go when the session closes, after its last
+in-flight request. A request overlay with no session gets a fresh authority,
+so its answers go when its snapshot is superseded. An entry another
+authority reused is held by that authority too and outlives the one that
+produced it. Every entry is charged, as a retained reservation, to the
+host's aggregate `SemanticRetentionAccount` through the dependency-neutral
+`ResolutionRetentionAccount` seam; a refused reservation serves the answer
+uncached. Independently, each structure is bounded (per-slot candidate cap,
+slot cap, oldest first), and `HostRetentionSnapshot` reports both counts
+(`overlay_resolution_slots`, `overlay_value_versions`), as does the churn
+lane's retention line.
 
 **Carried by the operation, not by a reader.** The overlay is part of the
 Engine's `ResolutionOperation` (`ResolutionOperation::over`), and the Engine

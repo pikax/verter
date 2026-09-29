@@ -732,6 +732,16 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     fn end_strict_self_root_transition(&self) {}
 
+    /// Install the host's aggregate retention account, which the resident
+    /// request-overlay resolution state (the overlay lane and the overlay
+    /// value table) charges its entries to. Adapter workspaces with no
+    /// Engine retain no such state and ignore it.
+    fn install_resolution_retention(
+        &self,
+        _account: std::sync::Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+    ) {
+    }
+
     // ── Reverse-graph authority methods (R6: NO DEFAULTS) ──
     //
     // Every WorkspaceAccess impl MUST explicitly implement these. A future

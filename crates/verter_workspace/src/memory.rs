@@ -777,6 +777,13 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for MemoryWorkspace {
+    fn install_resolution_retention(
+        &self,
+        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+    ) {
+        self.engine.install_resolution_retention(account);
+    }
+
     fn begin_strict_self_root_transition(&self) {
         self.engine.begin_strict_self_root_transition();
     }
