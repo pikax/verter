@@ -19303,27 +19303,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
-    /// keep the subject's arms assignable to the predicate's target type.
-    /// When NO arm survives but the target is itself assignable to the
-    /// subject's type, the target IS the narrow (the checker's own rule
-    /// for a predicate whose target is a strict subtype of the declared
-    /// type). The target lowers like a declarator annotation — a
-    /// frame-shadowed answer establishes nothing.
-    ///
-    /// The assertion-statement caller: the guard twin consumes the
-    /// consumption verdict too and records the predicate call's
-    /// evidence from it.
-    fn narrow_to_predicate_target(
-        &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        target: &crate::flow_slice_content::GatedType,
-        negated: bool,
-    ) -> GuardNarrowing {
-        self.narrow_to_predicate_target_consuming(subject, target, negated)
-            .0
-    }
-
     /// The constraint a bare type-parameter node reads as in a narrow
     /// (`getBaseConstraintOfType`, `unknown` when it declares none), or
     /// `None` for any other node.
@@ -19571,8 +19550,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         (Some(self.never_node()), consumption)
     }
 
-    /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
-    /// verdict — whether the evaluator genuinely consumed the predicate
+    /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
+    /// keep the subject's arms assignable to the predicate's target type.
+    /// When NO arm survives but the target is itself assignable to the
+    /// subject's type, the target IS the narrow (the checker's own rule
+    /// for a predicate whose target is a strict subtype of the declared
+    /// type). The target lowers like a declarator annotation — a
+    /// frame-shadowed answer establishes nothing.
+    ///
+    /// It carries the CONSUMPTION verdict — whether the evaluator
+    /// genuinely consumed the predicate
     /// fact, and whether the narrow-direction obligation it asked was
     /// decided. This is what the guard twin's call evidence is recorded
     /// from: a fact the evaluator could not consume at all (a
