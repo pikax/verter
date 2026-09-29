@@ -16,6 +16,7 @@ pub mod corender;
 pub mod css;
 pub mod hashing;
 pub mod reactivity;
+pub mod receipt;
 pub mod registry;
 pub mod resolution;
 pub mod route;

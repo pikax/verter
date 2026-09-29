@@ -10,7 +10,7 @@ use super::PrimitiveKind;
 /// itself defines — never a gap in this substrate filled with a guess. A
 /// type operation continues with the checker's error type, which reads as
 /// `any`: that continuation is the diagnostic's [`recovery`](Self::recovery),
-/// and it rides `Opaque(QueryError::CheckerRecovery(..))`, the error type of
+/// and it rides `Opaque(QueryError::CheckerRecovery { .. })`, the error type of
 /// the §22 lattice, so it dominates a union or an intersection exactly as the
 /// checker's error type does. A call no candidate applies to continues with
 /// the checker's error-recovery candidate instead
@@ -34,7 +34,9 @@ impl CheckerDiagnostic {
     pub const fn recovery(self) -> Option<PrimitiveKind> {
         match self.code {
             CheckerDiagnosticCode::ExcessivelyDeepInstantiation
-            | CheckerDiagnosticCode::RecursiveFulfillmentCallback => Some(PrimitiveKind::Any),
+            | CheckerDiagnosticCode::RecursiveFulfillmentCallback
+            | CheckerDiagnosticCode::UnionTooComplex
+            | CheckerDiagnosticCode::TupleTooLarge => Some(PrimitiveKind::Any),
             CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
             | CheckerDiagnosticCode::ArgumentCountAtLeast => None,
@@ -45,9 +47,20 @@ impl CheckerDiagnostic {
 /// The checker diagnostics an operation here can raise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckerDiagnosticCode {
-    /// TS2589: the lib `Awaited<T>` conditional re-entered an application it
-    /// is still evaluating, so its instantiation never terminates.
+    /// TS2589: an instantiation nested deeper than the checker's
+    /// instantiation depth, or a conditional tail run longer than its tail
+    /// limit ([`checker_policy`](super::checker_policy)) — including the lib
+    /// `Awaited<T>` conditional re-entering an application it is still
+    /// evaluating, whose instantiation never terminates.
     ExcessivelyDeepInstantiation,
+    /// TS2590: a cross product over unions has at least the checker's
+    /// product limit of constituents, checked before one is built
+    /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
+    UnionTooComplex,
+    /// TS2799: splicing a tuple into a tuple type reaches the checker's
+    /// tuple-size limit. Written in an expression, the checker reports the
+    /// same limit as TS2800.
+    TupleTooLarge,
     /// TS1062: the awaited-type relation reached a thenable whose promised
     /// value is a type it is already unwrapping.
     RecursiveFulfillmentCallback,
@@ -72,6 +85,8 @@ impl CheckerDiagnosticCode {
     pub const fn code(self) -> u32 {
         match self {
             Self::ExcessivelyDeepInstantiation => 2589,
+            Self::UnionTooComplex => 2590,
+            Self::TupleTooLarge => 2799,
             Self::RecursiveFulfillmentCallback => 1062,
             Self::ArgumentNotAssignable => 2345,
             Self::ArgumentCount => 2554,
@@ -86,6 +101,10 @@ impl CheckerDiagnosticCode {
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }
+            Self::UnionTooComplex => {
+                "Expression produces a union type that is too complex to represent."
+            }
+            Self::TupleTooLarge => "Type produces a tuple type that is too large to represent.",
             Self::RecursiveFulfillmentCallback => {
                 "Type is referenced directly or indirectly in the fulfillment callback of its \
                  own 'then' method."
@@ -98,31 +117,6 @@ impl CheckerDiagnosticCode {
         }
     }
 }
-
-/// The pinned checker's limit on one TAIL run of the lib `Awaited<T>`
-/// conditional: the run fails with TS2589 at its 1000th tail step.
-///
-/// A tail step is `Awaited<X>` → `Awaited<V>` through a single callback
-/// (`then(onfulfilled: (v: V) => void)`) into a non-union `V`; the checker
-/// evaluates such steps as a loop, counting them. Measured on TypeScript
-/// 7.0.2 over chains of distinct thenables `C0 → C1 → … → number`: 999
-/// steps answer `number`, 1000 steps are `any` under TS2589. A run entered
-/// through a callback union starts with one step already counted (998
-/// further steps answer, 999 fail).
-pub(crate) const LIB_AWAITED_TAIL_STEPS: u32 = 1000;
-
-/// The pinned checker's limit on NESTED (non-tail) steps of the lib
-/// `Awaited<T>` conditional: the 98th nested step on one path fails with
-/// TS2589, as the checker's instantiation depth runs out.
-///
-/// A nested step either goes through a callback union (an optional or
-/// nullable `onfulfilled`, a union-typed `then`, every `Promise`) or into a
-/// union `V`; a step that does both counts twice. Measured on TypeScript
-/// 7.0.2: 97 nested steps answer the chain's value (reporting TS2589 on
-/// some shapes while keeping the value), 98 are `any` under TS2589, whether
-/// the application is written directly, through a generic alias, through a
-/// signature, or over `ReturnType`.
-pub(crate) const LIB_AWAITED_NESTED_STEPS: u32 = 98;
 
 /// The type operation that raised a [`CheckerDiagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,4 +133,13 @@ pub enum CheckerDiagnosticOperation {
     /// The resolution of one call or `new` expression no candidate applies
     /// to ([`SemanticQueryKey::ResolveCall`](super::SemanticQueryKey::ResolveCall)).
     CallResolution,
+    /// An intersection distributed over its union constituents
+    /// (`getIntersectionType`).
+    Intersection,
+    /// A template literal type over union spans (`getTemplateLiteralType`).
+    TemplateLiteral,
+    /// An object spread over union operands (`getSpreadType`).
+    ObjectSpread,
+    /// A tuple spread into a tuple type (`createNormalizedTupleType`).
+    TupleSpread,
 }

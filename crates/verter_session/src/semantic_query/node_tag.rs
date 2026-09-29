@@ -177,10 +177,12 @@ impl SemanticNodeData {
     /// Returns [`ChildWalk::Sealed`] for the sealed callable carrier, whose
     /// children are not enumerable here.
     ///
-    /// This is the SEMANTIC descent topology, and three kinds of retained id
+    /// This is the SEMANTIC descent topology, and four kinds of retained id
     /// are deliberately leaves of it: an `Opaque(RecursiveRef { args })`
     /// refusal is a typed back-edge whose arguments name the instantiation
-    /// it stands for, not structure beneath it; a class expression's
+    /// it stands for, not structure beneath it; an `Opaque(CheckerRecovery {
+    /// beyond })` is the checker's error type, and the type Verter names past
+    /// the checker's limit is an answer beside it, not a part of it; a class expression's
     /// recorded `prototype` is a derived record beside its instance, not a
     /// part of it; and a pending conditional frame's parameters are the
     /// binders it substitutes, not operands. A reader that must see every
@@ -346,6 +348,10 @@ impl SemanticNodeData {
             Self::Opaque(super::QueryError::RecursiveRef { args, .. }) => {
                 args.iter().copied().for_each(visit);
             }
+            Self::Opaque(super::QueryError::CheckerRecovery {
+                beyond: Some(beyond),
+                ..
+            }) => visit(*beyond),
             Self::ClassExpressionInstance { identity, .. } => {
                 identity.prototype.into_iter().for_each(visit);
             }

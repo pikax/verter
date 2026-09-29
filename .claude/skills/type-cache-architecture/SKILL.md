@@ -933,6 +933,38 @@ distinguishable at the carrier type; the warm-hit oracle cannot conflate them.
 Overflow produces `FactSignatureOverflow` audit event + candidate is admitted
 as `NonCacheable`.
 
+### Completed results and their receipts
+
+Completion and retention are separate verdicts. A flow evaluation that
+completes as its own component's root lands in the dispatch transaction's
+demand-keyed result table (`FlowResultTable` in `dispatch_txn.rs`), classified
+on the shared reuse rail (`resolver_core/reuse.rs`): `Shared` (complete and
+retained), `RequestOnly` (complete, persistent admission refused for a
+deterministic reason, whose refusal replays into every consumer) or never kept
+(incomplete, transient or unattributed refusal). The table is separate from
+the ordered publication queue the machinery root drains, so a refused or
+aborted publication never makes a completed child run again on its
+transaction.
+
+A kept result's evidence is hierarchical: its own facts plus the receipt of
+every completed result it consumed (`FactVersionRef::Receipt`, the
+`ResultReceipt` in `verter_semantic::facts::receipt`), never a copy of the
+consumed result's facts. When the result completes, every tracer and recorder
+live around it replaces what the result's computation fanned into it (the range
+between the two `mark_evidence` marks) with the receipt
+(`complete_with_receipt`); a later consumer observes only the receipt.
+`drop_subsumed_receipts` removes a receipt a sibling receipt consumed, so a
+chain's scopes keep its top receipt. Every validator reads a receipt through to
+the facts it reaches (`validates_through_receipts`), applying its own per-fact
+rules (the strict self-root rule included) inside the receipt, visiting each
+distinct receipt once per validated signature (`ReceiptWalk`). Signature
+projections read receipt summaries (`canonical_ids`, `aggregated_domains`) or
+walk them (`resolution_*`). Domain compaction never lifts a receipt. Receipts
+form a DAG (a child is minted before its parent) and drop from an explicit
+stack. A member closed inside a larger component keeps no receipt of its own:
+the component root's receipt, whose evaluation covered every member, is the
+sealed component receipt.
+
 ## Typed SignatureAdmission gate (CRITICAL)
 
 Producers convert their finalised fact tracer into a typed admission verdict via

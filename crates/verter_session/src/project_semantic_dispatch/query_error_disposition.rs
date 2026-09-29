@@ -232,7 +232,7 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         ),
         // The checker's recovered error type reads as `any`: a complete
         // answer, but not a closed literal domain.
-        QueryError::CheckerRecovery(_) => (
+        QueryError::CheckerRecovery { .. } => (
             QueryErrorDisposition::CheckerRecovery,
             ClosedLiteralDomainUnresolvedReason::Unsupported,
         ),

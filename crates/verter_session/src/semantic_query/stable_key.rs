@@ -1177,12 +1177,21 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
         SemanticNodeData::Opaque(err) => {
             enc.header(category::INTRINSIC, subtag::OPAQUE);
             encode_query_error(&mut enc, err);
-            // A recursive back-edge names the instantiation it stands for.
-            if let QueryError::RecursiveRef { args, .. } = err {
-                enc.u16(args.len() as u16);
-                for arg in args.iter() {
-                    enc.child(*arg);
+            // A recursive back-edge names the instantiation it stands for;
+            // a checker recovery past a checker limit names the type Verter
+            // holds beyond it.
+            match err {
+                QueryError::RecursiveRef { args, .. } => {
+                    enc.u16(args.len() as u16);
+                    for arg in args.iter() {
+                        enc.child(*arg);
+                    }
                 }
+                QueryError::CheckerRecovery {
+                    beyond: Some(beyond),
+                    ..
+                } => enc.child(*beyond),
+                _ => {}
             }
         }
         SemanticNodeData::IntrinsicApplication { op, args } => {
@@ -1936,17 +1945,21 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
         QueryError::UnrepresentableSurfaceMember => 19,
         QueryError::OpenSurface => 20,
         QueryError::UnmodeledPosition => 21,
-        QueryError::CheckerRecovery(_) => 22,
+        QueryError::CheckerRecovery { .. } => 22,
     };
     enc.u8(tag);
     match err {
-        QueryError::CheckerRecovery(diagnostic) => {
+        QueryError::CheckerRecovery { diagnostic, .. } => {
             enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
             enc.u8(match diagnostic.operation {
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
                 crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand => 2,
                 crate::semantic_query::CheckerDiagnosticOperation::AsyncReturnPayload => 3,
                 crate::semantic_query::CheckerDiagnosticOperation::CallResolution => 4,
+                crate::semantic_query::CheckerDiagnosticOperation::Intersection => 5,
+                crate::semantic_query::CheckerDiagnosticOperation::TemplateLiteral => 6,
+                crate::semantic_query::CheckerDiagnosticOperation::ObjectSpread => 7,
+                crate::semantic_query::CheckerDiagnosticOperation::TupleSpread => 8,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

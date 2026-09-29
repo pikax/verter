@@ -3947,14 +3947,75 @@ fn staged_flow_proof(
     .expect("a clean re-staged value mints a proof")
 }
 
-/// A completed member marked reusable answers a later demand on its
-/// transaction with its proven value, and REPLAYS what its evaluation read
-/// into the scopes live at the demanding site — the fact into the live
-/// tracer, the canonical self-root onto the live build frame, and the
-/// canonical-evidence epoch — so a build that consumes the reused value
-/// is rooted exactly as if it had re-evaluated it.
+/// A flow result completed on the transaction answers a later demand on it
+/// with its proven value, and REPLAYS what its evaluation read into the
+/// scopes live at the demanding site — the fact into the live tracer, the
+/// canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value is
+/// rooted exactly as if it had re-evaluated it.
 #[test]
 fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::Shared);
+}
+
+/// A completed result whose persistent admission was refused for a typed,
+/// deterministic reason still answers the rest of its transaction — its
+/// completion does not depend on its retention — and the refusal travels
+/// with it: the live tracer that consumes it is refused too, and its reads
+/// are replayed as for any other completed result.
+#[test]
+fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::RequestOnly(
+        crate::resolver_core::reuse::NonCacheableRefusal::new(
+            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        ),
+    ));
+}
+
+/// An incomplete result, or one refused for a transient or unattributed
+/// reason, never enters the transaction's result table: a later demand
+/// evaluates it again rather than freezing a degraded answer.
+#[test]
+fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
+    use crate::resolver_core::reuse::{NoReuseCause, ReuseClass};
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let value = flow_result_value(dispatch, key.clone());
+        for reuse in [
+            ReuseClass::NoReuse(NoReuseCause::Incomplete),
+            ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            )),
+            ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
+                verter_workspace::NonCacheablePropagation::Transitive,
+            )),
+        ] {
+            let mut txn = dispatch.dispatch_txn.borrow_mut();
+            txn.flow.results.complete(
+                key.clone(),
+                super::dispatch_txn::TransactionFlowResult {
+                    value: value.clone(),
+                    reuse,
+                    replay: super::dispatch_txn::FlowMemberReuse {
+                        reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                            facts: Arc::from(Vec::new()),
+                            non_cacheable: false,
+                        },
+                        observed_self_roots: Vec::new(),
+                        canonical_evidence_deposited: false,
+                    },
+                },
+            );
+            assert!(
+                !txn.flow.results.contains(&key),
+                "{reuse:?} must not answer a later demand on the transaction"
+            );
+        }
+    });
+}
+
+fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
     let host = make_scc_host();
     with_dispatch(&host, |dispatch| {
         let key = scc_key(dispatch, "scCleanA");
@@ -3968,26 +4029,21 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
         };
         let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
             (Arc::from("/ws/replayed.ts"), [6; 16]);
-        dispatch
-            .dispatch_txn
-            .borrow_mut()
-            .flow
-            .completed_members
-            .push(super::dispatch_txn::CompletedFlowReturnMember {
-                key: key.clone(),
-                result: staged_flow_proof(&key, value.clone()),
-                inline_flight: None,
-                self_roots: Vec::new(),
-                materialized: crate::semantic_query::demand::MaterializedSet::default(),
-                reuse: Some(super::dispatch_txn::FlowMemberReuse {
+        dispatch.dispatch_txn.borrow_mut().flow.results.complete(
+            key.clone(),
+            super::dispatch_txn::TransactionFlowResult {
+                value: value.clone(),
+                reuse,
+                replay: super::dispatch_txn::FlowMemberReuse {
                     reads: crate::resolver_core::resolver_context::RecordedFactReads {
                         facts: Arc::from(vec![fact.clone()]),
                         non_cacheable: false,
                     },
                     observed_self_roots: vec![root.clone()],
                     canonical_evidence_deposited: true,
-                }),
-            });
+                },
+            },
+        );
         let epoch = dispatch.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
         let (step, read_set) = host
@@ -4003,8 +4059,16 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
             ),
             other => panic!("a reusable member answers Complete, got {other:?}"),
         }
-        let crate::resolver_core::FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
-            panic!("the live tracer seals a cacheable signature");
+        let signature = match (read_set.finalise(), reuse.is_shared()) {
+            (crate::resolver_core::FactReadSetFinalise::Ok(signature), true) => signature,
+            (crate::resolver_core::FactReadSetFinalise::NonCacheable(signature), false) => {
+                signature
+            }
+            (other, shared) => panic!(
+                "a {} result seals the live tracer {}, got {other:?}",
+                if shared { "shared" } else { "request-only" },
+                if shared { "cacheable" } else { "non-cacheable" }
+            ),
         };
         assert!(
             signature.contains(&fact),

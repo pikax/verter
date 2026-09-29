@@ -1668,10 +1668,40 @@ pub(crate) fn fact_tracer_installed() -> bool {
 /// not live while it ran.
 #[derive(Debug, Clone)]
 pub(crate) struct RecordedFactReads {
-    /// Every distinct fact fanned out while the computation ran.
+    /// Every distinct fact fanned out while the computation ran: its own
+    /// reads, and the receipt of each completed result it consumed.
     pub(crate) facts: std::sync::Arc<[crate::resolver_core::FactVersionRef]>,
     /// Whether any non-cacheable read was marked, local-only included.
     pub(crate) non_cacheable: bool,
+}
+
+/// Where the active scopes stood when a computation began, so its
+/// observations can be replaced by its receipt if it completes
+/// ([`complete_with_receipt`]).
+pub(crate) use fact_tracer_tls::EvidenceMarks;
+
+/// Mark every active tracer and recorder before a computation whose
+/// completed result may be answered by a receipt.
+#[inline]
+pub(crate) fn mark_evidence() -> EvidenceMarks {
+    fact_tracer_tls::mark_evidence()
+}
+
+/// A computation that ran between `start` and `end` completed with the
+/// evidence `reads`: mint its receipt and replace, in every scope still
+/// active, what it observed in that range with the receipt. Returns the
+/// receipt, the one fact a later consumer of the result observes instead of
+/// its reads.
+pub(crate) fn complete_with_receipt(
+    start: &EvidenceMarks,
+    end: &EvidenceMarks,
+    reads: &RecordedFactReads,
+) -> crate::resolver_core::FactVersionRef {
+    let receipt = crate::resolver_core::FactVersionRef::Receipt(
+        verter_workspace::ResultReceipt::new(reads.facts.to_vec()),
+    );
+    fact_tracer_tls::collapse_evidence(start, end, &receipt);
+    receipt
 }
 
 /// Run `work` under a passive fact-read recorder and return what it read.

@@ -170,7 +170,6 @@ pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
-pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
@@ -4272,6 +4271,8 @@ mod index_signature_access_tests;
 mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
+#[cfg(test)]
+mod intersection_complexity_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
 #[cfg(test)]
