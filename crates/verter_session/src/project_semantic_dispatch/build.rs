@@ -304,45 +304,46 @@ pub(super) fn class_prototype_member(
     }
 }
 
-/// Upper bound on the template-literal keyspace product width
-/// `∏ |choice_set_i|` enumerated by
-/// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
-/// template whose enumerated product would exceed this cap carrier-stops to
-/// the deferred [`SemanticNodeData::TemplateLiteral`] shell instead of
-/// materialising (and possibly warm-publishing) an explosive union. The cap
-/// sits well above any realistic component template keyspace (event / slot /
-/// prop-name enumerations are far below it) while bounding allocation on the
-/// pathological tail. This is a PRODUCT-WIDTH bound, distinct from the
-/// deferred evaluator's per-arg recursion depth ceiling — that ceiling bounds
-/// how deep one argument resolves, not how wide the cartesian product grows.
-pub(super) const TEMPLATE_LITERAL_KEYSPACE_CAP: usize = 1024;
-
-/// Outcome of [`ProjectSemanticDispatch::reduce_template_literal_nodes`]: the
-/// folded surface node plus whether the keyspace product-width budget was
-/// exceeded. A `keyspace_budget_exceeded == true` outcome carries the deferred
-/// `TemplateLiteral` carrier-stop shell as `node`, and the live producer marks
-/// the build non-cacheable / budget-tainted so it is never warm-admitted.
-pub(super) struct TemplateReduceOutcome {
-    pub(super) node: SemanticNodeId,
-    pub(super) keyspace_budget_exceeded: bool,
-}
-
 /// One piece of a distributed template concatenation: literal text, or a
 /// hole type the template literal type keeps (`string`, `number`, …).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum TemplatePiece {
     Text(String),
     Hole(SemanticNodeId),
 }
 
+/// One constituent a template, or one of its interpolated expressions,
+/// distributes into: its pieces, and — for a literal type that is not a
+/// string (a number, bigint or boolean literal, `null`, `undefined`, an enum
+/// member) — that type. The checker counts constituents, not texts: `"0"`
+/// and `0` are two constituents of `"0" | 0` though they spell the same
+/// text, while `"a0"` and the `"a0"` a nested template forms are one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TemplateConstituent {
+    pieces: Vec<TemplatePiece>,
+    spelled: Option<SemanticNodeId>,
+}
+
+impl TemplateConstituent {
+    /// A string literal or template literal constituent of `pieces`.
+    fn string(pieces: Vec<TemplatePiece>) -> Self {
+        Self {
+            pieces,
+            spelled: None,
+        }
+    }
+}
+
 /// The concatenations a template distributes into.
 enum TemplateAlternatives {
-    /// Every concatenation, as its pieces.
-    Finite(Vec<Vec<TemplatePiece>>),
+    /// Every constituent, in order.
+    Finite(Vec<TemplateConstituent>),
     /// Some expression does not settle; the template stays authored.
     Open,
-    /// The product exceeds [`TEMPLATE_LITERAL_KEYSPACE_CAP`].
-    OverBudget,
+    /// The checker refuses the cross product (TS2590).
+    TooComplex(crate::semantic_query::CheckerDiagnostic),
+    /// The connected-work ledger refused the construction.
+    Exhausted(crate::semantic_query::PartialReasonSet),
     /// An interpolant is neither a literal nor a placeholder type (an enum
     /// member whose value is not a constant): the template is `string`.
     AnyString,
@@ -13873,7 +13874,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   any & never` is `never`); the error type, `any`, then `unknown`
     ///   decide a union;
     /// - an intersection whose cross product the checker refuses is its
-    ///   error type.
+    ///   error type, as is a template literal type whose cross product it
+    ///   refuses (`getTemplateLiteralType`).
     ///
     /// The members are read as the types they name, whatever carrier the
     /// composite was built as: an intersection substituted into an
@@ -13897,6 +13899,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) => return None,
             Some(SemanticNodeData::Intersection(arms)) => (arms.members_arc(), false),
             Some(SemanticNodeData::Union(arms)) => (arms.members_arc(), true),
+            Some(SemanticNodeData::TemplateLiteral { .. }) => {
+                return self.template_operand_recovery(operand)
+            }
             _ => return None,
         };
         if !is_union {
@@ -13907,9 +13912,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut found: [Option<SemanticNodeId>; 4] = [None; 4];
         for arm in arms.iter() {
             let arm_type = match graph.node_data(*arm).as_deref() {
-                Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => {
-                    self.conditional_operand_extreme(*arm)
-                }
+                Some(
+                    SemanticNodeData::Intersection(_)
+                    | SemanticNodeData::Union(_)
+                    | SemanticNodeData::TemplateLiteral { .. },
+                ) => self.conditional_operand_extreme(*arm),
                 Some(
                     SemanticNodeData::Alias(_)
                     | SemanticNodeData::DeclRef { .. }
@@ -13936,6 +13943,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
             error.or(any).or(unknown)
         } else {
             never.or(error).or(any)
+        }
+    }
+
+    /// The checker's recovery a template literal type `operand` is when
+    /// the checker refuses its cross product; `None` otherwise.
+    fn template_operand_recovery(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        let (pattern, args) = match self.graph().node_data(operand).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => (Arc::clone(quasis), Arc::clone(expressions)),
+            _ => return None,
+        };
+        let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+            pattern,
+            args,
+            context: self.template_literal_reduce_context(),
+        });
+        match read.value {
+            QueryResult::Value(reduced) => matches!(
+                self.graph().node_data(reduced).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+            )
+            .then_some(reduced),
+            _ => None,
         }
     }
 
@@ -15393,12 +15425,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// walker — the deferred evaluator's `TemplateLiteral` arm and the
     /// mapped key-remap path both reach this reducer THROUGH this query.
     ///
-    /// Keyspace budget: a finite product whose running width exceeds
-    /// [`TEMPLATE_LITERAL_KEYSPACE_CAP`] carrier-stops to the deferred shell
-    /// and the result is marked NON-CACHEABLE / budget-tainted
-    /// (`cache_suppress` + `result_is_partial`) — a truncated / over-budget
-    /// product is never warm-admitted (mirrors the evaluator's
-    /// budget-exhaustion `ReturnOnly` discipline).
+    /// A product at the checker's limit is its TS2590 recovery, a complete
+    /// fact. A construction the connected-work ledger refuses carrier-stops
+    /// to the deferred shell, marked NON-CACHEABLE / budget-tainted
+    /// (`cache_suppress` + `result_is_partial`): an exhausted product is
+    /// never warm-admitted.
     ///
     /// Self-version rooting: the reduction depends on every interpolated
     /// arg node, so the memo entry roots on the file content version each
@@ -15411,22 +15442,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let outcome = self.reduce_template_literal_nodes(
+        let reduced = self.reduce_template_literal_nodes(
             pattern,
             args,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+        let node = reduced.unwrap_or_else(|_| {
+            self.graph().intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: Arc::clone(pattern),
+                expressions: Arc::clone(args),
+            })
+        });
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(outcome.node),
+            QueryResult::Value(node),
             self.project_generation_signature(),
         ))
         .with_observed_self_roots(observed_self_roots);
-        if outcome.keyspace_budget_exceeded {
-            // The product width tripped the keyspace cap: the value is a
-            // deferred carrier-stop shell, not the fully-enumerated surface.
-            // Mark it a non-cacheable budget-tainted partial so it is never
-            // warm-admitted and the taint folds into the enclosing request.
+        if reduced.is_err() {
+            // The ledger refused the construction: the value is the deferred
+            // carrier-stop shell, not the enumerated surface. It is a
+            // non-cacheable budget-tainted partial, never warm-admitted, and
+            // the taint folds into the enclosing request.
             output.cache_suppress = true;
             output.result_is_partial = true;
         }
@@ -16910,13 +16947,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   carrier-stops to the authored `TemplateLiteral` shell (the caller
     ///   re-dispatches once it resolves).
     ///
-    /// Keyspace budget: the running product width `∏ |alternatives_i|` is
-    /// bounded by [`TEMPLATE_LITERAL_KEYSPACE_CAP`]. A product whose width
-    /// exceeds the cap carrier-stops to the `TemplateLiteral` shell and the
-    /// returned [`TemplateReduceOutcome::keyspace_budget_exceeded`] flag is
-    /// set so the live producer refuses to warm-admit the over-budget result.
-    /// The check runs on the per-arg alternative counts BEFORE any string is
-    /// allocated.
+    /// The product is the checker's (`checkCrossProductUnion`), weighed on
+    /// the expressions' distinct constituent counts before any
+    /// concatenation is built: at the checker's limit the template is its
+    /// TS2590 recovery, holding the authored template as the type beyond
+    /// the limit (the template itself denotes it). Below it every
+    /// concatenation built is charged to the connected-work ledger; a
+    /// refused construction is `Err` with the ledger's trip, folded into
+    /// the build's completeness.
     ///
     /// The multi-result case renormalises through
     /// [`SemanticQueryKey::ReduceUnion`] so the union is canonical. Used by
@@ -16928,40 +16966,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
         quasis: &[Arc<str>],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> TemplateReduceOutcome {
+    ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
         let graph = self.graph();
         let spliced = self.spliced_template(quasis, args);
         let (quasis, args): (&[Arc<str>], &[SemanticNodeId]) = match &spliced {
             Some((quasis, args)) => (quasis, args),
             None => (quasis, args),
         };
-        let carrier_stop = |keyspace_budget_exceeded: bool| TemplateReduceOutcome {
-            node: graph.intern_node(SemanticNodeData::TemplateLiteral {
+        let authored = || {
+            graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
                 expressions: Arc::from(args.to_vec().into_boxed_slice()),
-            }),
-            keyspace_budget_exceeded,
+            })
         };
         let alternatives = match self.template_alternatives(quasis, args, eval_context) {
-            TemplateAlternatives::Open => return carrier_stop(false),
-            TemplateAlternatives::OverBudget => return carrier_stop(true),
+            TemplateAlternatives::Open => return Ok(authored()),
+            TemplateAlternatives::TooComplex(diagnostic) => {
+                return Ok(crate::semantic_query::checker_policy::checker_recovery(
+                    graph,
+                    diagnostic,
+                    Some(authored()),
+                ));
+            }
+            TemplateAlternatives::Exhausted(reasons) => {
+                self.fold_local_partial_completeness(reasons);
+                return Err(reasons);
+            }
             // An interpolant that is neither a literal nor a placeholder
             // type (an enum member whose value is not a constant) makes the
             // whole template `string`, as the checker's template
             // construction does.
             TemplateAlternatives::AnyString => {
-                return TemplateReduceOutcome {
-                    node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
-                    keyspace_budget_exceeded: false,
-                }
+                return Ok(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
             }
             TemplateAlternatives::Finite(alternatives) => alternatives,
         };
         let members: Vec<SemanticNodeId> = alternatives
             .into_iter()
-            .map(|pieces| self.template_type_from_pieces(pieces))
+            .map(|constituent| self.template_type_from_pieces(constituent.pieces))
             .collect();
-        let node = match members.as_slice() {
+        Ok(match members.as_slice() {
             [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             [single] => *single,
             _ => {
@@ -16971,14 +17015,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
-                    _ => return carrier_stop(false),
+                    _ => authored(),
                 }
             }
-        };
-        TemplateReduceOutcome {
-            node,
-            keyspace_budget_exceeded: false,
-        }
+        })
     }
 
     /// The texts and holes of a template of `quasis` and `args` with every
@@ -17045,53 +17085,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Every concatenation a template of `quasis` and `args` distributes
     /// into, each as its sequence of text and hole pieces — the cartesian
     /// product of the per-expression alternatives
-    /// ([`Self::template_arg_alternatives`]).
+    /// ([`Self::template_arg_alternatives`]). The product is weighed first
+    /// as the checker weighs it (`checkCrossProductUnion` over the
+    /// expressions' constituent counts, `never` an empty factor): at the
+    /// checker's limit it is TS2590 and nothing is built. Each concatenation
+    /// built is charged to the connected-work ledger before it is formed.
     fn template_alternatives(
         &self,
         quasis: &[Arc<str>],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> TemplateAlternatives {
-        let mut per_arg: Vec<Vec<Vec<TemplatePiece>>> = Vec::with_capacity(args.len());
-        let mut product_width: usize = 1;
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let mut per_arg: Vec<Vec<TemplateConstituent>> = Vec::with_capacity(args.len());
         for &arg in args {
             match self.template_arg_alternatives(arg, eval_context) {
-                TemplateAlternatives::Finite(alternatives) => {
-                    product_width = product_width.saturating_mul(alternatives.len());
-                    per_arg.push(alternatives);
-                }
+                TemplateAlternatives::Finite(alternatives) => per_arg.push(alternatives),
                 other => return other,
             }
         }
-        if product_width > TEMPLATE_LITERAL_KEYSPACE_CAP {
-            return TemplateAlternatives::OverBudget;
+        let factors = per_arg.iter().map(|alternatives| match alternatives.len() {
+            0 => ProductFactor::Never,
+            1 => ProductFactor::Single,
+            width => ProductFactor::Union(width),
+        });
+        if let Err(diagnostic) = cross_product_union(
+            factors,
+            crate::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
+        ) {
+            return TemplateAlternatives::TooComplex(diagnostic);
         }
         let text = |index: usize| {
             TemplatePiece::Text(quasis.get(index).map(|q| q.to_string()).unwrap_or_default())
         };
         let mut results: Vec<Vec<TemplatePiece>> = vec![vec![text(0)]];
         for (index, alternatives) in per_arg.iter().enumerate() {
-            let mut next: Vec<Vec<TemplatePiece>> =
-                Vec::with_capacity(results.len() * alternatives.len());
+            let width = results.len() * alternatives.len();
+            if let Err(reasons) = self.connected_demand.charge_units(width) {
+                return TemplateAlternatives::Exhausted(reasons);
+            }
+            let mut next: Vec<Vec<TemplatePiece>> = Vec::with_capacity(width);
             for prefix in &results {
                 for alternative in alternatives {
                     let mut combined = prefix.clone();
-                    combined.extend(alternative.iter().cloned());
+                    combined.extend(alternative.pieces.iter().cloned());
                     combined.push(text(index + 1));
                     next.push(combined);
                 }
             }
             results = next;
         }
-        TemplateAlternatives::Finite(results)
+        TemplateAlternatives::Finite(
+            results
+                .into_iter()
+                .map(TemplateConstituent::string)
+                .collect(),
+        )
     }
 
     /// The alternatives ONE interpolated expression contributes, each a
     /// sequence of pieces: its text for a literal (TS-stringified —
     /// `` `${1 | 2}` `` is `"1" | "2"`, a bigint its base-10 digits) and for
     /// `null` / `undefined`, both texts for `boolean`, nothing at all for
-    /// `never` (an empty product factor), the constituents' alternatives for
-    /// a union, a nested template literal type's own alternatives, and a
+    /// `never` (an empty product factor), the distinct constituents of a
+    /// union (the union the checker forms from them: a string literal a
+    /// nested template forms again is one constituent, a number literal
+    /// spelling the same text another), a nested template literal type's own
+    /// alternatives, and a
     /// hole for `string` / `number` / `bigint` / `any` or a string mapping
     /// over one. A residual string-mapping application reduces first, so
     /// `` `on${Capitalize<K>}` `` folds once `K` is substituted. Every other
@@ -17106,18 +17166,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some((intrinsic, operand)) = self.string_mapping_of(resolved) {
             resolved = self.apply_string_intrinsic(&intrinsic, operand, eval_context);
         }
-        let text =
-            |text: String| TemplateAlternatives::Finite(vec![vec![TemplatePiece::Text(text)]]);
+        let text = |text: String, spelled: Option<SemanticNodeId>| {
+            TemplateAlternatives::Finite(vec![TemplateConstituent {
+                pieces: vec![TemplatePiece::Text(text)],
+                spelled,
+            }])
+        };
         let data = graph.node_data(resolved);
         match data.as_deref() {
-            Some(SemanticNodeData::Literal(value)) => text(literal_value_template_text(value)),
+            Some(SemanticNodeData::Literal(value)) => text(
+                literal_value_template_text(value),
+                (!matches!(value, LiteralValue::String(_))).then_some(resolved),
+            ),
             // An enum member interpolates as its value; a member whose
             // value is not a constant is no literal and spells any string.
             Some(SemanticNodeData::EnumLiteral(literal)) => {
                 if super::canonical_algebra::enum_literal_is_unit(graph, literal) {
                     let base = literal.base;
                     drop(data);
-                    self.template_arg_alternatives(base, eval_context)
+                    // The member is its own constituent, whatever its value.
+                    match self.template_arg_alternatives(base, eval_context) {
+                        TemplateAlternatives::Finite(constituents) => TemplateAlternatives::Finite(
+                            constituents
+                                .into_iter()
+                                .map(|constituent| TemplateConstituent {
+                                    spelled: Some(resolved),
+                                    ..constituent
+                                })
+                                .collect(),
+                        ),
+                        other => other,
+                    }
                 } else {
                     TemplateAlternatives::AnyString
                 }
@@ -17125,28 +17204,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
                 TemplateAlternatives::Finite(Vec::new())
             }
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => text("null".to_owned()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => {
+                text("null".to_owned(), Some(resolved))
+            }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
-                text("undefined".to_owned())
+                text("undefined".to_owned(), Some(resolved))
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
-                TemplateAlternatives::Finite(vec![
-                    vec![TemplatePiece::Text("false".to_owned())],
-                    vec![TemplatePiece::Text("true".to_owned())],
-                ])
+                TemplateAlternatives::Finite(
+                    ["false", "true"]
+                        .into_iter()
+                        .map(|text| TemplateConstituent {
+                            pieces: vec![TemplatePiece::Text(text.to_owned())],
+                            spelled: Some(resolved),
+                        })
+                        .collect(),
+                )
             }
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
                 drop(data);
-                let mut out: Vec<Vec<TemplatePiece>> = Vec::new();
+                let mut out: Vec<TemplateConstituent> = Vec::new();
+                let mut seen: FxHashSet<TemplateConstituent> = FxHashSet::default();
                 for member in members.iter() {
                     match self.template_arg_alternatives(*member, eval_context) {
-                        TemplateAlternatives::Finite(alternatives) => out.extend(alternatives),
+                        TemplateAlternatives::Finite(alternatives) => out.extend(
+                            alternatives
+                                .into_iter()
+                                .filter(|alternative| seen.insert(alternative.clone())),
+                        ),
                         other => return other,
                     }
-                }
-                if out.len() > TEMPLATE_LITERAL_KEYSPACE_CAP {
-                    return TemplateAlternatives::OverBudget;
                 }
                 TemplateAlternatives::Finite(out)
             }
@@ -17161,7 +17249,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => {
                 drop(data);
                 if self.is_template_hole(resolved) {
-                    TemplateAlternatives::Finite(vec![vec![TemplatePiece::Hole(resolved)]])
+                    TemplateAlternatives::Finite(vec![TemplateConstituent::string(vec![
+                        TemplatePiece::Hole(resolved),
+                    ])])
                 } else {
                     TemplateAlternatives::Open
                 }

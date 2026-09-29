@@ -890,7 +890,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
+    pub(crate) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
         self.connected_demand.set_limits_for_tests(work, depth);
     }
 
@@ -3575,10 +3575,10 @@ fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
 ///
 /// `TemplateLiteralReduce` counts too: a template over wide finite unions
 /// enumerates a cartesian product, so an unbounded re-dispatch storm over
-/// template reductions is the same expansion-storm shape. (The reducer also
-/// applies its own per-call product-width cap — `TEMPLATE_LITERAL_KEYSPACE_CAP`
-/// — which bounds a SINGLE reduction; this gate bounds the aggregate dispatch
-/// count across the request.)
+/// template reductions is the same expansion-storm shape. (A SINGLE
+/// reduction is bounded by the checker's product rule and charges each
+/// concatenation it builds to the connected-work ledger; this gate bounds the
+/// aggregate dispatch count across the request.)
 ///
 /// `TypeOf` counts too: it is a demand-bearing projection reducer
 /// (`build_typeof` lowers a value's declaration graph at the requested
@@ -4339,6 +4339,8 @@ mod relation_variance_tests;
 mod signature_relation_tests;
 #[cfg(test)]
 mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_complexity_tests;
 #[cfg(test)]
 mod template_pattern_relation_tests;
 #[cfg(test)]

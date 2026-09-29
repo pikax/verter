@@ -9862,9 +9862,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // it — its holes settled and its unions distributed — and a pattern
         // accepts a string literal or template whose slices fit its holes.
         let mut settled_pair = None;
-        let mut template_budget_exceeded = false;
+        let mut template_exhausted = false;
         for (side, data) in [(source, &source_data), (target, &target_data)] {
-            if settled_pair.is_some() || template_budget_exceeded {
+            if settled_pair.is_some() || template_exhausted {
                 break;
             }
             if let SemanticNodeData::TemplateLiteral {
@@ -9872,33 +9872,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 expressions,
             } = &**data
             {
-                let reduced = self.reduce_template_literal_nodes(
+                let Ok(reduced) = self.reduce_template_literal_nodes(
                     quasis,
                     expressions,
                     ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Expanded,
                     ),
-                );
-                if reduced.keyspace_budget_exceeded {
-                    template_budget_exceeded = true;
+                ) else {
+                    template_exhausted = true;
                     continue;
-                }
-                if reduced.node != side
+                };
+                if reduced != side
                     && !matches!(
-                        graph.node_data(reduced.node).as_deref(),
+                        graph.node_data(reduced).as_deref(),
                         Some(SemanticNodeData::TemplateLiteral { quasis: q, expressions: e })
                             if q == quasis && e == expressions
                     )
                 {
                     settled_pair = Some(if side == source {
-                        (reduced.node, target)
+                        (reduced, target)
                     } else {
-                        (source, reduced.node)
+                        (source, reduced)
                     });
                 }
             }
         }
-        if template_budget_exceeded {
+        if template_exhausted {
             results.push(RelationResult::Unknown);
             return;
         }

@@ -1,0 +1,201 @@
+//! A template literal type over unions whose cross product reaches the
+//! checker's limit is the checker's TS2590 recovery (`checkCrossProductUnion`
+//! in `getTemplateLiteralType`): the product of the spans' constituent
+//! counts is checked before a concatenation is built, and the answer reads
+//! and relates as `any`. Under the limit the template distributes.
+//!
+//! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
+//! --declaration --emitDeclarationOnly` on the fixture each test builds,
+//! each probe read off a TS2322 against `never`. The four `strictNullChecks`
+//! × `noImplicitAny` settings agree on every probe.
+
+use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_probe};
+use crate::semantic_query::{
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
+    SemanticNodeData,
+};
+
+const IS_ANY: &str = "type IsAny<T> = 0 extends 1 & T ? \"any\" : \"not-any\";\n";
+
+const DIGITS: &str = "type D = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;\n";
+
+/// `type <name> = "<prefix>0" | … | "<prefix><count - 1>";`
+fn string_union(name: &str, prefix: &str, count: usize) -> String {
+    let arms: Vec<String> = (0..count).map(|i| format!("\"{prefix}{i}\"")).collect();
+    format!("type {name} = {};\n", arms.join(" | "))
+}
+
+/// The TS2590 recovery of a template literal type.
+const TS2590: CheckerDiagnostic = CheckerDiagnostic {
+    code: CheckerDiagnosticCode::UnionTooComplex,
+    operation: CheckerDiagnosticOperation::TemplateLiteral,
+};
+
+/// Four digit spans are 10,000 concatenations; five are 100,000, the
+/// checker's limit.
+///
+/// Measured: `IsAny<`${D}${D}${D}${D}`>` is `"not-any"`, `"0000" extends
+/// `${D}${D}${D}${D}` ? 1 : 2` is `1` and `"x" extends …` is `2`;
+/// `IsAny<`${D}${D}${D}${D}${D}`>` and `"x" extends `${D}${D}${D}${D}${D}` ?
+/// 1 : 2` are `any` under TS2590. (A conditional extending the recovery is
+/// the recovery; `IsAny` alone would also meet the limit in `1 & T`.)
+#[test]
+fn four_digit_spans_distribute_and_five_reach_the_limit() {
+    let source = format!("{IS_ANY}{DIGITS}");
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<`${D}${D}${D}${D}`>", "\"not-any\""),
+            ("\"0000\" extends `${D}${D}${D}${D}` ? 1 : 2", "1"),
+            ("\"x\" extends `${D}${D}${D}${D}` ? 1 : 2", "2"),
+            ("IsAny<`${D}${D}${D}${D}${D}`>", "any"),
+            ("\"x\" extends `${D}${D}${D}${D}${D}` ? 1 : 2", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Two spans at the limit: 369 × 271 = 99,999 distributes and 400 × 250 =
+/// 100,000 does not.
+///
+/// Measured: `IsAny<`${A}-${B}`>` is `"not-any"` and `"a0-b0" extends
+/// `${A}-${B}` ? 1 : 2` is `1` at 369 × 271; `IsAny<`${C}-${F}`>` and `"x"
+/// extends `${C}-${F}` ? 1 : 2` are `any` under TS2590 at 400 × 250.
+#[test]
+fn two_spans_meet_the_limit_at_one_hundred_thousand() {
+    let source = format!(
+        "{IS_ANY}{}{}{}{}",
+        string_union("A", "a", 369),
+        string_union("B", "b", 271),
+        string_union("C", "c", 400),
+        string_union("F", "f", 250),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<`${A}-${B}`>", "\"not-any\""),
+            ("\"a0-b0\" extends `${A}-${B}` ? 1 : 2", "1"),
+            ("IsAny<`${C}-${F}`>", "any"),
+            ("\"x\" extends `${C}-${F}` ? 1 : 2", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A span whose union holds a template counts that template's
+/// concatenations: `"x" | `${D}${D}${D}`` is 1,001 constituents, and two
+/// more digit spans make 100,100; one more makes 10,010.
+///
+/// Measured: `IsAny<Nest>` and `"x" extends Nest ? 1 : 2` are `any` under
+/// TS2590; `"x" extends Nest2 ? 1 : 2` is `2` and `"x0" extends Nest2 ? 1 :
+/// 2` is `1`.
+#[test]
+fn a_template_inside_a_span_counts_its_concatenations() {
+    let source = format!(
+        "{IS_ANY}{DIGITS}type Nest = `${{\"x\" | `${{D}}${{D}}${{D}}`}}${{D}}${{D}}`;\n\
+         type Nest2 = `${{\"x\" | `${{D}}${{D}}${{D}}`}}${{D}}`;\n"
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<Nest>", "any"),
+            ("\"x\" extends Nest ? 1 : 2", "any"),
+            ("\"x\" extends Nest2 ? 1 : 2", "2"),
+            ("\"x0\" extends Nest2 ? 1 : 2", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A span counts its union's constituents, not their texts: `Y = S | D` is
+/// twenty constituents spelling ten strings, so four `Y` spans are 160,000;
+/// `` Z = S2 | `a${D}` `` is ten, the template forming the string literals
+/// `S2` already holds, so four `Z` spans are 10,000.
+///
+/// Measured: `` IsAny<`${Y}${Y}${Y}${Y}`> `` and
+/// `` "x" extends `${Y}${Y}${Y}${Y}` ? 1 : 2 `` are `any` under TS2590,
+/// `` IsAny<`${Y}${Y}${Y}`> `` and `` IsAny<`${Z}${Z}${Z}${Z}`> `` are
+/// `"not-any"`, `` "a0a1" extends `${Z}${Z}` ? 1 : 2 `` is `1` and
+/// `` "0000" extends `${Z}${Z}` ? 1 : 2 `` is `2`.
+#[test]
+fn a_span_counts_constituents_not_texts() {
+    let source = format!(
+        "{IS_ANY}{DIGITS}{}{}type Y = S | D;\ntype Z = S2 | `a${{D}}`;\n",
+        string_union("S", "", 10),
+        string_union("S2", "a", 10),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<`${Y}${Y}${Y}${Y}`>", "any"),
+            ("\"x\" extends `${Y}${Y}${Y}${Y}` ? 1 : 2", "any"),
+            ("IsAny<`${Y}${Y}${Y}`>", "\"not-any\""),
+            ("IsAny<`${Z}${Z}${Z}${Z}`>", "\"not-any\""),
+            ("\"a0a1\" extends `${Z}${Z}` ? 1 : 2", "1"),
+            ("\"0000\" extends `${Z}${Z}` ? 1 : 2", "2"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `boolean` is the two constituents `false | true`.
+///
+/// Measured: `` `${boolean}${1 | 2}` `` is `"false1" | "false2" | "true1" |
+/// "true2"`, and `IsAny<`${boolean}${D}`>` is `"not-any"`.
+#[test]
+fn boolean_spans_two_constituents() {
+    let source = format!("{IS_ANY}{DIGITS}");
+    let failures = mismatches(
+        &source,
+        &[
+            (
+                "`${boolean}${1 | 2}`",
+                "\"false1\" | \"false2\" | \"true1\" | \"true2\"",
+            ),
+            ("IsAny<`${boolean}${D}`>", "\"not-any\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Past the limit the template is the TS2590 recovery holding the authored
+/// template as the type beyond it: nothing is concatenated.
+#[test]
+fn the_ts2590_recovery_holds_the_authored_template_beyond_it() {
+    let source = format!("{IS_ANY}{DIGITS}");
+    with_probe(&source, "`${D}${D}${D}${D}${D}`", |dispatch, node| {
+        let data = dispatch.graph().node_data(node);
+        let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            beyond: Some(beyond),
+        })) = data.as_deref()
+        else {
+            panic!("the template must be the TS2590 recovery, measured {data:?}");
+        };
+        assert_eq!(*diagnostic, TS2590);
+        assert!(
+            matches!(
+                dispatch.graph().node_data(*beyond).as_deref(),
+                Some(SemanticNodeData::TemplateLiteral { expressions, .. })
+                    if expressions.len() == 5
+            ),
+            "beyond the limit is the authored five-span template"
+        );
+    });
+}
+
+/// The answer at the limit is the same read cold or warm, and in either
+/// order.
+#[test]
+fn the_limit_answers_the_same_cold_warm_and_reordered() {
+    let source = format!("{IS_ANY}{DIGITS}");
+    let over = ("\"x\" extends `${D}${D}${D}${D}${D}` ? 1 : 2", "any");
+    let under = ("IsAny<`${D}${D}${D}${D}`>", "\"not-any\"");
+    let under_relation = ("\"0000\" extends `${D}${D}${D}${D}` ? 1 : 2", "1");
+    let mut failures = mismatches_in_one_host(&source, &[over, under, under_relation, over, under]);
+    failures.extend(mismatches_in_one_host(
+        &source,
+        &[under_relation, under, over, under_relation, over],
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
