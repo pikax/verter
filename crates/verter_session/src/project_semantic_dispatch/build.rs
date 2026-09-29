@@ -9450,6 +9450,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// `signature`'s base signature (`getBaseSignature`): each of its type
+    /// parameters instantiated at its base constraint
+    /// ([`Self::instantiate_signature_params_at_base_constraints`]), and the
+    /// clause dropped. A signature that declares no type parameters is
+    /// itself; `None` when `signature` is no signature or its return is
+    /// not a declared type.
+    pub(super) fn base_signature(&self, signature: SemanticNodeId) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let data = graph.node_data(signature)?;
+        let SemanticNodeData::Signature {
+            kind,
+            params,
+            return_type,
+            type_parameters,
+            occurrence,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+            signature_span,
+            return_type_span,
+            predicate,
+            is_abstract,
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        if type_parameters.is_empty() {
+            return Some(signature);
+        }
+        let base = |node: SemanticNodeId| {
+            self.instantiate_signature_params_at_base_constraints(signature, node)
+        };
+        let params: Arc<[crate::semantic_query::FunctionParam]> = params
+            .iter()
+            .cloned()
+            .map(|mut param| {
+                param.ty = base(param.ty);
+                param
+            })
+            .collect();
+        let return_type = base(*return_type);
+        Some(graph.intern_node(SemanticNodeData::Signature {
+            kind: *kind,
+            params,
+            return_type,
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            occurrence: occurrence.clone(),
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+            signature_span: *signature_span,
+            return_type_span: *return_type_span,
+            predicate: *predicate,
+            is_abstract: *is_abstract,
+        }))
+    }
+
     /// The signature-utility rule addressed by type-parameter NAME and
     /// constraint rather than by an owning `Signature` node: TypeScript's
     /// BASE signature (`getBaseSignature`), which is what `ReturnType` /

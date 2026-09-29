@@ -3176,51 +3176,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return receiver,
         };
-        let Some(data) = graph.node_data(signature) else {
-            return receiver;
-        };
-        let SemanticNodeData::Signature {
-            kind,
-            params,
-            return_type,
-            type_parameters,
-            occurrence,
-            return_carrier: SignatureReturnCarrier::Declared(_),
-            signature_span,
-            return_type_span,
-            predicate,
-            is_abstract,
-        } = data.as_ref()
-        else {
-            return receiver;
-        };
-        if type_parameters.is_empty() {
-            return receiver;
+        match self.base_signature(signature) {
+            Some(base) if base != signature => base,
+            _ => receiver,
         }
-        let base = |node: SemanticNodeId| {
-            self.instantiate_signature_params_at_base_constraints(signature, node)
-        };
-        let params: Arc<[FunctionParam]> = params
-            .iter()
-            .cloned()
-            .map(|mut param| {
-                param.ty = base(param.ty);
-                param
-            })
-            .collect();
-        let return_type = base(*return_type);
-        graph.intern_node(SemanticNodeData::Signature {
-            kind: *kind,
-            params,
-            return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            occurrence: occurrence.clone(),
-            return_carrier: SignatureReturnCarrier::Declared(return_type),
-            signature_span: *signature_span,
-            return_type_span: *return_type_span,
-            predicate: *predicate,
-            is_abstract: *is_abstract,
-        })
     }
 
     fn call_receiver_relation(
