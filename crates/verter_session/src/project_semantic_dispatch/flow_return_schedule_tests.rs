@@ -2200,3 +2200,58 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         );
     }
 }
+
+/// Completion is not retention: a chain whose every callee evaluation is
+/// refused persistent admission for a deterministic reason (a fenced
+/// serve, forced inside each inline evaluation, and on every cold build)
+/// still evaluates each level exactly once, and answers the chain's value
+/// — each completed callee answers the rest of the transaction however its
+/// publication fares, and none is published.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+/// `{ v: number; tag: "c"; }` at every length.
+#[test]
+fn a_chain_refused_persistent_admission_evaluates_each_level_once() {
+    for levels in [8usize, 64] {
+        let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
+        host.test_force
+            .force_fenced_serve_for_tests
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        host.test_force
+            .force_flow_member_fenced_serve_for_tests
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = super::flow_return::flow_evaluations_for_tests();
+        let (outcome, completed) = with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, PATH, "witness");
+            let outcome = eval_key_on(&host, dispatch, key);
+            (outcome, dispatch.dispatch_txn.borrow().flow.results.len())
+        });
+        let evaluations = super::flow_return::flow_evaluations_for_tests() - before;
+        assert_eq!(
+            completed, levels,
+            "{levels} levels: every callee completes on the transaction, refused or not"
+        );
+        let Outcome::Value {
+            ty,
+            degradation: None,
+            candidates: 0,
+        } = &outcome
+        else {
+            panic!("{levels} levels: a complete value, published nowhere: {outcome:?}");
+        };
+        assert_tagged_value(
+            &Outcome::Value {
+                ty: ty.clone(),
+                degradation: None,
+                candidates: 1,
+            },
+            &[TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)],
+        );
+        assert_eq!(
+            evaluations,
+            levels + 1,
+            "{levels} levels: each of the {} functions evaluates once",
+            levels + 1
+        );
+    }
+}

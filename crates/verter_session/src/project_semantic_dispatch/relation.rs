@@ -3462,10 +3462,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inline_flight: member.inline_flight,
                         self_roots: member.self_roots,
                         materialized: member.materialized,
-                        // Closed inside a larger component: its value rests
-                        // on frames outside its own, so it is never reused
-                        // on the transaction.
-                        reuse: None,
                     });
                 }
                 unproven => {
