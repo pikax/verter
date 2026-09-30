@@ -421,7 +421,10 @@ fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
         FlowReturnDegradation::UnresolvedValue => FlowDegradationTag::UnresolvedValue,
         FlowReturnDegradation::UnmodeledPosition => FlowDegradationTag::UnmodeledPosition,
         FlowReturnDegradation::PartialInterior => FlowDegradationTag::PartialInterior,
-        FlowReturnDegradation::OperationBudget => FlowDegradationTag::OperationBudget,
+        // The audit vocabulary readers know: a value evaluated through an
+        // operation's recovery is a value composed around an interior read
+        // that did not complete.
+        FlowReturnDegradation::OperationBudget => FlowDegradationTag::PartialInterior,
     }
 }
 

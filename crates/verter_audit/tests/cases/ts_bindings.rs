@@ -234,7 +234,6 @@ fn flow_partiality_tags_enumerate_every_closed_reason() {
         "UnresolvedValue",
         "UnmodeledPosition",
         "PartialInterior",
-        "OperationBudget",
     ];
     // Every `FlowReturnFailure` variant with its nested `Unsupported` /
     // `CallResolution` / `Budget` reasons expanded, plus the host's own
