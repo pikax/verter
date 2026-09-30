@@ -14,9 +14,15 @@
 //!   `exec`. Without a delegated cgroup the supervisor refuses.
 //! - macOS (`macos-phys-footprint`, sampled): the child is spawned suspended
 //!   into its own process group; the supervisor samples the summed
-//!   `phys_footprint` of every tracked descendant and kills the tree on a
-//!   breach. Sampling proves no overshoot bound, so this backend runs only
-//!   with `--allow-sampled`.
+//!   `phys_footprint` of every tracked descendant and has the group killed
+//!   on a breach. Sampling proves no overshoot bound, so this backend runs
+//!   only with `--allow-sampled`.
+//!
+//! On Unix a watchdog process (see `sentinel`) owns the workload: it spawns
+//! it, observes its exit, tears the tree down and reaps it, and does so on its
+//! own when the supervisor dies. Nothing is ever killed by a cached process
+//! id: Linux kills through the cgroup's `cgroup.kill`, macOS through the
+//! process group of an unreaped leader.
 //!
 //! Fail closed: when containment or telemetry cannot be established the child
 //! never runs (exit 125, `launched: false`); when either is lost mid-run the
@@ -48,6 +54,8 @@ use report::Report;
 /// - `containment`: establishing containment fails.
 /// - `telemetry`: the pre-launch telemetry probe fails.
 /// - `telemetry-midrun`: the third telemetry observation fails.
+/// - `die-after-spawn`: the supervisor dies, as a crash would, right after
+///   the child exists and before it is released (it prints the child's pid).
 pub const FAULT_ENV: &str = "VERTER_SUPERVISE_FAULT";
 
 /// An injected fault (see [`FAULT_ENV`]).
@@ -56,6 +64,7 @@ pub(crate) enum Fault {
     Containment,
     Telemetry,
     TelemetryMidrun,
+    DieAfterSpawn,
 }
 
 impl Fault {
@@ -64,6 +73,7 @@ impl Fault {
             "containment" => Some(Fault::Containment),
             "telemetry" => Some(Fault::Telemetry),
             "telemetry-midrun" => Some(Fault::TelemetryMidrun),
+            "die-after-spawn" => Some(Fault::DieAfterSpawn),
             _ => None,
         }
     }
@@ -73,6 +83,9 @@ impl Fault {
 pub(crate) const MIDRUN_FAULT_OBSERVATION: u64 = 3;
 
 /// The child's stdout and stderr files.
+/// On Unix they only prove the paths are writable before launch: the watchdog
+/// reopens them by path for the child it spawns.
+#[cfg_attr(unix, allow(dead_code))]
 pub(crate) struct Outputs {
     pub stdout: File,
     pub stderr: File,
@@ -81,6 +94,7 @@ pub(crate) struct Outputs {
 /// Everything a backend needs to run one child.
 pub(crate) struct Launch<'a> {
     pub spec: &'a RunSpec,
+    #[cfg_attr(unix, allow(dead_code))]
     pub outputs: Outputs,
     pub fault: Option<Fault>,
 }

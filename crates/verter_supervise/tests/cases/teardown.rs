@@ -158,3 +158,66 @@ fn a_killed_supervisor_takes_the_tree_with_it() {
         "a killed supervisor writes no result; a missing result is the caller's failure signal"
     );
 }
+
+/// The supervisor dies after the child exists but before it is released or
+/// registered anywhere. The child (suspended on Windows and macOS, already
+/// running on Linux) must not outlive it: the job (Windows) or the watchdog
+/// that spawned it (Unix) tears it down.
+#[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "needs a delegated cgroup v2 subtree (systemd-run --user --scope -p Delegate=yes)"
+)]
+fn a_supervisor_dying_between_spawn_and_release_leaves_no_orphan() {
+    let dir = scratch("die-after-spawn");
+    let pidfile = dir.join("grandchild.pid");
+    let pidfile_text = pidfile.to_string_lossy().into_owned();
+    let run = supervise_in_raw(
+        &dir,
+        &["--mem-mb", "256", "--timeout-ms", "60000"],
+        &["spawn-wait", &pidfile_text, "sleep", "60000"],
+        &[(verter_supervise::FAULT_ENV, "die-after-spawn")],
+    );
+    let child: u32 = run
+        .1
+        .lines()
+        .find_map(|line| line.strip_prefix("verter-supervise: fault: dying after spawning pid "))
+        .unwrap_or_else(|| panic!("the fault never fired; stderr: {}", run.1))
+        .trim()
+        .parse()
+        .unwrap();
+    // Give a running (Linux) child the chance to start its grandchild.
+    std::thread::sleep(Duration::from_millis(300));
+    let mut tree = vec![(
+        child,
+        "the child of a supervisor that died after spawning it",
+    )];
+    if let Ok(text) = std::fs::read_to_string(&pidfile) {
+        tree.push((
+            text.trim().parse().unwrap(),
+            "the grandchild of a supervisor that died after spawning its parent",
+        ));
+    }
+    assert_gone(&tree);
+    assert_ne!(run.0, Some(0));
+    assert!(!dir.join("result.json").exists());
+}
+
+/// Run the supervisor to completion and return its exit code and stderr,
+/// without requiring a result document.
+fn supervise_in_raw(
+    dir: &std::path::Path,
+    limits: &[&str],
+    fixture_args: &[&str],
+    env: &[(&str, &str)],
+) -> (Option<i32>, String) {
+    let mut command = command(dir, limits, fixture_args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("launch verter-supervise");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}

@@ -225,7 +225,8 @@ the run is invalid). A Unix child killed by a signal it did not get from the
 supervisor exits 128 plus the signal.
 
 `result.json` (`schema: 1`) records `program`, `args`, `cwd`, `startedAt`,
-`launched`, `wallMs` (from the child's release to its exit), `exitCode`,
+`launched`, `wallMs` (from the child's release to the observation of its
+exit), `exitCode`,
 `signal`, `killedBy` (`null`, `"memory"`, `"timeout"`, `"cancel"`,
 `"supervisor-error"`, `"pressure"`), `memLimitBytes`, `killTriggerBytes`,
 `timeoutMs`, `peakBytes` with the OS metric it came from in `peakMetric`,
@@ -242,8 +243,8 @@ Containment per platform:
 | Platform | `backend` | `containment` | Mechanism | `peakMetric` |
 | --- | --- | --- | --- | --- |
 | Windows 10+ | `windows-job-object` | `hard` | The child is created suspended and already inside a job object (`PROC_THREAD_ATTRIBUTE_JOB_LIST`) with a job-wide committed-memory limit, kill-on-close and no breakaway, then resumed. The kernel refuses commit past the cap; the limit notification kills the tree; the supervisor's death closes the job and kills the tree. | `job-peak-commit-charge`: the kernel's high-water mark of the tree's commit charge. At a memory kill it includes the request the kernel refused, so it can sit above the cap by that request; granted commit never exceeds the cap. |
-| Linux | `linux-cgroup-v2` | `hard` | A dedicated cgroup v2 (`memory.max`, `memory.swap.max=0`, `memory.oom.group=1`) the child joins before `exec`; teardown writes `cgroup.kill`; a sentinel process kills the cgroup if the supervisor dies. Needs a delegated subtree with the memory controller (for example `systemd-run --user --scope -p Delegate=yes verter-supervise ...`); without one the supervisor refuses. `RLIMIT_AS` is never substituted: it is a per-process address-space limit, not a tree cap. | `cgroup-memory.peak` (kernel 5.19+), else `cgroup-memory.current-sampled-max` |
-| macOS | `macos-phys-footprint` | `sampled` | macOS gives an unprivileged process no kernel-enforced tree cap. The child is `posix_spawn`ed suspended into its own process group; the supervisor sums `phys_footprint` over the group and every tracked descendant every `--sample-ms` (default 10 ms), wakes on every fork (kqueue), and kills the tree at the cap less 1/16 headroom. Runs only with `--allow-sampled`. | `sampled-tree-phys-footprint-sum` |
+| Linux | `linux-cgroup-v2` | `hard` | A dedicated cgroup v2 (`memory.max`, `memory.swap.max=0`, `memory.oom.group=1`) the child joins before `exec`; a watchdog process outside the tree owns the child: it opens the cgroup's `cgroup.kill` before launch (without it, Linux 5.14+, the supervisor refuses), spawns the child, observes its exit, empties the cgroup through `cgroup.kill` and reaps the child, and does the same if the supervisor dies. Nothing is killed by process id. Needs a delegated subtree with the memory controller (for example `systemd-run --user --scope -p Delegate=yes verter-supervise ...`); without one the supervisor refuses. `RLIMIT_AS` is never substituted: it is a per-process address-space limit, not a tree cap. | `cgroup-memory.peak` (kernel 5.19+), else `cgroup-memory.current-sampled-max` |
+| macOS | `macos-phys-footprint` | `sampled` | macOS gives an unprivileged process no kernel-enforced tree cap. A watchdog process owns the child: it `posix_spawn`s it suspended into its own process group, releases it on the supervisor's word, observes its exit with `waitid(WNOWAIT)`, kills the group while the unreaped leader keeps the group id reserved, then reaps it, and does the same if the supervisor dies at any point. The supervisor sums `phys_footprint` over the group and every tracked descendant every `--sample-ms` (default 10 ms), wakes on every fork (kqueue), and has the watchdog kill the group at the cap less 1/16 headroom. Runs only with `--allow-sampled`. | `sampled-tree-phys-footprint-sum` |
 | Other | `unsupported` | none | Refuses to launch. | none |
 
 Fail closed: if containment or telemetry cannot be established, the program
@@ -251,15 +252,16 @@ never runs (`launched: false`, exit 125). On macOS the preflight also requires
 a cap within physical memory minus the host reserve (`--host-reserve-mb`,
 default a quarter of RAM, at least 2 GiB), normal host memory pressure and a
 sampling sweep that fits its age budget. Mid-run, lost telemetry, a dead
-sentinel, a sweep older than twice the sampling interval (macOS), a descendant
+watchdog, a sweep older than twice the sampling interval (macOS), a descendant
 that leaves the process group (macOS) or host memory pressure (macOS) kills
 the tree and invalidates the run. Sampling proves no overshoot bound, so a
 sampled result reports `overshootBoundBytes: null` and the observed overshoot
-instead; a descendant that detaches before the sampler sees it, or a
-simultaneous loss of supervisor and sentinel, is outside a sampled backend's
-reach.
+instead. A descendant that leaves the process group is reported, not
+killed: on macOS nothing outside the group is within the teardown's reach,
+and a simultaneous loss of supervisor and watchdog leaves the group unowned.
 
-`VERTER_SUPERVISE_FAULT` (`containment`, `telemetry`, `telemetry-midrun`)
+`VERTER_SUPERVISE_FAULT` (`containment`, `telemetry`, `telemetry-midrun`,
+`die-after-spawn`)
 injects a supervisor fault for the tests that prove each fail-closed path; it
 is never passed to the child. The crate's integration tests
 (`cargo test -p verter_supervise`) run the real supervisor over the
