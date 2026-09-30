@@ -466,20 +466,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// An instantiation nested `depth` deep past Verter's instantiation
-    /// budget: the checker's TS2589 recovery, reported at Verter's limit.
-    /// Whether the budget is reached depends on the chain that needed the
-    /// instantiation, not on the instantiation alone, so neither the
-    /// recovery nor anything evaluated from it is kept in the memo.
+    /// budget: the checker's TS2589 recovery, reported at Verter's limit, as a
+    /// resource partial. Whether the budget is reached depends on the chain
+    /// that needed the instantiation, not on the instantiation alone, so
+    /// neither the recovery nor anything evaluated from it is kept.
     fn instantiation_budget_refusal(
         &self,
         depth: u32,
     ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
-        let diagnostic = crate::semantic_query::checker_policy::instantiation_budget(
+        let refusal = crate::semantic_query::checker_policy::instantiation_budget(
             self.connected_demand.instantiation_within_budget(depth),
         )
         .err()?;
-        let recovery =
-            crate::semantic_query::checker_policy::checker_recovery(self.graph(), diagnostic, None);
+        let recovery = self.recover_at_operation_budget(refusal, None);
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
             QueryResult::Value(recovery),
             self.project_generation_signature(),

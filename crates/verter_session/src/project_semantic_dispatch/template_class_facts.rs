@@ -696,7 +696,8 @@ fn classify_closed_domain(
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
         StructuralFactDemandOutcome::Complete(node) => node,
-        StructuralFactDemandOutcome::Partial(reasons) => {
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => {
             return ClosedLiteralDomain::Unresolved {
                 reason: unresolved_reasons_from_partial(reasons).0,
                 exactness: ResolutionExactness::Incomplete,
@@ -747,7 +748,8 @@ fn classify_normalized_domain(
                 let normalized =
                     match dispatch.normalize_node_for_structural_fact_demand(member, context) {
                         StructuralFactDemandOutcome::Complete(node) => node,
-                        StructuralFactDemandOutcome::Partial(reasons) => {
+                        StructuralFactDemandOutcome::Recovered { reasons, .. }
+                        | StructuralFactDemandOutcome::Partial(reasons) => {
                             unresolved = Some(ClosedLiteralDomain::Unresolved {
                                 reason: unresolved_reasons_from_partial(reasons).0,
                                 exactness: ResolutionExactness::Incomplete,

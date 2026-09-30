@@ -1,13 +1,25 @@
-//! Shared Unix machinery: signal-driven wakeups, pipes, the sentinel client,
-//! exit-status decoding and process-group teardown.
+//! Shared Unix machinery: signal-driven wakeups, pipes, the monotonic clock
+//! shared by the supervisor and its watchdog, the spawn request, and the
+//! supervisor's side of the watchdog link.
+//!
+//! On Unix the watchdog (an internal mode of this binary, outside the
+//! workload's process group) owns the workload: it spawns it, observes its
+//! exit, tears the tree down and reaps it. The supervisor only decides
+//! (limits, deadline, cancellation, telemetry) and asks the watchdog to kill.
+//! Whatever way the supervisor ends, its control pipe closes and the watchdog
+//! tears the tree down; nothing is ever killed by a cached process id.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
+use crate::cli::RunSpec;
 use crate::FAULT_ENV;
 
 /// Set by SIGINT, SIGTERM or SIGHUP.
@@ -34,21 +46,21 @@ pub(crate) fn cancelled() -> bool {
     CANCELLED.load(Ordering::SeqCst)
 }
 
-/// The wakeup pipe: readable whenever a child changed state or the
-/// supervisor was asked to stop.
+/// A pipe that becomes readable whenever one of the handled signals arrives.
 pub(crate) struct Wakeups {
     read: OwnedFd,
     _write: OwnedFd,
 }
 
 impl Wakeups {
-    /// Install the SIGINT/SIGTERM/SIGHUP/SIGCHLD handlers.
-    pub(crate) fn install() -> std::io::Result<Wakeups> {
+    /// Install handlers for `signals`. SIGCHLD only wakes; any other signal
+    /// also marks the supervisor cancelled.
+    pub(crate) fn install(signals: &[libc::c_int]) -> std::io::Result<Wakeups> {
         let (read, write) = pipe()?;
         set_nonblocking(read.as_raw_fd())?;
         set_nonblocking(write.as_raw_fd())?;
         WAKE_FD.store(write.as_raw_fd(), Ordering::SeqCst);
-        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGCHLD] {
+        for &signal in signals {
             // SAFETY: installs a handler that only touches atomics and write(2).
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
@@ -127,19 +139,23 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Send SIGKILL to a process group and to every listed pid.
-pub(crate) fn kill_tree(pgid: libc::pid_t, pids: impl IntoIterator<Item = libc::pid_t>) {
-    // SAFETY: sending signals has no memory-safety preconditions.
+/// Nanoseconds on the system-wide monotonic clock, comparable between the
+/// supervisor and its watchdog.
+pub(crate) fn monotonic_ns() -> u64 {
+    // SAFETY: clock_gettime with a local out-parameter.
     unsafe {
-        if pgid > 1 {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-        for pid in pids {
-            if pid > 1 {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
+        let mut now: libc::timespec = std::mem::zeroed();
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now);
+        now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
     }
+}
+
+pub(crate) fn ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+pub(crate) fn ns_to_ms(ns: u64) -> f64 {
+    ns as f64 / 1_000_000.0
 }
 
 /// How the child ended.
@@ -167,21 +183,45 @@ pub(crate) fn decode_status(status: libc::c_int) -> ExitInfo {
     }
 }
 
-/// Reap `pid` if it has exited.
-pub(crate) fn try_reap(pid: libc::pid_t) -> std::io::Result<Option<ExitInfo>> {
-    let mut status = 0;
-    // SAFETY: waitpid on our own child with a local out-parameter.
-    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-    match reaped {
-        0 => Ok(None),
-        r if r == pid => Ok(Some(decode_status(status))),
-        _ => Err(std::io::Error::last_os_error()),
+/// What the watchdog needs to spawn the workload. Byte strings, so any
+/// Unix path, argument or environment entry survives the trip.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SpawnRequest {
+    pub program: Vec<u8>,
+    pub args: Vec<Vec<u8>>,
+    pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    pub cwd: Option<Vec<u8>>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// The workload's cgroup directory (Linux).
+    pub cgroup: Option<Vec<u8>>,
+}
+
+impl SpawnRequest {
+    pub(crate) fn new(spec: &RunSpec, cgroup: Option<&std::path::Path>) -> SpawnRequest {
+        let bytes = |text: &OsStr| text.as_bytes().to_vec();
+        SpawnRequest {
+            program: bytes(&spec.program),
+            args: spec.args.iter().map(|arg| bytes(arg)).collect(),
+            env: child_environment(&spec.env)
+                .into_iter()
+                .map(|(name, value)| (name.into_vec(), value.into_vec()))
+                .collect(),
+            cwd: spec.cwd.as_ref().map(|cwd| bytes(cwd.as_os_str())),
+            stdout: bytes(spec.stdout_path().as_os_str()),
+            stderr: bytes(spec.stderr_path().as_os_str()),
+            cgroup: cgroup.map(|dir| bytes(dir.as_os_str())),
+        }
     }
+}
+
+pub(crate) fn os(bytes: &[u8]) -> &OsStr {
+    OsStr::from_bytes(bytes)
 }
 
 /// The child's environment: the supervisor's own, the `--env` overrides
 /// applied, the fault hook removed.
-pub(crate) fn child_environment(overrides: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+fn child_environment(overrides: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
     let mut vars: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     for (name, value) in overrides {
         vars.insert(name.clone(), value.clone());
@@ -190,30 +230,46 @@ pub(crate) fn child_environment(overrides: &[(OsString, OsString)]) -> Vec<(OsSt
     vars.into_iter().collect()
 }
 
-pub(crate) fn ms(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
-}
-
-/// How long the sentinel waits for a heartbeat before tearing the tree down.
+/// How long the watchdog waits for a heartbeat before tearing the tree down.
 pub(crate) const HEARTBEAT_EXPIRY: Duration = Duration::from_secs(2);
 /// How often the supervisor sends a heartbeat.
 pub(crate) const HEARTBEAT_EVERY: Duration = Duration::from_millis(250);
+/// How long a handshake step with the watchdog may take.
+const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
 
-/// The supervisor's side of the sentinel: a separate process, outside the
-/// workload's process group, that tears the tree down when the supervisor
-/// dies (its control pipe reaches EOF) or stops responding (no heartbeat).
-pub(crate) struct SentinelLink {
+/// The watchdog's report that the workload exited and its tree is gone.
+pub(crate) struct Exited {
+    pub exit: ExitInfo,
+    /// Monotonic time the watchdog observed the exit.
+    pub exit_ns: u64,
+    /// Descendants still alive when the child exited, killed by teardown.
+    pub descendants: u64,
+    /// Processes teardown could not remove.
+    pub survivors: u64,
+}
+
+/// What the watchdog link produced since the last look.
+pub(crate) enum LinkEvent {
+    Exited(Exited),
+    /// The watchdog died: the tree is no longer owned by anyone.
+    Lost,
+}
+
+/// The supervisor's side of the watchdog: a control pipe the watchdog reads
+/// (its end of input means the supervisor is gone) and a reply pipe.
+pub(crate) struct WatchdogLink {
     child: Child,
-    control: std::fs::File,
+    control: crate::disk::File,
     replies: OwnedFd,
+    pending: Vec<u8>,
     last_heartbeat: Instant,
 }
 
-impl SentinelLink {
-    /// Start the sentinel and wait for its ready handshake.
-    pub(crate) fn start() -> Result<SentinelLink, String> {
+impl WatchdogLink {
+    /// Start the watchdog and wait for its ready handshake.
+    pub(crate) fn start() -> Result<WatchdogLink, String> {
         let exe = std::env::current_exe()
-            .map_err(|error| format!("cannot locate the supervisor for its sentinel: {error}"))?;
+            .map_err(|error| format!("cannot locate the supervisor for its watchdog: {error}"))?;
         let mut command = Command::new(exe);
         command
             .arg(crate::sentinel::SENTINEL_ARG)
@@ -225,75 +281,115 @@ impl SentinelLink {
             use std::os::unix::process::CommandExt;
             // Outside the terminal's foreground group, so an interactive
             // Ctrl-C reaches the supervisor (which cancels) but not the
-            // sentinel (which must outlive it).
+            // watchdog (which must outlive it).
             command.process_group(0);
         }
         let mut child = command
             .spawn()
-            .map_err(|error| format!("cannot start the sentinel: {error}"))?;
-        let control = std::fs::File::from(OwnedFd::from(child.stdin.take().expect("piped stdin")));
-        let replies: OwnedFd = child.stdout.take().expect("piped stdout").into();
-        let mut link = SentinelLink {
+            .map_err(|error| format!("cannot start the watchdog: {error}"))?;
+        let control =
+            crate::disk::File::from(OwnedFd::from(child.stdin.take().expect("piped stdin")));
+        let replies = OwnedFd::from(child.stdout.take().expect("piped stdout"));
+        let mut link = WatchdogLink {
             child,
             control,
             replies,
+            pending: Vec::new(),
             last_heartbeat: Instant::now(),
         };
-        if let Err(error) = link.await_ready() {
+        let ready = set_nonblocking(link.replies.as_raw_fd())
+            .map_err(|error| format!("watchdog reply pipe: {error}"))
+            .and_then(|()| link.expect_line(HANDSHAKE_LIMIT))
+            .and_then(|line| {
+                if line == "R" {
+                    Ok(())
+                } else {
+                    Err(format!("the watchdog answered {line:?} to its handshake"))
+                }
+            });
+        if let Err(error) = ready {
             link.child.kill().ok();
             link.child.wait().ok();
             return Err(error);
         }
-        set_nonblocking(link.replies.as_raw_fd())
-            .map_err(|error| format!("sentinel reply pipe: {error}"))?;
         Ok(link)
-    }
-
-    fn await_ready(&mut self) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut seen = Vec::new();
-        let mut reader = std::fs::File::from(
-            self.replies
-                .try_clone()
-                .map_err(|error| format!("sentinel reply pipe: {error}"))?,
-        );
-        while !seen.ends_with(b"R\n") {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || !poll_readable(self.replies.as_raw_fd(), remaining) {
-                return Err("the sentinel did not complete its handshake".to_owned());
-            }
-            let mut byte = [0u8; 1];
-            match reader.read(&mut byte) {
-                Ok(1) => seen.push(byte[0]),
-                _ => return Err("the sentinel exited during its handshake".to_owned()),
-            }
-        }
-        Ok(())
     }
 
     fn send(&mut self, line: &str) -> Result<(), String> {
         self.control
             .write_all(line.as_bytes())
             .and_then(|()| self.control.flush())
-            .map_err(|error| format!("the sentinel is unreachable: {error}"))
+            .map_err(|error| format!("the watchdog is unreachable: {error}"))
     }
 
-    pub(crate) fn watch_group(&mut self, pgid: libc::pid_t) -> Result<(), String> {
-        self.send(&format!("G {pgid}\n"))
+    /// Read available reply bytes; `false` at end of input.
+    fn fill(&mut self) -> bool {
+        let mut buffer = [0u8; 4096];
+        let mut reader = crate::disk::File::from(match self.replies.try_clone() {
+            Ok(fd) => fd,
+            Err(_) => return false,
+        });
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return false,
+                Ok(read) => self.pending.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return true,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
     }
 
-    pub(crate) fn watch_pid(&mut self, pid: libc::pid_t) -> Result<(), String> {
-        self.send(&format!("P {pid}\n"))
+    fn next_line(&mut self) -> Option<String> {
+        let end = self.pending.iter().position(|&byte| byte == b'\n')?;
+        let line: Vec<u8> = self.pending.drain(..=end).collect();
+        Some(String::from_utf8_lossy(&line[..end]).into_owned())
     }
 
-    /// Forget a tracked process that is gone, so a reused pid is never killed.
-    pub(crate) fn forget_pid(&mut self, pid: libc::pid_t) -> Result<(), String> {
-        self.send(&format!("X {pid}\n"))
+    /// Wait for the next reply line. `E <message>` becomes an error.
+    fn expect_line(&mut self, limit: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(line) = self.next_line() {
+                return match line.strip_prefix("E ") {
+                    Some(message) => Err(message.to_owned()),
+                    None => Ok(line),
+                };
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("the watchdog did not answer in time".to_owned());
+            }
+            poll_readable(self.replies.as_raw_fd(), remaining);
+            if !self.fill() && !self.pending.contains(&b'\n') {
+                return Err("the watchdog exited".to_owned());
+            }
+        }
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn watch_cgroup(&mut self, path: &std::path::Path) -> Result<(), String> {
-        self.send(&format!("C {}\n", path.display()))
+    /// Ask the watchdog to spawn the workload; returns its pid. On macOS the
+    /// workload is suspended until [`WatchdogLink::release`].
+    pub(crate) fn spawn(&mut self, request: &SpawnRequest) -> Result<libc::pid_t, String> {
+        let json = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        self.send(&format!("Q {json}\n"))?;
+        let line = self.expect_line(HANDSHAKE_LIMIT)?;
+        line.strip_prefix("S ")
+            .and_then(|pid| pid.parse().ok())
+            .ok_or_else(|| format!("the watchdog answered {line:?} to the spawn request"))
+    }
+
+    /// Release the workload; returns the monotonic time it was released.
+    pub(crate) fn release(&mut self) -> Result<u64, String> {
+        self.send("GO\n")?;
+        let line = self.expect_line(HANDSHAKE_LIMIT)?;
+        line.strip_prefix("G ")
+            .and_then(|at| at.parse().ok())
+            .ok_or_else(|| format!("the watchdog answered {line:?} to the release"))
+    }
+
+    /// Ask the watchdog to kill the workload's tree.
+    pub(crate) fn kill(&mut self) -> Result<(), String> {
+        self.send("K\n")
     }
 
     /// Send a heartbeat when one is due.
@@ -305,19 +401,48 @@ impl SentinelLink {
         Ok(())
     }
 
-    /// The sentinel's reply pipe: readable (EOF) if the sentinel died.
+    /// The reply pipe, for polling.
     pub(crate) fn fd(&self) -> RawFd {
         self.replies.as_raw_fd()
     }
 
-    /// Whether the sentinel is still alive.
-    pub(crate) fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    /// Collect what the watchdog reported.
+    pub(crate) fn event(&mut self) -> Option<LinkEvent> {
+        let open = self.fill();
+        while let Some(line) = self.next_line() {
+            if let Some(exited) = line.strip_prefix("X ").and_then(parse_exit) {
+                return Some(LinkEvent::Exited(exited));
+            }
+        }
+        if !open || !matches!(self.child.try_wait(), Ok(None)) {
+            return Some(LinkEvent::Lost);
+        }
+        None
     }
 
-    /// Disarm the sentinel after a completed teardown.
+    /// Dismiss the watchdog after it reported the exit.
     pub(crate) fn finish(mut self) {
         self.send("D\n").ok();
+        self.reap();
+    }
+
+    /// Abandon the run: closing the control pipe makes the watchdog tear
+    /// the tree down (if it spawned one) and exit.
+    pub(crate) fn abandon(self) {
+        let WatchdogLink {
+            mut child, control, ..
+        } = self;
+        drop(control);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !matches!(child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn reap(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if !matches!(self.child.try_wait(), Ok(None)) {
@@ -325,9 +450,36 @@ impl SentinelLink {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        self.child.kill().ok();
-        self.child.wait().ok();
     }
+}
+
+/// `X <code|-> <signal|-> <exit_ns> <descendants> <survivors>`.
+fn parse_exit(text: &str) -> Option<Exited> {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let [code, signal, exit_ns, descendants, survivors] = fields[..] else {
+        return None;
+    };
+    Some(Exited {
+        exit: ExitInfo {
+            code: code.parse().ok(),
+            signal: signal.parse().ok(),
+        },
+        exit_ns: exit_ns.parse().ok()?,
+        descendants: descendants.parse().ok()?,
+        survivors: survivors.parse().ok()?,
+    })
+}
+
+pub(crate) fn format_exit(exited: &Exited) -> String {
+    let field = |value: Option<String>| value.unwrap_or_else(|| "-".to_owned());
+    format!(
+        "X {} {} {} {} {}\n",
+        field(exited.exit.code.map(|code| code.to_string())),
+        field(exited.exit.signal.map(|signal| signal.to_string())),
+        exited.exit_ns,
+        exited.descendants,
+        exited.survivors
+    )
 }
 
 /// Wait until `fd` is readable (or hung up) for at most `limit`.
@@ -340,4 +492,13 @@ pub(crate) fn poll_readable(fd: RawFd, limit: Duration) -> bool {
     let timeout = limit.as_millis().min(i32::MAX as u128) as libc::c_int;
     // SAFETY: polls one valid descriptor.
     unsafe { libc::poll(&mut entry, 1, timeout) > 0 }
+}
+
+/// Die at once, as a crash would: no destructor, handler or cleanup runs.
+pub(crate) fn crash_now() -> ! {
+    // SAFETY: SIGKILL to ourselves; nothing runs after it.
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGKILL);
+    }
+    std::process::abort()
 }

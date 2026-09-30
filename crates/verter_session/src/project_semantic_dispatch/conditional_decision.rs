@@ -586,14 +586,15 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// The type a name operand resolves to, at structural transit; `None`
+    /// The type a name operand resolves to, at structural transit — the
+    /// checker's recovery when an operation's allowance stopped it; `None`
     /// when its demand does not complete.
     fn resolved_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
         self.normalize_node_for_structural_fact_demand(
             operand,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
-        .into_complete_node()
+        .into_usable_node()
     }
 
     fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {
@@ -788,7 +789,7 @@ impl ProjectSemanticDispatch<'_> {
                 check,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
-            .into_complete_node()?;
+            .into_usable_node()?;
         union_members_of(resolved)
     }
 
@@ -827,7 +828,7 @@ impl ProjectSemanticDispatch<'_> {
             node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
-        .into_complete_node()
+        .into_usable_node()
         .unwrap_or(node)
     }
 

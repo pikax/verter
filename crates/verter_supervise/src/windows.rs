@@ -15,8 +15,8 @@
 //! kernel refused, so it can sit above the cap by up to that request; the
 //! commit the tree was granted never exceeds the cap.
 
+use crate::disk::{File, OpenOptions};
 use std::ffi::{c_void, OsStr, OsString};
-use std::fs::{File, OpenOptions};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
@@ -42,12 +42,12 @@ use windows_sys::Win32::System::SystemServices::{
     JOB_OBJECT_MSG_JOB_MEMORY_LIMIT, JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, SetEvent, UpdateProcThreadAttribute,
-    WaitForMultipleObjects, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW,
+    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread, SetEvent,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects, CREATE_NEW_PROCESS_GROUP,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus, OVERLAPPED,
@@ -216,6 +216,16 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             return;
         }
     };
+    if launch.fault == Some(Fault::DieAfterSpawn) {
+        eprintln!(
+            "verter-supervise: fault: dying after spawning pid {}",
+            child.pid
+        );
+        // SAFETY: terminates this process, as a crash would; no handler runs.
+        unsafe {
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    }
 
     let port_thread = {
         let shared = Arc::clone(&shared);
@@ -569,6 +579,7 @@ fn query_accounting(job: &Owned) -> Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATIO
 struct Child {
     process: Owned,
     thread: Owned,
+    pid: u32,
 }
 
 /// Create the child suspended and already inside `job`, inheriting only its
@@ -693,6 +704,7 @@ fn spawn_in_job(spec: &RunSpec, job: &Owned, outputs: Outputs) -> Result<Child, 
         Ok(Child {
             process: Owned(info.hProcess),
             thread: Owned(info.hThread),
+            pid: info.dwProcessId,
         })
     }
 }

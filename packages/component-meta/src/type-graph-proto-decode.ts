@@ -230,6 +230,7 @@ const SURFACE_PARTIAL_REASON_BY_WIRE: Readonly<
   [SurfacePartialReason.FLOW_RETURN_NO_SURFACE]: "flowReturnNoSurface",
   [SurfacePartialReason.UNDECIDED_CONDITIONAL]: "undecidedConditional",
   [SurfacePartialReason.CONNECTED_MEMORY_LIMIT]: "connectedMemoryLimit",
+  [SurfacePartialReason.OPERATION_BUDGET]: "operationBudget",
 };
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;

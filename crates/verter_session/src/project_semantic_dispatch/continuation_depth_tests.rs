@@ -138,8 +138,8 @@ fn evaluated_in<R: Send + 'static>(
                         node,
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     )
-                    .into_complete_node()
-                    .expect("the probe evaluates completely");
+                    .into_usable_node()
+                    .expect("the probe answers");
                 read(dispatch, value)
             },
         )
@@ -530,8 +530,8 @@ fn a_budget_recovery_is_never_kept_in_the_memo() {
                             node,
                             ProjectionReductionContext::published(ProjectionMode::Expanded),
                         )
-                        .into_complete_node()
-                        .expect("the probe evaluates completely");
+                        .into_usable_node()
+                        .expect("the probe answers");
                     match dispatch.graph().node_data(value).as_deref() {
                         Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. })) => None,
                         _ => Some(

@@ -3,16 +3,19 @@
 //! The cgroup's `memory.max` is the cap for the whole tree (every descendant
 //! is born inside it), `memory.swap.max=0` keeps the tree from spilling into
 //! swap, and `memory.oom.group=1` makes the kernel's OOM kill take the whole
-//! tree. Teardown writes `cgroup.kill`. A sentinel process outside the tree
-//! kills the cgroup if the supervisor dies. The peak is the kernel's
-//! `memory.peak` where the kernel has it (5.19+), otherwise the sampled
-//! maximum of `memory.current`, named as such.
+//! tree. The watchdog owns the workload: before launch it opens the cgroup's
+//! `cgroup.kill` (the only way the tree is ever killed; without it the
+//! supervisor refuses), spawns the child into the cgroup, observes its exit
+//! and empties the cgroup. The peak is the kernel's `memory.peak` where the
+//! kernel has it (5.19+), otherwise the sampled maximum of `memory.current`,
+//! named as such.
 //!
 //! Without a delegated cgroup v2 subtree that has the memory controller the
 //! supervisor refuses to launch; a per-process `RLIMIT_AS` is not an
 //! aggregate tree cap and is never substituted.
 
-use std::fs::{File, OpenOptions};
+use crate::disk::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -20,17 +23,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::report::{Containment, KilledBy, Report, Sample, SampleSeries};
-use crate::unix::{child_environment, ms, try_reap, SentinelLink, Wakeups};
+use crate::unix::{
+    crash_now, monotonic_ns, ms, ns_to_ms, os, Exited, LinkEvent, SpawnRequest, Wakeups,
+    WatchdogLink,
+};
 use crate::{Fault, Launch, MIDRUN_FAULT_OBSERVATION};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
 const TEARDOWN_LIMIT: Duration = Duration::from_secs(5);
 
-/// The workload's cgroup.
+/// The workload's cgroup, as the supervisor sees it.
 struct Cgroup {
     dir: PathBuf,
-    procs: File,
     has_peak: bool,
 }
 
@@ -51,7 +56,7 @@ impl Cgroup {
                 "{CGROUP_ROOT} is not a cgroup v2 unified hierarchy"
             )));
         }
-        let own = std::fs::read_to_string("/proc/self/cgroup")
+        let own = disk::read_to_string("/proc/self/cgroup")
             .map_err(|error| refuse(format!("/proc/self/cgroup: {error}")))?;
         let own = own
             .lines()
@@ -69,7 +74,7 @@ impl Cgroup {
                 .as_nanos()
         );
         let dir = parent.join(unique);
-        std::fs::create_dir(&dir)
+        disk::create_dir(&dir)
             .map_err(|error| refuse(format!("cannot create {}: {error}", dir.display())))?;
         let configure = || -> Result<Cgroup, String> {
             write(&dir.join("memory.max"), &mem_limit_bytes.to_string())?;
@@ -89,18 +94,13 @@ impl Cgroup {
                     "memory.max reads back {applied:?}, not {mem_limit_bytes}"
                 ));
             }
-            let procs = OpenOptions::new()
-                .write(true)
-                .open(dir.join("cgroup.procs"))
-                .map_err(|error| format!("cgroup.procs: {error}"))?;
             Ok(Cgroup {
                 has_peak: dir.join("memory.peak").exists(),
                 dir: dir.clone(),
-                procs,
             })
         };
         configure().map_err(|error| {
-            std::fs::remove_dir(&dir).ok();
+            disk::remove_dir(&dir).ok();
             format!("cannot establish containment: {error}")
         })
     }
@@ -114,7 +114,7 @@ impl Cgroup {
     }
 
     fn event(&self, name: &str) -> Result<u64, String> {
-        let events = std::fs::read_to_string(self.file("memory.events"))
+        let events = disk::read_to_string(self.file("memory.events"))
             .map_err(|error| format!("memory.events: {error}"))?;
         Ok(events
             .lines()
@@ -123,32 +123,22 @@ impl Cgroup {
             .unwrap_or(0))
     }
 
-    fn members(&self) -> Vec<libc::pid_t> {
-        std::fs::read_to_string(self.file("cgroup.procs"))
-            .map(|procs| {
-                procs
-                    .lines()
-                    .filter_map(|pid| pid.trim().parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn kill_all(&self) {
-        if write(&self.file("cgroup.kill"), "1").is_ok() {
-            return;
+    /// Empty the cgroup when its watchdog is gone. Only `cgroup.kill`: never
+    /// a process id.
+    fn kill_orphaned(&self) -> Result<(), String> {
+        let kill = OpenOptions::new()
+            .write(true)
+            .open(self.file("cgroup.kill"))
+            .map_err(|error| format!("cgroup.kill: {error}"))?;
+        let (_, survivors) = empty_cgroup(&kill, &self.file("cgroup.events"), TEARDOWN_LIMIT);
+        if survivors {
+            return Err("the cgroup did not empty".to_owned());
         }
-        crate::unix::kill_tree(0, self.members());
-    }
-
-    fn populated(&self) -> bool {
-        std::fs::read_to_string(self.file("cgroup.events"))
-            .map(|events| events.lines().any(|line| line == "populated 1"))
-            .unwrap_or(false)
+        Ok(())
     }
 
     fn remove(&self) {
-        std::fs::remove_dir(&self.dir).ok();
+        disk::remove_dir(&self.dir).ok();
     }
 }
 
@@ -175,7 +165,7 @@ fn workload_parent(own: &Path) -> Result<PathBuf, String> {
     let members = read_trimmed(&own.join("cgroup.procs"))?;
     if members.lines().all(|member| member.trim() == pid) {
         let leaf = own.join(format!("verter-supervise-{pid}-self"));
-        match std::fs::create_dir(&leaf) {
+        match disk::create_dir(&leaf) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("cannot create {}: {error}", leaf.display())),
@@ -198,17 +188,17 @@ fn workload_parent(own: &Path) -> Result<PathBuf, String> {
 }
 
 fn swap_active() -> bool {
-    std::fs::read_to_string("/proc/swaps")
+    disk::read_to_string("/proc/swaps")
         .map(|swaps| swaps.lines().count() > 1)
         .unwrap_or(true)
 }
 
 fn write(path: &Path, value: &str) -> Result<(), String> {
-    std::fs::write(path, value).map_err(|error| format!("{}: {error}", path.display()))
+    disk::write(path, value).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn read_trimmed(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path)
+    disk::read_to_string(path)
         .map(|text| text.trim().to_owned())
         .map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -219,14 +209,167 @@ fn read_u64(path: &Path) -> Result<u64, String> {
         .map_err(|_| format!("{}: unreadable value {text:?}", path.display()))
 }
 
+fn populated(events: &Path) -> bool {
+    disk::read_to_string(events)
+        .map(|events| events.lines().any(|line| line == "populated 1"))
+        .unwrap_or(true)
+}
+
+/// Kill everything in a cgroup through its `cgroup.kill` and wait until it is
+/// empty. The kill is repeated only while the cgroup is still populated, and
+/// nothing is signalled once it is empty. Returns whether the cgroup was
+/// populated at the start and whether anything survived `limit`.
+fn empty_cgroup(kill: &File, events: &Path, limit: Duration) -> (bool, bool) {
+    let was_populated = populated(events);
+    let deadline = Instant::now() + limit;
+    let mut last_kill: Option<Instant> = None;
+    while populated(events) {
+        if Instant::now() > deadline {
+            return (was_populated, true);
+        }
+        if last_kill.is_none_or(|at| at.elapsed() >= Duration::from_millis(100)) {
+            let mut kill = kill;
+            kill.write_all(b"1").ok();
+            last_kill = Some(Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    (was_populated, false)
+}
+
 fn cpu_usage(cgroup: &Cgroup) -> Option<(f64, f64)> {
-    let stat = std::fs::read_to_string(cgroup.file("cpu.stat")).ok()?;
+    let stat = disk::read_to_string(cgroup.file("cpu.stat")).ok()?;
     let field = |name: &str| -> Option<f64> {
         stat.lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
             .and_then(|value| value.trim().parse::<f64>().ok())
     };
     Some((field("user_usec")? / 1000.0, field("system_usec")? / 1000.0))
+}
+
+/// The workload, as its watchdog owns it: the child and the cgroup's kill
+/// switch, opened before the child exists.
+pub(crate) struct Workload {
+    pid: libc::pid_t,
+    kill: File,
+    dir: PathBuf,
+    start_ns: u64,
+}
+
+impl Workload {
+    pub(crate) fn spawn(request: &SpawnRequest) -> Result<Workload, String> {
+        let dir = PathBuf::from(os(request
+            .cgroup
+            .as_deref()
+            .ok_or("cannot establish containment: the spawn request names no cgroup")?));
+        let kill = OpenOptions::new()
+            .write(true)
+            .open(dir.join("cgroup.kill"))
+            .map_err(|error| {
+                format!(
+                    "cannot establish containment: the cgroup's kill switch {} is unavailable \
+                     ({error}); Linux 5.14 or later is required",
+                    dir.join("cgroup.kill").display()
+                )
+            })?;
+        let procs = OpenOptions::new()
+            .write(true)
+            .open(dir.join("cgroup.procs"))
+            .map_err(|error| format!("cannot establish containment: cgroup.procs: {error}"))?;
+        let program = os(&request.program);
+        let refuse = |why: String| format!("cannot spawn {}: {why}", program.to_string_lossy());
+        let output = |path: &[u8]| {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(os(path))
+                .map_err(|error| refuse(format!("cannot open {:?}: {error}", os(path))))
+        };
+        let stdout = output(&request.stdout)?;
+        let stderr = output(&request.stderr)?;
+        let mut command = Command::new(program);
+        command
+            .args(request.args.iter().map(|arg| os(arg)))
+            .env_clear()
+            .envs(
+                request
+                    .env
+                    .iter()
+                    .map(|(name, value)| (os(name), os(value))),
+            )
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .process_group(0);
+        if let Some(cwd) = &request.cwd {
+            command.current_dir(os(cwd));
+        }
+        let procs_fd = procs.as_raw_fd();
+        // SAFETY: the closure only makes async-signal-safe system calls.
+        unsafe {
+            command.pre_exec(move || {
+                // Join the workload cgroup before exec: the program's first
+                // instruction already runs under the cap.
+                if libc::write(procs_fd, b"0".as_ptr() as *const libc::c_void, 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let start_ns = monotonic_ns();
+        let child = command.spawn().map_err(|error| refuse(error.to_string()))?;
+        let pid = child.id() as libc::pid_t;
+        // The watchdog observes and reaps the child with waitid/waitpid.
+        std::mem::forget(child);
+        Ok(Workload {
+            pid,
+            kill,
+            dir,
+            start_ns,
+        })
+    }
+
+    pub(crate) fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    /// The child runs from `exec`, already inside the cgroup; its start is
+    /// the moment it was spawned.
+    pub(crate) fn release(&self) -> Result<u64, String> {
+        Ok(self.start_ns)
+    }
+
+    pub(crate) fn kill(&self) {
+        let mut kill = &self.kill;
+        kill.write_all(b"1").ok();
+    }
+
+    /// Empty the cgroup after the child exited. Returns the descendants that
+    /// were still alive and whether any survived.
+    pub(crate) fn teardown(&self) -> (u64, u64) {
+        let members = |dir: &Path| {
+            disk::read_to_string(dir.join("cgroup.procs"))
+                .map(|procs| procs.lines().count() as u64)
+                .unwrap_or(0)
+        };
+        let descendants = members(&self.dir);
+        let (_, survived) =
+            empty_cgroup(&self.kill, &self.dir.join("cgroup.events"), TEARDOWN_LIMIT);
+        (
+            descendants,
+            if survived {
+                members(&self.dir).max(1)
+            } else {
+                0
+            },
+        )
+    }
+
+    /// Remove the emptied cgroup when the supervisor is gone and cannot.
+    pub(crate) fn abandoned(&self) {
+        disk::remove_dir(&self.dir).ok();
+    }
 }
 
 pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
@@ -263,7 +406,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         "cgroup-memory.current-sampled-max"
     });
 
-    let wakeups = match Wakeups::install() {
+    let wakeups = match Wakeups::install(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]) {
         Ok(wakeups) => wakeups,
         Err(error) => {
             report
@@ -273,9 +416,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             return;
         }
     };
-    let mut sentinel = match SentinelLink::start()
-        .and_then(|mut link| link.watch_cgroup(&cgroup.dir).map(|()| link))
-    {
+    let mut link = match WatchdogLink::start() {
         Ok(link) => link,
         Err(error) => {
             report
@@ -285,74 +426,48 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             return;
         }
     };
-
-    let procs_fd = cgroup.procs.as_raw_fd();
-    let mut command = Command::new(&spec.program);
-    command
-        .args(&spec.args)
-        .env_clear()
-        .envs(child_environment(&spec.env))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(launch.outputs.stdout))
-        .stderr(Stdio::from(launch.outputs.stderr))
-        .process_group(0);
-    if let Some(cwd) = &spec.cwd {
-        command.current_dir(cwd);
-    }
-    // SAFETY: the closure only makes async-signal-safe system calls.
-    unsafe {
-        command.pre_exec(move || {
-            // Join the workload cgroup before exec: the program's first
-            // instruction already runs under the cap.
-            if libc::write(procs_fd, b"0".as_ptr() as *const libc::c_void, 1) != 1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    if crate::unix::cancelled() {
-        report.killed_by = Some(KilledBy::Cancel);
-        sentinel.finish();
-        cgroup.remove();
-        return;
-    }
-    let started = Instant::now();
-    let child = match command.spawn() {
-        Ok(child) => child,
+    let pid = match link.spawn(&SpawnRequest::new(spec, Some(&cgroup.dir))) {
+        Ok(pid) => pid,
         Err(error) => {
-            report.errors.push(format!(
-                "cannot spawn {}: {error}",
-                spec.program.to_string_lossy()
-            ));
-            sentinel.finish();
-            cgroup.kill_all();
+            report.errors.push(error);
+            link.abandon();
             cgroup.remove();
             return;
         }
     };
-    let pid = child.id() as libc::pid_t;
-    // The child is reaped with waitpid below, not through `Child`.
-    std::mem::forget(child);
+    if launch.fault == Some(Fault::DieAfterSpawn) {
+        eprintln!("verter-supervise: fault: dying after spawning pid {pid}");
+        crash_now();
+    }
+    if crate::unix::cancelled() {
+        report.killed_by = Some(KilledBy::Cancel);
+        link.abandon();
+        cgroup.remove();
+        return;
+    }
+    let start_ns = match link.release() {
+        Ok(start_ns) => start_ns,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("cannot release the contained child: {error}"));
+            link.abandon();
+            cgroup.remove();
+            return;
+        }
+    };
     report.launched = true;
+    let started = Instant::now();
+
     let mut cause: Option<KilledBy> = None;
-    let mut killed_at: Option<Instant> = None;
-    let kill = |why: KilledBy, cause: &mut Option<KilledBy>, killed_at: &mut Option<Instant>| {
+    let mut kill_ns: Option<u64> = None;
+    let mut kill = |why: KilledBy, link: &mut WatchdogLink, cause: &mut Option<KilledBy>| {
         if cause.is_none() {
             *cause = Some(why);
-            *killed_at = Some(Instant::now());
+            kill_ns = Some(monotonic_ns());
         }
-        cgroup.kill_all();
+        link.kill().ok();
     };
-    if let Err(error) = sentinel
-        .watch_group(pid)
-        .and_then(|()| sentinel.watch_pid(pid))
-    {
-        report.errors.push(error);
-        kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
-    }
 
     let interval = spec.sample_interval.unwrap_or(DEFAULT_SAMPLE_INTERVAL);
     report.sampling.interval_ms = ms(interval);
@@ -361,42 +476,43 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     let mut sampled_max = 0u64;
     let mut next_sample = started;
     let mut last_observation = started;
-    let exit = loop {
-        match try_reap(pid) {
-            Ok(Some(exit)) => break Some(exit),
-            Ok(None) => {}
-            Err(error) => {
+    let mut killed_at: Option<Instant> = None;
+    let exited: Option<Exited> = loop {
+        match link.event() {
+            Some(LinkEvent::Exited(exited)) => break Some(exited),
+            Some(LinkEvent::Lost) => {
                 report
                     .errors
-                    .push(format!("cannot wait for the child: {error}"));
-                kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
+                    .push("the watchdog died mid-run; the cgroup was killed".to_owned());
+                if cause.is_none() {
+                    cause = Some(KilledBy::SupervisorError);
+                }
+                if let Err(error) = cgroup.kill_orphaned() {
+                    report.errors.push(error);
+                }
                 break None;
             }
+            None => {}
         }
         let now = Instant::now();
         if cause.is_none() && now >= deadline {
-            kill(KilledBy::Timeout, &mut cause, &mut killed_at);
+            kill(KilledBy::Timeout, &mut link, &mut cause);
         }
-        if crate::unix::cancelled() && cause.is_none() {
-            kill(KilledBy::Cancel, &mut cause, &mut killed_at);
+        if cause.is_none() && crate::unix::cancelled() {
+            kill(KilledBy::Cancel, &mut link, &mut cause);
         }
-        if let Some(at) = killed_at {
-            if at.elapsed() > TEARDOWN_LIMIT {
+        if cause.is_some() {
+            let at = *killed_at.get_or_insert(now);
+            if at.elapsed() > TEARDOWN_LIMIT * 2 {
                 report
                     .errors
-                    .push("the child did not exit after the tree was killed".to_owned());
+                    .push("the watchdog did not report the tree gone after the kill".to_owned());
                 break None;
             }
         }
-        if cause.is_none() && !sentinel.alive() {
-            report.errors.push("the sentinel died mid-run".to_owned());
-            kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
-        }
-        if cause.is_none() {
-            if let Err(error) = sentinel.heartbeat() {
-                report.errors.push(error);
-                kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
-            }
+        if let Err(error) = link.heartbeat() {
+            report.errors.push(error);
+            kill(KilledBy::SupervisorError, &mut link, &mut cause);
         }
         if cause.is_none() && now >= next_sample {
             report.sampling.count += 1;
@@ -426,11 +542,11 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     report
                         .errors
                         .push(format!("telemetry lost mid-run: {error}"));
-                    kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
+                    kill(KilledBy::SupervisorError, &mut link, &mut cause);
                 }
             }
             if cgroup.event("oom_kill").unwrap_or(0) > 0 {
-                kill(KilledBy::Memory, &mut cause, &mut killed_at);
+                kill(KilledBy::Memory, &mut link, &mut cause);
             }
             next_sample = (next_sample + interval).max(Instant::now());
         }
@@ -447,7 +563,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                 revents: 0,
             },
             libc::pollfd {
-                fd: sentinel.fd(),
+                fd: link.fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -461,44 +577,21 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             libc::poll(fds.as_mut_ptr(), 2, timeout);
         }
         wakeups.drain();
-        if fds[1].revents != 0 && cause.is_none() {
-            report.errors.push("the sentinel died mid-run".to_owned());
-            kill(KilledBy::SupervisorError, &mut cause, &mut killed_at);
-        }
     };
 
-    let exited = Instant::now();
-    if exit.is_some() {
-        // Reaped: its pid may be reused from here on.
-        sentinel.forget_pid(pid).ok();
-    }
-    report.wall_ms = Some(ms(exited.duration_since(started)));
-    if let Some(at) = killed_at {
-        report.termination_latency_ms = Some(ms(exited.saturating_duration_since(at)));
-    }
-    if let Some(exit) = exit {
-        report.exit_code = exit.code;
-        report.signal = exit.signal;
-    }
-
-    // Tear down whatever the child left behind, and wait for the cgroup to
-    // empty.
-    let left = cgroup.members();
-    report.descendants_killed = Some(left.len() as u64);
-    cgroup.kill_all();
-    let teardown_deadline = Instant::now() + TEARDOWN_LIMIT;
-    while cgroup.populated() {
-        if Instant::now() > teardown_deadline {
-            report.errors.push(format!(
-                "{} processes were still alive {TEARDOWN_LIMIT:?} after teardown",
-                cgroup.members().len()
-            ));
-            break;
+    if let Some(exited) = &exited {
+        report.wall_ms = Some(ns_to_ms(exited.exit_ns.saturating_sub(start_ns)));
+        report.termination_latency_ms =
+            kill_ns.map(|at| ns_to_ms(exited.exit_ns.saturating_sub(at)));
+        report.exit_code = exited.exit.code;
+        report.signal = exited.exit.signal;
+        report.descendants_killed = Some(exited.descendants);
+        if exited.survivors > 0 {
+            report
+                .errors
+                .push("processes survived the cgroup's teardown".to_owned());
         }
-        cgroup.kill_all();
-        std::thread::sleep(Duration::from_millis(2));
     }
-
     match cgroup.event("oom_kill") {
         Ok(kills) if kills > 0 && cause.is_none() => cause = Some(KilledBy::Memory),
         Ok(_) => {}
@@ -521,6 +614,60 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         report.cpu_kernel_ms = Some(system);
     }
     report.samples = series.into_vec();
-    sentinel.finish();
+    if exited.is_some() {
+        link.finish();
+    } else {
+        link.abandon();
+    }
     cgroup.remove();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Once the cgroup reads empty, teardown writes `cgroup.kill` no more:
+    /// nothing is signalled after a successful cleanup.
+    #[test]
+    fn teardown_stops_signalling_once_the_cgroup_is_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("verter-supervise-teardown-{}", std::process::id()));
+        disk::create_dir_all(&dir).unwrap();
+        let events = dir.join("cgroup.events");
+        let kill_path = dir.join("cgroup.kill");
+        disk::write(&kill_path, "").unwrap();
+        let kill = OpenOptions::new().append(true).open(&kill_path).unwrap();
+
+        disk::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        assert_eq!(
+            empty_cgroup(&kill, &events, Duration::from_millis(300)),
+            (false, false)
+        );
+        assert_eq!(disk::read_to_string(&kill_path).unwrap(), "");
+
+        // Populated until the first kill lands, then empty.
+        disk::write(&events, "populated 1\n").unwrap();
+        let flip = {
+            let events = events.clone();
+            let kill_path = kill_path.clone();
+            std::thread::spawn(move || {
+                while disk::read_to_string(&kill_path).unwrap().is_empty() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                disk::write(&events, "populated 0\n").unwrap();
+            })
+        };
+        assert_eq!(
+            empty_cgroup(&kill, &events, Duration::from_secs(5)),
+            (true, false)
+        );
+        flip.join().unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            disk::read_to_string(&kill_path).unwrap(),
+            "1",
+            "exactly one kill, none after the cgroup emptied"
+        );
+        disk::remove_dir_all(&dir).ok();
+    }
 }

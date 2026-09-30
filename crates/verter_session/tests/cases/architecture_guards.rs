@@ -4397,6 +4397,14 @@ pub(crate) mod foundations_guards {
             // may depend on the crate. `D14_ALLOW_LIST` carries the full
             // rationale.
             "crates/verter_validation_probe/src/disk.rs",
+            // test/CI-only process supervisor for compiler probes and
+            // benchmarks — the crate's SOLE disk boundary, through which its
+            // backends, its result writer and its fixture binary all read and
+            // write. Touches only its own result/log files, the contained
+            // workload's cgroup and `/proc` pseudo-files, and temp paths; never
+            // workspace/semantic/overlay/VFS state, and no production crate may
+            // depend on the crate. `D14_ALLOW_LIST` carries the full rationale.
+            "crates/verter_supervise/src/disk.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -5942,6 +5950,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_validation_probe/src/disk.rs",
             "test/CI-only validation-probe lane, and the crate's SOLE disk boundary — the corpus adapter, the lane and the summary binary all route through this one module, so the whole crate is this single entry rather than one per reader. It reads a pinned third-party corpus checkout under `.integration-tests/repos/` (gated behind `feature = \"external-corpus\"`), its own committed `manifest/*.toml`, and its own published `target/validation-probe/summary.json`. None of that is workspace, semantic, overlay or VFS state, and no production crate may depend on this crate (the dependency-layer guard lists it among the harnesses) — sibling of the `verter_vue_conformance/src/lib.rs` and `verter_svelte_conformance/src/generate.rs` corpus-tooling entries.",
+        ),
+        (
+            "crates/verter_supervise/src/disk.rs",
+            "test/CI-only process supervisor (`verter-supervise`) that runs compiler probes and benchmark arms under process-tree memory containment, and the crate's SOLE disk boundary — its Windows/Linux/macOS backends, its result writer and its `verter-supervise-fixture` test binary all route through this one module, so the whole crate is this single entry. It touches only its own `result.json` and the child's stdout/stderr log files, the contained workload's cgroup v2 control files and `/proc` pseudo-files, and temp paths its tests and fixture use. None of that is workspace, semantic, overlay or VFS state, and no production crate may depend on this crate (the dependency-layer guard lists it among the harnesses) — sibling of the `verter_validation_probe/src/disk.rs` tooling entry.",
         ),
 ];
 

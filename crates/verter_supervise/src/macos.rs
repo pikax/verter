@@ -9,20 +9,24 @@
 //!
 //! - Before the child runs: consent, a cap within physical memory minus the
 //!   host reserve, normal host memory pressure, a readable footprint, a
-//!   sampling cadence that meets its age budget, and a ready sentinel. Any
+//!   sampling cadence that meets its age budget, and a ready watchdog. Any
 //!   failure refuses the launch.
-//! - The child is `posix_spawn`ed suspended (`POSIX_SPAWN_START_SUSPENDED`)
-//!   into its own process group with only its three standard descriptors,
-//!   registered with kqueue (`NOTE_EXIT`, `NOTE_FORK`) and with the sentinel,
-//!   and only then released with `SIGCONT`.
-//! - Every sweep enumerates the process group and the children of every
-//!   tracked process, reads each one's `ri_phys_footprint`, and kills the
-//!   group and every tracked process when the sum reaches the kill trigger
-//!   (the cap less a headroom of 1/16). A fork wakes a sweep at once.
+//! - The watchdog owns the workload: it `posix_spawn`s the child suspended
+//!   (`POSIX_SPAWN_START_SUSPENDED`) into its own process group with only its
+//!   three standard descriptors, releases it with `SIGCONT` on the
+//!   supervisor's word, observes its exit with `waitid(WNOWAIT)`, kills the
+//!   group while the unreaped leader keeps the group id reserved, and only
+//!   then reaps it. A supervisor that dies at any point, even between the
+//!   spawn and the release, leaves the watchdog to kill the group.
+//! - The supervisor samples: every sweep enumerates the process group and the
+//!   children of every tracked process, reads each one's `ri_phys_footprint`,
+//!   and asks the watchdog to kill the group when the sum reaches the kill
+//!   trigger (the cap less a headroom of 1/16). A fork wakes a sweep at once.
 //! - Fail closed mid-run: an unreadable live process, a descendant that left
 //!   the process group, a sweep older than twice the sampling interval, a
-//!   dead sentinel or host memory pressure kills the tree and invalidates the
-//!   run.
+//!   dead watchdog or host memory pressure kills the group and invalidates
+//!   the run. A descendant that left the group is reported, not killed:
+//!   nothing is ever killed by a cached process id.
 //!
 //! Sampling proves no overshoot bound: allocation between two sweeps, and
 //! kill latency, are not bounded by anything the supervisor controls. The
@@ -34,9 +38,14 @@ use std::ffi::{c_char, c_int, CString};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use crate::disk;
+
 use crate::report::{Containment, KilledBy, Report, Sample, SampleSeries};
-use crate::unix::{child_environment, kill_tree, ms, try_reap, SentinelLink, Wakeups};
-use crate::{Fault, Launch, Outputs, MIDRUN_FAULT_OBSERVATION};
+use crate::unix::{
+    crash_now, monotonic_ns, ms, ns_to_ms, os, Exited, LinkEvent, SpawnRequest, Wakeups,
+    WatchdogLink,
+};
+use crate::{Fault, Launch, MIDRUN_FAULT_OBSERVATION};
 
 const METRIC: &str = "sampled-tree-phys-footprint-sum";
 const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
@@ -84,21 +93,12 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     report.peak_metric = Some(METRIC);
     report.sample_metric = Some(METRIC);
 
-    let wakeups = match Wakeups::install() {
+    let wakeups = match Wakeups::install(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]) {
         Ok(wakeups) => wakeups,
         Err(error) => {
             report
                 .errors
                 .push(format!("cannot install the cancellation handlers: {error}"));
-            return;
-        }
-    };
-    let mut sentinel = match SentinelLink::start() {
-        Ok(link) => link,
-        Err(error) => {
-            report
-                .errors
-                .push(format!("cannot establish containment: {error}"));
             return;
         }
     };
@@ -108,19 +108,30 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             report
                 .errors
                 .push(format!("cannot establish containment: kqueue: {error}"));
-            sentinel.finish();
             return;
         }
     };
-
-    let pid = match spawn_suspended(spec, launch.outputs) {
+    let mut link = match WatchdogLink::start() {
+        Ok(link) => link,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("cannot establish containment: {error}"));
+            return;
+        }
+    };
+    let pid = match link.spawn(&SpawnRequest::new(spec, None)) {
         Ok(pid) => pid,
         Err(error) => {
             report.errors.push(error);
-            sentinel.finish();
+            link.abandon();
             return;
         }
     };
+    if launch.fault == Some(Fault::DieAfterSpawn) {
+        eprintln!("verter-supervise: fault: dying after spawning pid {pid}");
+        crash_now();
+    }
     let pgid = pid;
     let mut known: BTreeSet<libc::pid_t> = BTreeSet::from([pid]);
     let armed = queue
@@ -133,11 +144,9 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         })
         .and_then(|()| {
             queue
-                .watch_fd(sentinel.fd())
+                .watch_fd(link.fd())
                 .map_err(|error| format!("kqueue: {error}"))
         })
-        .and_then(|()| sentinel.watch_group(pgid))
-        .and_then(|()| sentinel.watch_pid(pid))
         .and_then(|()| {
             footprint(pid).map(|_| ()).map_err(|error| {
                 format!("cannot establish telemetry: the child's footprint is unreadable: {error}")
@@ -145,35 +154,30 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         });
     if let Err(error) = armed {
         report.errors.push(error);
-        kill_tree(pgid, known.iter().copied());
-        reap_blocking(pid);
-        sentinel.finish();
+        link.abandon();
         return;
     }
     if crate::unix::cancelled() {
-        kill_tree(pgid, known.iter().copied());
-        reap_blocking(pid);
         report.killed_by = Some(KilledBy::Cancel);
-        sentinel.finish();
+        link.abandon();
         return;
     }
-
-    let started = Instant::now();
-    // SAFETY: releases our own suspended child.
-    if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
-        let error = std::io::Error::last_os_error();
-        kill_tree(pgid, known.iter().copied());
-        reap_blocking(pid);
-        report
-            .errors
-            .push(format!("cannot release the contained child: {error}"));
-        sentinel.finish();
-        return;
-    }
+    let start_ns = match link.release() {
+        Ok(start_ns) => start_ns,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("cannot release the contained child: {error}"));
+            link.abandon();
+            return;
+        }
+    };
     report.launched = true;
+    let started = Instant::now();
 
     let deadline = started + spec.timeout;
     let mut cause: Option<KilledBy> = None;
+    let mut kill_ns: Option<u64> = None;
     let mut killed_at: Option<Instant> = None;
     let mut series = SampleSeries::default();
     let mut peak = 0u64;
@@ -182,70 +186,46 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     let mut sweep_now = true;
     let mut tree_ever: BTreeSet<libc::pid_t> = known.clone();
 
-    let exit = loop {
-        let kill = |why: KilledBy,
-                    cause: &mut Option<KilledBy>,
-                    killed_at: &mut Option<Instant>,
-                    known: &BTreeSet<libc::pid_t>| {
+    let exited: Option<Exited> = loop {
+        let mut kill = |why: KilledBy, link: &mut WatchdogLink, cause: &mut Option<KilledBy>| {
             if cause.is_none() {
                 *cause = Some(why);
-                *killed_at = Some(Instant::now());
+                kill_ns = Some(monotonic_ns());
             }
-            kill_tree(pgid, known.iter().copied());
+            link.kill().ok();
         };
-        match try_reap(pid) {
-            Ok(Some(exit)) => break Some(exit),
-            Ok(None) => {}
-            Err(error) => {
-                report
-                    .errors
-                    .push(format!("cannot wait for the child: {error}"));
-                kill(
-                    KilledBy::SupervisorError,
-                    &mut cause,
-                    &mut killed_at,
-                    &known,
+        match link.event() {
+            Some(LinkEvent::Exited(exited)) => break Some(exited),
+            Some(LinkEvent::Lost) => {
+                report.errors.push(
+                    "the watchdog died mid-run; the process group is no longer owned".to_owned(),
                 );
+                if cause.is_none() {
+                    cause = Some(KilledBy::SupervisorError);
+                }
                 break None;
             }
+            None => {}
         }
         let now = Instant::now();
         if cause.is_none() && now >= deadline {
-            kill(KilledBy::Timeout, &mut cause, &mut killed_at, &known);
+            kill(KilledBy::Timeout, &mut link, &mut cause);
         }
         if cause.is_none() && crate::unix::cancelled() {
-            kill(KilledBy::Cancel, &mut cause, &mut killed_at, &known);
+            kill(KilledBy::Cancel, &mut link, &mut cause);
         }
-        if let Some(at) = killed_at {
-            // Keep killing: a process forked before the first signal landed
-            // must not survive.
-            kill_tree(pgid, known.iter().copied());
-            if at.elapsed() > TEARDOWN_LIMIT {
+        if cause.is_some() {
+            let at = *killed_at.get_or_insert(now);
+            if at.elapsed() > TEARDOWN_LIMIT * 2 {
                 report
                     .errors
-                    .push("the child did not exit after the tree was killed".to_owned());
+                    .push("the watchdog did not report the tree gone after the kill".to_owned());
                 break None;
             }
         }
-        if cause.is_none() && !sentinel.alive() {
-            report.errors.push("the sentinel died mid-run".to_owned());
-            kill(
-                KilledBy::SupervisorError,
-                &mut cause,
-                &mut killed_at,
-                &known,
-            );
-        }
-        if cause.is_none() {
-            if let Err(error) = sentinel.heartbeat() {
-                report.errors.push(error);
-                kill(
-                    KilledBy::SupervisorError,
-                    &mut cause,
-                    &mut killed_at,
-                    &known,
-                );
-            }
+        if let Err(error) = link.heartbeat() {
+            report.errors.push(error);
+            kill(KilledBy::SupervisorError, &mut link, &mut cause);
         }
         if cause.is_none() && (sweep_now || now >= next_sample) {
             sweep_now = false;
@@ -257,31 +237,12 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     let done = Instant::now();
                     for gone in &outcome.gone {
                         known.remove(gone);
-                        sentinel.forget_pid(*gone).ok();
                     }
                     for &new in &outcome.discovered {
                         tree_ever.insert(new);
-                        let registered = queue
-                            .watch_process(new)
-                            .or_else(|error| {
-                                if exists(new) {
-                                    Err(error.to_string())
-                                } else {
-                                    Ok(())
-                                }
-                            })
-                            .and_then(|()| sentinel.watch_pid(new));
-                        if let Err(error) = registered {
-                            report
-                                .errors
-                                .push(format!("cannot track descendant {new}: {error}"));
-                            kill(
-                                KilledBy::SupervisorError,
-                                &mut cause,
-                                &mut killed_at,
-                                &known,
-                            );
-                        }
+                        // Registration only speeds up fork wakeups; a pid
+                        // that is already gone needs none.
+                        queue.watch_process(new).ok();
                     }
                     peak = peak.max(outcome.footprint);
                     series.push(Sample {
@@ -296,16 +257,11 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     if let Some(escapee) = outcome.escaped {
                         report.errors.push(format!(
                             "descendant {escapee} left the process group; the tree is no longer \
-                             fully observable"
+                             fully observable and that process is outside the teardown"
                         ));
-                        kill(
-                            KilledBy::SupervisorError,
-                            &mut cause,
-                            &mut killed_at,
-                            &known,
-                        );
+                        kill(KilledBy::SupervisorError, &mut link, &mut cause);
                     } else if outcome.footprint >= trigger {
-                        kill(KilledBy::Memory, &mut cause, &mut killed_at, &known);
+                        kill(KilledBy::Memory, &mut link, &mut cause);
                     } else if age > max_age {
                         report.errors.push(format!(
                             "telemetry lost mid-run: an observation was {:.1} ms old, over the \
@@ -313,12 +269,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                             ms(age),
                             ms(max_age)
                         ));
-                        kill(
-                            KilledBy::SupervisorError,
-                            &mut cause,
-                            &mut killed_at,
-                            &known,
-                        );
+                        kill(KilledBy::SupervisorError, &mut link, &mut cause);
                     } else {
                         match pressure_level() {
                             Ok(PRESSURE_NORMAL) => {}
@@ -326,18 +277,13 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                                 report.errors.push(format!(
                                     "host memory pressure rose to level {level} mid-run"
                                 ));
-                                kill(KilledBy::Pressure, &mut cause, &mut killed_at, &known);
+                                kill(KilledBy::Pressure, &mut link, &mut cause);
                             }
                             Err(error) => {
                                 report
                                     .errors
                                     .push(format!("telemetry lost mid-run: {error}"));
-                                kill(
-                                    KilledBy::SupervisorError,
-                                    &mut cause,
-                                    &mut killed_at,
-                                    &known,
-                                );
+                                kill(KilledBy::SupervisorError, &mut link, &mut cause);
                             }
                         }
                     }
@@ -346,12 +292,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     report
                         .errors
                         .push(format!("telemetry lost mid-run: {error}"));
-                    kill(
-                        KilledBy::SupervisorError,
-                        &mut cause,
-                        &mut killed_at,
-                        &known,
-                    );
+                    kill(KilledBy::SupervisorError, &mut link, &mut cause);
                 }
             }
             next_sample = (next_sample + interval).max(Instant::now());
@@ -370,86 +311,102 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                 if events.forked {
                     sweep_now = true;
                 }
-                if events.fd_ready == Some(sentinel.fd()) && cause.is_none() && !sentinel.alive() {
-                    report.errors.push("the sentinel died mid-run".to_owned());
-                    kill(
-                        KilledBy::SupervisorError,
-                        &mut cause,
-                        &mut killed_at,
-                        &known,
-                    );
-                }
             }
             Err(error) => {
                 report.errors.push(format!("kevent: {error}"));
-                kill(
-                    KilledBy::SupervisorError,
-                    &mut cause,
-                    &mut killed_at,
-                    &known,
-                );
+                kill(KilledBy::SupervisorError, &mut link, &mut cause);
             }
         }
         wakeups.drain();
     };
 
-    let exited = Instant::now();
-    if exit.is_some() {
-        // Reaped: its pid may be reused from here on.
-        known.remove(&pid);
-        sentinel.forget_pid(pid).ok();
-    }
-    report.wall_ms = Some(ms(exited.duration_since(started)));
-    if let Some(at) = killed_at {
-        report.termination_latency_ms = Some(ms(exited.saturating_duration_since(at)));
-    }
-    if let Some(exit) = exit {
-        report.exit_code = exit.code;
-        report.signal = exit.signal;
-    }
-
-    // Tear down whatever the child left behind.
-    let left: Vec<libc::pid_t> = group_members(pgid)
-        .into_iter()
-        .chain(known.iter().copied())
-        .filter(|&member| member != pid && exists(member))
-        .collect();
-    report.descendants_killed = Some(left.len() as u64);
-    let teardown_deadline = Instant::now() + TEARDOWN_LIMIT;
-    loop {
-        kill_tree(pgid, known.iter().copied());
-        let alive = group_members(pgid)
-            .into_iter()
-            .chain(known.iter().copied())
-            .filter(|&member| member != pid && alive_not_zombie(member))
-            .count();
-        if alive == 0 {
-            break;
-        }
-        if Instant::now() > teardown_deadline {
+    if let Some(exited) = &exited {
+        report.wall_ms = Some(ns_to_ms(exited.exit_ns.saturating_sub(start_ns)));
+        report.termination_latency_ms =
+            kill_ns.map(|at| ns_to_ms(exited.exit_ns.saturating_sub(at)));
+        report.exit_code = exited.exit.code;
+        report.signal = exited.exit.signal;
+        report.descendants_killed = Some(exited.descendants);
+        if exited.survivors > 0 {
             report.errors.push(format!(
-                "{alive} processes were still alive {TEARDOWN_LIMIT:?} after teardown"
+                "{} processes of the group survived teardown",
+                exited.survivors
             ));
-            break;
         }
-        std::thread::sleep(Duration::from_millis(2));
     }
-
     report.killed_by = cause;
     report.peak_bytes = Some(peak);
     report.process_count = Some(tree_ever.len() as u64);
     report.samples = series.into_vec();
-    // SAFETY: getrusage with a local out-parameter.
-    unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        if libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) == 0 {
-            let millis =
-                |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
-            report.cpu_user_ms = Some(millis(usage.ru_utime));
-            report.cpu_kernel_ms = Some(millis(usage.ru_stime));
+    if exited.is_some() {
+        link.finish();
+    } else {
+        link.abandon();
+    }
+}
+
+/// The workload, as its watchdog owns it: a child spawned suspended into a
+/// process group of its own, which it leads. The watchdog reaps the leader
+/// only after the group is empty, so the group id is never reused while it
+/// is being killed.
+pub(crate) struct Workload {
+    pid: libc::pid_t,
+}
+
+impl Workload {
+    pub(crate) fn spawn(request: &SpawnRequest) -> Result<Workload, String> {
+        Ok(Workload {
+            pid: spawn_suspended(request)?,
+        })
+    }
+
+    pub(crate) fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    pub(crate) fn release(&self) -> Result<u64, String> {
+        let start_ns = monotonic_ns();
+        // SAFETY: continues our own suspended child.
+        if unsafe { libc::kill(self.pid, libc::SIGCONT) } != 0 {
+            return Err(format!(
+                "cannot release the child: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(start_ns)
+    }
+
+    pub(crate) fn kill(&self) {
+        // SAFETY: the group's leader is our unreaped child, so the group id
+        // still names this workload's group.
+        unsafe {
+            libc::kill(-self.pid, libc::SIGKILL);
         }
     }
-    sentinel.finish();
+
+    /// Kill the group until no live member is left, after the leader exited
+    /// (unreaped). Returns the members that were still alive and how many
+    /// survived.
+    pub(crate) fn teardown(&self) -> (u64, u64) {
+        let live = || {
+            group_members(self.pid)
+                .into_iter()
+                .filter(|&member| member != self.pid && alive_not_zombie(member))
+                .count() as u64
+        };
+        let descendants = live();
+        let deadline = Instant::now() + TEARDOWN_LIMIT;
+        let mut remaining = descendants;
+        while remaining > 0 && Instant::now() < deadline {
+            self.kill();
+            std::thread::sleep(Duration::from_millis(2));
+            remaining = live();
+        }
+        (descendants, remaining)
+    }
+
+    /// Nothing outlives the group on macOS.
+    pub(crate) fn abandoned(&self) {}
 }
 
 /// Everything that must hold before the child is created.
@@ -512,7 +469,7 @@ struct SweepOutcome {
     footprint: u64,
     discovered: Vec<libc::pid_t>,
     /// Tracked processes confirmed gone; forgotten so a reused pid is never
-    /// mistaken for a member (or killed).
+    /// mistaken for a member.
     gone: Vec<libc::pid_t>,
     escaped: Option<libc::pid_t>,
 }
@@ -702,37 +659,39 @@ fn pressure_level() -> Result<i32, String> {
     Ok(value)
 }
 
-fn reap_blocking(pid: libc::pid_t) {
-    let mut status = 0;
-    // SAFETY: waits for our own child.
-    unsafe {
-        libc::waitpid(pid, &mut status, 0);
-    }
-}
-
 /// Spawn the child suspended, in a new process group, with only its three
 /// standard descriptors and default signal dispositions.
-fn spawn_suspended(spec: &crate::cli::RunSpec, outputs: Outputs) -> Result<libc::pid_t, String> {
-    let program_text = spec.program.to_string_lossy().into_owned();
+fn spawn_suspended(request: &SpawnRequest) -> Result<libc::pid_t, String> {
+    let program_text = os(&request.program).to_string_lossy().into_owned();
     let refuse = |why: String| format!("cannot spawn {program_text}: {why}");
-    let program = c_string(&spec.program).map_err(refuse)?;
+    let program = c_string(os(&request.program)).map_err(refuse)?;
     let mut argv_owned = vec![program.clone()];
-    for arg in &spec.args {
-        argv_owned.push(c_string(arg).map_err(refuse)?);
+    for arg in &request.args {
+        argv_owned.push(c_string(os(arg)).map_err(refuse)?);
     }
     let mut envp_owned = Vec::new();
-    for (name, value) in child_environment(&spec.env) {
+    for (name, value) in &request.env {
         let mut entry = name.clone();
-        entry.push("=");
-        entry.push(&value);
-        envp_owned.push(c_string(&entry).map_err(refuse)?);
+        entry.push(b'=');
+        entry.extend_from_slice(value);
+        envp_owned.push(c_string(os(&entry)).map_err(refuse)?);
     }
-    let cwd = match &spec.cwd {
-        Some(cwd) => Some(c_string(cwd.as_os_str()).map_err(refuse)?),
+    let cwd = match &request.cwd {
+        Some(cwd) => Some(c_string(os(cwd)).map_err(refuse)?),
         None => None,
     };
-    let stdin = std::fs::File::open("/dev/null")
+    let stdin = disk::open("/dev/null")
         .map_err(|error| refuse(format!("cannot open /dev/null: {error}")))?;
+    let output = |path: &[u8]| {
+        disk::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(os(path))
+            .map_err(|error| refuse(format!("cannot open {:?}: {error}", os(path))))
+    };
+    let stdout = output(&request.stdout)?;
+    let stderr = output(&request.stderr)?;
     let mut argv: Vec<*mut c_char> = argv_owned
         .iter()
         .map(|arg| arg.as_ptr() as *mut c_char)
@@ -771,10 +730,8 @@ fn spawn_suspended(spec: &crate::cli::RunSpec, outputs: Outputs) -> Result<libc:
             || libc::posix_spawnattr_setsigdefault(&mut attr, &all_signals) != 0
             || libc::posix_spawnattr_setsigmask(&mut attr, &no_signals) != 0
             || libc::posix_spawn_file_actions_adddup2(&mut actions, stdin.as_raw_fd(), 0) != 0
-            || libc::posix_spawn_file_actions_adddup2(&mut actions, outputs.stdout.as_raw_fd(), 1)
-                != 0
-            || libc::posix_spawn_file_actions_adddup2(&mut actions, outputs.stderr.as_raw_fd(), 2)
-                != 0;
+            || libc::posix_spawn_file_actions_adddup2(&mut actions, stdout.as_raw_fd(), 1) != 0
+            || libc::posix_spawn_file_actions_adddup2(&mut actions, stderr.as_raw_fd(), 2) != 0;
         if let Some(cwd) = &cwd {
             failed =
                 failed || posix_spawn_file_actions_addchdir_np(&mut actions, cwd.as_ptr()) != 0;
@@ -819,7 +776,6 @@ fn spawn_suspended(spec: &crate::cli::RunSpec, outputs: Outputs) -> Result<libc:
 /// What woke the supervisor.
 struct Events {
     forked: bool,
-    fd_ready: Option<i32>,
 }
 
 /// A kqueue watching the tree's processes and the wakeup descriptors.
@@ -900,23 +856,14 @@ impl Queue {
         if count < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
-                return Ok(Events {
-                    forked: false,
-                    fd_ready: None,
-                });
+                return Ok(Events { forked: false });
             }
             return Err(error);
         }
-        let mut result = Events {
-            forked: false,
-            fd_ready: None,
-        };
+        let mut result = Events { forked: false };
         for event in &events[..count as usize] {
             if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_FORK != 0 {
                 result.forked = true;
-            }
-            if event.filter == libc::EVFILT_READ {
-                result.fd_ready = Some(event.ident as i32);
             }
         }
         Ok(result)

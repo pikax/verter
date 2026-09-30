@@ -21,7 +21,8 @@ fn published(probe: &str) -> Result<String, PartialReasonSet> {
             StructuralFactDemandOutcome::Complete(node) => {
                 Ok(format!("{:?}", dispatch.graph().node_data(node)))
             }
-            StructuralFactDemandOutcome::Partial(reasons) => Err(reasons),
+            StructuralFactDemandOutcome::Recovered { reasons, .. }
+            | StructuralFactDemandOutcome::Partial(reasons) => Err(reasons),
         },
     )
 }
