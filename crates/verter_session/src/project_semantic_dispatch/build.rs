@@ -301,45 +301,46 @@ pub(super) fn class_prototype_member(
     }
 }
 
-/// Upper bound on the template-literal keyspace product width
-/// `∏ |choice_set_i|` enumerated by
-/// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
-/// template whose enumerated product would exceed this cap carrier-stops to
-/// the deferred [`SemanticNodeData::TemplateLiteral`] shell instead of
-/// materialising (and possibly warm-publishing) an explosive union. The cap
-/// sits well above any realistic component template keyspace (event / slot /
-/// prop-name enumerations are far below it) while bounding allocation on the
-/// pathological tail. This is a PRODUCT-WIDTH bound, distinct from the
-/// deferred evaluator's per-arg recursion depth ceiling — that ceiling bounds
-/// how deep one argument resolves, not how wide the cartesian product grows.
-pub(super) const TEMPLATE_LITERAL_KEYSPACE_CAP: usize = 1024;
-
-/// Outcome of [`ProjectSemanticDispatch::reduce_template_literal_nodes`]: the
-/// folded surface node plus whether the keyspace product-width budget was
-/// exceeded. A `keyspace_budget_exceeded == true` outcome carries the deferred
-/// `TemplateLiteral` carrier-stop shell as `node`, and the live producer marks
-/// the build non-cacheable / budget-tainted so it is never warm-admitted.
-pub(super) struct TemplateReduceOutcome {
-    pub(super) node: SemanticNodeId,
-    pub(super) keyspace_budget_exceeded: bool,
-}
-
 /// One piece of a distributed template concatenation: literal text, or a
 /// hole type the template literal type keeps (`string`, `number`, …).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum TemplatePiece {
     Text(String),
     Hole(SemanticNodeId),
 }
 
+/// One constituent a template, or one of its interpolated expressions,
+/// distributes into: its pieces, and — for a literal type that is not a
+/// string (a number, bigint or boolean literal, `null`, `undefined`, an enum
+/// member) — that type. The checker counts constituents, not texts: `"0"`
+/// and `0` are two constituents of `"0" | 0` though they spell the same
+/// text, while `"a0"` and the `"a0"` a nested template forms are one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TemplateConstituent {
+    pieces: Vec<TemplatePiece>,
+    spelled: Option<SemanticNodeId>,
+}
+
+impl TemplateConstituent {
+    /// A string literal or template literal constituent of `pieces`.
+    fn string(pieces: Vec<TemplatePiece>) -> Self {
+        Self {
+            pieces,
+            spelled: None,
+        }
+    }
+}
+
 /// The concatenations a template distributes into.
 enum TemplateAlternatives {
-    /// Every concatenation, as its pieces.
-    Finite(Vec<Vec<TemplatePiece>>),
+    /// Every constituent, in order.
+    Finite(Vec<TemplateConstituent>),
     /// Some expression does not settle; the template stays authored.
     Open,
-    /// The product exceeds [`TEMPLATE_LITERAL_KEYSPACE_CAP`].
-    OverBudget,
+    /// The checker refuses the cross product (TS2590).
+    TooComplex(crate::semantic_query::CheckerDiagnostic),
+    /// The connected-work ledger refused the construction.
+    Exhausted(crate::semantic_query::PartialReasonSet),
     /// An interpolant is neither a literal nor a placeholder type (an enum
     /// member whose value is not a constant): the template is `string`.
     AnyString,
@@ -4432,6 +4433,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: &crate::semantic_query::InstantiateSource,
         instantiate_context: crate::semantic_query::InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        match self.begin_instantiate(base, args, source, instantiate_context, false) {
+            InstantiateStart::Done(output) => *output,
+            InstantiateStart::Build(mut build) => match self.drain_instantiate(&mut build, None) {
+                InstantiatePoll::Done(output) => *output,
+                InstantiatePoll::Need(_) => {
+                    unreachable!("an inline instantiation evaluates the instantiations it reaches")
+                }
+            },
+        }
+    }
+
+    /// Begin a generic instantiation: answer it at once (an authored or
+    /// `.vue` default instance, a builtin, a missing declaration, a
+    /// same-declaration back-edge), or bind its arguments, enter the active
+    /// instantiation and begin lowering its body — the build
+    /// [`Self::drain_instantiate`] carries on. `suspend` makes the body
+    /// projection stop at each instantiation it reaches instead of
+    /// evaluating it in place.
+    pub(super) fn begin_instantiate(
+        &self,
+        base: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        args: &Arc<[SemanticNodeId]>,
+        source: &crate::semantic_query::InstantiateSource,
+        instantiate_context: crate::semantic_query::InstantiateContext,
+        suspend: bool,
+    ) -> InstantiateStart {
         verter_audit::attribute_scope!(Instantiate);
         verter_audit::attribute_n!(Substitute, args.len());
         // The key carries an `InstantiateContext` (embedded
@@ -4443,13 +4470,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `instantiate_context_for`.
         let context = instantiate_context.projection_reduction();
         if let Some(authored) = source.authored_source() {
-            return self.build_authored_instantiation(
+            return InstantiateStart::Done(Box::new(self.build_authored_instantiation(
                 base,
                 authored.identity().locator(),
                 args,
                 authored.projection(),
                 instantiate_context,
-            );
+            )));
         }
         // demand-driven reducer spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
@@ -4585,7 +4612,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &scope,
                 context,
             ) {
-                return output;
+                return InstantiateStart::Done(Box::new(output));
             }
         }
 
@@ -4634,7 +4661,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // type. Instantiating it answers that carrier — `Promise<number>` is
         // `Promise<number>`, never a miss.
         if self.runtime_nominal_identity(&builtin_identity).is_some() {
-            return builtin_application_carrier(builtin_identity);
+            return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
         }
 
         // 2. Built-in utility dispatch.
@@ -4665,7 +4692,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &builtin_identity,
                 args.as_ref(),
             ) {
-                return builtin_application_carrier(builtin_identity);
+                return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
             }
 
             // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
@@ -4712,7 +4739,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // the nested read does NOT taint this (it is `cache_suppress`
             // on the inner memo only).
             output.result_is_partial = utility_is_partial;
-            return output.with_observed_self_roots(observed_self_roots);
+            return InstantiateStart::Done(Box::new(
+                output.with_observed_self_roots(observed_self_roots),
+            ));
         }
 
         // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
@@ -4736,7 +4765,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 empty_signature(),
             ));
             out.cache_suppress = true;
-            return out;
+            return InstantiateStart::Done(Box::new(out));
         }
         let ri = ResolvedRootIdentity::new_in_owner(
             decl_canonical.as_ref(),
@@ -4771,7 +4800,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     empty_signature(),
                 ));
                 out.cache_suppress = true;
-                return out;
+                return InstantiateStart::Done(Box::new(out));
             }
             PreparedTypeDeclResolution::Failed { failure, .. } => {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
@@ -4789,7 +4818,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     empty_signature(),
                 ));
                 out.cache_suppress = true;
-                return out;
+                return InstantiateStart::Done(Box::new(out));
             }
         };
 
@@ -4886,7 +4915,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             decl_owner,
             Arc::clone(decl_name),
         );
-        let pushed = self.push_instantiate_active(active_identity);
+        let pushed = self.push_instantiate_active(active_identity.clone());
         if !pushed {
             let unresolved_owner_debt = authored_resolution_debt
                 .as_ref()
@@ -4909,122 +4938,278 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .into();
             output.result_is_partial = unresolved_owner_debt;
             output.cache_suppress = unresolved_owner_debt;
-            return output;
+            return InstantiateStart::Done(Box::new(output));
         }
-        // Propagate the full
-        // `ProjectionReductionContext` through body lowering so a
-        // `StructuralTransit` instantiation lowers its body in transit
-        // demand. The legacy `body_mode`-only wrapper at
-        // [`Self::shallow_lower_type_expr`] rebuilds `Published(mode)`
-        // at lower.rs:80 and would clobber the demand axis —
-        // intermediate-hop `keyof T` / `{ [K in S]: V }` operators
-        // along the decl body would then reach the publication-edge
-        // loops and emit the spurious member edges that the
-        // ChatMessages `outputSchema|execute` leak captured.
-        // Surface-provenance handling for the declaration body (by
-        // design — own-body vs reference discrimination). The bit
-        // is stamped only for members lowered from an INLINE object
-        // literal that is the macro-T own body; members reached through a
-        // REFERENCE arm decay to structural. See
-        // `lower_decl_body_with_provenance` for the per-arm rule (inline
-        // `Object` arms keep the caller's provenance; `Ref` arms — an
-        // author intersection `A & B`'s named refs, or an interface's
-        // `extends Base` heritage `Ref` — go structural).
-        let mut result = self.lower_decl_body_with_provenance(
-            &prepared,
-            &env,
-            &scope,
-            scope_payload.as_ref(),
-            &shadowing,
-            &mut substitutions,
-            context,
-            authored_resolution_debt.as_ref(),
-        );
-        // Member-index overlay (carries the caller's provenance):
-        // `member_index` holds the declaration's OWN-body direct members.
-        // It APPENDS own members not yet on the surface (the heritage /
-        // member-index split) and RE-STAMPS any surface member that
-        // matches an own-body index entry. With per-arm body lowering the
-        // own `Object` arm members already carry the correct bit, so the
-        // re-stamp is a no-op for those; the overlay remains the authority
-        // for own members appended from `member_index` and is the safety
-        // net for surfaces where the own members were lowered structurally.
-        result = self.backfill_member_index_surface(
-            result,
-            &prepared,
-            &env,
-            &scope,
-            scope_payload.as_ref(),
-            &shadowing,
-            &mut substitutions,
-            context,
-            authored_resolution_debt.as_ref(),
-        );
-
-        // The checker's tail loop (`getConditionalType`): a generic body
-        // whose selected branch is this declaration applied to OTHER
-        // arguments is the next step of one tail run, evaluated here in
-        // place of a nested instantiation, and counted by the checker
-        // compatibility policy. The run fails with TS2589 at the checker's tail limit, or
-        // at once when the arguments come round again (the run can then
-        // never reach a value, so the checker's count is certain to run
-        // out). Each step is charged to the connected-work ledger; a trip
-        // leaves the step's back-edge as a typed partial.
-        let mut tail = crate::semantic_query::checker_policy::ConditionalTail::resumed(0);
-        let mut tail_arguments: Vec<Arc<[SemanticNodeId]>> = vec![Arc::clone(args)];
         let generic = !prepared.type_parameters.is_empty();
-        while let Some(next) = generic
-            .then(|| self.conditional_tail_arguments(result, decl_canonical, decl_owner, decl_name))
-            .flatten()
-        {
-            if tail_arguments.contains(&next) || !tail.step() {
-                result = crate::semantic_query::checker_policy::checker_recovery(
-                    self.graph(),
-                    crate::semantic_query::CheckerDiagnostic {
-                        code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                        operation: crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail,
-                    },
-                    None,
-                );
-                break;
-            }
-            if let Err(reasons) = self.charge_connected_work() {
-                self.fold_local_partial_completeness(reasons);
-                break;
-            }
-            tail_arguments.push(Arc::clone(&next));
-            substitutions.clear();
-            let (next_env, _) = self.bind_declared_type_arguments(
-                &prepared,
-                &next,
-                &binding_scope,
-                &mut substitutions,
-                context,
-                unbound_parameter,
-            );
-            result = self.lower_decl_body_with_provenance(
-                &prepared,
-                &next_env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-                authored_resolution_debt.as_ref(),
-            );
-            result = self.backfill_member_index_surface(
-                result,
-                &prepared,
-                &next_env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-                authored_resolution_debt.as_ref(),
-            );
-        }
+        let mut build = Box::new(InstantiateBuild {
+            active_identity,
+            decl_canonical: Arc::clone(decl_canonical),
+            decl_owner,
+            decl_name: Arc::clone(decl_name),
+            is_non_file_base,
+            decl_whole_hash,
+            base,
+            args: Arc::clone(args),
+            scope,
+            prepared,
+            scope_payload,
+            shadowing,
+            authored_resolution_debt,
+            context,
+            body_mode,
+            env,
+            substitutions,
+            tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
+            tail_arguments: vec![Arc::clone(args)],
+            generic,
+            suspend,
+            body: BodyLowering::Ready(base),
+        });
+        // Propagate the full `ProjectionReductionContext` through body
+        // lowering so a `StructuralTransit` instantiation lowers its body in
+        // transit demand: intermediate-hop `keyof T` / `{ [K in S]: V }`
+        // operators along the decl body must never reach the
+        // publication-edge loops. Surface provenance follows the per-arm
+        // rule of the decl-body projection: inline `Object` arms keep the
+        // caller's provenance, reference arms (an author intersection's
+        // named refs, an interface's `extends` heritage) go structural.
+        build.body = self.begin_instantiated_body(&mut build);
+        InstantiateStart::Build(build)
+    }
 
+    /// Carry an instantiation's build on as far as it can go. `delivery` is
+    /// the node of the instantiation its body projection last stopped at,
+    /// when it stopped at one. An inline build always finishes; a
+    /// suspending build stops at each instantiation its body reaches.
+    pub(super) fn drain_instantiate(
+        &self,
+        build: &mut InstantiateBuild,
+        mut delivery: Option<SemanticNodeId>,
+    ) -> InstantiatePoll {
+        verter_audit::attribute_scope!(Instantiate);
+        loop {
+            let lowered = match self.drain_instantiated_body(build, delivery.take()) {
+                BodyPoll::Need(key) => return InstantiatePoll::Need(key),
+                BodyPoll::Done(node) => node,
+            };
+            // Member-index overlay (carries the caller's provenance):
+            // `member_index` holds the declaration's OWN-body direct members.
+            // It APPENDS own members not yet on the surface (the heritage /
+            // member-index split) and RE-STAMPS any surface member that
+            // matches an own-body index entry. With per-arm body lowering the
+            // own `Object` arm members already carry the correct bit, so the
+            // re-stamp is a no-op for those; the overlay remains the authority
+            // for own members appended from `member_index` and is the safety
+            // net for surfaces where the own members were lowered structurally.
+            let mut result = self.backfill_member_index_surface(
+                lowered,
+                &build.prepared,
+                &build.env,
+                &build.scope,
+                build.scope_payload.as_ref(),
+                &build.shadowing,
+                &mut build.substitutions,
+                build.context,
+                build.authored_resolution_debt.as_ref(),
+            );
+
+            // The checker's tail loop (`getConditionalType`): a generic body
+            // whose selected branch is this declaration applied to OTHER
+            // arguments is the next step of one tail run, evaluated here in
+            // place of a nested instantiation, and counted by the checker
+            // compatibility policy. The run fails with TS2589 at the
+            // checker's tail limit, or at once when the arguments come round
+            // again (the run can then never reach a value, so the checker's
+            // count is certain to run out). Each step is charged to the
+            // connected-work ledger; a trip leaves the step's back-edge as a
+            // typed partial.
+            let next = build
+                .generic
+                .then(|| {
+                    self.conditional_tail_arguments(
+                        result,
+                        &build.decl_canonical,
+                        build.decl_owner,
+                        &build.decl_name,
+                    )
+                })
+                .flatten();
+            if let Some(next) = next {
+                if build.tail_arguments.contains(&next) || !build.tail.step() {
+                    result = crate::semantic_query::checker_policy::checker_recovery(
+                        self.graph(),
+                        crate::semantic_query::CheckerDiagnostic {
+                            code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                            operation:
+                                crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail,
+                        },
+                        None,
+                    );
+                } else if let Err(reasons) = self.charge_connected_work() {
+                    self.fold_local_partial_completeness(reasons);
+                } else {
+                    build.tail_arguments.push(Arc::clone(&next));
+                    build.substitutions.clear();
+                    let (next_env, _) = self.bind_instantiate_arguments(build, &next);
+                    build.env = next_env;
+                    build.body = self.begin_instantiated_body(build);
+                    continue;
+                }
+            }
+            return InstantiatePoll::Done(Box::new(self.finish_instantiate(build, result)));
+        }
+    }
+
+    /// Bind `args` to the declaration's type parameters the way the build's
+    /// first binding did: an unbound parameter in `Skeleton` mode binds a
+    /// `TypeParam` shell so the body keeps its open generics.
+    fn bind_instantiate_arguments(
+        &self,
+        build: &mut InstantiateBuild,
+        args: &[SemanticNodeId],
+    ) -> (
+        FxHashMap<String, SemanticNodeId>,
+        Vec<Option<SemanticNodeId>>,
+    ) {
+        let binding_scope = DeclarationBindingScope {
+            scope: &build.scope,
+            scope_payload: build.scope_payload.as_ref(),
+            shadowing: &build.shadowing,
+            authored_resolution_debt: build.authored_resolution_debt.as_ref(),
+        };
+        let body_mode = build.body_mode;
+        let decl_identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(&build.decl_canonical),
+            owner: build.decl_owner,
+            whole_hash: build.decl_whole_hash,
+            decl_name: Arc::clone(&build.decl_name),
+        };
+        let scope = build.scope.clone();
+        let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
+            (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::TypeParam {
+                        decl: decl_identity.clone(),
+                        param_index: index as u16,
+                        constraint: None,
+                        default: None,
+                        display_name: Arc::from(param.name.as_str()),
+                    },
+                    scope.clone(),
+                )
+            })
+        };
+        self.bind_declared_type_arguments(
+            &build.prepared,
+            args,
+            &binding_scope,
+            &mut build.substitutions,
+            build.context,
+            unbound_parameter,
+        )
+    }
+
+    /// Begin lowering the declaration's body under the build's current
+    /// bindings: an enum's member union at once, else the projection of its
+    /// substituted locator shape.
+    fn begin_instantiated_body(&self, build: &mut InstantiateBuild) -> BodyLowering {
+        let prepared = Arc::clone(&build.prepared);
+        // An enum's type is the union of its members' literal types, read
+        // off the member inventory its value declaration carries.
+        if let Some(enumeration) = self.enum_declared_at(
+            prepared.root_identity.canonical_id.as_ref(),
+            prepared.root_identity.owner,
+            prepared.root_identity.symbol_name.as_ref(),
+        ) {
+            return BodyLowering::Ready(self.enum_type(&enumeration));
+        }
+        // The declaration's OWN decl-body locator (whole body).
+        let canonical: Arc<str> = match &build.scope {
+            NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
+            NodeScopeId::Global => Arc::clone(&prepared.root_identity.canonical_id),
+        };
+        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: canonical,
+                    owner: prepared.root_identity.owner,
+                    symbol: Arc::clone(&prepared.root_identity.symbol_name),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        );
+        let seam = if build.suspend {
+            super::locator_view_worklist::ProjectionSeam::suspending()
+        } else {
+            super::locator_view_worklist::ProjectionSeam::inline()
+        };
+        self.begin_located_body_lowering(
+            locator,
+            prepared.kind,
+            &prepared.type_parameters,
+            &build.env,
+            &build.scope,
+            &mut build.substitutions,
+            build.context,
+            &prepared.vue_ignored_heritage,
+            seam,
+        )
+    }
+
+    /// Carry the build's body lowering on as far as it can go.
+    fn drain_instantiated_body(
+        &self,
+        build: &mut InstantiateBuild,
+        delivery: Option<SemanticNodeId>,
+    ) -> BodyPoll {
+        let InstantiateBuild {
+            prepared,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            authored_resolution_debt,
+            substitutions,
+            body,
+            ..
+        } = build;
+        self.drain_located_body_lowering(
+            body,
+            &crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                env,
+                scope,
+                name_resolution: &prepared.name_resolution,
+                scope_payload: scope_payload.as_ref(),
+                shadowing,
+                authored_resolution_debt: authored_resolution_debt.as_ref(),
+                self_value: None,
+            },
+            substitutions,
+            delivery,
+        )
+    }
+
+    /// Finish an instantiation whose body lowered to `result`: merge its
+    /// cross-file augmentations, leave the active instantiation, record its
+    /// origin edges and root its result on everything it read.
+    fn finish_instantiate(
+        &self,
+        build: &mut InstantiateBuild,
+        mut result: SemanticNodeId,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let substitutions = std::mem::take(&mut build.substitutions);
+        let authored_resolution_debt = build.authored_resolution_debt.take();
+        let decl_canonical = &build.decl_canonical;
+        let decl_name = &build.decl_name;
+        let decl_owner = build.decl_owner;
+        let decl_whole_hash = build.decl_whole_hash;
+        let is_non_file_base = build.is_non_file_base;
+        let args = &build.args;
+        let context = build.context;
+        let scope = &build.scope;
+        let prepared = &build.prepared;
+        let base = build.base;
         // Cross-file declaration augmentation (`declare module "X"` /
         // `declare global` interface merging from sibling files). Fold every
         // augmenter file's contributed body into the base body through the ONE
@@ -5036,7 +5221,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut augmentation_source_env_unobservable = false;
         if !is_non_file_base {
             if let Some(stitch) =
-                self.stitch_module_augmentations(decl_canonical, decl_name, result, &scope, context)
+                self.stitch_module_augmentations(decl_canonical, decl_name, result, scope, context)
             {
                 result = stitch.merged;
                 augmenter_contributor_roots = stitch.contributor_roots;
@@ -5057,7 +5242,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     decl_name,
                     args,
                     result,
-                    &scope,
+                    scope,
                     context,
                 ) {
                     result = stitch.merged;
@@ -7185,82 +7370,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Lower a prepared declaration's `body` carrying the macro-surface
-    /// provenance with own-body-vs-heritage discrimination (by
-    /// design).
-    ///
-    /// - **Alias**: the body is the author-written macro type argument
-    ///   (`defineProps<A & B>()` → `A & B`). Every member is own-body, so
-    ///   the whole body is lowered with the caller's `context` (an
-    ///   author intersection's arms keep `MacroTypeArgOwnBody`).
-    /// - **Interface / Class**: the body folds `extends` heritage into an
-    ///   `Intersection` whose heritage arms are `Ref` / `DeclRef` nodes
-    ///   and whose own-body arms are `Object` nodes. Each arm is lowered
-    ///   individually: own-body `Object` (and `Parenthesized(Object)`)
-    ///   arms keep the caller's provenance; heritage `Ref`-shaped arms
-    ///   downgrade to structural so inherited members surface with
-    ///   `declared_in_macro_type_arg = false`. A plain interface body
-    ///   (single `Object`, no `extends`) keeps the caller's provenance.
-    ///
-    /// This is per-arm SHAPE discrimination gated on `kind`, not arm
-    /// order: declaration-merged interfaces (every own slice an `Object`
-    /// arm) and `extends` heritage (always a `Ref` arm) are both handled
-    /// correctly.
-    #[allow(clippy::too_many_arguments)]
-    fn lower_decl_body_with_provenance(
-        &self,
-        prepared: &PreparedTypeDecl,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
-        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        context: crate::semantic_query::ProjectionReductionContext,
-        authored_resolution_debt: Option<
-            &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
-        >,
-    ) -> SemanticNodeId {
-        // An enum's type is the union of its members' literal types, read
-        // off the member inventory its value declaration carries.
-        if let Some(enumeration) = self.enum_declared_at(
-            prepared.root_identity.canonical_id.as_ref(),
-            prepared.root_identity.owner,
-            prepared.root_identity.symbol_name.as_ref(),
-        ) {
-            return self.enum_type(&enumeration);
-        }
-        // The declaration's OWN decl-body locator (whole body).
-        let canonical: Arc<str> = match scope {
-            NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
-            NodeScopeId::Global => Arc::clone(&prepared.root_identity.canonical_id),
-        };
-        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-            verter_type_expr::locators::TypeBodySlot {
-                anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: canonical,
-                    owner: prepared.root_identity.owner,
-                    symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
-                },
-                path: Arc::from(Vec::new().into_boxed_slice()),
-            },
-        );
-        self.lower_located_body_with_vue_heritage_policy(
-            locator,
-            prepared.kind,
-            &prepared.type_parameters,
-            &prepared.name_resolution,
-            env,
-            scope,
-            scope_payload,
-            shadowing,
-            substitutions,
-            context,
-            authored_resolution_debt,
-            &prepared.vue_ignored_heritage,
-        )
-    }
-
     /// Re-derive a declaration's ordered `(name, binder)` bindings from its
     /// NARROW type-parameter FACTS — the fact-side entry into the ONE
     /// shared binder-frame constructor (`build_type_param_binder_frame`,
@@ -7424,6 +7533,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
         >,
         vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
     ) -> SemanticNodeId {
+        let self_value = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                if slot.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+            {
+                Some(slot.anchor.clone())
+            }
+            _ => None,
+        };
+        let mut lowering = self.begin_located_body_lowering(
+            locator,
+            decl_kind,
+            type_parameters,
+            env,
+            scope,
+            substitutions,
+            context,
+            vue_ignored_heritage,
+            crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam::inline(),
+        );
+        let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            authored_resolution_debt,
+            self_value: self_value.as_ref(),
+        };
+        match self.drain_located_body_lowering(&mut lowering, &inputs, substitutions, None) {
+            BodyPoll::Done(node) => node,
+            BodyPoll::Need(_) => {
+                unreachable!("an inline body lowering evaluates the instantiations it reaches")
+            }
+        }
+    }
+
+    /// Begin lowering a located declaration body: fetch its fixed authored
+    /// shape, apply the caller's bindings by type-parameter substitution,
+    /// and plan the projection of the demanded view.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_located_body_lowering(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
+        seam: crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam,
+    ) -> BodyLowering {
         let owner_symbol = match &locator {
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => {
                 Arc::clone(&slot.anchor.symbol)
@@ -7439,21 +7600,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
-        let self_value = match &locator {
-            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
-                if slot.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value =>
-            {
-                Some(slot.anchor.clone())
-            }
-            _ => None,
-        };
-
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
         let shape = match self.lower_locator(locator) {
             QueryResult::Value(node) => node,
             QueryResult::Recursive(_) | QueryResult::Error(_) => {
-                return self.opaque(QueryError::Miss)
+                return BodyLowering::Ready(self.opaque(QueryError::Miss))
             }
         };
         let shape = if context.suppresses_vue_ignored_heritage() && !vue_ignored_heritage.is_empty()
@@ -7484,24 +7636,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
             substituted = next;
         }
 
-        // 3. Project the demanded view: per-arm ProjectionStamp application
-        //    + deferred-carrier evaluation under the caller's context.
-        let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
-            env,
-            scope,
-            name_resolution,
-            scope_payload,
-            shadowing,
-            authored_resolution_debt,
-            self_value: self_value.as_ref(),
+        // 3. Plan the projection of the demanded view: per-arm
+        //    ProjectionStamp application + deferred-carrier evaluation under
+        //    the caller's context.
+        BodyLowering::Project(Box::new(self.begin_decl_body_projection(
+            substituted,
+            decl_kind,
+            substitutions.len(),
+            context,
+            seam,
+        )))
+    }
+
+    /// Carry a located body lowering on as far as it can go. A partial
+    /// projection folds its reasons into the enclosing build.
+    fn drain_located_body_lowering(
+        &self,
+        lowering: &mut BodyLowering,
+        inputs: &crate::project_semantic_dispatch::locator_view::LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        delivery: Option<SemanticNodeId>,
+    ) -> BodyPoll {
+        let projection = match lowering {
+            BodyLowering::Ready(node) => return BodyPoll::Done(*node),
+            BodyLowering::Project(projection) => projection,
         };
-        let projected =
-            self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context);
-        if let crate::semantic_query::ResultCompleteness::Partial(reasons) = projected.completeness
-        {
-            self.fold_local_partial_completeness(reasons);
+        match self.drain_decl_body_projection(projection, inputs, substitutions, delivery) {
+            crate::project_semantic_dispatch::locator_view::BodyProjectionPoll::Need(key) => {
+                BodyPoll::Need(key)
+            }
+            crate::project_semantic_dispatch::locator_view::BodyProjectionPoll::Done(projected) => {
+                if let crate::semantic_query::ResultCompleteness::Partial(reasons) =
+                    projected.completeness
+                {
+                    self.fold_local_partial_completeness(reasons);
+                }
+                BodyPoll::Done(projected.node)
+            }
         }
-        projected.node
     }
 
     /// Remove only producer-addressed Vue runtime heritage arms from the
@@ -14294,12 +14466,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// walker — the deferred evaluator's `TemplateLiteral` arm and the
     /// mapped key-remap path both reach this reducer THROUGH this query.
     ///
-    /// Keyspace budget: a finite product whose running width exceeds
-    /// [`TEMPLATE_LITERAL_KEYSPACE_CAP`] carrier-stops to the deferred shell
-    /// and the result is marked NON-CACHEABLE / budget-tainted
-    /// (`cache_suppress` + `result_is_partial`) — a truncated / over-budget
-    /// product is never warm-admitted (mirrors the evaluator's
-    /// budget-exhaustion `ReturnOnly` discipline).
+    /// A product at the checker's limit is its TS2590 recovery, a complete
+    /// fact. A construction the connected-work ledger refuses carrier-stops
+    /// to the deferred shell, marked NON-CACHEABLE / budget-tainted
+    /// (`cache_suppress` + `result_is_partial`): an exhausted product is
+    /// never warm-admitted.
     ///
     /// Self-version rooting: the reduction depends on every interpolated
     /// arg node, so the memo entry roots on the file content version each
@@ -14312,22 +14483,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let outcome = self.reduce_template_literal_nodes(
+        let reduced = self.reduce_template_literal_nodes(
             pattern,
             args,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+        let node = reduced.unwrap_or_else(|_| {
+            self.graph().intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: Arc::clone(pattern),
+                expressions: Arc::clone(args),
+            })
+        });
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(outcome.node),
+            QueryResult::Value(node),
             self.project_generation_signature(),
         ))
         .with_observed_self_roots(observed_self_roots);
-        if outcome.keyspace_budget_exceeded {
-            // The product width tripped the keyspace cap: the value is a
-            // deferred carrier-stop shell, not the fully-enumerated surface.
-            // Mark it a non-cacheable budget-tainted partial so it is never
-            // warm-admitted and the taint folds into the enclosing request.
+        if reduced.is_err() {
+            // The ledger refused the construction: the value is the deferred
+            // carrier-stop shell, not the enumerated surface. It is a
+            // non-cacheable budget-tainted partial, never warm-admitted, and
+            // the taint folds into the enclosing request.
             output.cache_suppress = true;
             output.result_is_partial = true;
         }
@@ -15808,13 +15985,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   carrier-stops to the authored `TemplateLiteral` shell (the caller
     ///   re-dispatches once it resolves).
     ///
-    /// Keyspace budget: the running product width `∏ |alternatives_i|` is
-    /// bounded by [`TEMPLATE_LITERAL_KEYSPACE_CAP`]. A product whose width
-    /// exceeds the cap carrier-stops to the `TemplateLiteral` shell and the
-    /// returned [`TemplateReduceOutcome::keyspace_budget_exceeded`] flag is
-    /// set so the live producer refuses to warm-admit the over-budget result.
-    /// The check runs on the per-arg alternative counts BEFORE any string is
-    /// allocated.
+    /// The product is the checker's (`checkCrossProductUnion`), weighed on
+    /// the expressions' distinct constituent counts before any
+    /// concatenation is built: at the checker's limit the template is its
+    /// TS2590 recovery, holding the authored template as the type beyond
+    /// the limit (the template itself denotes it). Below it every
+    /// concatenation built is charged to the connected-work ledger; a
+    /// refused construction is `Err` with the ledger's trip, folded into
+    /// the build's completeness.
     ///
     /// The multi-result case renormalises through
     /// [`SemanticQueryKey::ReduceUnion`] so the union is canonical. Used by
@@ -15826,40 +16004,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
         quasis: &[Arc<str>],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> TemplateReduceOutcome {
+    ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
         let graph = self.graph();
         let spliced = self.spliced_template(quasis, args);
         let (quasis, args): (&[Arc<str>], &[SemanticNodeId]) = match &spliced {
             Some((quasis, args)) => (quasis, args),
             None => (quasis, args),
         };
-        let carrier_stop = |keyspace_budget_exceeded: bool| TemplateReduceOutcome {
-            node: graph.intern_node(SemanticNodeData::TemplateLiteral {
+        let authored = || {
+            graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
                 expressions: Arc::from(args.to_vec().into_boxed_slice()),
-            }),
-            keyspace_budget_exceeded,
+            })
         };
         let alternatives = match self.template_alternatives(quasis, args, eval_context) {
-            TemplateAlternatives::Open => return carrier_stop(false),
-            TemplateAlternatives::OverBudget => return carrier_stop(true),
+            TemplateAlternatives::Open => return Ok(authored()),
+            TemplateAlternatives::TooComplex(diagnostic) => {
+                return Ok(crate::semantic_query::checker_policy::checker_recovery(
+                    graph,
+                    diagnostic,
+                    Some(authored()),
+                ));
+            }
+            TemplateAlternatives::Exhausted(reasons) => {
+                self.fold_local_partial_completeness(reasons);
+                return Err(reasons);
+            }
             // An interpolant that is neither a literal nor a placeholder
             // type (an enum member whose value is not a constant) makes the
             // whole template `string`, as the checker's template
             // construction does.
             TemplateAlternatives::AnyString => {
-                return TemplateReduceOutcome {
-                    node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
-                    keyspace_budget_exceeded: false,
-                }
+                return Ok(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
             }
             TemplateAlternatives::Finite(alternatives) => alternatives,
         };
         let members: Vec<SemanticNodeId> = alternatives
             .into_iter()
-            .map(|pieces| self.template_type_from_pieces(pieces))
+            .map(|constituent| self.template_type_from_pieces(constituent.pieces))
             .collect();
-        let node = match members.as_slice() {
+        Ok(match members.as_slice() {
             [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             [single] => *single,
             _ => {
@@ -15869,14 +16053,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
-                    _ => return carrier_stop(false),
+                    _ => authored(),
                 }
             }
-        };
-        TemplateReduceOutcome {
-            node,
-            keyspace_budget_exceeded: false,
-        }
+        })
     }
 
     /// The texts and holes of a template of `quasis` and `args` with every
@@ -15943,53 +16123,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Every concatenation a template of `quasis` and `args` distributes
     /// into, each as its sequence of text and hole pieces — the cartesian
     /// product of the per-expression alternatives
-    /// ([`Self::template_arg_alternatives`]).
+    /// ([`Self::template_arg_alternatives`]). The product is weighed first
+    /// as the checker weighs it (`checkCrossProductUnion` over the
+    /// expressions' constituent counts, `never` an empty factor): at the
+    /// checker's limit it is TS2590 and nothing is built. Each concatenation
+    /// built is charged to the connected-work ledger before it is formed.
     fn template_alternatives(
         &self,
         quasis: &[Arc<str>],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> TemplateAlternatives {
-        let mut per_arg: Vec<Vec<Vec<TemplatePiece>>> = Vec::with_capacity(args.len());
-        let mut product_width: usize = 1;
+        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
+        let mut per_arg: Vec<Vec<TemplateConstituent>> = Vec::with_capacity(args.len());
         for &arg in args {
             match self.template_arg_alternatives(arg, eval_context) {
-                TemplateAlternatives::Finite(alternatives) => {
-                    product_width = product_width.saturating_mul(alternatives.len());
-                    per_arg.push(alternatives);
-                }
+                TemplateAlternatives::Finite(alternatives) => per_arg.push(alternatives),
                 other => return other,
             }
         }
-        if product_width > TEMPLATE_LITERAL_KEYSPACE_CAP {
-            return TemplateAlternatives::OverBudget;
+        let factors = per_arg.iter().map(|alternatives| match alternatives.len() {
+            0 => ProductFactor::Never,
+            1 => ProductFactor::Single,
+            width => ProductFactor::Union(width),
+        });
+        if let Err(diagnostic) = cross_product_union(
+            factors,
+            crate::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
+        ) {
+            return TemplateAlternatives::TooComplex(diagnostic);
         }
         let text = |index: usize| {
             TemplatePiece::Text(quasis.get(index).map(|q| q.to_string()).unwrap_or_default())
         };
         let mut results: Vec<Vec<TemplatePiece>> = vec![vec![text(0)]];
         for (index, alternatives) in per_arg.iter().enumerate() {
-            let mut next: Vec<Vec<TemplatePiece>> =
-                Vec::with_capacity(results.len() * alternatives.len());
+            let width = results.len() * alternatives.len();
+            if let Err(reasons) = self.connected_demand.charge_units(width) {
+                return TemplateAlternatives::Exhausted(reasons);
+            }
+            let mut next: Vec<Vec<TemplatePiece>> = Vec::with_capacity(width);
             for prefix in &results {
                 for alternative in alternatives {
                     let mut combined = prefix.clone();
-                    combined.extend(alternative.iter().cloned());
+                    combined.extend(alternative.pieces.iter().cloned());
                     combined.push(text(index + 1));
                     next.push(combined);
                 }
             }
             results = next;
         }
-        TemplateAlternatives::Finite(results)
+        TemplateAlternatives::Finite(
+            results
+                .into_iter()
+                .map(TemplateConstituent::string)
+                .collect(),
+        )
     }
 
     /// The alternatives ONE interpolated expression contributes, each a
     /// sequence of pieces: its text for a literal (TS-stringified —
     /// `` `${1 | 2}` `` is `"1" | "2"`, a bigint its base-10 digits) and for
     /// `null` / `undefined`, both texts for `boolean`, nothing at all for
-    /// `never` (an empty product factor), the constituents' alternatives for
-    /// a union, a nested template literal type's own alternatives, and a
+    /// `never` (an empty product factor), the distinct constituents of a
+    /// union (the union the checker forms from them: a string literal a
+    /// nested template forms again is one constituent, a number literal
+    /// spelling the same text another), a nested template literal type's own
+    /// alternatives, and a
     /// hole for `string` / `number` / `bigint` / `any` or a string mapping
     /// over one. A residual string-mapping application reduces first, so
     /// `` `on${Capitalize<K>}` `` folds once `K` is substituted. Every other
@@ -16004,18 +16204,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some((intrinsic, operand)) = self.string_mapping_of(resolved) {
             resolved = self.apply_string_intrinsic(&intrinsic, operand, eval_context);
         }
-        let text =
-            |text: String| TemplateAlternatives::Finite(vec![vec![TemplatePiece::Text(text)]]);
+        let text = |text: String, spelled: Option<SemanticNodeId>| {
+            TemplateAlternatives::Finite(vec![TemplateConstituent {
+                pieces: vec![TemplatePiece::Text(text)],
+                spelled,
+            }])
+        };
         let data = graph.node_data(resolved);
         match data.as_deref() {
-            Some(SemanticNodeData::Literal(value)) => text(literal_value_template_text(value)),
+            Some(SemanticNodeData::Literal(value)) => text(
+                literal_value_template_text(value),
+                (!matches!(value, LiteralValue::String(_))).then_some(resolved),
+            ),
             // An enum member interpolates as its value; a member whose
             // value is not a constant is no literal and spells any string.
             Some(SemanticNodeData::EnumLiteral(literal)) => {
                 if super::canonical_algebra::enum_literal_is_unit(graph, literal) {
                     let base = literal.base;
                     drop(data);
-                    self.template_arg_alternatives(base, eval_context)
+                    // The member is its own constituent, whatever its value.
+                    match self.template_arg_alternatives(base, eval_context) {
+                        TemplateAlternatives::Finite(constituents) => TemplateAlternatives::Finite(
+                            constituents
+                                .into_iter()
+                                .map(|constituent| TemplateConstituent {
+                                    spelled: Some(resolved),
+                                    ..constituent
+                                })
+                                .collect(),
+                        ),
+                        other => other,
+                    }
                 } else {
                     TemplateAlternatives::AnyString
                 }
@@ -16023,28 +16242,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
                 TemplateAlternatives::Finite(Vec::new())
             }
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => text("null".to_owned()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => {
+                text("null".to_owned(), Some(resolved))
+            }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
-                text("undefined".to_owned())
+                text("undefined".to_owned(), Some(resolved))
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
-                TemplateAlternatives::Finite(vec![
-                    vec![TemplatePiece::Text("false".to_owned())],
-                    vec![TemplatePiece::Text("true".to_owned())],
-                ])
+                TemplateAlternatives::Finite(
+                    ["false", "true"]
+                        .into_iter()
+                        .map(|text| TemplateConstituent {
+                            pieces: vec![TemplatePiece::Text(text.to_owned())],
+                            spelled: Some(resolved),
+                        })
+                        .collect(),
+                )
             }
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.members_arc();
                 drop(data);
-                let mut out: Vec<Vec<TemplatePiece>> = Vec::new();
+                // The span is the union the checker holds: its literal
+                // reduction runs first (a pattern absorbs the literals it
+                // matches).
+                let reduced = self.intern_normalized_union(
+                    &members,
+                    crate::semantic_query::NullabilityPolicy::Strict,
+                );
+                let members: Arc<[SemanticNodeId]> = match graph.node_data(reduced).as_deref() {
+                    Some(SemanticNodeData::Union(reduced)) => reduced.members_arc(),
+                    _ => Arc::from(vec![reduced].into_boxed_slice()),
+                };
+                let mut out: Vec<TemplateConstituent> = Vec::new();
+                let mut seen: FxHashSet<TemplateConstituent> = FxHashSet::default();
                 for member in members.iter() {
                     match self.template_arg_alternatives(*member, eval_context) {
-                        TemplateAlternatives::Finite(alternatives) => out.extend(alternatives),
+                        TemplateAlternatives::Finite(alternatives) => out.extend(
+                            alternatives
+                                .into_iter()
+                                .filter(|alternative| seen.insert(alternative.clone())),
+                        ),
                         other => return other,
                     }
-                }
-                if out.len() > TEMPLATE_LITERAL_KEYSPACE_CAP {
-                    return TemplateAlternatives::OverBudget;
                 }
                 TemplateAlternatives::Finite(out)
             }
@@ -16059,7 +16298,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => {
                 drop(data);
                 if self.is_template_hole(resolved) {
-                    TemplateAlternatives::Finite(vec![vec![TemplatePiece::Hole(resolved)]])
+                    TemplateAlternatives::Finite(vec![TemplateConstituent::string(vec![
+                        TemplatePiece::Hole(resolved),
+                    ])])
                 } else {
                     TemplateAlternatives::Open
                 }
@@ -16091,6 +16332,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if holes.is_empty() {
             let text = texts.pop().expect("one text per hole plus one");
             return graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
+        }
+        // Every text empty and every hole `string`: the template is `string`
+        // (`${string}${string}` spells any string).
+        let is_string = |hole: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*hole).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+        };
+        if texts.iter().all(String::is_empty) && holes.iter().all(is_string) {
+            return holes[0];
         }
         if let [hole] = holes.as_slice() {
             if texts.iter().all(String::is_empty)
@@ -17182,6 +17434,63 @@ enum Thenability {
 /// The declaration scope a type-parameter binding lowers its defaults in:
 /// the declaration's file scope, its scope payload and shadow set, and the
 /// authored-resolution debt of a declaration recovered as a partial.
+/// How [`ProjectSemanticDispatch::begin_instantiate`] begins.
+pub(super) enum InstantiateStart {
+    /// The instantiation is answered.
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
+    /// Its body is being lowered.
+    Build(Box<InstantiateBuild>),
+}
+
+/// Where an instantiation's build stands after it ran as far as it could.
+pub(super) enum InstantiatePoll {
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
+    /// The build waits on this instantiation.
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
+/// A generic declaration's instantiation between its steps: everything the
+/// build owns while its body projection waits on another instantiation.
+pub(super) struct InstantiateBuild {
+    pub(super) active_identity: super::InstantiateIdentity,
+    decl_canonical: Arc<str>,
+    decl_owner: verter_type_expr::TopLevelOwnerId,
+    decl_name: Arc<str>,
+    is_non_file_base: bool,
+    decl_whole_hash: crate::semantic_query::HashValue,
+    base: SemanticNodeId,
+    args: Arc<[SemanticNodeId]>,
+    scope: NodeScopeId,
+    prepared: Arc<PreparedTypeDecl>,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    authored_resolution_debt:
+        Option<crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame>,
+    context: crate::semantic_query::ProjectionReductionContext,
+    body_mode: crate::semantic_query::ProjectionMode,
+    env: FxHashMap<String, SemanticNodeId>,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+    tail: crate::semantic_query::checker_policy::ConditionalTail,
+    tail_arguments: Vec<Arc<[SemanticNodeId]>>,
+    generic: bool,
+    suspend: bool,
+    body: BodyLowering,
+}
+
+/// A declaration body's lowering in progress.
+pub(super) enum BodyLowering {
+    /// The body lowered to this node without a projection.
+    Ready(SemanticNodeId),
+    /// Its substituted shape is being projected.
+    Project(Box<crate::project_semantic_dispatch::locator_view::DeclBodyProjection>),
+}
+
+/// Where a body lowering stands after it ran as far as it could.
+pub(super) enum BodyPoll {
+    Done(SemanticNodeId),
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
 struct DeclarationBindingScope<'s> {
     scope: &'s NodeScopeId,
     scope_payload: Option<&'s crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,

@@ -27,10 +27,74 @@ use std::cell::Cell;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::PartialReasonSet;
 
-/// Work-unit cap for one connected semantic demand.
+/// The work units one structured comparison the checker records costs the
+/// relation at most, on the shape its relation-complexity limit is reached
+/// by: a union arm scanning a union target of object types charges the
+/// alternative and its pair's worklist step (measured: 22,329 units for the
+/// 20,100 comparisons of 200 reversed arms). Pinned by a test until the
+/// cap below is sized by it.
+#[cfg(test)]
+pub(super) const RELATION_UNITS_PER_COMPARISON: usize = 2;
+
+/// Work-unit cap for one connected semantic demand: the operational
+/// backstop.
+///
+/// It is NOT yet above the checker's relation-complexity envelope
+/// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
+/// `RELATION_UNITS_PER_COMPARISON` units each, 4,000,000 units): work
+/// units do not bound memory, and a relation holds about 1.6 KB per
+/// structured pair it relates, so sized there a union scan of 1,800
+/// reversed object arms would hold gigabytes. Until construction bytes are
+/// charged beside work, the cap stays here, and a relation the checker
+/// completes between about 130,000 and 2,000,000 comparisons ends as typed
+/// incompleteness rather than the checker's answer.
+///
+/// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
 pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
 /// Nested query-boundary cap for one connected semantic demand.
 pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
+/// Verter's own instantiation budget for one connected semantic demand:
+/// how deep instantiations evaluated on the continuation runtime may nest
+/// (each one's frame is held on the heap while the one it needs builds).
+/// Far past the checker's own depth limit, so Verter answers where the
+/// checker gives up; reaching it is the checker's TS2589, reported at
+/// Verter's limit ([`checker_policy::instantiation_budget`]). It bounds
+/// the frames one chain holds, so an instantiation that never terminates
+/// stops in bounded memory; the work ledger bounds its time.
+///
+/// [`checker_policy::instantiation_budget`]: crate::semantic_query::checker_policy::instantiation_budget
+pub(super) const MAX_CONNECTED_INSTANTIATION_DEPTH: u32 = 10_000;
+
+#[cfg(test)]
+thread_local! {
+    /// A lower instantiation budget for the ledgers this thread installs,
+    /// set by [`InstantiationBudgetForTests`].
+    static INSTANTIATION_DEPTH_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Install `limit` as the instantiation budget of every ledger this
+/// thread creates until the guard drops — the production budget's code
+/// path at a depth a test can reach quickly. Test-only.
+#[cfg(test)]
+pub(super) struct InstantiationBudgetForTests {
+    previous: Option<u32>,
+}
+
+#[cfg(test)]
+impl InstantiationBudgetForTests {
+    pub(super) fn install(limit: u32) -> Self {
+        Self {
+            previous: INSTANTIATION_DEPTH_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for InstantiationBudgetForTests {
+    fn drop(&mut self) {
+        INSTANTIATION_DEPTH_FOR_TESTS.with(|slot| slot.set(self.previous));
+    }
+}
 
 /// The one signal the ledger observes from outside its own accounting:
 /// whether the owning request has been cancelled.
@@ -71,6 +135,7 @@ pub(crate) struct ConnectedDemandLedger<'a> {
     work_limit: Cell<usize>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
+    instantiation_depth_limit: u32,
     tripped: Cell<PartialReasonSet>,
 }
 
@@ -82,6 +147,7 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("work_limit", &self.work_limit.get())
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
+            .field("instantiation_depth_limit", &self.instantiation_depth_limit)
             .field("tripped", &self.tripped.get())
             .finish()
     }
@@ -97,8 +163,21 @@ impl<'a> ConnectedDemandLedger<'a> {
             work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
             query_depth: Cell::new(0),
             query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
+            #[cfg(not(test))]
+            instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
+            #[cfg(test)]
+            instantiation_depth_limit: INSTANTIATION_DEPTH_FOR_TESTS
+                .with(Cell::get)
+                .unwrap_or(MAX_CONNECTED_INSTANTIATION_DEPTH),
             tripped: Cell::new(PartialReasonSet::empty()),
         }
+    }
+
+    /// Whether an instantiation nested `depth` deep on the continuation
+    /// runtime is within Verter's instantiation budget
+    /// ([`MAX_CONNECTED_INSTANTIATION_DEPTH`]).
+    pub(crate) fn instantiation_within_budget(&self, depth: u32) -> bool {
+        depth <= self.instantiation_depth_limit
     }
 
     /// Join the active connected demand, or install a fresh one when this is

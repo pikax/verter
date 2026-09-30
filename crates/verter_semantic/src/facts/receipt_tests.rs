@@ -84,10 +84,11 @@ fn a_digest_collision_never_makes_two_evidences_equal() {
     let forged = ResultReceipt(Arc::new(ResultEvidence {
         facts: Arc::from(vec![whole("/z.ts", 9)]),
         digest: a.digest(),
-        canonicals: Arc::from(vec![Arc::<str>::from("/z.ts")]),
+        canonicals: ResultReceipt::new(vec![whole("/z.ts", 9)])
+            .canonicals()
+            .clone(),
         aggregated: Arc::from(Vec::new()),
         resolution_evidence: false,
-        receipts: 1,
     }));
     assert_ne!(a, forged);
     assert_ne!(a.cmp(&forged), std::cmp::Ordering::Equal);
@@ -161,10 +162,9 @@ fn equal_chains_assembled_apart_compare_without_native_recursion() {
                         Some(digests) => ResultReceipt(Arc::new(ResultEvidence {
                             facts: Arc::clone(&built.0.facts),
                             digest: digests[level as usize],
-                            canonicals: Arc::clone(&built.0.canonicals),
+                            canonicals: built.0.canonicals.clone(),
                             aggregated: Arc::clone(&built.0.aggregated),
                             resolution_evidence: false,
-                            receipts: built.0.receipts,
                         })),
                     });
                 }
@@ -250,4 +250,60 @@ fn equal_lattices_assembled_apart_compare_in_their_distinct_pairs() {
     assert!(!a.ptr_eq(&b), "premise: assembled apart");
     assert_eq!(a, b);
     assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+}
+
+/// A receipt's canonical set is exactly the canonicals its reachable facts
+/// name, in order: through a long chain of distinct files, through a
+/// diamond, and never a canonical nothing reaches. A receipt naming only
+/// canonicals its consumed receipt already holds shares that set.
+#[test]
+fn a_receipts_canonical_set_is_exactly_what_it_reaches() {
+    let mut chain = ResultReceipt::new(vec![whole("/0.ts", 0)]);
+    for level in 1..1_024u32 {
+        chain = ResultReceipt::new(vec![
+            FactVersionRef::Receipt(chain),
+            whole(&format!("/{level}.ts"), (level % 251) as u8),
+        ]);
+    }
+    assert_eq!(chain.canonicals().len(), 1_024);
+    assert!(chain.references_canonical("/0.ts"), "the deepest level");
+    assert!(chain.references_canonical("/1023.ts"), "the top level");
+    assert!(!chain.references_canonical("/unrelated.ts"));
+    let mut walked = std::collections::BTreeSet::new();
+    assert!(chain.all_leaves(|fact| {
+        walked.insert(fact.canonical_id().expect("a file fact").to_owned());
+        true
+    }));
+    let listed: Vec<String> = chain.canonicals().iter().map(|c| c.to_string()).collect();
+    assert_eq!(
+        listed,
+        walked.into_iter().collect::<Vec<_>>(),
+        "the walk's canonicals, in order"
+    );
+
+    let shared = ResultReceipt::new(vec![whole("/s.ts", 1)]);
+    let left = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(shared.clone()),
+        whole("/l.ts", 2),
+    ]);
+    let right = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(shared.clone()),
+        whole("/r.ts", 3),
+    ]);
+    let top = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(left),
+        FactVersionRef::Receipt(right),
+    ]);
+    let listed: Vec<&str> = top.canonicals().iter().map(AsRef::as_ref).collect();
+    assert_eq!(listed, ["/l.ts", "/r.ts", "/s.ts"]);
+
+    let again = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(shared.clone()),
+        whole("/s.ts", 4),
+    ]);
+    assert_eq!(
+        again.canonicals(),
+        shared.canonicals(),
+        "no canonical added"
+    );
 }

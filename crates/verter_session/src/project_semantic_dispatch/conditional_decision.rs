@@ -514,6 +514,9 @@ impl ProjectSemanticDispatch<'_> {
             ) => return None,
             Some(SemanticNodeData::Intersection(arms)) => (arms.members_arc(), false),
             Some(SemanticNodeData::Union(arms)) => (arms.members_arc(), true),
+            Some(SemanticNodeData::TemplateLiteral { .. }) => {
+                return self.template_operand_recovery(operand)
+            }
             _ => return None,
         };
         if !is_union {
@@ -524,9 +527,11 @@ impl ProjectSemanticDispatch<'_> {
         let mut found: [Option<SemanticNodeId>; 4] = [None; 4];
         for arm in arms.iter() {
             let arm_type = match graph.node_data(*arm).as_deref() {
-                Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => {
-                    self.conditional_operand_extreme(*arm)
-                }
+                Some(
+                    SemanticNodeData::Intersection(_)
+                    | SemanticNodeData::Union(_)
+                    | SemanticNodeData::TemplateLiteral { .. },
+                ) => self.conditional_operand_extreme(*arm),
                 Some(
                     SemanticNodeData::Alias(_)
                     | SemanticNodeData::DeclRef { .. }
@@ -553,6 +558,31 @@ impl ProjectSemanticDispatch<'_> {
             error.or(any).or(unknown)
         } else {
             never.or(error).or(any)
+        }
+    }
+
+    /// The checker's recovery a template literal type `operand` is when
+    /// the checker refuses its cross product; `None` otherwise.
+    fn template_operand_recovery(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        let (pattern, args) = match self.graph().node_data(operand).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => (Arc::clone(quasis), Arc::clone(expressions)),
+            _ => return None,
+        };
+        let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+            pattern,
+            args,
+            context: self.template_literal_reduce_context(),
+        });
+        match read.value {
+            QueryResult::Value(reduced) => matches!(
+                self.graph().node_data(reduced).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+            )
+            .then_some(reduced),
+            _ => None,
         }
     }
 

@@ -2422,27 +2422,27 @@ fn normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete() {
 
 #[test]
 fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() {
-    // ADVANCED-PARTIAL: an over-cap template-literal product behind a `DeclRef`
-    // alias. The demand ADVANCES past the `DeclRef` (resolving `TooWide` through
-    // `ResolveDecl` to its `TemplateLiteral` body) and drives the shared
-    // `TemplateLiteralReduce`, whose 40x40 product deterministically exceeds the
-    // fixed keyspace cap and carrier-stops with `result_is_partial`. The reached
+    // ADVANCED-PARTIAL: a template-literal product the connected-work ledger
+    // refuses, behind a `DeclRef` alias. The demand ADVANCES past the `DeclRef`
+    // (resolving `TooWide` through `ResolveDecl` to its `TemplateLiteral` body)
+    // and drives the shared `TemplateLiteralReduce`, whose 1,600 concatenations
+    // exceed a 256-unit work limit, so it carrier-stops with
+    // `result_is_partial`. The reached
     // node is ADVANCED (a `TemplateLiteral` shell, NOT the input `DeclRef`) yet
     // NOT fully classified — its keyspace was never enumerated.
     //
-    // The point: a fixed-cap deferred op behind a carrier yields an ADVANCED
+    // The point: a refused deferred op behind a carrier yields an ADVANCED
     // non-carrier. Returning it as a bare node lets a consumer classify a
     // confident-but-truncated string-ish template (fail-open). The node-hiding
     // outcome is `Partial` instead — no node escapes the primitive, so no
-    // consumer can classify a truncated resolution. The over-cap partiality
-    // surfaces through the reduce read's `result_is_partial` (the boolean
-    // bridge, lifted `PROPAGATED`).
+    // consumer can classify a truncated resolution. The refused construction
+    // surfaces as the ledger's sticky work-limit trip.
     //
     // DISCRIMINATING: the negative arm panics on `Complete`; a completeness-
     // erasing regression (surfacing the advanced shell as a bare classifiable
     // node) classifies Complete and trips it. The interpolated unions are
-    // INLINE literal unions (finite at reduce time), so the keyspace cap
-    // deterministically fires — a residual `DeclRef` interpolation would instead
+    // INLINE literal unions (finite at reduce time), so the ledger
+    // deterministically refuses — a residual `DeclRef` interpolation would instead
     // be a non-finite honest carrier-stop (`Complete`), which is NOT this case.
     let wide = |prefix: &str| -> String {
         (0..40)
@@ -2500,15 +2500,16 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
         node_data_for(dispatch.ctx, toowide).as_deref()
     );
 
+    dispatch.set_connected_limits_for_tests(256, 24);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(toowide, navigate());
     match outcome {
         StructuralFactDemandOutcome::Partial(reasons) => assert!(
-            reasons.contains(PartialReasonSet::PROPAGATED),
-            "the over-cap template keyspace surfaces via the reduce read's result_is_partial \
-             (lifted PROPAGATED), got {reasons:?}"
+            reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+            "the refused template construction surfaces as the ledger's work-limit trip, \
+             got {reasons:?}"
         ),
         StructuralFactDemandOutcome::Complete(node) => panic!(
-            "an over-cap template-literal product behind a DeclRef must be Partial (never a \
+            "a refused template-literal product behind a DeclRef must be Partial (never a \
              confident classification of the advanced-but-unenumerated shell), got Complete({:?})",
             node_data_for(dispatch.ctx, node).as_deref()
         ),
@@ -3315,8 +3316,9 @@ fn validated_snippet_params_complete_nontuple_arg_is_present_bindingless() {
 
 #[test]
 fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
-    // CONSUMER (snippet peel): a `Snippet<Params>` whose `Params` is an over-cap
-    // template-literal behind a `DeclRef` yields a PARTIAL structural-fact demand
+    // CONSUMER (snippet peel): a `Snippet<Params>` whose `Params` is a template
+    // literal the connected-work ledger refuses (1,600 concatenations under a
+    // 256-unit limit) behind a `DeclRef` yields a PARTIAL structural-fact demand
     // on the `Params` arg. The whole snippet read fails closed (`None`), NEVER a
     // present binding-less `Some([])` slot — a truncated `Params` could still be
     // a tuple we could not reach.
@@ -3326,7 +3328,7 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
     // `Params` carrier-stopped to the (non-tuple) `TemplateLiteral` shell and was
     // bucketed present-binding-less `Some([])`; post-change the node-hiding
     // `Partial` fails the whole read to `None`. The inline finite unions
-    // guarantee the keyspace cap fires deterministically.
+    // guarantee the ledger refuses deterministically.
     let wide = |prefix: &str| -> String {
         (0..40)
             .map(|i| format!("\"{prefix}{i}\""))
@@ -3370,12 +3372,13 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
         .expect("the `toowide` member is present")
         .value;
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    // `Snippet<TooWide>` — the over-cap template alias as the single `Params` arg.
+    // `Snippet<TooWide>` — the refused template alias as the single `Params` arg.
     let snippet = instantiation_ref(&graph, "Snippet", vec![toowide]);
+    dispatch.set_connected_limits_for_tests(256, 24);
     assert_eq!(
         CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
         None,
-        "a PARTIAL (over-cap template) `Params` fails the whole snippet read closed — never a \
+        "a PARTIAL (refused template) `Params` fails the whole snippet read closed — never a \
          present binding-less `Some([])` slot off a truncated resolution"
     );
 }

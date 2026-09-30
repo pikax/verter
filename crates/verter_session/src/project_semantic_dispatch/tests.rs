@@ -29468,9 +29468,9 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 /// budget-exhausted / partial results never enter warm shared caches.
 ///
 /// This fixture reproduces that hole WITHOUT a `RequestContext` using a
-/// `RequestContext`-INDEPENDENT partiality source: a template-literal
-/// whose interpolated unions' cartesian product exceeds the fixed
-/// `TEMPLATE_LITERAL_KEYSPACE_CAP`. That carrier-stops with
+/// `RequestContext`-INDEPENDENT partiality source: a template literal
+/// whose construction the connected-work ledger refuses (a 40 × 40 product
+/// under a 256-unit work limit). That carrier-stops with
 /// `result_is_partial = true` regardless of any request budget. The
 /// entry-scoped gate withholds it; a request-sticky gate would not.
 #[test]
@@ -29481,14 +29481,10 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    // Two wide string-literal unions whose product exceeds the keyspace cap.
-    let cap = crate::project_semantic_dispatch::build::TEMPLATE_LITERAL_KEYSPACE_CAP;
+    // Two wide string-literal unions whose 1,600 concatenations the
+    // connected-work ledger refuses at a 256-unit limit.
     let union_side = 40usize;
-    assert!(
-        union_side * union_side > cap,
-        "fixture invariant: the {union_side}x{union_side} product must exceed the keyspace \
-         cap ({cap}) so the reduce carrier-stops as a budget-tainted partial"
-    );
+    dispatch.connected_demand.set_limits_for_tests(256, 24);
     let make_union = |prefix: &str| -> SemanticNodeId {
         let members: Vec<SemanticNodeId> = (0..union_side)
             .map(|i| {
@@ -29527,20 +29523,20 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
         "fixture invariant: no RequestContext ⇒ the request sticky must be false (the \
          request-sticky authority that would wrongly permit the publish)"
     );
-    // Fixture invariant 2: the keyspace cap actually tripped — the evaluation
-    // carrier-stopped to the `TemplateLiteral` shell (a partial), it did NOT
-    // fold to a fully-enumerated `Union`.
+    // Fixture invariant 2: the ledger actually refused the construction — the
+    // evaluation carrier-stopped to the `TemplateLiteral` shell (a partial),
+    // it did NOT fold to a fully-enumerated `Union`.
     assert!(
         matches!(
             graph.node_data(result).as_deref(),
             Some(SemanticNodeData::TemplateLiteral { .. })
         ),
-        "FIXTURE INVALID: the over-cap product must carrier-stop to the TemplateLiteral shell, \
+        "FIXTURE INVALID: the refused product must carrier-stop to the TemplateLiteral shell, \
          got {:?}",
         graph.node_data(result).as_deref()
     );
     // The typed completeness IS the entry-scoped admission authority: the
-    // over-cap keyspace surfaced through the `TemplateLiteralReduce` read's
+    // refused construction surfaced through the `TemplateLiteralReduce` read's
     // `result_is_partial` (the boolean bridge, lifted `PROPAGATED`), so the
     // evaluated entry is `Partial` — which is exactly why the memo gate below
     // withholds it with NO RequestContext installed.
@@ -29549,7 +29545,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
             result_completeness,
             crate::semantic_query::ResultCompleteness::Partial(_)
         ),
-        "the over-cap template evaluation must report Partial completeness (the \
+        "the refused template evaluation must report Partial completeness (the \
          admission authority the no-poison gate consults), got {result_completeness:?}"
     );
     // No-poison: the entry-scoped gate withholds the partial regardless of the

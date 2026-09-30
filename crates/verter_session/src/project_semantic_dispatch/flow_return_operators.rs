@@ -1439,17 +1439,20 @@ impl FlowEvaluator<'_, '_> {
             self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
             return Positional::Unmodeled;
         }
-        let reduced = self.dispatch.reduce_template_literal_nodes(
+        match self.dispatch.reduce_template_literal_nodes(
             quasis,
             &nodes,
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
-        );
-        if reduced.keyspace_budget_exceeded {
-            self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
-            return Positional::Unmodeled;
+        ) {
+            Ok(node) => Positional::Value(node),
+            Err(_) => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    FlowGap::UnmodeledExpression,
+                ));
+                Positional::Unmodeled
+            }
         }
-        Positional::Value(reduced.node)
     }
 }

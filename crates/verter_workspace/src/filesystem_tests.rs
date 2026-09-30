@@ -3024,3 +3024,139 @@ fn filesystem_workspace_exposes_the_source_env_generation_through_the_access_tra
          must see it"
     );
 }
+
+/// Distinct owners importing one `./types` beside them, the shape of a
+/// component batch, on a filesystem workspace.
+#[cfg(not(target_arch = "wasm32"))]
+fn sibling_owners_fixture(
+    owners: usize,
+) -> (
+    tempfile::TempDir,
+    Arc<FilesystemWorkspace>,
+    Vec<String>,
+    String,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonical_temp_root(&dir);
+    std::fs::write(
+        root.join("types.ts"),
+        "export interface Props { a: string }\n",
+    )
+    .unwrap();
+    let root_id = temp_canonical_id(&root);
+    let mut ids = Vec::with_capacity(owners);
+    for index in 0..owners {
+        std::fs::write(
+            root.join(format!("owner{index}.ts")),
+            "import type { Props } from './types'\n",
+        )
+        .unwrap();
+        ids.push(format!("{root_id}/owner{index}.ts"));
+    }
+    let workspace = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    (dir, workspace, ids, format!("{root_id}/types.ts"))
+}
+
+/// A sibling resolution that publishes its own route and loads the inputs
+/// both share, between one resolution's observations and its admission,
+/// changes nothing that resolution observed: it is admitted, cacheable,
+/// with the same answer and NO restart. A restart charged for a compatible
+/// sibling spends the operation's work budget on scheduling alone.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_compatible_sibling_publication_before_admission_costs_no_restart() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    let (_dir, workspace, owners, types) = sibling_owners_fixture(2);
+    let sibling_workspace = Arc::clone(&workspace);
+    let sibling_owner = owners[1].clone();
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            std::thread::scope(|scope| {
+                let sibling = scope.spawn(|| {
+                    sibling_workspace.resolve_import_outcome(&sibling_owner, "./types", CONTEXT)
+                });
+                let sibling = sibling.join().expect("the sibling resolves");
+                assert!(sibling.is_cacheable(), "the sibling is admitted");
+            });
+        },
+        || workspace.resolve_import_outcome(&owners[0], "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some(types.as_str()),
+        "the route answers `./types`"
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "a compatible sibling publication never refuses admission: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(
+        restarts, 0,
+        "a compatible sibling publication costs no restart"
+    );
+}
+
+/// Twelve sibling resolutions, one landing before EVERY admission attempt
+/// of the demanded one, as a concurrent component batch can schedule them:
+/// the demanded resolution is still admitted and cacheable with the serial
+/// answer. A restart charged per sibling exhausts the operation's restart
+/// budget and refuses the route (`BudgetExceeded`), which the session reads
+/// as an unrootable route, so the batch never warms.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn twelve_sibling_publications_never_refuse_a_route() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    let (_dir, workspace, owners, types) = sibling_owners_fixture(13);
+    let serial = FilesystemWorkspace::new(FilesystemOptions::default())
+        .resolve_import_outcome(&owners[0], "./types", CONTEXT);
+    let next = Arc::new(AtomicUsize::new(1));
+    let sibling_workspace = Arc::clone(&workspace);
+    let sibling_owners = owners.clone();
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let index = next.fetch_add(1, Ordering::AcqRel);
+            let Some(owner) = sibling_owners.get(index) else {
+                return;
+            };
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| sibling_workspace.resolve_import_outcome(owner, "./types", CONTEXT))
+                    .join()
+                    .expect("the sibling resolves");
+            });
+        },
+        || workspace.resolve_import_outcome(&owners[0], "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    assert_eq!(
+        serial.result().map(|result| result.source_id.as_str()),
+        Some(types.as_str())
+    );
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        serial.result().map(|result| result.source_id.as_str()),
+        "the route answers as it does serially: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "siblings never refuse the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(restarts, 0, "compatible siblings cost no restart");
+}

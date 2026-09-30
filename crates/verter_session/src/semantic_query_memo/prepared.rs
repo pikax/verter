@@ -113,18 +113,43 @@ impl PreparedKeyHandle {
     pub(super) fn requested_point(&self) -> &MaterializedPoint {
         &self.0.requested_point
     }
+}
 
-    /// Whether `other` is the SAME prepared instance (pointer
-    /// identity). Used by the recursion-stack guard to pop exactly the
-    /// frame it pushed.
-    pub(super) fn same_instance(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+impl verter_scheduler::tasks::ProducerIdentity for PreparedQueryIdentity {
+    fn producer_hash(&self) -> u64 {
+        self.cached_hash
     }
 
-    /// Whether this handle's key equals `key`, with `key_hash`
-    /// (produced by [`hash_key`]) as the fast-reject accelerator.
-    pub(super) fn key_matches(&self, key: &SemanticQueryKey, key_hash: u64) -> bool {
-        self.0.cached_hash == key_hash && &self.0.key == key
+    fn same_producer(&self, other: &dyn verter_scheduler::tasks::ProducerIdentity) -> bool {
+        other.downcast_ref::<Self>().is_some_and(|other| {
+            std::ptr::eq(self, other)
+                || (self.cached_hash == other.cached_hash && self.key == other.key)
+        })
+    }
+}
+
+impl PreparedKeyHandle {
+    /// This handle as the producer a task opens: a refcount bump, never a
+    /// new allocation.
+    pub(super) fn as_task_producer(&self) -> Arc<dyn verter_scheduler::tasks::ProducerIdentity> {
+        Arc::clone(&self.0) as Arc<dyn verter_scheduler::tasks::ProducerIdentity>
+    }
+
+    /// This handle as a producer identity to match against.
+    pub(super) fn as_task_producer_ref(&self) -> &dyn verter_scheduler::tasks::ProducerIdentity {
+        self.0.as_ref()
+    }
+
+    /// Whether `producer` is the semantic producer for exactly `key`, whose
+    /// prepared hash is `key_hash`.
+    pub(super) fn producer_matches_key(
+        producer: &dyn verter_scheduler::tasks::ProducerIdentity,
+        key: &SemanticQueryKey,
+        key_hash: u64,
+    ) -> bool {
+        producer
+            .downcast_ref::<PreparedQueryIdentity>()
+            .is_some_and(|identity| identity.cached_hash == key_hash && &identity.key == key)
     }
 }
 

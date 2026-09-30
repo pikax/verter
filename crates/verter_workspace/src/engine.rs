@@ -291,6 +291,11 @@ impl SessionResolutionDomain {
 
 struct CapturedResolutionFence {
     base_epoch: ResolutionEpoch,
+    /// The content generation the capture read under its stable epoch: a
+    /// content transition recorded past it, on a canonical the attempt
+    /// observed, changed an input the attempt read even when no resolution
+    /// fact has advanced yet (the refresh is lazy).
+    content_generation: u64,
     session_epoch: Option<ResolutionEpoch>,
     session_domain: Option<Arc<SessionResolutionDomain>>,
     world: Arc<CapturedResolutionWorld>,
@@ -1136,6 +1141,8 @@ impl Engine {
         );
         self.resolution_epoch
             .store(stable.wrapping_add(1), Ordering::Release);
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::WorldWriteHeld);
 
         struct RestoreEpoch<'a> {
             epoch: &'a AtomicU64,
@@ -2289,6 +2296,9 @@ impl Engine {
                 continue;
             }
             let base = self.resolution_world.load_full();
+            // Content transitions are recorded inside a world write, so a
+            // read between two equal stable epochs is the capture's own.
+            let content_generation = self.current_content_generation();
             let (session_domain, session_epoch, session) = match population {
                 ResolutionPopulation::Base => (None, None, None),
                 ResolutionPopulation::Session(fingerprint) => {
@@ -2312,6 +2322,7 @@ impl Engine {
             if base_before == base_after && base_after.is_stable() {
                 return Some(CapturedResolutionFence {
                     base_epoch: base_after,
+                    content_generation,
                     session_epoch,
                     session_domain,
                     world: Arc::new(CapturedResolutionWorld {
@@ -2396,6 +2407,51 @@ impl Engine {
 
         let _publication = self.resolution_world_write.try_lock_for(gate_wait)?;
         self.capture_resolution_world(population)
+    }
+
+    /// The fence an attempt admits under, decided while the caller holds the
+    /// publication gate (every writer is out of its window): the captured
+    /// fence while its world is still current, else the latest coherent
+    /// world when every fact the attempt observed still holds there — an
+    /// advance that touched nothing this attempt read is compatible, and
+    /// admitting into it reruns nothing. `None` when an observed fact
+    /// changed, or the request overlay's lane did: a genuine conflict.
+    fn admission_fence_under_gate(
+        &self,
+        captured: &CapturedResolutionFence,
+        population: ResolutionPopulation,
+        request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        transaction: &ResolutionTransaction,
+    ) -> Option<CapturedResolutionFence> {
+        if self.resolution_world_still_current(captured) {
+            return Some(CapturedResolutionFence {
+                base_epoch: captured.base_epoch,
+                content_generation: captured.content_generation,
+                session_epoch: captured.session_epoch,
+                session_domain: captured.session_domain.clone(),
+                world: Arc::clone(&captured.world),
+            });
+        }
+        let mut latest = self.capture_resolution_world(population)?;
+        if let Some(overlay) = request_overlay {
+            latest.world = overlay.effective_world(&latest.world);
+        }
+        if latest.world.composes_request_overlay() != captured.world.composes_request_overlay() {
+            return None;
+        }
+        // An input the attempt read whose content transitioned since the
+        // capture is a genuine change, even before its lazy refresh advances
+        // a fact.
+        if latest.content_generation != captured.content_generation
+            && transaction.observed_canonicals().any(|canonical| {
+                self.last_content_transition_generation(canonical) > captured.content_generation
+            })
+        {
+            return None;
+        }
+        transaction
+            .observations_hold_in(&latest.world)
+            .then_some(latest)
     }
 
     fn resolution_world_still_current(&self, captured: &CapturedResolutionFence) -> bool {
@@ -3584,6 +3640,8 @@ impl Engine {
         let mut flight_lease = None;
         loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
+            #[cfg(test)]
+            resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
             let captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
@@ -3970,53 +4028,54 @@ impl Engine {
                     ));
                 }
             }
+            // Admission is decided once, under the publication gate below: a
+            // world that moved since this attempt's capture is checked for
+            // compatibility there, and a writer still inside its window is
+            // waited on by taking the gate, never charged as a superseded
+            // world.
             #[cfg(test)]
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        rejected_exact_targets,
-                        true,
-                        false,
-                        false,
-                    );
-                }
-                continue;
-            }
 
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::RequestCompletion);
 
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
+            let session_domain = captured.session_domain.clone();
             let (_publication, _session_publication) = {
                 crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
                     self.resolution_world_write.lock(),
-                    captured
-                        .session_domain
-                        .as_ref()
-                        .map(|domain| domain.write.lock()),
+                    session_domain.as_ref().map(|domain| domain.write.lock()),
                 )
             };
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        rejected_exact_targets,
-                        true,
-                        false,
-                        false,
-                    );
+            let admission_fence = self.admission_fence_under_gate(
+                &captured,
+                population,
+                request_overlay,
+                &transaction.lock(),
+            );
+            match admission_fence {
+                Some(latest) => {
+                    transaction.lock().rebase_onto(Arc::clone(&latest.world));
+                    captured = latest;
                 }
-                continue;
+                None => {
+                    let tracked = TransactionReader::new(reader, &transaction);
+                    if input_ledger.charge_outer_restart(&tracked).is_err() {
+                        return ResolutionOutcome::new(
+                            None,
+                            transaction.into_inner().finish(),
+                            rejected_exact_targets,
+                            true,
+                            false,
+                            false,
+                        );
+                    }
+                    continue;
+                }
             }
             if !final_validate() {
                 input_ledger.release_applied_outputs();
@@ -4309,7 +4368,7 @@ impl Engine {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         loop {
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
+            let Some(mut captured) = self.capture_stable_resolution_world(population) else {
                 #[cfg(test)]
                 resolution_test_hooks::record_return_only();
                 return ResolutionOutcome::refused(
@@ -4409,29 +4468,18 @@ impl Engine {
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        Vec::new(),
-                        true,
-                        false,
-                        false,
-                    );
-                }
-                continue;
-            }
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::RequestCompletion);
 
             let _publication = self.resolution_world_write.lock();
-            let _session_publication = captured
-                .session_domain
-                .as_ref()
-                .map(|domain| domain.write.lock());
-            if !self.resolution_world_still_current(&captured) {
+            let session_domain = captured.session_domain.clone();
+            let _session_publication = session_domain.as_ref().map(|domain| domain.write.lock());
+            let admission_fence =
+                self.admission_fence_under_gate(&captured, population, None, &transaction.lock());
+            if let Some(latest) = admission_fence {
+                transaction.lock().rebase_onto(Arc::clone(&latest.world));
+                captured = latest;
+            } else {
                 let tracked = TransactionReader::new(reader, &transaction);
                 if input_ledger.charge_outer_restart(&tracked).is_err() {
                     return ResolutionOutcome::new(
