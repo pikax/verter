@@ -335,6 +335,8 @@ impl TestSessionBuilder {
                         },
                         Arc::new(tokio::sync::OnceCell::new()),
                         3,
+                        None,
+                        Arc::new(tokio::sync::Notify::new()),
                     );
                     match hub.establish().await {
                         Ok(_) => Ok(Arc::new(hub) as Arc<dyn TypeProvider>),

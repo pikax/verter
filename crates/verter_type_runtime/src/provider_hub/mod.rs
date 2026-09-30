@@ -67,17 +67,21 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::protocol::TypeProviderError;
 use crate::traits::TypeProvider;
 
+mod admission;
 mod desired;
 mod epoch;
 mod forwarding;
 mod quarantine;
-mod transport;
 
+pub use admission::{
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
+    OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    ProjectWitness,
+};
 use desired::{DesiredMutation, DesiredState, Disposition, Lane};
 use epoch::EpochMint;
 use quarantine::{InFlightGuard, QueryFingerprint, QueryWatch};
 
-pub use transport::{EstablishedTransport, LazyTransport, TransportIdentity};
 pub use verter_identity::identity::ProviderEpoch;
 
 /// Notification severity levels for provider events.
@@ -121,6 +125,22 @@ pub trait ProviderNotifier: Send + Sync + 'static {
     /// Deliberately has no default body: a silent default is how a provider
     /// silently inherits behaviour it was supposed to override.
     fn provider_started(&self, pid: Option<u32>, start: EngineStart);
+
+    /// Admitted generated state was dropped because a replacement engine
+    /// installed: the recorded carriers and overlays exist in NO engine now,
+    /// and the desired state will not replay them — a replacement may only
+    /// receive them through a FRESH admission against its own serving epoch.
+    ///
+    /// This is the recovery re-arm signal: the tier that minted the dropped
+    /// admissions re-runs its publication (resolve → admit → apply) for the
+    /// named units, so a recovered engine is not left without its companion
+    /// registrations and overlays until the next ordinary publication. The hub
+    /// emits it AFTER the replacement is installed (a re-arm can bind a
+    /// witness to the new epoch). Defaulted: a tier without hub-issued
+    /// admissions never drops any.
+    fn admitted_state_dropped(&self, dropped: &admission::DroppedAdmittedState) {
+        let _ = dropped;
+    }
 }
 
 /// No-op notifier (logs via tracing only).
@@ -181,6 +201,14 @@ pub struct HubPolicy {
     /// `None`: the hub establishes only through [`ProviderHub::establish`] and
     /// recovery, and queries without a serving engine fail closed.
     pub on_demand: Option<Duration>,
+    /// `true` for an externally-attached transport (the shared editor
+    /// attach): a death RETIRES the serving epoch fail-closed without the
+    /// respawn loop. Re-establishment belongs to the re-arm door
+    /// ([`ProviderHub::establish_rearming`]) — a fresh generation
+    /// discriminant — never to a backoff storm against a dead attach, and
+    /// the instance is never declared exhausted: a later fresh
+    /// discriminant (a reconnect) still re-arms.
+    pub retire_only_on_crash: bool,
 }
 
 impl HubPolicy {
@@ -191,6 +219,7 @@ impl HubPolicy {
             max_restarts,
             establish_timeout: DEFAULT_ESTABLISH_TIMEOUT,
             on_demand: None,
+            retire_only_on_crash: false,
         }
     }
 
@@ -201,6 +230,22 @@ impl HubPolicy {
             max_restarts,
             establish_timeout: DEFAULT_ESTABLISH_TIMEOUT,
             on_demand: Some(retry_cooldown),
+            retire_only_on_crash: false,
+        }
+    }
+
+    /// An externally-attached transport the re-arm door
+    /// ([`ProviderHub::establish_rearming`]) establishes lazily: a death
+    /// retires the epoch fail-closed (no respawn loop, no exhaustion), and a
+    /// failed or evicted attach re-attempts only through a fresh generation
+    /// discriminant.
+    #[must_use]
+    pub const fn lazy_attach(establish_timeout: Duration) -> Self {
+        Self {
+            max_restarts: 0,
+            establish_timeout,
+            on_demand: None,
+            retire_only_on_crash: true,
         }
     }
 
@@ -257,6 +302,20 @@ struct Lifecycle {
     /// crash monitors captured at an older value are abandoned.
     teardown_generation: u64,
     last_failure: Option<(Instant, String)>,
+    /// The re-arm gate of a lazily-attached transport
+    /// ([`HubPolicy::lazy_attach`]): the generation discriminant of the last
+    /// FAILED attempt — or of the establishment a death evicted. `None` while
+    /// an incarnation serves (or before the first attempt): every demand may
+    /// establish. `Some(discriminant)` while gated: only a probe that ADVANCES
+    /// past it re-arms; an unchanged discriminant — or an unobservable one
+    /// (`None`, gated by a first failure at `None` itself) — fails closed
+    /// without a new attempt.
+    attach_gate: Option<Option<String>>,
+    /// The discriminant the serving (or last evicted) incarnation
+    /// established at — re-read AFTER a successful establishment, so an
+    /// advertisement that advanced mid-handshake is carried as the
+    /// establishment's own. A death arms [`Lifecycle::attach_gate`] with it.
+    established_discriminant: Option<String>,
 }
 
 /// State shared between the hub handle and its actor.
@@ -269,6 +328,7 @@ struct Shared<P: ?Sized> {
     epochs: EpochMint,
     lifecycle: StdMutex<Lifecycle>,
     query_watch: Arc<StdMutex<QueryWatch>>,
+    admission: StdMutex<admission::AdmissionState>,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -312,6 +372,15 @@ enum Command<P: ?Sized> {
         lane: Lane,
         deadline: Option<tokio::time::Instant>,
         ack: oneshot::Sender<Result<AppliedReceipt, TypeProviderError>>,
+    },
+    /// An admitted generated unit is forwarded only to the exact serving
+    /// incarnation. It is never put in desired state for unproven replay.
+    ApplyOverlay {
+        mutation: DesiredMutation,
+        admissions: Vec<AdmittedRequest>,
+        lane: Lane,
+        deadline: Option<tokio::time::Instant>,
+        ack: oneshot::Sender<Result<AppliedReceipt, AdmissionRefusal>>,
     },
     /// The engine serving `epoch` died: retire it so queries fail closed.
     Retire {
@@ -386,8 +455,11 @@ where
                 phase: Phase::Idle,
                 teardown_generation: 0,
                 last_failure: None,
+                attach_gate: None,
+                established_discriminant: None,
             }),
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
+            admission: StdMutex::new(admission::AdmissionState::default()),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
@@ -395,6 +467,7 @@ where
         tokio::spawn(run_actor(
             command_rx,
             Arc::clone(&shared),
+            Arc::clone(&notifier),
             log_name,
             demand_driven,
         ));
@@ -439,6 +512,68 @@ where
     /// orphaned. A failure is not retried within the policy's retry cooldown.
     pub async fn establish(&self) -> Result<ProviderEpoch, TypeProviderError> {
         establish(&self.state).await
+    }
+
+    /// Establish through the re-arm door of a lazily-attached transport
+    /// ([`HubPolicy::lazy_attach`]) — the door that replaces a wall-clock
+    /// retry cooldown with the transport's own re-arm authority: an external
+    /// generation discriminant (a reconnect nonce, a workspace/config
+    /// generation).
+    ///
+    /// A demand FAILS CLOSED — no attempt, no I/O — while the observed
+    /// discriminant is UNCHANGED since the last failed attempt (or since the
+    /// establishment a death evicted), so a dead or absent attach is never
+    /// stormed; any ADVANCE (a fresh discriminant) re-arms and establishes
+    /// through the same singleflight as [`ProviderHub::establish`]. A serving
+    /// incarnation returns its epoch without probing.
+    ///
+    /// `probe` reads the CURRENT discriminant (`None` when none is
+    /// observable — a first failure AT `None` gates exactly like one at an
+    /// observable discriminant and never re-arms on another `None`). The
+    /// discriminant is re-read AFTER a success and retained as the
+    /// establishment's own, so a generation that advanced mid-establishment
+    /// is what a later eviction compares against.
+    pub async fn establish_rearming(
+        &self,
+        probe: impl Fn() -> Option<String>,
+    ) -> Result<ProviderEpoch, TypeProviderError> {
+        if let Some(epoch) = self.state.shared.serving_epoch() {
+            return Ok(epoch);
+        }
+        let gate = self.state.shared.lifecycle().attach_gate.clone();
+        let observed = probe();
+        if let Some(failed_at) = gate {
+            if !generation_advanced(&failed_at, &observed) {
+                return Err(TypeProviderError::new(format!(
+                    "{} attach failed at the current generation and re-arms only on a fresh one",
+                    self.state.establisher.log_name()
+                )));
+            }
+        }
+        match establish(&self.state).await {
+            Ok(epoch) => {
+                let established_at = probe();
+                let mut lifecycle = self.state.shared.lifecycle();
+                lifecycle.established_discriminant = established_at;
+                lifecycle.attach_gate = None;
+                Ok(epoch)
+            }
+            Err(error) => {
+                self.state.shared.lifecycle().attach_gate = Some(observed);
+                Err(error)
+            }
+        }
+    }
+
+    /// The serving provider incarnation, if one serves: the exact instance
+    /// and epoch every hub-issued witness and admitted request binds to. A
+    /// hub with no serving engine yields `None` (the caller fails closed).
+    #[must_use]
+    pub fn serving(&self) -> Option<(Arc<P>, ProviderEpoch)> {
+        self.state
+            .shared
+            .serving()
+            .map(|serving| (Arc::clone(&serving.provider), serving.epoch))
     }
 
     /// Recover from the death of the engine serving `retired`.
@@ -813,6 +948,7 @@ where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
     let log_name = state.establisher.log_name();
+    let retire_only = state.policy.retire_only_on_crash;
     {
         let mut lifecycle = state.shared.lifecycle();
         // TEARDOWN DISCRIMINATION: a deliberate shutdown produces the same
@@ -832,7 +968,20 @@ where
         if !matches!(lifecycle.phase, Phase::Idle) {
             return;
         }
-        lifecycle.phase = Phase::Recovering;
+        if retire_only {
+            // An externally-attached transport never respawns on a timer:
+            // retire the epoch fail-closed and hold the re-arm at the
+            // discriminant the dead incarnation established at. The next
+            // demand re-establishes only through a FRESH discriminant (a
+            // reconnect); within the same one every query fails closed to
+            // its baseline — including an unobservable discriminant, which
+            // gates exactly like an observable one. The instance is never
+            // declared exhausted.
+            lifecycle.attach_gate = Some(lifecycle.established_discriminant.clone());
+            lifecycle.phase = Phase::Idle;
+        } else {
+            lifecycle.phase = Phase::Recovering;
+        }
     }
     tracing::warn!("{log_name} crash detected - initiating restart sequence");
 
@@ -857,6 +1006,14 @@ where
         return;
     }
     let _ = ack_rx.await;
+
+    if retire_only {
+        tracing::warn!(
+            "{log_name} attach died — epoch {retired:?} retired; re-establishment \
+             waits for a fresh generation discriminant"
+        );
+        return;
+    }
 
     state.notifier.notify(
         NotifySeverity::Warning,
@@ -986,6 +1143,7 @@ where
 async fn run_actor<P>(
     mut command_rx: mpsc::UnboundedReceiver<Command<P>>,
     shared: Arc<Shared<P>>,
+    notifier: Arc<dyn ProviderNotifier>,
     log_name: &'static str,
     demand_driven: bool,
 ) where
@@ -1003,6 +1161,123 @@ async fn run_actor<P>(
             },
         };
         match command {
+            Command::ApplyOverlay {
+                mutation,
+                admissions,
+                lane,
+                deadline,
+                ack,
+            } => {
+                let current = || {
+                    admissions
+                        .iter()
+                        .try_for_each(|admission| admission::check_current(&shared, admission))
+                };
+                let result = if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                    Err(AdmissionRefusal::DeadlineElapsed)
+                } else {
+                    match current() {
+                        Err(reason) => Err(reason),
+                        Ok(()) => {
+                            let serving = shared
+                                .serving()
+                                .expect("admission checked serving provider");
+                            let disposition = desired.disposition(&mutation);
+                            if disposition == Disposition::Shadowed {
+                                Err(AdmissionRefusal::ShadowedMutation)
+                            } else {
+                                let forwarding = async {
+                                    let forwarded = desired::forward(
+                                        serving.provider.as_ref(),
+                                        &mutation,
+                                        lane,
+                                    );
+                                    match deadline {
+                                        Some(at) => {
+                                            crate::deadline::with_deadline_at(at, forwarded).await
+                                        }
+                                        None => forwarded.await,
+                                    }
+                                };
+                                match await_receptive(
+                                    forwarding,
+                                    Some(serving.epoch),
+                                    &mut command_rx,
+                                    &mut queued,
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {
+                                        match current() {
+                                            Ok(()) => {
+                                                desired.apply(&mutation, lane);
+                                                desired.record_admitted(&mutation, &admissions);
+                                                let mut watch =
+                                                    shared.query_watch.lock().unwrap_or_else(
+                                                        |poisoned| poisoned.into_inner(),
+                                                    );
+                                                for path in mutation.touched_paths() {
+                                                    watch.clear_path(&path);
+                                                }
+                                                Ok(AppliedReceipt {
+                                                    epoch: Some(serving.epoch),
+                                                })
+                                            }
+                                            Err(AdmissionRefusal::StaleBasis)
+                                                if admissions
+                                                    .iter()
+                                                    .all(admission::membership_inputs_current) =>
+                                            {
+                                                // A CONTENT-ONLY drift (another document's edit
+                                                // landed while the engine was awaited). The
+                                                // publication that decided membership is unchanged,
+                                                // so the healthy engine holds nothing the live
+                                                // basis excludes: retiring it would restart a
+                                                // whole project engine on every concurrent edit.
+                                                // Only the settlement is refused — nothing is
+                                                // recorded as applied or replayable, and the
+                                                // issuer's fresh admission re-applies idempotently.
+                                                Err(AdmissionRefusal::StaleBasis)
+                                            }
+                                            Err(reason) => {
+                                                // A publication raced the forward. The engine
+                                                // may now contain an unadmitted unit, so it cannot
+                                                // serve or replay that state into another epoch.
+                                                if demand_driven {
+                                                    retire(&shared, serving.epoch).await;
+                                                } else {
+                                                    serving.crash_signal.notify_one();
+                                                }
+                                                Err(reason)
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(_)) => {
+                                        // A partial provider write cannot be allowed to serve.
+                                        if demand_driven {
+                                            retire(&shared, serving.epoch).await;
+                                        } else {
+                                            serving.crash_signal.notify_one();
+                                        }
+                                        Err(AdmissionRefusal::ProviderWriteFailed)
+                                    }
+                                    Err(Interrupt::Retired(retired)) => {
+                                        retire(&shared, serving.epoch).await;
+                                        let _ = retired.send(());
+                                        Err(AdmissionRefusal::StaleProvider)
+                                    }
+                                    Err(Interrupt::Shutdown(done)) => {
+                                        shutdown_serving(&shared).await;
+                                        let _ = done.send(());
+                                        Err(AdmissionRefusal::StaleProvider)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                let _ = ack.send(result);
+            }
             Command::Mutate {
                 mutation,
                 lane,
@@ -1150,6 +1425,7 @@ async fn run_actor<P>(
                     };
                 match outcome {
                     Ok(()) => {
+                        let dropped = desired.discard_admitted();
                         let epoch = shared.epochs.mint();
                         // Record the installed engine's tier BEFORE releasing
                         // it into the serving cell: from that instant
@@ -1175,6 +1451,13 @@ async fn run_actor<P>(
                             // torn down, not orphaned, and its monitor released.
                             let _ = previous.provider.shutdown().await;
                             previous.crash_signal.notify_one();
+                        }
+                        // A replacement dropped the OLD epoch's admitted state
+                        // (a first install never has any). Announce it AFTER the
+                        // serving cell is filled so a re-arm binds its fresh
+                        // admission to the epoch that now serves.
+                        if !dropped.carriers.is_empty() || !dropped.files.is_empty() {
+                            notifier.admitted_state_dropped(&dropped);
                         }
                         let _ = ack.send(Ok(epoch));
                     }
@@ -1226,6 +1509,20 @@ where
         let _ = serving.provider.shutdown().await;
         // Release the incarnation's crash monitor; it observes the teardown.
         serving.crash_signal.notify_one();
+    }
+}
+
+/// Whether the observed generation discriminant ADVANCED past the gated one —
+/// the re-arm signal of [`ProviderHub::establish_rearming`].
+///
+/// Re-arm ONLY when the current discriminant is `Some(new)` that differs from
+/// the gate. A missing current discriminant (`None` — none observable) does
+/// NOT re-arm, so a flapping / absent advertisement never storms
+/// establishment.
+fn generation_advanced(gated: &Option<String>, current: &Option<String>) -> bool {
+    match current {
+        Some(now) => Some(now) != gated.as_ref(),
+        None => false,
     }
 }
 

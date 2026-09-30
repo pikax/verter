@@ -1467,6 +1467,240 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
     );
 }
 
+/// A carrier whose owning configured project EXCLUDES its generated units (the
+/// include claims the source while the `exclude` removes the companion's own
+/// form) can never be advertised: the provider hub's generated-unit admission
+/// refuses the companion buffers, so attempting the publication leaves a permanently
+/// retrying pending carrier — and provider-sync completion unannounced — for the
+/// rest of the session. The gateway must settle the carrier TERMINALLY instead:
+/// no store write, no provider-buffer registration, and a settled
+/// `SettleClass::Unresolved` (dequeue, never retried; native analysis remains).
+///
+/// RED before the fix: the gateway attempted the advertisement, the reconciler
+/// ran the store commit and then failed its provider-buffer transition, and the
+/// carrier settled as the retryable `SettleClass::Pending`.
+#[tokio::test]
+async fn excluded_generated_units_settle_terminal_without_provider_writes() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let companion = format!("{source}.verter.ts");
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: source.clone(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineProps<{ label: string }>()</script><template><div>{{ label }}</div></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("load carrier");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    // The include claims the source while the `exclude` removes the
+    // companion's own form: the project owns `Comp.vue` while admitting none
+    // of the units generated for it.
+    let (_ws, snap) = ws_and_snapshot_body(
+        &ws_root,
+        &[(
+            tsconfig.as_str(),
+            r#"{ "include": ["src/**/*.vue", "src/**/*.ts"], "exclude": ["src/Comp.vue.verter.ts"] }"#,
+        )],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: true,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("an excluded generated-unit set must not be advertised (NotOwned)");
+    };
+    assert_eq!(
+        admission.settle(not_owned, &source, None),
+        SettleClass::Unresolved,
+        "an excluded generated-unit set settles TERMINAL (dequeue, never retried) — \
+         a retryable Pending keeps provider-sync completion unannounced forever"
+    );
+    assert!(
+        !carrier_ready_in_store(&ws_root, &tsconfig, &companion),
+        "an excluded generated-unit set must not be written to the store the \
+         @verter/typescript-plugin reads (zero speculative writes)"
+    );
+    let provider_calls = mock.calls();
+    assert!(
+        provider_calls
+            .iter()
+            .all(|call| !matches!(call, MockCall::RegisterCarrierMetadata { .. })),
+        "no provider-buffer registration may be attempted for an excluded set: \
+         {provider_calls:?}"
+    );
+}
+
+/// A carrier that WAS advertised, then whose owning project's include narrows so
+/// the generated units are no longer admitted, must be RETRACTED from the store
+/// when the exclusion settles — the stale `ready_files` row must disappear so the
+/// plugin stops advertising a membership the configuration no longer grants.
+#[tokio::test]
+async fn narrowing_the_include_retracts_a_previously_admitted_carrier() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let companion = format!("{source}.verter.ts");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let (_ws, broad) = ws_and_snapshot(
+        &ws_root,
+        &[(tsconfig.as_str(), r#"["**/*"]"#)],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(broad)));
+
+    // 1. The broad include admits the units: the carrier publishes.
+    let advertised = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(companion.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Ts,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![advertised],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the broad-include publish succeeds");
+    assert!(matches!(published, ReconcileOutcome::Advertised { .. }));
+    assert!(carrier_ready_in_store(&ws_root, &tsconfig, &companion));
+
+    // 2. The include narrows onto the source while the `exclude` removes the
+    //    companion's own form: ownership stays Bound, but the generated units
+    //    are excluded. Republish and re-run the gateway.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: source.clone(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineProps<{ label: string }>()</script><template><div>{{ label }}</div></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("load carrier");
+    let (_ws, narrow) = ws_and_snapshot_body(
+        &ws_root,
+        &[(
+            tsconfig.as_str(),
+            r#"{ "include": ["src/**/*.vue", "src/**/*.ts"], "exclude": ["src/Comp.vue.verter.ts"] }"#,
+        )],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(narrow)));
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: true,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("the narrowed include excludes the generated units (NotOwned)");
+    };
+    assert_eq!(
+        admission.settle(not_owned, &source, None),
+        SettleClass::Unresolved,
+        "the exclusion settles TERMINAL after retracting the prior advertisement"
+    );
+    assert!(
+        !carrier_ready_in_store(&ws_root, &tsconfig, &companion),
+        "the stale ready_files row must be RETRACTED so the plugin stops advertising \
+         the membership the narrowed configuration no longer grants"
+    );
+}
+
 /// Corrupt the on-disk manifest for `ws_root`'s store so EVERY subsequent store
 /// read-modify-write FAILS (`read_manifest` propagates a parse error on a
 /// present-but-unparseable manifest rather than clobbering it). This is the portable
@@ -1931,15 +2165,35 @@ fn ws_and_snapshot(
     projects: &[(&str, &str)],
     sources: &[&str],
 ) -> (MemoryWorkspace, WorkspaceSnapshot) {
+    let bodies: Vec<(String, String)> = projects
+        .iter()
+        .map(|(tsconfig, include)| {
+            (
+                (*tsconfig).to_string(),
+                format!(r#"{{ "include": {include} }}"#),
+            )
+        })
+        .collect();
+    let bodies: Vec<(&str, &str)> = bodies
+        .iter()
+        .map(|(tsconfig, body)| (tsconfig.as_str(), body.as_str()))
+        .collect();
+    ws_and_snapshot_body(ws_root, &bodies, sources)
+}
+
+/// [`ws_and_snapshot`] over FULL tsconfig bodies — the membership shape under
+/// test when `exclude` (or any non-include field) is part of it.
+fn ws_and_snapshot_body(
+    ws_root: &str,
+    projects: &[(&str, &str)],
+    sources: &[&str],
+) -> (MemoryWorkspace, WorkspaceSnapshot) {
     let ws = MemoryWorkspace::new(MemoryOptions {
         roots: vec![ws_root.to_string()],
         default_resolve_extensions: None,
     });
-    for (tsconfig, include) in projects {
-        ws.inject_file(
-            (*tsconfig).to_string(),
-            Arc::<str>::from(format!(r#"{{ "include": {include} }}"#).as_str()),
-        );
+    for (tsconfig, body) in projects {
+        ws.inject_file((*tsconfig).to_string(), Arc::<str>::from(*body));
     }
     for src in sources {
         ws.inject_file(

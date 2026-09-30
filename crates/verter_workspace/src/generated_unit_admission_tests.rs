@@ -15,7 +15,8 @@ use crate::snapshot_builder::{build_workspace_snapshot_simple, configured_projec
 use crate::workspace_snapshot::{ProjectId, SnapshotGeneration, WorkspaceSnapshot};
 
 use super::{
-    decide_generated_unit_admission, GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason,
+    decide_generated_unit_admission, decide_generated_unit_admission_with_basis,
+    GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason,
 };
 
 const ROOT: &str = "d:/ws";
@@ -203,8 +204,11 @@ fn single_project_membership_shapes() {
     }
 }
 
-/// The measured shape still OWNS the carrier source — ownership and generated-unit
-/// admission are separate facts that disagree here.
+/// The measured shape still OWNS the carrier source. Under the IDENTITY basis
+/// (the unit derives from no carrier) ownership and generated-unit admission
+/// stay separate facts that disagree here; the production companion basis —
+/// which maps `Foo.vue.tsx` back to `Foo.vue` — is exercised by the
+/// carrier-basis tests below.
 #[test]
 fn carrier_ownership_does_not_imply_generated_unit_admission() {
     let snap = snapshot(
@@ -221,6 +225,146 @@ fn carrier_ownership_does_not_imply_generated_unit_admission() {
     assert_eq!(
         verdict(&snap, TSCONFIG, &[IDE_TSX]),
         Err(vec![(IDE_TSX.to_string(), NotMatchedByIncludeOrFiles)])
+    );
+}
+
+/// The production basis the verter_lsp call sites hand in: every companion
+/// form of `Foo.vue` reverse-maps to its carrier source (a stand-in for the
+/// registry's `classify_carrier_companion`, which this layer cannot see).
+fn carrier_basis(unit: &CanonicalPath) -> CanonicalPath {
+    let name = unit.as_str();
+    match name.find(".vue.") {
+        // `Foo.vue.tsx` / `Foo.vue.jsx` / `Foo.vue.verter.ts` / the sidecar —
+        // everything from the `.vue.` infix on is the generated form.
+        Some(idx) => CanonicalPath::new(&name[..idx + ".vue".len()]),
+        None => unit.clone(),
+    }
+}
+
+fn verdict_with_basis(
+    snapshot: &WorkspaceSnapshot,
+    tsconfig: &str,
+    paths: &[&str],
+) -> Result<(), Vec<(String, GeneratedUnitNonAdmissionReason)>> {
+    match decide_generated_unit_admission_with_basis(
+        snapshot,
+        &CanonicalPath::new(tsconfig),
+        &units(paths),
+        carrier_basis,
+    ) {
+        GeneratedUnitAdmission::Admitted(_) => Ok(()),
+        GeneratedUnitAdmission::NotAdmitted(refusal) => Err(refusal
+            .offending()
+            .iter()
+            .map(|(unit, reason)| (unit.as_str().to_string(), *reason))
+            .collect()),
+    }
+}
+
+/// The engine maps a companion through its carrier source's project, so the
+/// extension-specific include that OWNS `Foo.vue` ADMITS the companions
+/// projected from it — the baseline-serving model — while every genuinely
+/// refused shape stays refused under its own typed reason.
+#[test]
+fn carrier_basis_membership_shapes() {
+    const EXTENSION_SPECIFIC: &str =
+        r#"{ "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.vue", "src/**/*.d.ts"] }"#;
+    struct Case {
+        name: &'static str,
+        tsconfig: &'static str,
+        extra_files: &'static [(&'static str, &'static str)],
+        units: &'static [&'static str],
+        expected: Result<(), &'static [(&'static str, GeneratedUnitNonAdmissionReason)]>,
+    }
+    let cases = [
+        // The extension-specific include owns `Foo.vue`; through the carrier
+        // basis its IDE companions are members of the same project.
+        Case {
+            name: "extension-specific include admits the IDE companions via the carrier basis",
+            tsconfig: EXTENSION_SPECIFIC,
+            extra_files: &[],
+            units: &[IDE_TSX, IDE_JSX, API_TS],
+            expected: Ok(()),
+        },
+        // An excluded basis (the js-lax shape) refuses the family: the exclude
+        // removes both the companion's own form and its carrier source.
+        Case {
+            name: "exclude removing the carrier source refuses its companion",
+            tsconfig: r#"{ "include": ["src"], "exclude": ["src/lax"] }"#,
+            extra_files: &[("d:/ws/src/lax/Foo.vue", "<template/>")],
+            units: &["d:/ws/src/lax/Foo.vue.tsx"],
+            expected: Err(&[("d:/ws/src/lax/Foo.vue.tsx", Excluded)]),
+        },
+        // A config that excludes the companion's own form refuses it even
+        // though its basis is admitted: the unit's own form decides first.
+        Case {
+            name: "exclude removing the companion form refuses it despite the admitted basis",
+            tsconfig: r#"{ "include": ["src"], "exclude": ["src/**/*.vue.tsx"] }"#,
+            extra_files: &[],
+            units: &[IDE_TSX, API_TS],
+            expected: Err(&[(IDE_TSX, Excluded)]),
+        },
+        // A basis the include never matches (the carrier is not a member)
+        // refuses the companion: no membership anywhere.
+        Case {
+            name: "include matching neither the unit nor its basis refuses it",
+            tsconfig: r#"{ "include": ["src/**/*.ts"] }"#,
+            extra_files: &[],
+            units: &[IDE_TSX],
+            expected: Err(&[(IDE_TSX, NotMatchedByIncludeOrFiles)]),
+        },
+        // `files` are exact and exclude-immune: naming just the carrier admits
+        // its companions through the basis.
+        Case {
+            name: "files-only project naming just the carrier admits the companion",
+            tsconfig: r#"{ "files": ["src/Foo.vue"] }"#,
+            extra_files: &[],
+            units: &[IDE_TSX],
+            expected: Ok(()),
+        },
+    ];
+
+    for case in cases {
+        let snap = snapshot(&[(TSCONFIG, case.tsconfig)], case.extra_files);
+        let expected = case.expected.map_err(|rows| {
+            rows.iter()
+                .map(|(unit, reason)| ((*unit).to_string(), *reason))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            verdict_with_basis(&snap, TSCONFIG, case.units),
+            expected,
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// Two extension-specific projects both own the carrier source; the basis's
+/// default-owner walk resolves to the name-least one, so the companion is
+/// admitted THERE and refused for the other (it would serve under the winner's
+/// options).
+#[test]
+fn second_project_winning_the_basis_walk_is_a_non_admission() {
+    const A: &str = "d:/ws/tsconfig.a.json";
+    const Z: &str = "d:/ws/tsconfig.z.json";
+    let snap = snapshot(
+        &[
+            (
+                A,
+                r#"{ "compilerOptions": { "strict": false }, "include": ["src/**/*.vue"] }"#,
+            ),
+            (
+                Z,
+                r#"{ "compilerOptions": { "strict": true }, "include": ["src/**/*.vue"] }"#,
+            ),
+        ],
+        &[],
+    );
+    assert_eq!(verdict_with_basis(&snap, A, &[IDE_TSX]), Ok(()));
+    assert_eq!(
+        verdict_with_basis(&snap, Z, &[IDE_TSX]),
+        Err(vec![(IDE_TSX.to_string(), OwnedByDifferentProject)])
     );
 }
 

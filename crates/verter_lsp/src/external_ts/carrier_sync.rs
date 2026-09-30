@@ -36,9 +36,14 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use verter_session::external_ts::{CarrierOwnershipResolution, ScriptKind, SnapshotRole};
+use verter_session::external_ts::{
+    CarrierOwnershipResolution, ProjectBinding, ScriptKind, SnapshotRole,
+};
 use verter_session::{IdeResponse, VerterHost};
 use verter_workspace::FilesystemWorkspace;
+use verter_workspace::{
+    decide_generated_unit_admission_with_basis, CanonicalPath, GeneratedUnitAdmission,
+};
 
 use crate::documents::DocumentRegistry;
 use crate::external_ts::{
@@ -233,11 +238,13 @@ enum NotOwnedReason {
     /// sole retryable owner-loss state — the coordinator requeues it. tsserver membership
     /// was deferred WITHOUT thrash (no retract).
     NotReady,
-    /// Ownership is authoritative but the carrier has NO usable owner — `NoProject` /
-    /// `Ambiguous`. TERMINAL: the gateway retracted any prior membership; the coordinator
-    /// advances the owner-loss barrier and settles terminal (never re-queued). The
-    /// user-visible `verter(project)` diagnostic is published separately from the same
-    /// resolution (see [`project_ownership_diagnostic`]).
+    /// Ownership is authoritative but the carrier has NO usable provider membership —
+    /// `NoProject` / `Ambiguous`, or the owning configured project EXCLUDES the
+    /// carrier's generated units (the membership proof the provider hub's admission
+    /// consumes refused them). TERMINAL: the gateway retracted any prior membership;
+    /// the coordinator advances the owner-loss barrier and settles terminal (never
+    /// re-queued). The user-visible `verter(project)` diagnostic is published
+    /// separately from the same resolution (see [`project_ownership_diagnostic`]).
     Unresolved,
     /// Nothing was COMMITTED this pass (compile-to-nothing with a SUCCESSFUL retract, a
     /// not-advertised reconcile, an unactivatable publish, or a fail-closed publish error):
@@ -807,6 +814,42 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
     }
 
+    // Generated-unit admission is a CONFIGURATION fact of the owning project, not
+    // a transient failure. The provider hub refuses the companion buffers
+    // (`AdmissionRefusal::GeneratedUnitExcluded`) for a set the workspace
+    // membership proof excludes, so an attempted advertisement can never
+    // complete: the provider-buffer transition fails and the carrier would stay
+    // queued — and provider-sync completion unannounced — for the rest of the
+    // session. Decide the SAME membership question the hub's admission consumes
+    // BEFORE any store or provider write, retract a prior advertisement, and
+    // settle TERMINAL (native analysis remains available). A config edit that
+    // admits the units re-drives reconciliation through its own change, exactly
+    // like a terminal owner-loss.
+    if generated_units_excluded(req.vfs, &binding, &companions) {
+        let retract = membership
+            .coordinator
+            .reconcile_membership_with_resolution(
+                req.canonical_id,
+                CarrierOwnershipResolution::Bound(binding.clone()),
+                companions,
+                ReconcileReason::GeneratedUnitsExcluded,
+            )
+            .await;
+        if classify_terminal_retract(&retract) == TerminalRetractDecision::RetryPending {
+            if let Err(error) = &retract {
+                tracing::warn!(
+                    "carrier-sync gateway: generated-units-excluded retract reconcile failed \
+                     for {}: {error} (external-TS degraded for this source; the stale \
+                     advertisement is still served cross-process and the carrier stays \
+                     queued for retry)",
+                    req.canonical_id
+                );
+            }
+            return CarrierSyncDecision::NotOwned(CarrierNotOwned::retract_failed());
+        }
+        return CarrierSyncDecision::NotOwned(CarrierNotOwned::unresolved());
+    }
+
     // Record EVERY companion surface (IDE + API) and stamp each version from its
     // freshly-recorded generation, so navigation span-classification carries both
     // roles' content/map identity AND the IDE companion's `getScriptVersion` advances
@@ -928,6 +971,37 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
 /// `NotReady` and no owned commit is minted).
 fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
     host.last_content_transition_generation(canonical_id)
+}
+
+/// Whether the owning configured project EXCLUDES the carrier's generated units
+/// — the same workspace membership query (`decide_generated_unit_admission`)
+/// whose proof the provider hub's generated-unit admission consumes before any
+/// provider-visible write. Classification only: the hub remains the sole write
+/// authority; this answers whether an advertisement is even reachable so an
+/// excluded carrier settles terminally instead of retrying a refusal that the
+/// current configuration can never satisfy. `false` when no published snapshot
+/// is available (the transient bootstrap keeps its retry).
+fn generated_units_excluded(
+    vfs: Option<&FilesystemWorkspace>,
+    binding: &ProjectBinding,
+    companions: &[CarrierCompanion],
+) -> bool {
+    let Some(published) = vfs.and_then(|vfs| vfs.load_published()) else {
+        return false;
+    };
+    let units: Vec<CanonicalPath> = companions
+        .iter()
+        .map(|companion| CanonicalPath::new(companion.provider_uri.as_ref()))
+        .collect();
+    matches!(
+        decide_generated_unit_admission_with_basis(
+            published.snapshot.as_ref(),
+            &CanonicalPath::new(binding.tsconfig_uri()),
+            &units,
+            super::carrier_membership_basis,
+        ),
+        GeneratedUnitAdmission::NotAdmitted(_)
+    )
 }
 
 /// Build the carrier companion set (public-API + IDE) from the owner-resolved
@@ -1130,12 +1204,86 @@ pub struct CarrierTransactionCoordinator {
     /// survives to refuse a late token (removing then re-inserting the barrier would lose
     /// the tombstone).
     barriers: DashMap<String, CarrierAdmissionBarrier>,
+    /// Single-flight guard + per-entry exhaustion budget of the pending-snapshot
+    /// re-drive chain. This coordinator is the ONE retry-disposition authority
+    /// every drain context of a server shares (the coordinator's long-lived
+    /// context, background init's pre/post-scan drains and the scanner's
+    /// carrier-phase drain), so the gate it holds bounds the WHOLE queue:
+    /// at most one bounded successor chain drains it at a time, and an entry
+    /// the chain exhausted its attempt budget on is retried only after a
+    /// genuine retry signal (an external drain pass, an engine start) —
+    /// never by a mere coordinator wake.
+    pending_redrive_armed: std::sync::atomic::AtomicBool,
+    /// The canonical ids still queued when the last chain exhausted its
+    /// attempt budget. Replaced wholesale each time a chain exhausts; cleared
+    /// by a retry signal. Ids no longer queued are inert (eligibility is the
+    /// intersection with the live queue), so a dequeued entry leaves no
+    /// lasting block behind.
+    pending_redrive_exhausted: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Bumped by every retry signal ([`Self::pending_redrive_clear_exhausted`]).
+    /// A running chain captures it before each pass and compares at its end:
+    /// a signal that landed mid-chain must NOT be overwritten by the chain's
+    /// own exhaustion record — the chain instead yields to it (skips the
+    /// record, so the cleared budget stands and a fresh chain follows).
+    pending_redrive_signal_generation: std::sync::atomic::AtomicU64,
 }
 
 impl CarrierTransactionCoordinator {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Begin a pending-snapshot re-drive chain: `true` only for the one
+    /// caller that flipped the guard from disarmed to armed. The guard is
+    /// released by [`Self::pending_redrive_disarm`] when the chain ends.
+    pub(crate) fn pending_redrive_try_arm(&self) -> bool {
+        !self
+            .pending_redrive_armed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Release the single-flight guard when a chain ends (attempt cap or an
+    /// empty queue), so a later signal can arm a fresh chain.
+    pub(crate) fn pending_redrive_disarm(&self) {
+        self.pending_redrive_armed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The retry-signal generation — compare two reads around provider work
+    /// to learn whether a signal landed in between.
+    pub(crate) fn pending_redrive_signal_generation(&self) -> u64 {
+        self.pending_redrive_signal_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record the entries still queued when a chain exhausted its attempt
+    /// budget: each recorded id stays INELIGIBLE for a later chain until a
+    /// retry signal clears the budget ([`Self::pending_redrive_clear_exhausted`]).
+    pub(crate) fn pending_redrive_record_exhausted<I, S>(&self, still_queued: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.pending_redrive_exhausted.lock() = still_queued.into_iter().map(Into::into).collect();
+    }
+
+    /// Clear the exhaustion budget — the retry signal half: an external drain
+    /// pass (a publication, a scanner sweep) or an engine start repaired the
+    /// inputs the exhausted entries were refused on, so every queued entry is
+    /// eligible for a fresh bounded chain again.
+    pub(crate) fn pending_redrive_clear_exhausted(&self) {
+        self.pending_redrive_signal_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.pending_redrive_exhausted.lock().clear();
+    }
+
+    /// Whether the queue holds at least one entry this chain may attempt:
+    /// a queued id NOT in the exhausted cohort (new work stays live even
+    /// while an older cohort holds its budget).
+    pub(crate) fn pending_redrive_eligible(&self, queued: &dashmap::DashSet<String>) -> bool {
+        let exhausted = self.pending_redrive_exhausted.lock();
+        queued.iter().any(|id| !exhausted.contains(id.key()))
     }
 
     /// The source's CURRENT owner-loss barrier value — the local intent epoch a starting

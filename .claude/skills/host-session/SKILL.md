@@ -129,13 +129,74 @@ Per-engine availability matrix: `display_signature` — both engines wherever th
 
 ### Per-Project tsserver Routing (`tsserver/project_router.rs`)
 
+Generated-unit requests and writes bind through `ProviderHub::bind_project` and
+`admit_request_with`. The LSP retains the exact `PublishedRoot` used by the
+canonical resolver and supplies a live publication/content/project-generation
+reader; the hub binds that basis to the actual serving provider and epoch.
+The workspace membership query mints the complete proof for the requested
+unit set. A unit is tested against the owning project's spec through its
+MEMBERSHIP BASIS — the unit's own form first, then the carrier source it
+projects from when that form matches no include (the reverse companion map,
+handed into the workspace query as data by
+`external_ts::carrier_membership_basis`, because the engine maps a companion
+through its source's project: an extension-specific `src/**/*.vue` include
+that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
+`exclude` removes the unit's own form still refuses it. Warm same-basis requests reuse the hub admission, while an excluded,
+missing, stale or wrong-project proof refuses before a provider query or write.
+Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
+The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
+authority: its overlay owns a `ProviderHub<TsgoSharedProvider>` that establishes
+the attach through the re-arm door, and every per-carrier sweep write carries a
+hub-issued `AdmittedRequest` forwarded by
+`ProviderHub::forward_admitted_file` — off the actor queue, because the sweep's
+writes are concurrent barrier-coalesced (the single-writer actor would serialize
+them into one engine program update per carrier), but with the SAME pre/post
+currency checks and retirement dispositions the actor path enforces. The
+resolver-side proof is decided before the attach is ever established; the
+hub-issued admission binds the serving epoch and basis, so a replacement
+re-admits fresh. No admission cache survives beside the hub (the per-composite
+`CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
+are `ProviderHub::bound_project` + the hub request cache).
+A basis drift observed AFTER a provider write landed splits on what drifted. A
+content-only drift (another document's edit while the engine was awaited) leaves
+the publication that decided membership unchanged, so the healthy engine holds
+nothing the live basis excludes: the settlement is refused `StaleBasis`, nothing
+is recorded, the engine keeps serving, and the issuer's fresh admission
+re-applies idempotently (the direct shared write additionally closes its one
+path). Only a replaced publication or project generation — where the engine may
+now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
+project engine on every concurrent edit is the failure this split prevents.
+The tsserver router is the issuer that answers a basis drift with a fresh
+admission, bounded to two re-issues per operation: a query whose route expired
+`StaleBasis` while the engine answered discards that answer and is re-run under
+a fresh binding (`routed_query!`), and a generated-unit admission whose basis
+moved between the publication read and the hub binding is re-admitted before
+anything reaches the engine (`admit_current_unit`). A refusal on an unmoved
+basis, a withdrawn owner, or a spent budget is returned unchanged; a write the
+actor refused AFTER admission is not re-forwarded by the router and stays with
+the carrier sync's own retry.
+Generated state is retained only after an applied receipt. Recovery discards
+the old epoch's generated overlays; the replacement requires fresh admission
+before receiving them, and the install announces exactly what it dropped
+(`ProviderNotifier::admitted_state_dropped`, after the replacement serves) so
+the router's re-arm hook re-registers and re-activates those carriers through
+FRESH admission instead of waiting for the next ordinary publication. A
+discovery load shadowed by an editor open returns
+`ShadowedMutation` without an applied receipt because no provider write occurred.
+Request answers are fenced again at settlement. A carrier whose owning
+configured project EXCLUDES its generated units is settled TERMINALLY by the
+carrier-sync gateway (membership retracted, never retried within the same
+configuration; a config edit re-drives reconciliation through its own change)
+— retrying the hub's `GeneratedUnitExcluded` refusal would keep provider-sync
+completion unannounced forever.
+
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 
 - **Engine identity** is `(owning tsconfig, real canonical `tsserver.js`)`. Two projects that resolve the same install share one process; two projects on different TypeScript versions never do.
 - **Every operation is project-bound.** A provider path maps to its authored carrier source (`classify_carrier_companion`, or the publish path's registered route), then through `resolve_carrier` (`PresentSnapshotAuthoritative`) → `ProjectBinding` → `TsserverEngineBackend::ensure_project` → `BoundProject`. Discovery runs from the OWNING project's directory (`resolve_tsserver(tsdk, Some(project_dir))`), so the pnpm `node_modules/typescript` symlink canonicalizes to the real `.pnpm/typescript@<v>` install (load-bearing: tsserver finds `lib.*.d.ts` relative to its own script path).
 - **Fail-closed per project.** `NotReady` / `NoProject` / `Ambiguous` / an unresolvable or TS7+ TypeScript is a DISTINCT refusal for THAT project carrying discovery's actionable install message. It never poisons a sibling project and never borrows a sibling's engine.
 - **Lazy + singleflight.** Construction starts no process. ONE `ProviderHub` per engine identity (`tsserver/resilient.rs::hub`, `HubPolicy::explicit`) collapses concurrent cold demands onto one establishment and owns that engine's crash recovery. A failed first spawn fails that demand closed and the NEXT demand retries through the same hub; a hub whose engine has already served keeps the project through recovery — it records lifecycle updates for the replacement and fails queries closed until one serves. `shutdown` / `resync_open_files` / `update_workspace_folders` fan out to every ALLOCATED hub, including one still establishing.
-- **Resolution caching.** Per-project engine resolution is cached under a published-snapshot generation fence (success AND refusal), so hover/completion never repeats the ancestor walk, the `read_dir` of the install's `lib/`, or discovery's `npm root -g` fallback. A project-graph republish re-resolves; a bare `node_modules` mutation that publishes no snapshot still needs a reload.
+- **Resolution caching.** Per-project engine resolution is cached under `ResolvedPublication`: the exact `PublishedRoot` identity plus content and project generations (success AND refusal), so hover/completion never repeats the ancestor walk, the `read_dir` of the install's `lib/`, or discovery's `npm root -g` fallback. A project-graph republish re-resolves; a bare `node_modules` mutation that publishes no snapshot still needs a reload.
 - **`child_pid()`** returns the first started engine's PID. `$/verter/typeProviderStarted` carries exactly one PID (a single-engine wire affordance); orphan containment does not depend on it — every spawned tsserver arms its own process-group `TreeKill` and registers in the process-wide engine-tree table the client-death monitor terminates in full.
 
 ### Provider Selection (`main.rs`)
@@ -498,9 +559,9 @@ Provider diagnostics are published only when their generated range maps back to 
 
 `ProviderHub<P>` is the ONE lifecycle owner of a provider instance (the owned tsgo engine, each project-bound tsserver, the managed fallback chain). Adapters implement `ProviderEstablisher` — spawn + handshake ONE engine and wire the crash signal the hub hands them — and nothing else: they never decide readiness, restart, replay, or accept a retired engine's result.
 
-- **Establish** (`ProviderHub::establish`): singleflight per instance, runs on its own task (a caller that gives up neither cancels it nor starts a second one), bounded by `HubPolicy::establish_timeout` for the spawn and separately for the replay. A failed attempt arms the `HubPolicy::on_demand` retry cooldown. Under `on_demand` the first query establishes; under `explicit` the caller does (startup tsgo, router demands) and queries without a serving engine fail closed.
-- **Recover** (`ProviderHub::recover`, driven by the per-epoch crash monitor): retire the crashed epoch, quarantine the in-flight killers, respawn within `max_restarts` with bounded backoff, replay, install. A signal naming a retired epoch is inert; a deliberate shutdown advances the teardown generation so the torn-down child's EOF is never a crash, and a shutdown that lands during the restart backoff abandons the respawn before any process is spawned or failure reported. A hub that exhausted its restart budget reports its terminal state ("stays down for this session"), never an eternal "restarting"; only a settlement the serving epoch accepted self-heals a fingerprint's crash strikes.
-- **Epochs and receipts**: every install mints a strictly newer `verter_identity::ProviderEpoch` (the same mint `LazyTransport` uses for the shared editor transport). A query answered by an engine retired before its result settled returns an error, never a result of the replacement; a mutation's `AppliedReceipt` names the epoch that accepted it (`None` = held for replay).
+- **Establish** (`ProviderHub::establish`): singleflight per instance, runs on its own task (a caller that gives up neither cancels it nor starts a second one), bounded by `HubPolicy::establish_timeout` for the spawn and separately for the replay. A failed attempt arms the `HubPolicy::on_demand` retry cooldown. Under `on_demand` the first query establishes; under `explicit` the caller does (startup tsgo, router demands) and queries without a serving engine fail closed. A lazily-ATTACHED external transport (the shared editor attach, `HubPolicy::lazy_attach`) establishes through the re-arm door `ProviderHub::establish_rearming(probe)`: a demand at an UNCHANGED generation discriminant (reconnect nonce / workspace generation — re-probed after a success and retained as the establishment's own) fails closed with no attempt, and any advance re-arms through the same singleflight.
+- **Recover** (`ProviderHub::recover`, driven by the per-epoch crash monitor): retire the crashed epoch, quarantine the in-flight killers, respawn within `max_restarts` with bounded backoff, replay, install. A signal naming a retired epoch is inert; a deliberate shutdown advances the teardown generation so the torn-down child's EOF is never a crash, and a shutdown that lands during the restart backoff abandons the respawn before any process is spawned or failure reported. A hub that exhausted its restart budget reports its terminal state ("stays down for this session"), never an eternal "restarting"; only a settlement the serving epoch accepted self-heals a fingerprint's crash strikes. Under `HubPolicy::lazy_attach` a death instead RETIRES the epoch fail-closed (the establisher wires attach liveness into the crash signal): no respawn loop, no exhaustion — re-establishment belongs to the re-arm door alone.
+- **Epochs and receipts**: every install mints a strictly newer `verter_identity::ProviderEpoch` — including the shared editor attach's incarnation (the attach is served by its OWN `ProviderHub<TsgoSharedProvider>`; the former `LazyTransport` cell and its private epoch mint are gone). A query answered by an engine retired before its result settled returns an error, never a result of the replacement; a mutation's `AppliedReceipt` names the epoch that accepted it (`None` = held for replay).
 - **Start announcements** (`ProviderNotifier::provider_started(pid, EngineStart)`): every engine install is announced to the notifier with its kind -- `Initial` (first serve / re-activation) or `Recovery` (crash replacement). The WIRE policy is per route: the tsgo/tsserver routes announce both (`LspNotifier::new`), while the shared route's managed fallback announces recoveries only (`LspNotifier::recovery_only`) -- that route attests "managed TSGO remains cold until an observed attach failure", the editor-neutral contract asserts it over `$/verter/typeProviderStarted`, and the composite still legitimately activates the fallback for carriers whose generated units are not admitted to their owning project.
 - **Actor**: one single-writer actor per hub records desired state then forwards; it stays receptive to retirement/shutdown while a forward or replay is wedged and queues everything else in order. Hubs share nothing, so a held or failed instance never blocks an independent one.
 - **Deadlines**: the submitter's ambient request deadline is captured once (`deadline::current`) and re-opened around the forward on the actor task (`with_deadline_at`); the submitter's wait for the settlement is bounded by the same instant.
@@ -858,7 +919,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/config.rs` | `ProjectConfig`, `ProjectRegistry`, `RegistryBuildResult` |
 | `crates/verter_lsp/src/tsgo/traits.rs` | `TypeProvider` trait definition |
 | `crates/verter_lsp/src/tsgo/ipc.rs` | TSGO LSP client, `LspTransport`, hang detection |
-| `crates/verter_type_runtime/src/provider_hub/` | `ProviderHub`: the ONE provider lifecycle owner (establish, recover, replay, serving `ProviderEpoch`, receipts) + `LazyTransport` |
+| `crates/verter_type_runtime/src/provider_hub/` | `ProviderHub`: the ONE provider lifecycle owner (establish, recover, replay, serving `ProviderEpoch`, receipts, `bind_project`/`admit_request` admission and the lazy-attach re-arm door) |
 | `crates/verter_lsp/src/tsgo/resilient.rs` | Owned tsgo establishment strategy (`establish_owned`) |
 | `crates/verter_lsp/src/tsgo/project_sync.rs` | `ProjectSync` (batched provider file ops) |
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |

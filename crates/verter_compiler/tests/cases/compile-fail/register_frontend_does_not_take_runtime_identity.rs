@@ -22,11 +22,10 @@ impl CarrierFrontend for ToolingFrontend {
 
 fn main() {
     let _ = TypedCapabilityRegistration::register_frontend(
-        CatalogIdentity::new(
+        CatalogIdentity::ordinary(
             FrameworkAdapterId::new("tooling"),
             LanguageId::new("html"),
             FrameworkEpochId::new("html-v1"),
-            None,
             CatalogCapability::Runtime,
         ),
         Present(ToolingFrontend),

@@ -36,6 +36,475 @@ use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::TsserverTypeProvider;
 
+#[tokio::test]
+async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis,
+        ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        basis.clone(),
+        Arc::clone(&reader),
+    );
+    let witness = harness.provider.bind_project(input.clone()).unwrap();
+    assert!(witness.same_binding(&harness.provider.bind_project(input).unwrap()));
+    assert!(matches!(
+        harness
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), None),
+        Err(AdmissionRefusal::MissingGeneratedProof)
+    ));
+    assert!(matches!(
+        harness.provider.admit_request(&witness, &[], Some(&proof)),
+        Err(AdmissionRefusal::IncompleteGeneratedProof)
+    ));
+    assert!(engine.calls().is_empty());
+    let admitted = harness
+        .provider
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    let resolutions = AtomicUsize::new(0);
+    for _ in 0..2 {
+        harness
+            .provider
+            .admit_request_with(&witness, std::slice::from_ref(&unit), || {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                proof.clone()
+            })
+            .unwrap();
+    }
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    let other_hub = make_harness(engine.clone(), MockProvider::new("tsgo")).await;
+    assert!(matches!(
+        other_hub
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof)),
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert!(engine.calls().is_empty());
+    let fingerprint = QueryFingerprint::new("diagnostics", unit.as_str(), 0, 0);
+    {
+        let mut watch = harness.provider.state.shared.query_watch.lock().unwrap();
+        watch.begin(&fingerprint);
+        for _ in 0..super::quarantine::QUARANTINE_STRIKE_THRESHOLD {
+            watch.record_crash_implications();
+        }
+        watch.end(&fingerprint, false);
+    }
+    assert!(harness
+        .provider
+        .get_diagnostics(unit.as_str())
+        .await
+        .is_err());
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::File {
+                path: unit.as_str().into(),
+                content: "export {};".into(),
+                kind: OverlayFileKind::Open,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        harness
+            .provider
+            .get_diagnostics(unit.as_str())
+            .await
+            .is_ok(),
+        "an admitted companion write lifts the prior content's quarantine"
+    );
+    assert_eq!(engine.calls().len(), 1);
+
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "stale background".into(),
+                    kind: OverlayFileKind::Load,
+                    priority: OverlayPriority::Background,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::ShadowedMutation)
+    ));
+    assert_eq!(
+        engine.calls().len(),
+        1,
+        "shadowed writes have no applied receipt"
+    );
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_eq!(
+        replacement.calls().len(),
+        0,
+        "a replacement has no admission for the old provider's generated unit"
+    );
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "old epoch".into(),
+                    kind: OverlayFileKind::Update,
+                    priority: OverlayPriority::Foreground,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert_eq!(replacement.calls().len(), 0);
+
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        1,
+        1,
+    );
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "stale".into(),
+                    kind: OverlayFileKind::Open,
+                    priority: OverlayPriority::Foreground,
+                }
+            )
+            .await,
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert_eq!(engine.calls().len(), 1);
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(3).await;
+    assert_eq!(replacement.calls().len(), 0, "a stale proof cannot replay");
+
+    let rebuilt = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let rebuilt_basis = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&rebuilt))),
+        1,
+        1,
+    );
+    *live.lock().unwrap() = rebuilt_basis.clone();
+    let rebound = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            Vec::new(),
+            rebuilt_basis.clone(),
+            Arc::clone(&reader),
+        ))
+        .unwrap();
+    assert!(matches!(
+        harness
+            .provider
+            .admit_request(&rebound, std::slice::from_ref(&unit), Some(&proof)),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert_eq!(engine.calls().len(), 1);
+    let fresh_proof = decide_generated_unit_admission(
+        &rebuilt,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    let fresh_admission = harness
+        .provider
+        .admit_request(&rebound, std::slice::from_ref(&unit), Some(&fresh_proof))
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &fresh_admission,
+            OverlayMutation::File {
+                path: unit.as_str().into(),
+                content: "fresh epoch".into(),
+                kind: OverlayFileKind::Load,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement.calls().len(),
+        1,
+        "fresh admission must reach replacement despite the old open overlay"
+    );
+    let changed_references = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            vec!["d:/ws/referenced/tsconfig.json".into()],
+            rebuilt_basis,
+            reader,
+        ))
+        .unwrap();
+    assert!(!rebound.same_binding(&changed_references));
+    assert!(matches!(
+        harness.provider.check_admission(&fresh_admission),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    let other_basis = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&rebuilt))),
+        1,
+        1,
+    );
+    let other_reader = {
+        let basis = other_basis.clone();
+        Arc::new(move || Some(basis.clone())) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let other_witness = harness
+        .provider
+        .bind_project(ProjectBindingInput::new(
+            "d:/ws/src/Other.vue".into(),
+            project.into(),
+            Vec::new(),
+            other_basis,
+            other_reader,
+        ))
+        .unwrap();
+    assert!(matches!(
+        harness.provider.check_project(&changed_references),
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    let other_admission = harness
+        .provider
+        .admit_request(
+            &other_witness,
+            std::slice::from_ref(&unit),
+            Some(&fresh_proof),
+        )
+        .unwrap();
+    replacement.inner.update_fails.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        harness
+            .provider
+            .apply_overlay(
+                &other_admission,
+                OverlayMutation::File {
+                    path: unit.as_str().into(),
+                    content: "failed update".into(),
+                    kind: OverlayFileKind::Update,
+                    priority: OverlayPriority::Foreground,
+                },
+            )
+            .await,
+        Err(AdmissionRefusal::ProviderWriteFailed)
+    ));
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(4).await;
+    assert!(harness.provider.is_serving(), "explicit hub recovers");
+}
+
+/// A replacement install DROPS the old epoch's admitted state — the desired
+/// state will not replay it unproven — and must ANNOUNCE exactly what it
+/// dropped, after the replacement serves, so the tier that minted the
+/// admissions can re-publish them through fresh admission. RED before the
+/// re-arm signal existed: the drop was silent, and a recovered engine stayed
+/// without its companion registrations until the next ordinary publication.
+#[tokio::test]
+async fn replacement_install_announces_dropped_admitted_state() {
+    use super::{
+        AdmissionRefusal, DroppedAdmittedCarrier, DroppedAdmittedState, OverlayMutation,
+        ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let reader = Arc::new(move || Some(basis.clone()))
+        as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>;
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        ProjectBasis::new(Arc::clone(&publication), 1, 1),
+        Arc::clone(&reader),
+    );
+    let witness = harness.provider.bind_project(input).unwrap();
+    let admitted = harness
+        .provider
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::RegisterCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                content: "export const __ide = 1;".into(),
+                project_file_name: project.into(),
+            },
+        )
+        .await
+        .unwrap();
+    harness
+        .provider
+        .apply_overlay(
+            &admitted,
+            OverlayMutation::ActivateCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                project_file_name: project.into(),
+                script_kind: crate::traits::CarrierScriptKind::Ts,
+            },
+        )
+        .await
+        .unwrap();
+    // The FIRST install carried no admitted state: nothing may have been
+    // announced as dropped so far.
+    assert!(
+        harness.notifier.dropped().is_empty(),
+        "a first install drops no admitted state: {:?}",
+        harness.notifier.dropped()
+    );
+
+    // The crash replacement drops the old epoch's admitted registration and
+    // announces it — content, project, and the recorded parsing mode included,
+    // everything a fresh-admission re-publish needs.
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    harness.notifier.await_dropped(1).await;
+    assert_eq!(
+        harness.notifier.dropped(),
+        vec![DroppedAdmittedState {
+            carriers: vec![DroppedAdmittedCarrier {
+                source_path: source.into(),
+                companion_path: unit.as_str().into(),
+                content: "export const __ide = 1;".into(),
+                project_file_name: project.into(),
+                script_kind: Some(crate::traits::CarrierScriptKind::Ts),
+            }],
+            files: Vec::new(),
+        }],
+        "the replacement must announce exactly the dropped admitted carrier"
+    );
+    // The announcement is not itself an admission: the old admission stays
+    // refused against the new epoch until a FRESH one is minted.
+    assert!(matches!(
+        harness.provider.check_admission(&admitted),
+        Err(AdmissionRefusal::StaleProvider)
+    ));
+    assert!(
+        replacement.calls().is_empty(),
+        "announcing the drop must not speculatively write the old state"
+    );
+}
+
 // @ai-generated
 #[test]
 fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {
@@ -648,9 +1117,13 @@ async fn a_respawned_provider_is_announced_structurally() {
 struct RecordingNotifier {
     messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
     started: parking_lot::Mutex<Vec<(Option<u32>, EngineStart)>>,
+    /// Every admitted-state drop announcement, in announcement order.
+    dropped: parking_lot::Mutex<Vec<super::DroppedAdmittedState>>,
     /// Signalled on every structural start announcement — event-driven
     /// synchronization for tests awaiting a respawn.
     started_signal: Notify,
+    /// Signalled on every admitted-state drop announcement.
+    dropped_signal: Notify,
 }
 
 impl RecordingNotifier {
@@ -660,6 +1133,32 @@ impl RecordingNotifier {
 
     fn started(&self) -> Vec<(Option<u32>, EngineStart)> {
         self.started.lock().clone()
+    }
+
+    fn dropped(&self) -> Vec<super::DroppedAdmittedState> {
+        self.dropped.lock().clone()
+    }
+
+    /// Wait, driven by the announcement event itself, until `count`
+    /// admitted-state drops were announced. The bound is a failsafe that makes
+    /// a missing announcement fail loudly instead of hanging.
+    async fn await_dropped(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if self.dropped().len() >= count {
+                    return;
+                }
+                self.dropped_signal.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "only {} admitted-state drop(s) were announced within 30s: {:?}",
+                self.dropped().len(),
+                self.messages()
+            )
+        });
     }
 
     /// Wait, driven by the announcement event itself, until `count` engines
@@ -693,6 +1192,11 @@ impl ProviderNotifier for RecordingNotifier {
     fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
         self.started.lock().push((pid, start));
         self.started_signal.notify_one();
+    }
+
+    fn admitted_state_dropped(&self, dropped: &super::DroppedAdmittedState) {
+        self.dropped.lock().push(dropped.clone());
+        self.dropped_signal.notify_one();
     }
 }
 
@@ -3313,4 +3817,652 @@ async fn a_wedged_or_failed_instance_never_blocks_an_independent_healthy_instanc
         .unwrap();
     assert!(stuck.await.unwrap().is_err());
     assert!(!wedged.is_serving());
+}
+
+// ── The lazy-attach re-arm door (`establish_rearming` +
+//    `HubPolicy::lazy_attach`): the discipline the shared editor attach's
+//    transport cell used to own, now owned by the hub. ──
+
+/// An establisher whose first `fail_first` attempts fail and every later one
+/// hands `provider` back. The attempt counter is shared with the test (the
+/// establisher is type-erased inside the hub), so a fail-closed demand is
+/// discriminated from a retry storm by the observed attempt count.
+struct ScriptedLazyAttach {
+    attempts: Arc<AtomicUsize>,
+    fail_first: usize,
+    provider: MockProvider,
+    crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>>,
+}
+
+impl ScriptedLazyAttach {
+    fn failing_until(fail_first: usize, provider: MockProvider) -> Self {
+        Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            fail_first,
+            provider,
+            crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+}
+
+impl ProviderEstablisher<MockProvider> for ScriptedLazyAttach {
+    fn log_name(&self) -> &'static str {
+        "test-lazy-attach"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "test-attach"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "test attach is re-arming"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        false
+    }
+
+    fn establish<'a>(&'a self, crash_notify: Arc<Notify>) -> EstablishFuture<'a, MockProvider> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt < self.fail_first {
+            return Box::pin(async { Err(TypeProviderError::new("scripted attach failure")) });
+        }
+        *self.crash_notify.lock() = Some(Arc::clone(&crash_notify));
+        let provider = self.provider.clone();
+        Box::pin(async move { Ok(Arc::new(provider)) })
+    }
+}
+
+/// The number of establisher invocations observed so far (the retry-storm
+/// discriminator: a fail-closed demand must not invoke the establisher).
+fn attempts_of(backend: &ScriptedLazyAttach) -> Arc<AtomicUsize> {
+    Arc::clone(&backend.attempts)
+}
+
+/// A cell-held probe the test flips between demands.
+fn discriminant_probe(
+    cell: &Arc<parking_lot::Mutex<Option<String>>>,
+) -> impl Fn() -> Option<String> + '_ {
+    let cell = Arc::clone(cell);
+    move || cell.lock().clone()
+}
+
+/// A failed lazy attach fails CLOSED on every demand at the UNCHANGED
+/// discriminant (no retry storm) and on an unobservable one (`None`), and
+/// re-arms only through a FRESH discriminant. A serving incarnation returns
+/// its epoch without probing.
+#[tokio::test]
+async fn lazy_attach_rearm_fails_closed_until_the_discriminant_advances() {
+    let backend = ScriptedLazyAttach::failing_until(1, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    let observed = Arc::new(parking_lot::Mutex::new(Some("nonce-a".to_string())));
+
+    // First demand at `nonce-a`: one real attempt, which the script fails.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // Same discriminant: fail closed with NO new attempt.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "an unchanged discriminant must not re-attempt establishment (no retry storm)"
+    );
+
+    // Unobservable discriminant (`None`): still fail closed, no attempt.
+    *observed.lock() = None;
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // A FRESH discriminant re-arms and establishes.
+    *observed.lock() = Some("nonce-b".to_string());
+    let epoch = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-arms the lazy attach");
+    assert!(hub.is_serving());
+
+    // While serving, the door returns the epoch without probing (the probe
+    // cell is poisoned to prove it is never read).
+    *observed.lock() = None;
+    assert_eq!(
+        hub.establish_rearming(discriminant_probe(&observed))
+            .await
+            .unwrap(),
+        epoch
+    );
+}
+
+/// A first failure at an UNOBSERVABLE discriminant arms the re-arm gate at
+/// `None`: a later demand at another `None` must make NO new attempt. The
+/// outer option distinguishes "gated at discriminant X" from "not gated" — a
+/// flat gate cannot tell a first failure at `None` (hold closed) from "no
+/// attempt yet" (any demand may establish), so every later demand re-runs the
+/// attach. Only a FRESH observable discriminant re-arms.
+#[tokio::test]
+async fn lazy_attach_failed_at_an_unobservable_discriminant_holds_the_gate() {
+    let backend = ScriptedLazyAttach::failing_until(1, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    // The shim never advertises a discriminant.
+    let observed = Arc::new(parking_lot::Mutex::new(None));
+
+    // First demand at `None`: one real attempt, which the script fails.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // Another demand at the SAME unobservable `None`: fail closed with NO
+    // new attempt — the gate holds.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a failed attach at an unobservable discriminant must not be retried on \
+         another unobservable demand (every query would re-run the attach)"
+    );
+
+    // A FRESH observable discriminant re-arms: the script succeeds from its
+    // second attempt on.
+    *observed.lock() = Some("nonce-a".to_string());
+    hub.establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-arms the lazy attach");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(hub.is_serving());
+}
+
+/// A death under the lazy-attach policy RETIRES the epoch fail-closed without
+/// the respawn loop: demands at the dead establishment's discriminant fail
+/// closed with zero new attempts, and a fresh discriminant re-establishes
+/// under a NEW epoch. The instance is never declared exhausted.
+#[tokio::test]
+async fn lazy_attach_death_retires_fail_closed_and_re_arms_on_a_fresh_discriminant() {
+    let backend = ScriptedLazyAttach::failing_until(0, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let crash_notify = Arc::clone(&backend.crash_notify);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    let observed = Arc::new(parking_lot::Mutex::new(Some("nonce-a".to_string())));
+
+    let first = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("the first demand establishes");
+    assert!(hub.is_serving());
+
+    // The attach dies: the watcher notifies the crash signal the hub handed
+    // the establishment. Deterministic spin — no wall-clock sleep.
+    crash_notify
+        .lock()
+        .as_ref()
+        .expect("the establishment received its crash signal")
+        .notify_one();
+    for _ in 0..100_000 {
+        if !hub.is_serving() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !hub.is_serving(),
+        "a lazy-attach death must retire the serving epoch"
+    );
+
+    // The discriminant re-read AFTER the successful establishment is what the
+    // eviction gated: an unchanged one fails closed with no new attempt.
+    *observed.lock() = Some("nonce-a".to_string());
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    let attempts_after_death = attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        attempts_after_death, 1,
+        "a demand at the dead establishment's discriminant must not re-attempt"
+    );
+
+    // A fresh discriminant (a reconnect) re-establishes under a NEW epoch.
+    *observed.lock() = Some("nonce-c".to_string());
+    let second = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-establishes the lazy attach");
+    assert!(second > first, "the replacement must mint a fresh epoch");
+    assert_eq!(attempts.load(Ordering::SeqCst), attempts_after_death + 1);
+}
+
+/// The direct admitted write (`forward_admitted_file`) performs ZERO provider
+/// operations on refusal — a path the admission does not cover, or an
+/// admission whose basis drifted — and exactly one write when current.
+#[tokio::test]
+async fn forward_admitted_file_refusals_write_nothing() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    let hub = ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        basis,
+        Arc::clone(&reader),
+    );
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    // A path the admission does NOT cover: typed refusal, zero writes.
+    assert!(matches!(
+        hub.forward_admitted_file(
+            &admission,
+            "d:/ws/src/Other.vue.tsx",
+            "export {}",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::IncompleteGeneratedProof)
+    ));
+    assert!(
+        engine.calls().is_empty(),
+        "an uncovered path must not be written"
+    );
+
+    // A basis drift (a new publication) invalidates the admission BEFORE the
+    // write: typed refusal, zero writes.
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        2,
+        1,
+    );
+    assert!(matches!(
+        hub.forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "export const v = 1;",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert!(
+        engine.calls().is_empty(),
+        "a stale-basis admission must not write — zero speculative provider work"
+    );
+
+    // The warm witness dies with the drift; a current binding writes exactly
+    // once through the covering admission.
+    assert!(
+        hub.bound_project(source).is_none(),
+        "a drifted basis must retire the warm witness"
+    );
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let witness = hub
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            Vec::new(),
+            ProjectBasis::new(Arc::clone(&publication), 1, 1),
+            reader,
+        ))
+        .unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    hub.forward_admitted_file(
+        &admission,
+        unit.as_str(),
+        "export const v = 1;",
+        OverlayFileKind::Open,
+        OverlayPriority::Foreground,
+    )
+    .await
+    .expect("a current admission writes the covered unit");
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::OpenFile { path, .. } if path == unit.as_str()))
+            .count()
+            == 1,
+        "exactly one provider write for the admitted unit"
+    );
+}
+
+/// A BASIS-ONLY drift observed after a successful direct write (a
+/// content-generation bump while the write was awaited) must NOT take the
+/// shared lazy attachment down: the engine is healthy. The one written path
+/// is compensated with a close, the refusal is `StaleBasis`, and the hub
+/// keeps serving — the crash signal and `StaleProvider` stay reserved for
+/// provider-write failures and epoch/provider replacement.
+#[tokio::test]
+async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    let hub = ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    // The live basis drifts once the write has LANDED on the engine — every
+    // check before the write still sees the original basis — simulating a
+    // content-generation bump that lands while the write is awaited.
+    let drifted = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    let reader = {
+        let live_basis = basis.clone();
+        let unit_for_reader = unit.clone();
+        let engine_reader = engine.clone();
+        Arc::new(move || {
+            let written = engine_reader.calls().iter().any(|call| {
+                matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
+            });
+            if written {
+                Some(drifted.clone())
+            } else {
+                Some(live_basis.clone())
+            }
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    let refusal = hub
+        .forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "export const v = 1;",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await
+        .expect_err("a basis-only drift after the write must refuse settlement");
+    assert!(
+        matches!(refusal, AdmissionRefusal::StaleBasis),
+        "a basis-only drift is a StaleBasis refusal, not a provider replacement: {refusal:?}"
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::OpenFile { path, .. } if path == unit.as_str()))
+            .count(),
+        1,
+        "the write itself landed on the healthy engine"
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::CloseFile { path } if path == unit.as_str()))
+            .count(),
+        1,
+        "the drifted admission's written path is compensated with exactly one close"
+    );
+    assert!(
+        hub.is_serving(),
+        "a basis-only drift must not retire or crash-signal the shared lazy attachment"
+    );
+}
+
+/// A CONTENT-ONLY basis drift observed after a successful actor-applied
+/// overlay (another document's edit landing while the engine was awaited)
+/// must not take a healthy explicit engine down. The publication that decided
+/// the unit's membership is unchanged, so the engine holds nothing the live
+/// basis excludes: the settlement is refused as `StaleBasis`, the SAME engine
+/// keeps serving, and a fresh admission re-applies on it.
+#[tokio::test]
+async fn applied_overlay_survives_a_content_only_drift_without_restarting_the_engine() {
+    use super::{AdmissionRefusal, OverlayMutation, ProjectBasis, ProjectBindingInput};
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let serving_epoch = harness.provider.serving_epoch();
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let registrations = |provider: &MockProvider| {
+        provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::RegisterCarrierMember { .. }))
+            .count()
+    };
+    // The live basis advances its content generation by one for every
+    // registration that has LANDED on the engine: each check before a write
+    // sees the basis it was admitted at, the check after it sees a drift.
+    let reader = {
+        let publication = Arc::clone(&publication);
+        let engine = engine.clone();
+        Arc::new(move || {
+            let landed = engine
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MockCall::RegisterCarrierMember { .. }))
+                .count() as u64;
+            Some(ProjectBasis::new(Arc::clone(&publication), 1 + landed, 1))
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let register = |content: &str| OverlayMutation::RegisterCarrier {
+        source_path: source.into(),
+        companion_path: unit.as_str().into(),
+        content: content.into(),
+        project_file_name: project.into(),
+    };
+    let admit = |content_generation: u64| {
+        let witness = harness
+            .provider
+            .bind_project(ProjectBindingInput::new(
+                source.into(),
+                project.into(),
+                Vec::new(),
+                ProjectBasis::new(Arc::clone(&publication), content_generation, 1),
+                Arc::clone(&reader),
+            ))
+            .expect("the live basis binds");
+        harness
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+            .expect("the unit is a member of the bound publication")
+    };
+
+    let refusal = harness
+        .provider
+        .apply_overlay(&admit(1), register("first"))
+        .await
+        .expect_err("a drift after the write refuses the settlement");
+    assert!(
+        matches!(refusal, AdmissionRefusal::StaleBasis),
+        "a content-only drift is a StaleBasis refusal: {refusal:?}"
+    );
+    assert_eq!(registrations(&engine), 1, "the write landed exactly once");
+
+    // Let a (wrongly) armed crash monitor run: it would retire the engine.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        harness.provider.serving_epoch(),
+        serving_epoch,
+        "a content-only drift must not retire or crash-signal the healthy engine"
+    );
+
+    // The retry binds the drifted basis and reaches the SAME engine.
+    let _ = harness
+        .provider
+        .apply_overlay(&admit(2), register("second"))
+        .await;
+    assert_eq!(
+        registrations(&engine),
+        2,
+        "the fresh admission re-applies on the engine that kept serving"
+    );
+    assert_eq!(
+        harness.notifier.started().len(),
+        1,
+        "no replacement engine was started"
+    );
+    assert!(
+        replacement.calls().is_empty(),
+        "no replacement engine received work"
+    );
 }

@@ -56,6 +56,12 @@ impl crate::resilient_provider::ProviderEstablisher<dyn TypeProvider> for Prebui
 /// its source against the live, published configured-project ownership graph,
 /// and every engine is established through its production provider hub.
 async fn batch_router_fixture() -> BatchRouterFixture {
+    batch_router_fixture_with_generated_membership(true).await
+}
+
+async fn batch_router_fixture_with_generated_membership(
+    admit_generated: bool,
+) -> BatchRouterFixture {
     use verter_semantic::resolver_core::{
         ConfiguredMembership, ModuleResolverCore, StaticMembershipSpec,
     };
@@ -81,6 +87,8 @@ async fn batch_router_fixture() -> BatchRouterFixture {
         engine_specs: DashMap::new(),
         providers: DashMap::new(),
         routes: DashMap::new(),
+        admitted_state_rearm: parking_lot::RwLock::new(None),
+        restart_pulse: Arc::new(tokio::sync::Notify::new()),
     };
     let providers = [
         Arc::new(MockTypeProvider::new()),
@@ -101,14 +109,33 @@ async fn batch_router_fixture() -> BatchRouterFixture {
     .collect();
     let mut projects = Vec::new();
     let mut configs = Vec::new();
+    let mut cached_specs = Vec::new();
     for (index, (name, provider)) in ["a", "b"].into_iter().zip(&providers).enumerate() {
         let project_root = format!("{root}/{name}");
         let tsconfig = format!("{project_root}/tsconfig.json");
-        let files: Vec<_> = members
+        let source_files: Vec<_> = members
             .iter()
             .filter(|member| member.project_file_name == tsconfig)
             .map(|member| CanonicalPath::new(&member.source_path))
             .collect();
+        let admitted_files: Vec<_> = if admit_generated {
+            members
+                .iter()
+                .filter(|member| member.project_file_name == tsconfig)
+                .map(|member| CanonicalPath::new(&member.companion_path))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Without generated membership the project admits NO member — neither
+        // the carriers (so no companion basis matches) nor their units: the
+        // ownership binding still resolves through the configured-project
+        // graph, and the membership snapshot must refuse the batch.
+        let files: Vec<_> = if admit_generated {
+            source_files
+        } else {
+            Vec::new()
+        };
         projects.push(OwnershipProject {
             id: ProjectId(index as u32),
             root: CanonicalPath::new(&project_root),
@@ -117,7 +144,7 @@ async fn batch_router_fixture() -> BatchRouterFixture {
                 tsconfig_path: CanonicalPath::new(&tsconfig),
                 membership: ConfiguredMembership {
                     spec: StaticMembershipSpec {
-                        files: files.clone(),
+                        files: files.iter().cloned().chain(admitted_files).collect(),
                         include: Vec::new(),
                         exclude: Vec::new().into(),
                     },
@@ -137,17 +164,14 @@ async fn batch_router_fixture() -> BatchRouterFixture {
             project: tsconfig.clone(),
             tsserver_path: format!("{root}/typescript/lib/tsserver.js"),
         };
-        router.engine_specs.insert(
+        cached_specs.push((
             tsconfig,
-            CachedEngineSpec {
-                generation: 1,
-                outcome: Ok(ProjectEngineSpec {
-                    key: key.clone(),
-                    workspace_root: root.clone(),
-                    default_lib_count: 1,
-                }),
+            ProjectEngineSpec {
+                key: key.clone(),
+                workspace_root: root.clone(),
+                default_lib_count: 1,
             },
-        );
+        ));
         let provider: Arc<dyn TypeProvider> = provider.clone();
         let hub = ProviderHub::new(
             PrebuiltEngine(provider),
@@ -163,6 +187,24 @@ async fn batch_router_fixture() -> BatchRouterFixture {
         resolver: ModuleResolverCore::new(configs),
         generation: SnapshotGeneration(1),
     })));
+    let ws_read = router.host.workspace_read();
+    let basis = ResolvedPublication {
+        published: ws_read.published_root().unwrap(),
+        content_generation: ws_read.content_generation(),
+        project_generation: router
+            .host
+            .project_type_store()
+            .current_project_generation(),
+    };
+    for (project, spec) in cached_specs {
+        router.engine_specs.insert(
+            project,
+            CachedEngineSpec {
+                basis: basis.clone(),
+                outcome: Ok(spec),
+            },
+        );
+    }
     BatchRouterFixture {
         _temp: temp,
         router,
@@ -170,6 +212,89 @@ async fn batch_router_fixture() -> BatchRouterFixture {
         providers,
         members,
     }
+}
+
+#[tokio::test]
+async fn authored_owner_without_generated_membership_never_reaches_a_project_engine() {
+    let fixture = batch_router_fixture_with_generated_membership(false).await;
+    let result = fixture
+        .router
+        .activate_carrier_members(&fixture.members)
+        .await;
+    assert!(
+        result.is_err(),
+        "generated-unit exclusion must refuse the batch"
+    );
+    for provider in &fixture.providers {
+        assert!(
+            provider.calls().is_empty(),
+            "refused units must not reach an engine"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refused_registration_does_not_poison_a_healthy_project_route() {
+    let fixture = batch_router_fixture().await;
+    let member = &fixture.members[0];
+    let wrong_project = &fixture.members[1].project_file_name;
+    assert!(fixture
+        .router
+        .register_carrier_member(
+            &member.source_path,
+            &member.companion_path,
+            "export {};",
+            wrong_project,
+        )
+        .await
+        .is_err());
+    assert!(fixture.router.routes.is_empty());
+    fixture
+        .router
+        .register_carrier_member(
+            &member.source_path,
+            &member.companion_path,
+            "export {};",
+            &member.project_file_name,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture.providers[0].calls().as_slice(),
+        [MockCall::RegisterCarrierMember { .. }]
+    ));
+    assert!(fixture.providers[1].calls().is_empty());
+}
+
+#[tokio::test]
+async fn fresh_registration_replaces_a_stale_project_route() {
+    let fixture = batch_router_fixture().await;
+    let member = &fixture.members[0];
+    fixture.router.register_route(
+        &member.source_path,
+        &member.companion_path,
+        &fixture.members[1].project_file_name,
+    );
+    fixture
+        .router
+        .register_carrier_member(
+            &member.source_path,
+            &member.companion_path,
+            "export {};",
+            &member.project_file_name,
+        )
+        .await
+        .unwrap();
+    let route = fixture.router.routes.get(&member.companion_path).unwrap();
+    assert_eq!(
+        route.project,
+        ProjectTsserverProvider::normalized(&member.project_file_name)
+    );
+    assert!(matches!(
+        fixture.providers[0].calls().as_slice(),
+        [MockCall::RegisterCarrierMember { .. }]
+    ));
+    assert!(fixture.providers[1].calls().is_empty());
 }
 
 #[tokio::test]
@@ -668,5 +793,185 @@ async fn workspace_folder_updates_reach_a_hub_whose_first_establishment_is_in_fl
         "the folder update recorded while the hub was still establishing must reach its \
          engine through the replay, got {:?}",
         engine.calls()
+    );
+}
+
+fn hover_calls(provider: &MockTypeProvider) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count()
+}
+
+/// A query whose basis drifts while the engine answers is settled under a
+/// FRESH admission, never on the drifted one: an unrelated document's edit
+/// re-issues the query and serves the engine's answer, while a drift that
+/// withdraws ownership still refuses without a second engine call.
+#[tokio::test]
+async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    router.activate_carrier_members(&members).await.unwrap();
+    // The drift callbacks below need the router while it is serving a query.
+    let router = Arc::new(router);
+    let companion = members[0].companion_path.clone();
+    providers[0].set_hover(
+        &companion,
+        3,
+        Some(HoverInfo {
+            contents: "const answer: number".to_string(),
+            range_start: None,
+            range_end: None,
+            display_signature: None,
+            kind: None,
+            documentation: None,
+        }),
+    );
+
+    // An unrelated document changes while the engine answers.
+    let injecting = Arc::clone(&workspace);
+    let unrelated = format!("{}.unrelated.ts", members[2].source_path);
+    let drifting = Arc::clone(&router);
+    providers[0].set_on_query(
+        &companion,
+        Box::new(move || {
+            injecting.inject_file(unrelated, Arc::from("export {};"));
+            // Engine discovery is substituted in this fixture: carry the
+            // pre-resolved engines over to the drifted basis, as a real
+            // install's re-resolution would.
+            let drifted = ResolvedPublication::current(&drifting.host).unwrap();
+            for mut spec in drifting.engine_specs.iter_mut() {
+                spec.basis = drifted.clone();
+            }
+        }),
+    );
+    let hover = router
+        .get_hover(&companion, 3)
+        .await
+        .expect("a content-only drift must not surface as unavailable semantics");
+    assert_eq!(
+        hover.map(|info| info.contents).as_deref(),
+        Some("const answer: number")
+    );
+    assert_eq!(
+        hover_calls(&providers[0]),
+        2,
+        "the drifted answer is discarded and the query re-issued once"
+    );
+
+    // Ownership is withdrawn while the engine answers.
+    providers[0].clear_calls();
+    let publishing = Arc::clone(&workspace);
+    providers[0].set_on_query(
+        &companion,
+        Box::new(move || {
+            publishing.publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(Arc::new(
+                verter_workspace::WorkspaceSnapshot {
+                    owners_memo: Default::default(),
+                    projects: Vec::new(),
+                    resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+                    generation: SnapshotGeneration(2),
+                },
+            )));
+        }),
+    );
+    assert!(
+        router.get_hover(&companion, 3).await.is_err(),
+        "a withdrawn owner must refuse, never serve the stale answer"
+    );
+    assert_eq!(
+        hover_calls(&providers[0]),
+        1,
+        "a refused re-admission must not reach the engine again"
+    );
+}
+
+/// A generated write whose basis moves WHILE it is being admitted (an
+/// unrelated document's edit landing between the publication read and the
+/// hub binding) is re-admitted against the live basis and reaches the engine,
+/// instead of leaving the carrier without provider state until a later retry.
+#[tokio::test]
+async fn generated_write_admission_racing_a_content_edit_is_readmitted() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    let member = members[0].clone();
+    // Project `a`'s engine is cold: its establishment parks on a gate, so the
+    // write is suspended between resolving its binding and binding the hub.
+    let key = router
+        .providers
+        .iter()
+        .find(|entry| entry.key().project == member.project_file_name)
+        .map(|entry| entry.key().clone())
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine: Arc<dyn TypeProvider> = providers[0].clone();
+    router.providers.insert(
+        key,
+        Arc::new(ProviderHub::new(
+            GatedEngine {
+                engine,
+                gate: Arc::clone(&gate),
+                entered: Arc::clone(&entered),
+            },
+            Arc::new(verter_type_runtime::provider_hub::TracingNotifier),
+            crate::resilient_provider::HubPolicy::explicit(3),
+        )),
+    );
+    let router = Arc::new(router);
+    let write = tokio::spawn({
+        let router = Arc::clone(&router);
+        let member = member.clone();
+        async move {
+            router
+                .register_carrier_member(
+                    &member.source_path,
+                    &member.companion_path,
+                    "export {};",
+                    &member.project_file_name,
+                )
+                .await
+        }
+    });
+    await_until(
+        || entered.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "the write reached the cold engine's establishment",
+    )
+    .await;
+
+    workspace.inject_file(
+        format!("{}.unrelated.ts", member.source_path),
+        Arc::from("export {};"),
+    );
+    // Engine discovery is substituted in this fixture: carry the pre-resolved
+    // engines over to the drifted basis, as a real install's re-resolution would.
+    let drifted = ResolvedPublication::current(&router.host).unwrap();
+    for mut spec in router.engine_specs.iter_mut() {
+        spec.basis = drifted.clone();
+    }
+    gate.add_permits(1);
+
+    write
+        .await
+        .unwrap()
+        .expect("an admission that raced a content edit must be re-admitted");
+    assert!(
+        providers[0].calls().iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember { companion_path, .. }
+                if *companion_path == member.companion_path
+        )),
+        "the re-admitted registration must reach the owning engine"
     );
 }

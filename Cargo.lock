@@ -4054,6 +4054,7 @@ dependencies = [
  "verter_test_support",
  "verter_tsgo_api",
  "verter_type_runtime",
+ "verter_workspace",
 ]
 
 [[package]]
