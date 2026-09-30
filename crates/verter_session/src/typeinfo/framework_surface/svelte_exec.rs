@@ -372,6 +372,9 @@ fn partial_diagnostic_messages(reasons: PartialReasonSet) -> Vec<String> {
             "Type evaluation exceeded Verter's safe connected-query depth limit.".to_string(),
         );
     }
+    if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
+        diagnostics.push("Type evaluation exceeded Verter's safe memory budget.".to_string());
+    }
     if reasons.contains(PartialReasonSet::MISSING_DEPENDENCY) {
         diagnostics.push(
             "A referenced type's imported dependency could not be resolved; the surface is              published as a partial subset."

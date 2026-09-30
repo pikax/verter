@@ -95,6 +95,7 @@ fn diagnostic_kind(
         Source::BudgetExceeded => ResolutionDiagnosticKind::BudgetExceeded,
         Source::ProjectionWorkLimit => ResolutionDiagnosticKind::ProjectionWorkLimit,
         Source::ConnectedQueryDepthLimit => ResolutionDiagnosticKind::ConnectedQueryDepthLimit,
+        Source::ConnectedMemoryLimit => ResolutionDiagnosticKind::ConnectedMemoryLimit,
         Source::MappedDepthExceeded => ResolutionDiagnosticKind::MappedDepthExceeded,
         Source::UnresolvedReference => ResolutionDiagnosticKind::UnresolvedReference,
         Source::IndeterminateConditional => ResolutionDiagnosticKind::IndeterminateConditional,

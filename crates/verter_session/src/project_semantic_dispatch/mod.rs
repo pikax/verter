@@ -96,6 +96,13 @@ mod conditional_decision;
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
 pub(crate) mod connected_demand;
+#[cfg(test)]
+mod connected_demand_tests;
+// The exclusive-cost receipts a connected demand records for each
+// computation and replays when it serves a result warm.
+pub(crate) mod cost_receipt;
+#[cfg(test)]
+mod cost_receipt_tests;
 pub(crate) mod cycle_gate;
 mod enum_type;
 pub(crate) mod enumerate;
@@ -798,6 +805,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         u32::try_from(self.connected_demand.limit_report(reasons).0).unwrap_or(u32::MAX)
     }
 
+    /// What the last connected demand charged: its work units and its
+    /// construction bytes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn connected_demand_usage(&self) -> connected_demand::DemandUsage {
+        self.connected_demand.usage()
+    }
+
+    /// Replace the construction-byte allowance for the next connected
+    /// demand. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_construction_byte_limit_for_tests(&self, bytes: usize) {
+        self.connected_demand.set_byte_limit_for_tests(bytes);
+    }
+
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
         self.connected_demand.active_trip()
     }
@@ -871,8 +892,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
                 let (limit, actual, rail) = self.connected_demand.limit_report(reasons);
+                let domain = if reasons
+                    .contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+                {
+                    BudgetDomain::ConstructionBytes
+                } else {
+                    BudgetDomain::ProjectionOperation
+                };
                 self.opaque(QueryError::BudgetExceeded(BudgetExceededFailure {
-                    domain: BudgetDomain::ProjectionOperation,
+                    domain,
                     limit,
                     actual,
                     context: format!("semantic-dispatch:{rail}"),
@@ -917,6 +945,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
             diagnostics.push(ShallowDiagnostic::ConnectedQueryDepthLimit { root });
+        }
+        if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
+            diagnostics.push(ShallowDiagnostic::ConnectedMemoryLimit { root });
         }
         Arc::from(diagnostics.into_boxed_slice())
     }

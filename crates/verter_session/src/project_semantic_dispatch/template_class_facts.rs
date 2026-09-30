@@ -916,6 +916,7 @@ fn unresolved_reasons_from_partial(
         )
     } else if reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+        || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
     {
         (
             ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded,

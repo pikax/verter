@@ -38,7 +38,8 @@ export interface NativeExpansionDiagnostic {
     | "cyclicReference"
     | "cyclicInstantiation"
     | "instantiationError"
-    | "emptyUnionArm";
+    | "emptyUnionArm"
+    | "connectedMemoryLimit";
   context: string;
   propertyName?: string;
 }
@@ -553,7 +554,8 @@ export type NativeSurfacePartialReason =
   | "flowReturnUninferred"
   | "flowReturnUnverified"
   | "flowReturnNoSurface"
-  | "undecidedConditional";
+  | "undecidedConditional"
+  | "connectedMemoryLimit";
 
 /**
  * Typed completeness of a published component surface. Without it an

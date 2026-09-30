@@ -283,3 +283,53 @@ fn a_union_drops_the_literals_its_patterns_match() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Every concatenation's bytes are reserved before it is built: under a
+/// 4 KiB construction allowance, 40 × 40 concatenations stop on the memory
+/// rail as a typed partial, never a truncated union.
+#[test]
+fn a_template_past_its_byte_allowance_is_a_memory_partial() {
+    use crate::semantic_query::{
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, ResultCompleteness,
+    };
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = super::ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let union = |prefix: &str| {
+        let members: Vec<crate::semantic_query::SemanticNodeId> = (0..40)
+            .map(|i| {
+                graph.intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::String(format!("{prefix}{i}")),
+                ))
+            })
+            .collect();
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(std::sync::Arc::from(
+                members.into_boxed_slice(),
+            )),
+        ))
+    };
+    let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis: std::sync::Arc::from(
+            vec![
+                std::sync::Arc::<str>::from(""),
+                std::sync::Arc::from("-"),
+                std::sync::Arc::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: std::sync::Arc::from(vec![union("a"), union("b")].into_boxed_slice()),
+    });
+    dispatch.set_construction_byte_limit_for_tests(4 << 10);
+    let (_, completeness) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
+        template,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    match completeness {
+        ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT),
+            "the partial is the memory rail's, got {reasons:?}"
+        ),
+        ResultCompleteness::Complete => panic!("4 KiB cannot hold 1,600 concatenations"),
+    }
+}

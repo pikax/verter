@@ -1147,6 +1147,9 @@ fn result_completeness_to_ffi(
                 PartialReason::UndecidedConditional => {
                     FfiSurfacePartialReason::UndecidedConditional
                 }
+                PartialReason::ConnectedMemoryLimit => {
+                    FfiSurfacePartialReason::ConnectedMemoryLimit
+                }
             })
             .collect(),
         },
@@ -1343,6 +1346,9 @@ fn resolution_diagnostic_to_ffi(
         }
         ResolutionDiagnosticKind::ConnectedQueryDepthLimit => {
             FfiResolutionDiagnosticKind::ConnectedQueryDepthLimit
+        }
+        ResolutionDiagnosticKind::ConnectedMemoryLimit => {
+            FfiResolutionDiagnosticKind::ConnectedMemoryLimit
         }
         ResolutionDiagnosticKind::MappedDepthExceeded => {
             FfiResolutionDiagnosticKind::MappedDepthExceeded

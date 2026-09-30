@@ -144,6 +144,9 @@ pub enum ShallowDiagnostic {
     /// boundary limit. Heap-owned structural traversal does not count toward
     /// this rail.
     ConnectedQueryDepthLimit { root: SemanticNodeId },
+    /// The connected root demand exhausted its construction-byte allowance:
+    /// operational partiality, like the work envelope.
+    ConnectedMemoryLimit { root: SemanticNodeId },
     /// `T & T` — duplicate intersection arm short-circuited so the
     /// walker does not re-enter an arm that contributes nothing new.
     DuplicateArmShortCircuited { node: SemanticNodeId },
