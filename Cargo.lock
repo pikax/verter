@@ -3934,6 +3934,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_supervise"
+version = "0.0.1-beta.5"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "verter_test_support",
+ "windows-sys",
+]
+
+[[package]]
 name = "verter_svelte_conformance"
 version = "0.0.1-beta.5"
 dependencies = [

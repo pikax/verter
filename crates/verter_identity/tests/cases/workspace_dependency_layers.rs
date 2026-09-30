@@ -106,6 +106,11 @@ const LAYER_7_HARNESSES: &[&str] = &[
     // expectation evaluator): test and CI tooling that no production crate
     // may depend on.
     "verter_validation_probe",
+    // The process supervisor compiler probes and benchmarks run under
+    // (process-tree memory containment, deadline, teardown, telemetry): a
+    // standalone tool binary with no workspace dependencies that nothing may
+    // depend on.
+    "verter_supervise",
 ];
 
 /// Build/test tooling, not a production layer. Checked by

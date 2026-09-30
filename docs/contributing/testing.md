@@ -202,6 +202,71 @@ pnpm integration-test --skip-build --skip-baseline --no-clone "$PROJECT"
 
 See the [CI/CD page](./ci-cd.md) for details on the integration test workflow.
 
+## Compiler Probes and Benchmarks Under a Resource Cap
+
+Never run a compiler probe (tsc, a Verter release binary) or a benchmark arm
+bare: one probe once reached 132 GB and hung the host. Run it under
+`verter-supervise` (crate `verter_supervise`), which contains the whole process
+tree, enforces a deadline, tears every descendant down, and writes a result
+document:
+
+```bash
+cargo build -p verter_supervise --release
+verter-supervise run --mem-mb 8192 --timeout-ms 120000 --out out/result.json \
+  [--sample-ms 50] [--cwd DIR] [--env KEY=VALUE ...] [--allow-sampled] [--host-reserve-mb N] \
+  -- PROGRAM ARGS...
+```
+
+The child's stdout and stderr go to `out/result.stdout.log` and
+`out/result.stderr.log`. The supervisor exits with the child's exit code, or
+124 (deadline), 137 (memory cap), 130 (cancelled: Ctrl-C, Ctrl-Break, SIGINT,
+SIGTERM or SIGHUP to the supervisor) or 125 (the supervisor refused or failed:
+the run is invalid). A Unix child killed by a signal it did not get from the
+supervisor exits 128 plus the signal.
+
+`result.json` (`schema: 1`) records `program`, `args`, `cwd`, `startedAt`,
+`launched`, `wallMs` (from the child's release to its exit), `exitCode`,
+`signal`, `killedBy` (`null`, `"memory"`, `"timeout"`, `"cancel"`,
+`"supervisor-error"`, `"pressure"`), `memLimitBytes`, `killTriggerBytes`,
+`timeoutMs`, `peakBytes` with the OS metric it came from in `peakMetric`,
+`containment` (`"hard"` or `"sampled"`), `backend`, `overshootBoundBytes`,
+`observedOvershootBytes`, `terminationLatencyMs`, `sampling` (interval, count,
+largest observation age and sweep time), a bounded `samples` series
+(`{tMs, bytes}` of `sampleMetric`), `processCount`, `descendantsKilled`,
+`cpuUserMs`, `cpuKernelMs`, `stdoutPath`, `stderrPath` and `errors`.
+Telemetry that could not be read is `null`, never `0`. A killed supervisor
+writes no result: a missing `result.json` means the run is invalid.
+
+Containment per platform:
+
+| Platform | `backend` | `containment` | Mechanism | `peakMetric` |
+| --- | --- | --- | --- | --- |
+| Windows 10+ | `windows-job-object` | `hard` | The child is created suspended and already inside a job object (`PROC_THREAD_ATTRIBUTE_JOB_LIST`) with a job-wide committed-memory limit, kill-on-close and no breakaway, then resumed. The kernel refuses commit past the cap; the limit notification kills the tree; the supervisor's death closes the job and kills the tree. | `job-peak-commit-charge`: the kernel's high-water mark of the tree's commit charge. At a memory kill it includes the request the kernel refused, so it can sit above the cap by that request; granted commit never exceeds the cap. |
+| Linux | `linux-cgroup-v2` | `hard` | A dedicated cgroup v2 (`memory.max`, `memory.swap.max=0`, `memory.oom.group=1`) the child joins before `exec`; teardown writes `cgroup.kill`; a sentinel process kills the cgroup if the supervisor dies. Needs a delegated subtree with the memory controller (for example `systemd-run --user --scope -p Delegate=yes verter-supervise ...`); without one the supervisor refuses. `RLIMIT_AS` is never substituted: it is a per-process address-space limit, not a tree cap. | `cgroup-memory.peak` (kernel 5.19+), else `cgroup-memory.current-sampled-max` |
+| macOS | `macos-phys-footprint` | `sampled` | macOS gives an unprivileged process no kernel-enforced tree cap. The child is `posix_spawn`ed suspended into its own process group; the supervisor sums `phys_footprint` over the group and every tracked descendant every `--sample-ms` (default 10 ms), wakes on every fork (kqueue), and kills the tree at the cap less 1/16 headroom. Runs only with `--allow-sampled`. | `sampled-tree-phys-footprint-sum` |
+| Other | `unsupported` | none | Refuses to launch. | none |
+
+Fail closed: if containment or telemetry cannot be established, the program
+never runs (`launched: false`, exit 125). On macOS the preflight also requires
+a cap within physical memory minus the host reserve (`--host-reserve-mb`,
+default a quarter of RAM, at least 2 GiB), normal host memory pressure and a
+sampling sweep that fits its age budget. Mid-run, lost telemetry, a dead
+sentinel, a sweep older than twice the sampling interval (macOS), a descendant
+that leaves the process group (macOS) or host memory pressure (macOS) kills
+the tree and invalidates the run. Sampling proves no overshoot bound, so a
+sampled result reports `overshootBoundBytes: null` and the observed overshoot
+instead; a descendant that detaches before the sampler sees it, or a
+simultaneous loss of supervisor and sentinel, is outside a sampled backend's
+reach.
+
+`VERTER_SUPERVISE_FAULT` (`containment`, `telemetry`, `telemetry-midrun`)
+injects a supervisor fault for the tests that prove each fail-closed path; it
+is never passed to the child. The crate's integration tests
+(`cargo test -p verter_supervise`) run the real supervisor over the
+`verter-supervise-fixture` process tree. On Linux the backend-dependent cases
+are ignored by default because they need a delegated cgroup; run them with
+`--include-ignored` inside one (or as root).
+
 ## Server Cleanup
 
 After starting any dev server, preview server, or other long-running process for testing, always terminate it when done — stale servers interfere with subsequent test runs. Capture the PID at spawn and terminate **that** PID. A port is a diagnostic, not proof of ownership: `lsof -t -i:<port>` returns whoever holds the port, which may be your own editor's server or another agent's. Never terminate by image name or pattern (`pkill -f node`, `taskkill /F /IM node.exe`, `Stop-Process -Name`).
