@@ -1975,6 +1975,7 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail => 9,
                 crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
+                crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

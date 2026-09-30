@@ -4985,6 +4985,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             substitutions,
             tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
             tail_arguments: std::iter::once(Arc::clone(args)).collect(),
+            conditional_body: None,
             generic,
             suspend,
             body: BodyLowering::Ready(base),
@@ -5058,7 +5059,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
                 })
                 .flatten();
-            if let Some(next) = next {
+            if next.is_some() && self.declares_conditional_body(build) == Some(false) {
+                // The body applies the declaration itself with no conditional
+                // type of its own deciding: the alias's declared type
+                // requires itself — the checker's TS2456, a checker error
+                // (`any`), never a step of a tail run.
+                result = crate::semantic_query::checker_policy::checker_recovery(
+                    self.graph(),
+                    crate::semantic_query::checker_policy::circular_type_alias(),
+                    None,
+                );
+            } else if let Some(next) = next {
                 if build.tail_arguments.contains(&next)
                     || !build.tail.step(self.connected_demand.tail_steps_budget())
                 {
@@ -15210,6 +15221,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// one names itself directly, which the checker reports as a circular
     /// alias, and its back-edge stays the recursive reference. `None` for
     /// any other result, an application nested inside a type included.
+    /// Whether the declaration an instantiation builds declares a
+    /// conditional type as its body (through `Alias` wrappers): only then
+    /// is its body applying the declaration again a step of the checker's
+    /// tail loop. `None` when the body cannot be recovered — unknown, never
+    /// evidence of a circular declaration. Read once per build.
+    fn declares_conditional_body(&self, build: &mut InstantiateBuild) -> Option<bool> {
+        if let Some(known) = build.conditional_body {
+            return known;
+        }
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(&build.decl_canonical),
+            owner: build.decl_owner,
+            whole_hash: build.decl_whole_hash,
+            decl_name: Arc::clone(&build.decl_name),
+        };
+        let known = match self.declared_alias_body(&identity) {
+            Some(Some(body)) => Some(matches!(
+                self.graph().node_data(body).as_deref(),
+                Some(SemanticNodeData::Conditional { .. })
+            )),
+            Some(None) | None => None,
+        };
+        build.conditional_body = Some(known);
+        known
+    }
+
     fn conditional_tail_arguments(
         &self,
         result: SemanticNodeId,
@@ -17544,6 +17581,9 @@ pub(super) struct InstantiateBuild {
     /// Every argument list the tail run has taken, for the recurrence that
     /// never reaches a value.
     tail_arguments: rustc_hash::FxHashSet<Arc<[SemanticNodeId]>>,
+    /// Whether the declaration's body is a conditional type, once read
+    /// (`Some(None)` when it could not be recovered).
+    conditional_body: Option<Option<bool>>,
     generic: bool,
     suspend: bool,
     body: BodyLowering,
