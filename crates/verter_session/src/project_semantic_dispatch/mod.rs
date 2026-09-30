@@ -4386,6 +4386,8 @@ mod constrained_infer_tests;
 #[cfg(test)]
 mod generic_source_inference_tests;
 #[cfg(test)]
+mod infer_inventory_tests;
+#[cfg(test)]
 mod inference_fixation_tests;
 #[cfg(test)]
 mod mapped_key_domain_carrier_tests;

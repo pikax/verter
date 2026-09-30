@@ -16,8 +16,8 @@ use rustc_hash::FxHashSet;
 
 use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::{
-    BranchSelection, ConditionalPendingSubstitution, OriginEdgeKind, OriginMeta, PrimitiveKind,
-    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    BranchSelection, ConditionalPendingSubstitution, OriginEdgeKind, OriginMeta, QueryError,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// The infer-routing classification of a conditional's `extends` pattern
@@ -28,7 +28,7 @@ use crate::semantic_query::{
 pub(super) enum ConditionalInferRoute {
     None,
     Bare,
-    InScopePattern(super::relation::InferPatternShape),
+    InScopePattern,
     OutOfScope,
 }
 
@@ -940,7 +940,7 @@ impl ProjectSemanticDispatch<'_> {
         // bindings substitute into the selected (true) branch.
         let related = self.execute_relate_pair(check, extends);
         let selected = |bindings: std::sync::Arc<[crate::semantic_query::InferBinding]>| {
-            if !matches!(route, ConditionalInferRoute::InScopePattern(_)) {
+            if !matches!(route, ConditionalInferRoute::InScopePattern) {
                 return (ConditionalBranchSelection::True, None);
             }
             self.select_with_inferences(check, extends, bindings)
@@ -982,8 +982,8 @@ impl ProjectSemanticDispatch<'_> {
 
     /// The branch an inferring `extends` pattern selects once its
     /// inferences are fixed. What the pattern infers selects no branch by
-    /// itself: a constrained `infer` whose inference its constraint refuses
-    /// takes the constraint (`getInferredType`), and the checker relates the
+    /// itself: an `infer` whose inference its declared or implied constraint
+    /// refuses takes the constraint (`getInferredType`), and the checker relates the
     /// check to the pattern instantiated with the fixed types
     /// (`getConditionalType`) — `[1]` against `[infer X extends string]`
     /// fixes `string` and takes the false branch, and `{ a: 1; b: (x:
@@ -1001,9 +1001,10 @@ impl ProjectSemanticDispatch<'_> {
         ConditionalBranchSelection,
         Option<super::relation::RelationInferBindings>,
     ) {
-        let constrained = self.pattern_constrains_an_infer(extends);
+        let constraints = self.infer_constraints_in(extends);
+        let constrained = !constraints.is_empty();
         let bindings = if constrained {
-            match self.infer_bindings_within_constraints(&bindings) {
+            match self.infer_bindings_within_constraints(&bindings, &constraints) {
                 Some(bindings) => bindings,
                 None => return (ConditionalBranchSelection::Undecided, None),
             }
@@ -1155,7 +1156,62 @@ impl ProjectSemanticDispatch<'_> {
                 self.substitute_semantic_type_param(node, *param, wildcard)
             })
         };
-        self.relate_outside_inference(permissive(check), permissive(extends))
+        let (check, extends) = (permissive(check), permissive(extends));
+        self.wildcard_failure_undecided(
+            [check, extends],
+            wildcard,
+            self.relate_outside_inference(check, extends),
+        )
+    }
+
+    /// `step`, a relation over a permissive instantiation, except that its
+    /// failure is undecided where an operand holds an operation over the
+    /// wildcard (`Uppercase<W>` and every other builtin utility, `W["k"]`, a
+    /// template hole, a conditional over it): the checker's instantiation turns such an operation into
+    /// the wildcard itself, which relates to everything, and the lane reads
+    /// the operation as written.
+    fn wildcard_failure_undecided(
+        &self,
+        operands: [SemanticNodeId; 2],
+        wildcard: SemanticNodeId,
+        step: super::dispatch_txn::RelationStep,
+    ) -> super::dispatch_txn::RelationStep {
+        if !matches!(step, super::dispatch_txn::RelationStep::NotAssignable) {
+            return step;
+        }
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = operands.to_vec();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            let operation = match data.as_ref() {
+                SemanticNodeData::IntrinsicApplication { .. }
+                | SemanticNodeData::IndexedAccess { .. }
+                | SemanticNodeData::KeyOf { .. }
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Conditional { .. }
+                | SemanticNodeData::Mapped { .. } => true,
+                // A builtin utility is an operation too (`Uppercase<W>`).
+                SemanticNodeData::InstantiationRef { base, .. } => {
+                    base.canonical_id.as_ref() == "__builtin__"
+                }
+                _ => false,
+            };
+            let mut over_wildcard = false;
+            let _ = data.for_each_child(|child| {
+                over_wildcard |= child == wildcard;
+                stack.push(child);
+            });
+            if operation && over_wildcard {
+                return super::dispatch_txn::RelationStep::Unknown;
+            }
+        }
+        step
     }
 
     /// The checker's definitely-true test (`getRestrictiveInstantiation`):
@@ -1444,11 +1500,13 @@ impl ProjectSemanticDispatch<'_> {
 
     /// The selection over an `extends` pattern whose `infer` declarations
     /// sit deeper than the relation binds: the false branch when the check
-    /// does not relate to the pattern even with every `infer` read as `any`
-    /// — the checker's definitely-false test over the permissive
-    /// instantiation (`getConditionalType`), which no inference can turn
-    /// true (`string extends { then(cb: (v: infer V) => void): void }` is
-    /// false). Otherwise the checker infers from the check and relates the
+    /// does not relate to the pattern even with every `infer` read as the
+    /// permissive wildcard type — the checker's definitely-false test over
+    /// the permissive instantiation (`getConditionalType`), which no
+    /// inference can turn true (`string extends { then(cb: (v: infer V) =>
+    /// void): void }` is false). The wildcard is no `any`: an operation over
+    /// it is the wildcard, so `"AB"` against `Uppercase<infer U>` is not
+    /// definitely false. Otherwise the checker infers from the check and relates the
     /// inferred pattern, which the lane does not model here: the
     /// conditional is undecided, as is a pattern holding a nested
     /// conditional or mapped type, whose binders scope their own `infer`
@@ -1462,18 +1520,22 @@ impl ProjectSemanticDispatch<'_> {
         if scan.binder_scope || scan.infers.is_empty() {
             return ConditionalBranchSelection::Undecided;
         }
-        let any = self
+        let wildcard = self
             .graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+            .intern_node(SemanticNodeData::Opaque(QueryError::PermissiveWildcard));
         let permissive = scan.infers.iter().fold(extends, |pattern, infer| {
-            self.substitute_semantic_type_param(pattern, *infer, any)
+            self.substitute_semantic_type_param(pattern, *infer, wildcard)
         });
         if self.subtree_contains_infer(permissive) {
             return ConditionalBranchSelection::Undecided;
         }
         let params = self.type_params_within(&[check, permissive]);
         let step = if params.is_empty() {
-            self.execute_relate_pair(check, permissive)
+            self.wildcard_failure_undecided(
+                [check, permissive],
+                wildcard,
+                self.execute_relate_pair(check, permissive),
+            )
         } else {
             self.permissive_relation(check, permissive, &params)
         };
@@ -1517,209 +1579,24 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// Classify the infer-routing of a conditional's `extends` pattern:
-    /// bare `infer X`, an in-scope pattern (object property / tuple
-    /// head-tail / function positions — binds through the relation), an
-    /// out-of-scope deep pattern (stays deferred, exactly the retired
-    /// pre-relation behavior for unsupported shapes), or no infer at all.
+    /// The infer-routing of a conditional's `extends` pattern: a bare
+    /// `infer X`, a pattern whose declarations the relation infers through
+    /// (its inventory, or a root reverse mapping), one holding a
+    /// declaration below structure the relation does not infer through (an
+    /// explicit capability gap), or none.
     fn conditional_infer_route(&self, extends: SemanticNodeId) -> ConditionalInferRoute {
-        let graph = self.graph();
-        let Some(data) = graph.node_data(extends) else {
-            return ConditionalInferRoute::None;
-        };
-        match &*data {
-            SemanticNodeData::Infer { .. } => ConditionalInferRoute::Bare,
-            SemanticNodeData::Object(view) => {
-                if view.index_signatures.iter().any(|signature| {
-                    self.subtree_contains_infer(signature.key_type)
-                        || self.subtree_contains_infer(signature.value_type)
-                }) || view
-                    .call_signatures
-                    .iter()
-                    .chain(view.construct_signatures.iter())
-                    .any(|signature| self.subtree_contains_infer(*signature))
-                    || view
-                        .keyspace
-                        .is_some_and(|keyspace| self.subtree_contains_infer(keyspace))
-                {
-                    return ConditionalInferRoute::OutOfScope;
-                }
-                let mut direct = false;
-                for member in view.positive_members().iter() {
-                    if matches!(
-                        graph.node_data(member.value).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
-                        direct = true;
-                    } else if self.subtree_contains_infer(member.value) {
-                        // A placeholder nested through structure alone (a
-                        // method's callback parameter) is deposited by the
-                        // structural relation; any other nesting is not.
-                        if self.structural_infer_sites(member.value).is_none() {
-                            return ConditionalInferRoute::OutOfScope;
-                        }
-                        direct = true;
-                    }
-                }
-                if direct {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::ObjectProps,
-                    )
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            SemanticNodeData::Tuple { elements, .. } => {
-                let mut direct = false;
-                for element in elements.iter() {
-                    if matches!(
-                        graph.node_data(element.value).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
-                        direct = true;
-                    } else if self.subtree_contains_infer(element.value) {
-                        // A placeholder an element reaches through structure
-                        // or a reference is deposited by the relation of the
-                        // element; any other nesting is not.
-                        if self.structural_infer_sites(element.value).is_none() {
-                            return ConditionalInferRoute::OutOfScope;
-                        }
-                        direct = true;
-                    }
-                }
-                if direct {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::TupleHeadTail,
-                    )
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            SemanticNodeData::Array { element, .. } => {
-                if matches!(
-                    graph.node_data(*element).as_deref(),
-                    Some(SemanticNodeData::Infer { .. })
-                ) {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::ArrayElement,
-                    )
-                } else if self.subtree_contains_infer(*element) {
-                    ConditionalInferRoute::OutOfScope
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                type_parameters,
-                predicate,
-                ..
-            } => {
-                let mut direct = false;
-                for param in params.iter() {
-                    if matches!(
-                        graph.node_data(param.ty).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
-                        direct = true;
-                    } else if self.relation_pattern_info(param.ty).is_some_and(|pattern| {
-                        matches!(
-                            pattern.shape,
-                            super::relation::InferPatternShape::TupleHeadTail
-                                | super::relation::InferPatternShape::ArrayElement
-                        )
-                    }) {
-                        // Rest-tuple/array inference nested in a function
-                        // parameter is an in-scope contravariant pattern,
-                        // not an unsupported deep occurrence.
-                        direct = true;
-                    } else if self.subtree_contains_infer(param.ty) {
-                        return ConditionalInferRoute::OutOfScope;
-                    }
-                }
-                // The predicate target sits where the return does: a bare
-                // `x is infer U` is a direct return-position site.
-                for position in std::iter::once(*return_type)
-                    .chain(predicate.and_then(|predicate| predicate.ty))
-                {
-                    if matches!(
-                        graph.node_data(position).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
-                        direct = true;
-                    } else if self.subtree_contains_infer(position) {
-                        return ConditionalInferRoute::OutOfScope;
-                    }
-                }
-                for tp in type_parameters.iter() {
-                    if tp
-                        .constraint
-                        .is_some_and(|c| self.subtree_contains_infer(c))
-                        || tp.default.is_some_and(|d| self.subtree_contains_infer(d))
-                    {
-                        return ConditionalInferRoute::OutOfScope;
-                    }
-                }
-                if direct {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::Function,
-                    )
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            SemanticNodeData::Mapped { .. } => {
-                if self.relation_pattern_info(extends).is_some_and(|pattern| {
-                    pattern.shape == super::relation::InferPatternShape::ReverseHomomorphicMapped
-                }) {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::ReverseHomomorphicMapped,
-                    )
-                } else if self.subtree_contains_infer(extends) {
-                    ConditionalInferRoute::OutOfScope
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            // A reference to a generic declaration infers from its type
-            // arguments (`Box<infer P>`), and through any structure there.
-            SemanticNodeData::InstantiationRef { .. } => {
-                match self.structural_infer_sites(extends) {
-                    Some(sites) if !sites.is_empty() => ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::Reference,
-                    ),
-                    Some(_) => ConditionalInferRoute::None,
-                    None => ConditionalInferRoute::OutOfScope,
-                }
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                let mut direct = false;
-                for hole in expressions.iter() {
-                    if matches!(
-                        graph.node_data(*hole).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
-                        direct = true;
-                    } else if self.subtree_contains_infer(*hole) {
-                        return ConditionalInferRoute::OutOfScope;
-                    }
-                }
-                if direct {
-                    ConditionalInferRoute::InScopePattern(
-                        super::relation::InferPatternShape::TemplateLiteral,
-                    )
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
-            _ => {
-                if self.subtree_contains_infer(extends) {
-                    ConditionalInferRoute::OutOfScope
-                } else {
-                    ConditionalInferRoute::None
-                }
-            }
+        if matches!(
+            self.graph().node_data(extends).as_deref(),
+            Some(SemanticNodeData::Infer { .. })
+        ) {
+            return ConditionalInferRoute::Bare;
+        }
+        if self.relation_pattern_info(extends).is_some() {
+            return ConditionalInferRoute::InScopePattern;
+        }
+        match self.infer_inventory(extends) {
+            super::relation::InferInventory::Sites(_) => ConditionalInferRoute::None,
+            super::relation::InferInventory::Unsupported => ConditionalInferRoute::OutOfScope,
         }
     }
 
