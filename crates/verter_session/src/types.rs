@@ -2790,6 +2790,16 @@ impl CompileFailure {
     }
 }
 
+impl From<crate::semantic_query::ExecutionAbort> for HostError {
+    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+        match abort {
+            crate::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+            crate::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
+            crate::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
+        }
+    }
+}
+
 /// Errors returned by [`VerterHost`](crate::VerterHost) operations.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -2832,6 +2842,9 @@ pub enum HostError {
     /// The request was superseded by a newer version of the file.
     #[error("request superseded by newer generation")]
     Superseded,
+    /// The request was cancelled before it could publish.
+    #[error("request cancelled")]
+    Cancelled,
     /// The scheduler was shut down.
     #[error("scheduler shut down")]
     Shutdown,
@@ -3195,6 +3208,8 @@ pub enum PublicApiProjectionError {
     /// Vue TSC generation rejected an incomplete, mismatched, or unsafe macro
     /// projection.
     TscGeneration(verter_compiler::tsc::TscGenerationError),
+    /// The projection's semantic inputs were aborted: nothing is published.
+    Aborted(crate::semantic_query::ExecutionAbort),
 }
 
 impl PublicApiProjectionError {
@@ -3204,6 +3219,11 @@ impl PublicApiProjectionError {
     pub const fn is_retryable(&self) -> bool {
         match self {
             Self::TscGeneration(error) => error.is_retryable(),
+            // A superseded view is transient; a cancelled request or a shut
+            // down host is the caller's decision, not a retry.
+            Self::Aborted(abort) => {
+                matches!(abort, crate::semantic_query::ExecutionAbort::Superseded)
+            }
         }
     }
 
@@ -3212,6 +3232,7 @@ impl PublicApiProjectionError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::TscGeneration(_) => "tsc-generation",
+            Self::Aborted(_) => "aborted",
         }
     }
 
@@ -3220,6 +3241,9 @@ impl PublicApiProjectionError {
     pub const fn detail_code(&self) -> &'static str {
         match self {
             Self::TscGeneration(error) => error.code(),
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Cancelled) => "cancelled",
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Superseded) => "superseded",
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Shutdown) => "shutdown",
         }
     }
 
@@ -3228,6 +3252,7 @@ impl PublicApiProjectionError {
     pub const fn subject(&self) -> crate::PublicApiProjectionSubject {
         let subject = match self {
             Self::TscGeneration(error) => error.subject(),
+            Self::Aborted(_) => verter_compiler::tsc::TscFailureSubject::Source,
         };
         match subject {
             verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
@@ -3247,6 +3272,7 @@ impl PublicApiProjectionError {
     pub const fn macro_syntax_index(&self) -> Option<u32> {
         match self {
             Self::TscGeneration(error) => error.macro_syntax_index(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3257,6 +3283,7 @@ impl PublicApiProjectionError {
     ) -> Option<verter_compiler::tsc::TscDeclarationShapeReason> {
         match self {
             Self::TscGeneration(error) => error.declaration_shape_reason(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3265,6 +3292,7 @@ impl PublicApiProjectionError {
     pub const fn member_ordinal(&self) -> Option<u32> {
         match self {
             Self::TscGeneration(error) => error.member_ordinal(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3275,6 +3303,7 @@ impl PublicApiProjectionError {
     ) -> Option<&verter_compiler::tsc::TscUnavailableOutcome> {
         match self {
             Self::TscGeneration(error) => error.unavailable_outcome(),
+            Self::Aborted(_) => None,
         }
     }
 }
@@ -3289,6 +3318,7 @@ impl std::fmt::Display for PublicApiProjectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TscGeneration(error) => error.fmt(formatter),
+            Self::Aborted(abort) => write!(formatter, "public API projection aborted: {abort:?}"),
         }
     }
 }

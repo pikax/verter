@@ -304,9 +304,6 @@ impl<R> MacroFailure<R> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum MacroPartialReason {
     BudgetExceeded,
-    Cancelled,
-    SupersededGeneration,
-    UnstableState,
     Recursion,
     IncompleteTraversal,
 }

@@ -181,6 +181,9 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
         CompileEntryOutcome::RuntimeSurfaceRefused(refusal) => {
             panic!("unexpected runtime-surface refusal: {}", refusal.message)
         }
+        CompileEntryOutcome::Aborted(abort) => {
+            panic!("an uncancelled compile never aborts: {abort:?}")
+        }
     };
     let script = &produced.outputs[&VirtualNodeKind::Script];
     let style = &produced.outputs[&VirtualNodeKind::Style { index: 0 }];
@@ -218,13 +221,17 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
             },
         ));
     }
-    let macro_output = host.produce_vue_macro_codegen(
-        canonical,
-        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
-            multi_profile.target,
+    let macro_output = host
+        .produce_vue_macro_codegen(
+            canonical,
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
+                multi_profile.target,
+            )
+            .unwrap_or(
+                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
+            ),
         )
-        .unwrap_or(crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames),
-    );
+        .expect("an uncancelled production publishes");
     let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
         style_v_bind_usage_complete: Some(true),
         ..Default::default()
@@ -303,6 +310,9 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
         CompileEntryOutcome::RuntimeSurfaceRefused(refusal) => {
             panic!("unexpected runtime-surface refusal: {}", refusal.message)
         }
+        CompileEntryOutcome::Aborted(abort) => {
+            panic!("an uncancelled compile never aborts: {abort:?}")
+        }
     };
     assert_eq!(
         produced.outputs[&VirtualNodeKind::Main].code,
@@ -330,6 +340,9 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
         CompileEntryOutcome::Produced(produced) => produced,
         CompileEntryOutcome::RuntimeSurfaceRefused(refusal) => {
             panic!("unexpected runtime-surface refusal: {}", refusal.message)
+        }
+        CompileEntryOutcome::Aborted(abort) => {
+            panic!("an uncancelled compile never aborts: {abort:?}")
         }
     };
     assert!(
@@ -401,6 +414,9 @@ fn an_ide_only_profile_publishes_its_tsx_whatever_the_ssr_axis_says() {
                 "an IDE-only profile with ssr={ssr} demands no runtime surface to refuse: {} {}",
                 refusal.diagnostic_code, refusal.message
             ),
+            CompileEntryOutcome::Aborted(abort) => {
+                panic!("an uncancelled compile never aborts: {abort:?}")
+            }
         };
         assert!(
             produced.outputs.is_empty(),
@@ -470,6 +486,9 @@ fn a_profile_demanding_no_product_publishes_under_either_ssr_axis() {
                 "the placeholder runtime product must be producible, got {} {}",
                 refusal.diagnostic_code, refusal.message
             ),
+            CompileEntryOutcome::Aborted(abort) => {
+                panic!("an uncancelled compile never aborts: {abort:?}")
+            }
         };
         assert!(
             produced.outputs.is_empty() && produced.tsx.is_none(),

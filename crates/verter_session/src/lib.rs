@@ -125,6 +125,8 @@ pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
 pub(crate) mod compile_cache_mode;
 pub(crate) mod compile_fact_emission;
+#[cfg(test)]
+mod component_meta_abort_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;

@@ -33784,7 +33784,7 @@ defineProps<{ config: { handler(msg: string) } }>()
         )
         .unwrap();
 
-    let err = project
+    let failure = project
         .host()
         .get_component_meta_output("/App.vue")
         .expect_err(
@@ -33792,6 +33792,9 @@ defineProps<{ config: { handler(msg: string) } }>()
              unknown-materializing failure must FAIL output materialization — \
              never shell-fold to a completed unknown",
         );
+    let crate::meta_resolve::ComponentMetaFailure::Output(err) = failure else {
+        panic!("an uncancelled request never aborts: {failure:?}");
+    };
     assert_eq!(
         err.lane,
         crate::meta_resolve::ComponentMetaOutputLane::Prop,

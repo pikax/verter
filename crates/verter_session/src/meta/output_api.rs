@@ -273,6 +273,12 @@ impl MetaSession {
             );
         }
 
+        // An aborted computation publishes nothing.
+        if let Some(abort) =
+            crate::semantic_query::ExecutionAbort::observed_in(final_completeness.get())
+        {
+            return Err(MetaError::Aborted(abort));
+        }
         if let Some(err) =
             component_meta_resolution_budget_error(canonical.as_str(), Some(&analysis), &resolved)
         {

@@ -734,9 +734,6 @@ fn push_unavailable(
 const fn partial_reason_code(reason: MacroPartialReason) -> &'static str {
     match reason {
         MacroPartialReason::BudgetExceeded => "budget-exceeded",
-        MacroPartialReason::Cancelled => "cancelled",
-        MacroPartialReason::SupersededGeneration => "superseded-generation",
-        MacroPartialReason::UnstableState => "unstable-state",
         MacroPartialReason::Recursion => "recursion",
         MacroPartialReason::IncompleteTraversal => "incomplete-traversal",
     }

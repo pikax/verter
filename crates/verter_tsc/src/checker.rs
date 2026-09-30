@@ -427,8 +427,14 @@ fn generate_all_tsx(
         .map(|vue_path| {
             let canonical_id = canonical_path_id(vue_path);
             host.vue_macro_semantic_input(&canonical_id, CompileTarget::TSX)
+                .map_err(|abort| {
+                    api_check::TypecheckError::new(format!(
+                        "verter-tsc: macro semantics for {} were aborted: {abort:?}",
+                        vue_path.display()
+                    ))
+                })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let vue_rows: Vec<(PathBuf, String, PathBuf)> = vue_only
         .par_iter()
