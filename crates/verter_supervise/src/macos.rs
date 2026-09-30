@@ -24,13 +24,14 @@
 //!   trigger (the cap less a headroom of 1/16). A fork wakes a sweep at once.
 //! - Fail closed mid-run: an unreadable live process, a descendant that left
 //!   the process group, an observation older than twice the sampling
-//!   interval (at least 50 ms: macOS sometimes wakes a sleep that late), a
-//!   dead watchdog or host memory pressure kills the group and invalidates
-//!   the run. Nothing is ever killed by a cached process id. A descendant
-//!   that left the group dies with the tree only when its pid is pinned: the
-//!   kill stops the group first, and a stopped parent cannot reap its child,
-//!   so the child it still parents keeps its pid. One whose parent already
-//!   exited belongs to launchd and is only reported.
+//!   interval (at least 500 ms: macOS sometimes wakes a sleep tens of
+//!   milliseconds late), a dead watchdog or host memory pressure kills the
+//!   group and invalidates the run. Nothing is ever killed by a cached
+//!   process id. A descendant that left the group dies with the tree only
+//!   when its pid is pinned: the kill stops the group first, and a stopped
+//!   parent cannot reap its child, so the child it still parents keeps its
+//!   pid. One whose parent already exited belongs to launchd and is only
+//!   reported.
 //!
 //! Sampling proves no overshoot bound: allocation between two sweeps, and
 //! kill latency, are not bounded by anything the supervisor controls. The
@@ -490,7 +491,7 @@ fn next_sweep_due(observed: Instant, interval: Duration) -> Instant {
 }
 
 /// The floor of the mid-run observation-age budget.
-const MIN_SAMPLE_AGE_BUDGET: Duration = Duration::from_millis(50);
+const MIN_SAMPLE_AGE_BUDGET: Duration = Duration::from_millis(500);
 
 /// How old a mid-run observation may get before the run fails closed:
 /// twice the interval, never under [`MIN_SAMPLE_AGE_BUDGET`]. macOS now
@@ -1022,10 +1023,13 @@ mod tests {
     /// interval still gets twice itself.
     #[test]
     fn the_age_budget_absorbs_a_late_wakeup_but_scales_with_the_interval() {
-        assert!(sample_age_budget(DEFAULT_SAMPLE_INTERVAL) >= Duration::from_millis(50));
         assert_eq!(
-            sample_age_budget(Duration::from_millis(100)),
-            Duration::from_millis(200)
+            sample_age_budget(DEFAULT_SAMPLE_INTERVAL),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            sample_age_budget(Duration::from_millis(400)),
+            Duration::from_millis(800)
         );
     }
 
