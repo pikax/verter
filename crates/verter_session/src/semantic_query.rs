@@ -81,6 +81,10 @@ pub use intersection_input::{
     IntersectionInputId, IntersectionInputRef, IntersectionPurpose, IntersectionRecipe,
     IntersectionTerm,
 };
+pub mod fact_result;
+#[cfg(test)]
+mod fact_result_tests;
+pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]
