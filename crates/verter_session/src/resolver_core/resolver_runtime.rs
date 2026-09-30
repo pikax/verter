@@ -353,6 +353,8 @@ where
     /// Archived entries must be removed because untracked-file acceptance in
     /// the store view's `validates` method would otherwise return stale facts.
     pub fn hard_evict_canonical(&self, canonical_id: &str) {
+        // A deleted component keys fallthrough nodes nothing can read again.
+        self.fallthrough.release_owner(canonical_id);
         self.prepared_decl_bundles
             .hard_remove(&canonical_id.to_string());
         self.routes.evict_provider(canonical_id);

@@ -5039,6 +5039,9 @@ pub struct HostRetentionSnapshot {
     /// Overlay value versions the workspace holds, held and released the
     /// same way.
     pub overlay_value_versions: usize,
+    /// Fallthrough nodes the resolver runtime caches: keyed by component,
+    /// bounded, and released when their component closes or is deleted.
+    pub fallthrough_nodes: usize,
     /// What the activity gate has applied so far: counts, the longest a
     /// queued release waited, and the last release's own cost.
     pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,
