@@ -91,6 +91,7 @@ mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
+mod conditional_decision;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
@@ -163,6 +164,7 @@ mod flow_return_widening;
 // the component close finalizes through it), and the `FlowReturnKey`
 // constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
+mod inference;
 // The product lattice of the flow authority: the per-domain dataflow
 // products and the ONE join route every merge point folds through. The
 // flow evaluator holds its whole semantic state here — the products ARE
@@ -786,6 +788,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.connected_demand.charge()
     }
 
+    /// The limit of the connected-work rail the active demand tripped (the
+    /// work limit when none has): the cap a budget verdict reports.
+    pub(super) fn connected_trip_limit(&self) -> u32 {
+        let reasons = self
+            .connected_demand
+            .active_trip()
+            .unwrap_or(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
+        u32::try_from(self.connected_demand.limit_report(reasons).0).unwrap_or(u32::MAX)
+    }
+
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
         self.connected_demand.active_trip()
     }
@@ -930,7 +942,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
+    pub(crate) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
         self.connected_demand.set_limits_for_tests(work, depth);
     }
 
@@ -2118,13 +2130,10 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`] —
-/// the ONE shared conditional branch-selection oracle, factored out of
-/// `build_conditional`'s relation path (the infer-pattern cases and the
-/// full memoised relation engine, both through the sole relation
-/// authority `execute(SemanticQueryKey::Relate)`) and reused by the
-/// key-domain closedness classifiers in `raise.rs` for
-/// selected-branch-only classification.
+/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`],
+/// the branch-selection step of the conditional query's decision procedure
+/// (`conditional_decision.rs`), through the sole relation authority
+/// `execute(SemanticQueryKey::Relate)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConditionalBranchSelection {
     True,
@@ -3734,10 +3743,10 @@ fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
 ///
 /// `TemplateLiteralReduce` counts too: a template over wide finite unions
 /// enumerates a cartesian product, so an unbounded re-dispatch storm over
-/// template reductions is the same expansion-storm shape. (The reducer also
-/// applies its own per-call product-width cap — `TEMPLATE_LITERAL_KEYSPACE_CAP`
-/// — which bounds a SINGLE reduction; this gate bounds the aggregate dispatch
-/// count across the request.)
+/// template reductions is the same expansion-storm shape. (A SINGLE
+/// reduction is bounded by the checker's product rule and charges each
+/// concatenation it builds to the connected-work ledger; this gate bounds the
+/// aggregate dispatch count across the request.)
 ///
 /// `TypeOf` counts too: it is a demand-bearing projection reducer
 /// (`build_typeof` lowers a value's declaration graph at the requested
@@ -4371,7 +4380,17 @@ mod carrier_head_resolution_tests;
 #[cfg(test)]
 mod closedness_evaluator_tests;
 #[cfg(test)]
+mod conditional_decision_tests;
+#[cfg(test)]
+mod constrained_infer_tests;
+#[cfg(test)]
+mod generic_source_inference_tests;
+#[cfg(test)]
+mod inference_fixation_tests;
+#[cfg(test)]
 mod mapped_key_domain_carrier_tests;
+#[cfg(test)]
+mod reference_inference_tests;
 
 #[cfg(test)]
 mod raised_shape_tests;
@@ -4501,9 +4520,13 @@ mod relation_operand_tests;
 #[cfg(test)]
 mod relation_variance_tests;
 #[cfg(test)]
+mod relation_work_tests;
+#[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]
 mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_complexity_tests;
 #[cfg(test)]
 mod template_pattern_relation_tests;
 #[cfg(test)]

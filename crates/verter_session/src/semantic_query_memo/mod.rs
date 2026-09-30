@@ -86,7 +86,7 @@ pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
-pub(crate) use tasks::ExecutionTask;
+pub(crate) use verter_scheduler::tasks::ExecutionTask;
 
 mod producer;
 mod stats;
@@ -862,6 +862,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         body: impl FnOnce() -> T,
     ) -> T {
+        use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
         let _open = execution
             .task()

@@ -439,6 +439,7 @@ fn conditional_any_check_unions_both_branches() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     assert!(
@@ -472,6 +473,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let y_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
 

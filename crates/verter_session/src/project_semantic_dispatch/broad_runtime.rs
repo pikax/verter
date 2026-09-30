@@ -788,6 +788,7 @@ fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReaso
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::ForeignSemanticOperand
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::RaiseMiss
         | QueryError::OpenSurface

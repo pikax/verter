@@ -6,7 +6,7 @@ use super::checker_probe_lane_tests::{default_probe_host, with_probe_outcome_on_
 use super::evaluate::StructuralFactDemandOutcome;
 use crate::semantic_query::PartialReasonSet;
 
-const SOURCE: &str = "type Box<X> = { v: X };\n";
+const SOURCE: &str = "type R<T> = { [K in keyof T as K]: T[K] };\n";
 
 /// The published outcome of `probe`: the reduced node's data, or the
 /// partial reasons.
@@ -27,18 +27,19 @@ fn published(probe: &str) -> Result<String, PartialReasonSet> {
 }
 
 /// tsc 7.0.2 (`--strict`, and the same in the other three settings)
-/// decides every conditional here: `Box<"a"> extends Box<infer P> ? P : 0`
-/// is `"a"`, `"a" extends string ? 1 : 2` is `1`, and in `{ f<T>(x: T): T
-/// extends string ? 1 : 2 }` the conditional over the method's own `T`
-/// stays deferred, printed as written.
+/// decides every conditional here: `{ x: 1 } extends R<infer X> ? X : "no"`
+/// is `unknown` (a key-remapped mapped type infers nothing), `"a" extends
+/// string ? 1 : 2` is `1`, and in `{ f<T>(x: T): T extends string ? 1 : 2
+/// }` the conditional over the method's own `T` stays deferred, printed as
+/// written.
 ///
-/// The lane does not infer through a nested pattern (`Box<infer P>`), so
+/// The lane does not relate a source to a key-remapped mapped pattern, so
 /// that conditional is undecided: its shell publishes as a partial demand
 /// carrying `UNDECIDED_CONDITIONAL`, where it used to publish complete. The
 /// decided conditional and the checker's own deferral stay complete.
 #[test]
 fn a_conditional_the_lane_cannot_decide_is_a_typed_gap_never_complete() {
-    let undecided = published("Box<\"a\"> extends Box<infer P> ? P : 0");
+    let undecided = published("{ x: 1 } extends R<infer X> ? X : \"no\"");
     assert!(
         matches!(undecided, Err(reasons) if reasons.contains(PartialReasonSet::UNDECIDED_CONDITIONAL)),
         "an undecided conditional is a typed gap, got {undecided:?}"

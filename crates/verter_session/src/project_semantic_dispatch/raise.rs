@@ -3527,11 +3527,6 @@ struct OpenWalk<'a> {
     /// diverge on recursive refs.
     dispatch: &'a ProjectSemanticDispatch<'a>,
     bound_params: FxHashSet<SemanticNodeId>,
-    /// Exact infer declarations bound by an enclosing oracle-selected bare-infer
-    /// conditional (`X := check` — see the tri-state `Conditional` arm):
-    /// an `Infer` reference in the selected branch classifies as its
-    /// bound node. Empty outside such a branch.
-    bound_infers: FxHashMap<crate::semantic_query::InferBinderId, SemanticNodeId>,
     /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
     /// per-argument key-domain judgement, and the concrete-instantiation
     /// shortcut are all DERIVED from this role (see [`OpenRole`]) — there
@@ -3575,7 +3570,6 @@ impl<'a> OpenWalk<'a> {
         Self {
             dispatch,
             bound_params,
-            bound_infers: FxHashMap::default(),
             role,
             position: OperandPosition::KeyDomain,
             budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
@@ -3683,36 +3677,7 @@ impl<'a> OpenWalk<'a> {
         Self {
             dispatch: self.dispatch,
             bound_params,
-            bound_infers: self.bound_infers.clone(),
             role,
-            position: self.position,
-            budget: self.budget,
-            in_flight: FxHashSet::default(),
-            memo: FxHashMap::default(),
-        }
-    }
-
-    /// A child walk with the SAME policy + remaining budget and exact `binder`
-    /// bound to `node` in the infer-binding environment — used by the
-    /// tri-state `Conditional` arm when the shared oracle selects TRUE
-    /// via the bare-infer pattern (`X := check`): the selected branch's
-    /// `Infer` references classify as the check node. The binding scope
-    /// is local to that branch, so the child gets fresh
-    /// `memo`/`in_flight` state (same rule as
-    /// [`Self::scoped_with_bound_binder`]); the caller copies the
-    /// child's spent budget back.
-    fn scoped_with_bound_infer(
-        &self,
-        binder: crate::semantic_query::InferBinderId,
-        node: SemanticNodeId,
-    ) -> Self {
-        let mut bound_infers = self.bound_infers.clone();
-        bound_infers.insert(binder, node);
-        Self {
-            dispatch: self.dispatch,
-            bound_params: self.bound_params.clone(),
-            bound_infers,
-            role: self.role,
             position: self.position,
             budget: self.budget,
             in_flight: FxHashSet::default(),
@@ -3867,38 +3832,22 @@ impl<'a> OpenWalk<'a> {
             SemanticNodeData::Opaque(_) => self.role.question().undecidable_is_open(),
 
             // `Infer` is a conditional-inference BINDING placeholder
-            // (`extends UIMessage<infer M, …>`), NOT an unbound generic.
-            // A name BOUND by an enclosing oracle-selected bare-infer
-            // conditional (`X := check`) classifies as its bound node —
-            // the same binding the build-side substitution applies; an
-            // unbound placeholder stays closed.
-            SemanticNodeData::Infer { binder, .. } | SemanticNodeData::InferRef { binder, .. } => {
-                match self.bound_infers.get(binder).copied() {
-                    Some(bound) => self.node_is_open(ctx, bound),
-                    None => false,
-                }
-            }
+            // (`extends UIMessage<infer M, …>`), NOT an unbound generic: a
+            // conditional the query selects a branch of reaches here with
+            // its bindings substituted, and a placeholder that stays is
+            // closed.
+            SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => false,
 
             // --- operator shapes ---
-            // TRI-STATE conditional through the SHARED branch-selection
-            // oracle (the infer routing, then the same sole
-            // `execute(SemanticQueryKey::Relate)` authority
-            // `build_conditional` selects branches with; `any` / `error`
-            // checks defer): a SELECTED branch IS the conditional's
-            // surface — classify only it (an open losing branch is dead
-            // and must not false-OPEN the domain), with a bare-infer
-            // selection binding the branch's infer name to the CHECK
-            // node (`X := check`, mirroring the build-side
-            // substitution). A function-infer selection binds
-            // check-SIGNATURE components — widened to the Deferred
-            // treatment here (a superset of the selected branch;
-            // classifying the raw branch with unbound-closed infer
-            // placeholders would risk a false-CLOSED). A Deferred
-            // selection classifies the check/extends OPERANDS
-            // value-sensitively (branch selection depends on operand
-            // VALUES — any open instantiation argument opens them) plus
-            // BOTH branches under the surrounding position.
-            SemanticNodeData::Conditional { .. } => self.conditional_is_open(ctx, &data),
+            // A conditional is read through the conditional query, the one
+            // owner of its decision: the type it reduces to IS its surface —
+            // classify only that (an open losing branch is dead and must not
+            // false-OPEN the domain). A conditional the query keeps whole
+            // classifies the check/extends OPERANDS value-sensitively
+            // (branch selection depends on operand VALUES — any open
+            // instantiation argument opens them) plus BOTH branches under
+            // the surrounding position.
+            SemanticNodeData::Conditional { .. } => self.conditional_is_open(ctx, node, &data),
             // `keyof`'s value IS its base's KEY SET — the base re-enters
             // the `KeyDomain` position even under a value-sensitive
             // operand, matching the TypeExpr arm.
@@ -4175,6 +4124,7 @@ impl<'a> OpenWalk<'a> {
     fn conditional_is_open(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
         data: &SemanticNodeData,
     ) -> bool {
         let SemanticNodeData::Conditional {
@@ -4188,68 +4138,28 @@ impl<'a> OpenWalk<'a> {
         else {
             unreachable!("a conditional's openness")
         };
-        let (check, extends) = (*check, *extends);
-        let pending = pending.as_deref();
-        let dispatch = self.dispatch;
-        let true_branch =
-            || dispatch.apply_conditional_branch_pending(*true_branch_ref, pending, true);
-        let false_branch =
-            || dispatch.apply_conditional_branch_pending(*false_branch_ref, pending, false);
-        // Consult the shared branch-selection oracle THROUGH the active
-        // dispatcher (NOT a freshly-constructed one): the active
-        // dispatcher carries the `instantiate_active` /
+        // Read THROUGH the active dispatcher (NOT a freshly-constructed
+        // one): it carries the `instantiate_active` /
         // `carrier_normalizing` cycle-guard state, so a recursive ref in
         // the check/extends operands terminates bounded instead of
         // diverging.
-        let (mut selection, infer) = self.dispatch.conditional_branch_selection(check, extends);
-        let mut bare_infer_binding: Option<(crate::semantic_query::InferBinderId, SemanticNodeId)> =
-            None;
-        match infer {
-            Some(super::relation::RelationInferBindings {
-                shape: super::relation::InferPatternShape::Bare,
-                bindings,
-            }) => {
-                // The bare-infer binding the relation fixed at
-                // session close (`X := check`) — the SAME binding
-                // the build-side substitution applies.
-                if let Some(binding) = bindings.first() {
-                    if let Some(SemanticNodeData::Infer { binder, .. }) =
-                        super::node_data_for(ctx, binding.param).as_deref()
-                    {
-                        bare_infer_binding = Some((binder.clone(), binding.bound));
-                    }
-                }
-            }
-            Some(super::relation::RelationInferBindings { .. }) => {
-                // A non-bare infer selection (object / tuple /
-                // function pattern) binds check-SIGNATURE
-                // components — widened to the Deferred treatment
-                // here (a superset of the selected branch;
-                // classifying the raw branch with unbound-closed
-                // infer placeholders would risk a false-CLOSED).
-                selection = super::ConditionalBranchSelection::Deferred;
-            }
-            None => {}
+        let dispatch = self.dispatch;
+        if let super::conditional_decision::ConditionalOutcome::Reduced(selected) =
+            dispatch.conditional_outcome(node)
+        {
+            return self.node_is_open(ctx, selected);
         }
-        match selection {
-            super::ConditionalBranchSelection::True => match bare_infer_binding {
-                Some((binder, bound)) => {
-                    let mut scoped = self.scoped_with_bound_infer(binder, bound);
-                    let open = scoped.node_is_open(ctx, true_branch());
-                    self.budget = scoped.budget;
-                    open
-                }
-                None => self.node_is_open(ctx, true_branch()),
-            },
-            super::ConditionalBranchSelection::False => self.node_is_open(ctx, false_branch()),
-            super::ConditionalBranchSelection::Deferred
-            | super::ConditionalBranchSelection::Undecided => {
-                self.node_is_open_at(ctx, check, OperandPosition::ValueSensitive)
-                    || self.node_is_open_at(ctx, extends, OperandPosition::ValueSensitive)
-                    || self.node_is_open(ctx, true_branch())
-                    || self.node_is_open(ctx, false_branch())
-            }
-        }
+        let pending = pending.as_deref();
+        self.node_is_open_at(ctx, *check, OperandPosition::ValueSensitive)
+            || self.node_is_open_at(ctx, *extends, OperandPosition::ValueSensitive)
+            || self.node_is_open(
+                ctx,
+                dispatch.apply_conditional_branch_pending(*true_branch_ref, pending, true),
+            )
+            || self.node_is_open(
+                ctx,
+                dispatch.apply_conditional_branch_pending(*false_branch_ref, pending, false),
+            )
     }
 
     /// [`Self::node_openness_uncached`]'s mapped arm.

@@ -453,6 +453,7 @@ fn locator_shape_infer_identity_matches_eager_and_relowering() {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
             name: "RouteT".to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("RouteT"),
@@ -498,7 +499,7 @@ fn locator_shape_infer_identity_matches_eager_and_relowering() {
     let route_binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
         .filter_map(
             |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
-                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "RouteT" => {
+                Some(SemanticNodeData::Infer { name, binder, .. }) if name.as_ref() == "RouteT" => {
                     Some(binder.clone())
                 }
                 _ => None,
@@ -533,6 +534,7 @@ fn authored_infer_identity_uses_locator_and_exact_path_not_body_text() {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
             name: "Anchored".to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("Anchored"),
@@ -591,6 +593,7 @@ fn eager_and_locator_routes_share_authored_infer_identity() {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
             name: "CrossRoute".to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("CrossRoute"),
@@ -617,7 +620,9 @@ fn eager_and_locator_routes_share_authored_infer_identity() {
     let binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
         .filter_map(
             |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
-                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "CrossRoute" => {
+                Some(SemanticNodeData::Infer { name, binder, .. })
+                    if name.as_ref() == "CrossRoute" =>
+                {
                     Some(binder.clone())
                 }
                 _ => None,
@@ -650,6 +655,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
             name: name.to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from(name),
@@ -695,7 +701,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
         let binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
             .filter_map(
                 |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
-                    Some(SemanticNodeData::Infer { name, binder })
+                    Some(SemanticNodeData::Infer { name, binder, .. })
                         if name.as_ref() == expected_name =>
                     {
                         Some(binder.clone())
@@ -732,6 +738,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
         type_arguments: Arc::from(
             vec![TypeExpr::Infer {
                 name: "CarrierP".to_string(),
+                constraint: None,
             }]
             .into_boxed_slice(),
         ),
@@ -741,6 +748,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
         expressions: Arc::from(
             vec![TypeExpr::Infer {
                 name: "TemplateP".to_string(),
+                constraint: None,
             }]
             .into_boxed_slice(),
         ),
@@ -840,6 +848,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
                     label: None,
                     ty: TypeExpr::Infer {
                         name: "U".to_string(),
+                        constraint: None,
                     },
                     optional: false,
                     rest: false,

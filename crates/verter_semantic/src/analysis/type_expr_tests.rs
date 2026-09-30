@@ -891,7 +891,9 @@ fn conditional_with_infer() {
             // extends should be Array<infer U> which normalizes to Array { element: Infer }
             match extends.as_ref() {
                 TypeExpr::Array { element, .. } => {
-                    assert!(matches!(element.as_ref(), TypeExpr::Infer { name } if name == "U"));
+                    assert!(
+                        matches!(element.as_ref(), TypeExpr::Infer { name, .. } if name == "U")
+                    );
                 }
                 _ => panic!("expected array with infer, got {extends:?}"),
             }

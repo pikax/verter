@@ -63,6 +63,7 @@ pub(crate) enum MaterializePathSegment {
     ImportArgument(u32),
     TypeOfArgument(u32),
     KeyOfOperand,
+    InferConstraint,
     IndexedObject,
     IndexedIndex,
     ConditionalCheck,
@@ -306,10 +307,24 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
     fn literal(&mut self, value: LiteralValue) -> MaterializedTypeExpr {
         MaterializedTypeExpr::exact(TypeExpr::Literal(value))
     }
-    fn infer(&mut self, name: Arc<str>) -> MaterializedTypeExpr {
-        MaterializedTypeExpr::exact(TypeExpr::Infer {
-            name: name.as_ref().to_string(),
-        })
+    fn infer(
+        &mut self,
+        name: Arc<str>,
+        constraint: Option<MaterializedTypeExpr>,
+    ) -> MaterializedTypeExpr {
+        match constraint {
+            None => MaterializedTypeExpr::exact(TypeExpr::Infer {
+                name: name.as_ref().to_string(),
+                constraint: None,
+            }),
+            Some(constraint) => fold_compound(
+                vec![(MaterializePathSegment::InferConstraint, constraint)],
+                |mut exprs| TypeExpr::Infer {
+                    name: name.as_ref().to_string(),
+                    constraint: Some(Arc::new(exprs.pop().expect("infer constraint"))),
+                },
+            ),
+        }
     }
     fn unknown(&mut self, value: UnknownValue) -> MaterializedTypeExpr {
         // A GENUINE unknown (unrepresentable authored/raw syntax): exact —

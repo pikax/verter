@@ -855,6 +855,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
         }),
         extends: Arc::new(TypeExpr::Infer {
             name: "P".to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("P"),
@@ -910,6 +911,7 @@ fn conditional_binds_nested_infer_in_true_branch() {
         extends: Arc::new(TypeExpr::Array {
             element: Arc::new(TypeExpr::Infer {
                 name: "E".to_string(),
+                constraint: None,
             }),
             readonly: false,
         }),
@@ -977,6 +979,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
                     "a".to_string().into(),
                     TypeExpr::Infer {
                         name: "P".to_string(),
+                        constraint: None,
                     },
                     false,
                     false,
@@ -1043,6 +1046,7 @@ fn conditional_binds_function_param_infer_in_true_branch() {
             Some("x".to_string()),
             TypeExpr::Infer {
                 name: "P".to_string(),
+                constraint: None,
             },
             false,
             false,
@@ -1133,6 +1137,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             readonly: MappedModifier::None,
             name_type: Some(Arc::new(TypeExpr::Infer {
                 name: "R".to_string(),
+                constraint: None,
             })),
         }),
         true_type: Arc::new(TypeExpr::Ref {
@@ -1408,6 +1413,7 @@ fn conditional_with_infer(name: &str, check: PrimitiveName) -> TypeExpr {
         check: Arc::new(TypeExpr::Primitive(check)),
         extends: Arc::new(TypeExpr::Infer {
             name: name.to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from(name),
@@ -1441,7 +1447,7 @@ fn authored_infer_identity_is_shared_by_structural_and_eager_routes() {
     let route_binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
         .filter_map(
             |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
-                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "RouteT" => {
+                Some(SemanticNodeData::Infer { name, binder, .. }) if name.as_ref() == "RouteT" => {
                     Some(binder.clone())
                 }
                 _ => None,
@@ -1535,6 +1541,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
                     label: None,
                     ty: TypeExpr::Infer {
                         name: "U".to_string(),
+                        constraint: None,
                     },
                     optional: false,
                     rest: false,
@@ -1889,6 +1896,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
             name: "U".to_string(),
+            constraint: None,
         }),
         true_type: Arc::new(TypeExpr::Conditional {
             check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),

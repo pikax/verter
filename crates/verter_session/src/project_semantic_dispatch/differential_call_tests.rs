@@ -1384,3 +1384,28 @@ fn a_derived_member_replaces_the_base_member() {
     ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `bind` checks its `thisArg` against its parameter as the call's
+/// inference INSTANTIATED it: `ThisParameterType<T>` with `T` the function
+/// `bind` is read off reduces (`unknown` for a function with no `this`, the
+/// declared `this` otherwise), so the check is decided and every answer of
+/// [`function_bind_and_generic_calls_read_the_function_they_are_read_off`]
+/// closes with its proof.
+#[test]
+fn function_bind_and_generic_calls_close_with_their_proof() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.unproven_returns(&[
+        "bound",
+        "boundCalled",
+        "methodBind",
+        "methodBind2",
+        "idCall",
+        "idApply",
+        "ovCall",
+        "ovApply",
+        "idBind",
+        "ovBind",
+        "nestedDecl",
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

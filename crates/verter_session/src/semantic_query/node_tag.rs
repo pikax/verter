@@ -195,10 +195,10 @@ impl SemanticNodeData {
             | Self::Literal(_)
             | Self::Opaque(_)
             | Self::RawFallback { .. }
-            | Self::Infer { .. }
             | Self::InferRef { .. }
             | Self::DeclRef { .. }
             | Self::TypeOfNominal(_) => {}
+            Self::Infer { constraint, .. } => constraint.iter().copied().for_each(visit),
             Self::EnumLiteral(literal) => visit(literal.base),
             Self::IntrinsicApplication { args, .. } | Self::InstantiationRef { args, .. } => {
                 args.iter().copied().for_each(visit);

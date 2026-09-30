@@ -131,9 +131,10 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
     match node {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown(_) => {}
+
+        TypeExpr::Infer { constraint, .. } => drain_opt_arc(constraint, worklist),
 
         // `typeof C.make<string>` — the instantiation-expression arguments are
         // owned recursive children (a plain `Vec`, no shared-`Arc` gate).
@@ -489,7 +490,13 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
                 stack.push(HashStep::Node(arg));
             }
         }
-        TypeExpr::Infer { name } => name.hash(state),
+        TypeExpr::Infer { name, constraint } => {
+            name.hash(state);
+            constraint.is_some().hash(state);
+            if let Some(constraint) = constraint {
+                stack.push(HashStep::Node(constraint));
+            }
+        }
         TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(state),
         TypeExpr::Unknown(value) => value.hash(state),
 
@@ -1080,10 +1087,12 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
             TypeExpr::Primitive(name) => {
                 out.embeds_any |= *name == PrimitiveName::Any;
             }
-            TypeExpr::Literal(_)
-            | TypeExpr::Infer { .. }
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Unknown(_) => {}
+            TypeExpr::Literal(_) | TypeExpr::SyntheticSlotBinding(_) | TypeExpr::Unknown(_) => {}
+            TypeExpr::Infer { constraint, .. } => {
+                if let Some(constraint) = constraint {
+                    stack.push(NameStep::Node(constraint));
+                }
+            }
         }
     }
     out

@@ -119,7 +119,7 @@ pub(super) enum Read<'a> {
 }
 
 impl Read<'_> {
-    fn text(&self) -> &str {
+    pub(super) fn text(&self) -> &str {
         match self {
             Read::Type(text) | Read::Return(text) => text,
         }
@@ -259,8 +259,9 @@ impl<'a> Matrix<'a> {
         failures
     }
 
-    /// Each row's verdict in each setting, in row then setting order.
-    pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
+    /// One host carrying every setting's project with the probe module for
+    /// `rows` (and the library and sibling files) upserted into it.
+    fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
         for (index, setting) in self.settings.iter().enumerate() {
@@ -298,6 +299,54 @@ impl<'a> Matrix<'a> {
                 crate::FileLanguage::script_ts(),
             );
         }
+        host
+    }
+
+    /// Every `(setting, function)` whose body-derived return closes WITHOUT
+    /// its proof — the finalizer's verdict partial — with its partial
+    /// reasons, as the failure list.
+    pub(super) fn unproven_returns(&self, functions: &[&str]) -> Vec<String> {
+        let host = self.host(&[]);
+        let mut unproven = Vec::new();
+        for setting in self.settings {
+            let canonical = format!("{}/probe.ts", setting.root);
+            for function in functions {
+                let store_view = host.resolver_store_view_read().into_owned_view();
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                let key = crate::semantic_query::FlowReturnKey {
+                    function: dispatch.flow_function_slot_for(
+                        Arc::from(canonical.as_str()),
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        Arc::from(*function),
+                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                        0,
+                    ),
+                    normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                    context: dispatch.flow_return_context_for(&canonical),
+                    demand: ReturnProjectionDemand::whole_return(),
+                    input: crate::semantic_query::FlowInputContext::empty(),
+                    result_contract: super::flow_solve::flow_return_result_contract_id(),
+                };
+                let read = dispatch.execute_read(
+                    crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+                );
+                if read.result_is_partial {
+                    unproven.push(format!(
+                        "`{function}` [{}]: its proof does not close ({:?})",
+                        setting.label, read.partial_reasons
+                    ));
+                }
+            }
+        }
+        unproven
+    }
+
+    /// Each row's verdict in each setting, in row then setting order.
+    pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
+        let host = self.host(rows);
         rows.iter()
             .enumerate()
             .map(|(index, (read, answers))| {
@@ -866,7 +915,43 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             let text: String = format!("{error:?}").chars().take(80).collect();
             format!("<opaque {text}>")
         }
-        SemanticNodeData::Conditional { .. } => "<unreduced conditional>".to_owned(),
+        // A conditional the checker keeps (a generic operand) prints as
+        // written, its branches as the pending substitution reads them.
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            pending,
+            ..
+        } => {
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
+            format!(
+                "{} extends {} ? {} : {}",
+                operand(dispatch, *check, depth, false),
+                operand(dispatch, *extends, depth, false),
+                at(true_branch),
+                at(false_branch)
+            )
+        }
+        // An `infer` declaration prints with its constraint; a reference to
+        // one is its name.
+        SemanticNodeData::Infer {
+            name, constraint, ..
+        } => match constraint {
+            Some(constraint) => format!("infer {name} extends {}", at(*constraint)),
+            None => format!("infer {name}"),
+        },
+        SemanticNodeData::InferRef { name, .. } => name.to_string(),
         SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {

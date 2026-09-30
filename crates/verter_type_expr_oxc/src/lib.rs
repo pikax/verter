@@ -164,7 +164,8 @@ fn lower_from_explicit_stack<'b, 'a>(root: &'b TSType<'a>, source: &str) -> Type
 }
 
 /// Whether a type's lowering reads no child type: a keyword, a literal,
-/// `this`, an `infer` binder or a reference without type arguments.
+/// `this`, an `infer` binder without a constraint or a reference without
+/// type arguments.
 fn is_leaf_type(ts_type: &TSType<'_>) -> bool {
     match ts_type {
         TSType::TSTypeReference(reference) => reference
@@ -185,8 +186,8 @@ fn is_leaf_type(ts_type: &TSType<'_>) -> bool {
         | TSType::TSObjectKeyword(_)
         | TSType::TSLiteralType(_)
         | TSType::TSThisType(_)
-        | TSType::TSIntrinsicKeyword(_)
-        | TSType::TSInferType(_) => true,
+        | TSType::TSIntrinsicKeyword(_) => true,
+        TSType::TSInferType(infer) => infer.type_parameter.constraint.is_none(),
         _ => false,
     }
 }
@@ -366,18 +367,14 @@ fn build_ts_type<'b, 'a>(
         // -- typeof (type query) --
         TSType::TSTypeQuery(query) => lower_type_query(query, source, lower),
 
-        // -- infer T --
-        // A constrained `infer X extends C` is unsupported syntax: the IR's
-        // `Infer` carries no constraint, and dropping it would read the
-        // placeholder as unconstrained (the checker filters and parses its
-        // candidate by the constraint).
-        TSType::TSInferType(infer) if infer.type_parameter.constraint.is_some() => {
-            TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
-                source, infer.span,
-            )))
-        }
+        // -- infer T / infer T extends C --
         TSType::TSInferType(infer) => TypeExpr::Infer {
             name: infer.type_parameter.name.to_string(),
+            constraint: infer
+                .type_parameter
+                .constraint
+                .as_ref()
+                .map(|constraint| Arc::new(lower(constraint))),
         },
 
         // -- Import type in TYPE position: `import("./m")` /
@@ -1523,6 +1520,13 @@ fn rebuild_normalized<'e>(
         },
         TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(ty(inner.as_ref()))),
         TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(ty(inner.as_ref()))),
+        TypeExpr::Infer {
+            name,
+            constraint: Some(constraint),
+        } => TypeExpr::Infer {
+            name: name.clone(),
+            constraint: Some(Arc::new(ty(constraint.as_ref()))),
+        },
         // Synthetic slot-binding carrier is a TERMINAL leaf. The carrier
         // is shallow-by-construction and is never resolved as a type
         // alias via the type registry — return it unchanged.

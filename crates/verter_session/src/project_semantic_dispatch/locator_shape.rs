@@ -1465,10 +1465,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut declarations = Vec::with_capacity(infer_sites.len());
                 for site in infer_sites {
                     let binder = entry.infer_binders.binder_at(&site.path);
+                    // A declared constraint is read where the conditional is
+                    // written: no `infer` of the pattern is in scope there
+                    // (`[infer A, infer B extends A]` reports TS2304 for `A`).
+                    let constraint = site.constraint.map(|constraint| {
+                        self.lower_locator_shape_node(
+                            constraint,
+                            &entry.with_binders(binders.frames()),
+                        )
+                    });
                     let declaration = graph.intern_node_with_scope(
                         SemanticNodeData::Infer {
                             name: Arc::clone(&site.name),
                             binder: binder.clone(),
+                            constraint,
                         },
                         scope.clone(),
                     );
@@ -1705,7 +1715,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope.clone(),
                     );
                     let base_infer = match graph.node_data(inner_id).as_deref() {
-                        Some(SemanticNodeData::Infer { name, binder }) => {
+                        Some(SemanticNodeData::Infer { name, binder, .. }) => {
                             Some((Arc::clone(name), binder.clone()))
                         }
                         _ => None,
@@ -1883,12 +1893,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 built[0].binder
             }
 
-            TypeExpr::Infer { name } => match ctx.lookup_infer_declaration(name) {
+            // An `infer` no conditional's `extends` declares (the checker
+            // reports it) reads no constraint.
+            TypeExpr::Infer { name, .. } => match ctx.lookup_infer_declaration(name) {
                 Some(declaration) => declaration,
                 _ => graph.intern_node_with_scope(
                     SemanticNodeData::Infer {
                         name: Arc::from(name.as_str()),
                         binder: ctx.infer_binders.binder_for_expr(expr),
+                        constraint: None,
                     },
                     scope.clone(),
                 ),

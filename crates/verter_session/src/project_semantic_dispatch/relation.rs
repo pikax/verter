@@ -76,14 +76,15 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
-    provisional_relate_step, redischarge_is_stable, select_inference_candidates,
-    CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
-    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
-    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
+    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
+    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
+    ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
+    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -201,6 +202,9 @@ pub(crate) enum InferPatternShape {
     /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
     /// template literal pattern.
     TemplateLiteral,
+    /// `T extends Box<infer P>` — `Infer` sites among the type arguments
+    /// of a reference to a generic declaration.
+    Reference,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -311,11 +315,9 @@ impl InferPatternInfo {
 }
 
 /// The relation-payload bindings a binding-producing judgement fixed at
-/// session close, plus the pattern shape that produced them (the
-/// closedness classifiers widen non-`Bare` shapes to `Deferred`).
+/// session close.
 #[derive(Debug, Clone)]
 pub(crate) struct RelationInferBindings {
-    pub(crate) shape: InferPatternShape,
     pub(crate) bindings: Arc<[InferBinding]>,
 }
 
@@ -806,12 +808,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         negative: bool,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
@@ -875,12 +879,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub fn mixed_binding_scc_discharge_for_tests(
         &self,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
         let member_key = self.relate_key_for(string, number);
@@ -925,12 +931,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// exposes the consumed binding snapshot and the real stability gate.
     #[cfg(test)]
     pub fn binding_scc_substitution_edge_for_tests(&self) -> (Arc<[InferBinding]>, bool) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -1412,6 +1420,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             (top, chain)
         };
+        // One more structured comparison of the chain's check: past the
+        // checker's allowance the check overflows, false (TS2859).
+        let exhausted = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let counts = &mut txn.relation.chain_comparisons;
+            match counts
+                .iter_mut()
+                .rev()
+                .find(|(base, _)| *base == chain.base)
+            {
+                Some((_, comparisons)) => comparisons.record().is_err(),
+                None => false,
+            }
+        };
+        if exhausted {
+            self.overflow_relation_chain(&chain);
+            return Some(RelationResult::NotAssignable);
+        }
         let depth = chain.depth + 1;
         let mut expanding = chain.expanding;
         {
@@ -1562,6 +1588,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// explicit stack, each alias once (a member naming an alias already
     /// read stays as it is written). `members` itself when none names
     /// such an alias.
+    /// The target arms a union source's arms first relate to by position
+    /// (`eachTypeRelatedToType`): the target union's arms — without
+    /// `undefined` when the source holds none
+    /// (`getUndefinedStrippedTargetIfNeeded`) — when the source has a
+    /// multiple of their number. `None` otherwise.
+    fn positional_union_targets(
+        &self,
+        source_members: &[SemanticNodeId],
+        target: SemanticNodeId,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let target_members = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return None,
+        };
+        let target_members = self.relation_union_members(&target_members);
+        let is_undefined = |node: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )
+        };
+        let positions: Vec<SemanticNodeId> = if !source_members.iter().any(is_undefined)
+            && target_members.iter().any(is_undefined)
+        {
+            target_members
+                .iter()
+                .copied()
+                .filter(|member| !is_undefined(member))
+                .collect()
+        } else {
+            target_members.to_vec()
+        };
+        (!positions.is_empty()
+            && source_members.len() >= positions.len()
+            && source_members.len().is_multiple_of(positions.len()))
+        .then_some(positions)
+    }
+
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
         let graph = self.graph();
         let mut seen: FxHashSet<DeclIdentity> = FxHashSet::default();
@@ -2519,6 +2584,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(test)]
         MOST_OPEN_FRAMES.with(|most| most.set(most.get().max(idx + 1)));
         txn.note_inline_flight(idx, inline_flight);
+        // A relation frame with no relation frame below it starts a chain —
+        // one check — whose comparisons count from zero; a chain at or above
+        // this index has closed.
+        if parent_chain.is_none() {
+            let counts = &mut txn.relation.chain_comparisons;
+            counts.retain(|(base, _)| *base < idx);
+            counts.push((idx, Default::default()));
+        }
         if let Some(state) = txn
             .reentry_mut()
             .frame_mut_for_update(idx)
@@ -2872,7 +2945,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             RelationProof::BudgetExceeded {
                                 cap: RecursionOrBudgetCap {
                                     kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
-                                    limit: super::call_resolve::MAX_APPLICABILITY_RELATIONS as u32,
+                                    limit: self.connected_trip_limit(),
                                 },
                             },
                         ))
@@ -4212,6 +4285,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
+                // A reference infers from its type arguments.
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 _ if self.subtree_contains_infer(node) => return None,
                 _ => {}
             }
@@ -4291,6 +4368,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // `infer` placeholders an element reaches through
+                        // structure or a reference (`[PE<infer M, any>]`)
+                        // are sites of the same pattern.
+                        for node in self
+                            .structural_infer_sites(element.value)
+                            .unwrap_or_default()
+                        {
+                            if let Some(SemanticNodeData::Infer { name, .. }) =
+                                graph.node_data(node).as_deref()
+                            {
+                                sites.push(InferParamSite {
+                                    node,
+                                    name: Arc::clone(name),
+                                    priority: InferenceCandidatePriority::Argument,
+                                });
+                            }
+                        }
                     }
                 }
                 (!sites.is_empty())
@@ -4389,6 +4484,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
+            }
+            Some(SemanticNodeData::InstantiationRef { .. }) => {
+                let sites: Vec<InferParamSite> = self
+                    .structural_infer_sites(target)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|node| match graph.node_data(node).as_deref() {
+                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                            node,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::Argument,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::Reference, sites, None))
             }
             Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
                 let sites: Vec<InferParamSite> = expressions
@@ -5094,6 +5206,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> RelationResult {
         let mut any_unknown = false;
         for (source, target) in alternatives {
+            // Each alternative is relation work of its own, whether or not
+            // it enters a worklist.
+            if !self.charge_relation_work(1) {
+                return RelationResult::Unknown;
+            }
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
             let result = if excess_prepass_completed {
@@ -5214,6 +5331,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             RelationResult::NotAssignable
         }
+    }
+
+    /// The source signature a relation of `source` to the signature
+    /// `target` compares. A generic source relates as it is instantiated
+    /// in the target's context (`compareSignaturesRelated`); a relation of
+    /// comparability (which erases generics) keeps the source as it is.
+    /// Under an inference session a generic source infers as its base
+    /// signature (`inferFromSignatures` reads `getBaseSignature`: `<T>(x:
+    /// T) => T` against `(...a: infer A) => infer R` infers `[x: unknown]`
+    /// and `unknown`) — unless the target is generic itself: its own type
+    /// parameters are no inference site of the session, so the pair relates
+    /// as it does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
+    /// U) => U, x: T)`). `None` when the base signature cannot be read.
+    fn signature_relation_source(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> Option<SemanticNodeId> {
+        if self.current_relation_kind() == RelationKind::Comparable {
+            return Some(source);
+        }
+        if !self.relation_session_active() || self.signature_is_generic(target) {
+            return Some(
+                self.instantiate_signature_in_context_of(source, target, kind)
+                    .unwrap_or(source),
+            );
+        }
+        if self.signature_is_generic(source) {
+            return self.base_signature(source);
+        }
+        Some(source)
     }
 
     /// Whether `signature` declares type parameters of its own.
@@ -5593,10 +5742,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .active_session()
             .map(|session| session.projection_candidates_since(checkpoint))
             .unwrap_or_default();
-        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
-        let projection_recovered = !candidate_nodes.is_empty();
+        let winning = super::inference::winning_candidates(&candidates);
+        let projection_recovered = !winning.is_empty();
         let recovered = if projection_recovered {
-            self.relation_combine_candidates(&candidate_nodes, variance)
+            let (candidate_nodes, variance) = winning.inferred_from();
+            self.relation_combine_candidates(candidate_nodes, variance)
         } else {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
@@ -5690,6 +5840,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::Infer {
             name: base_name,
             binder: base_binder,
+            ..
         }) = graph.node_data(base_infer).as_deref().cloned()
         else {
             return Vec::new();
@@ -5744,20 +5895,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } => {
                     let conditional_shadows =
                         self.extends_pattern_declares_infer(*extends, base_infer);
-                    let (selection, _) = self.conditional_branch_selection(*check, *extends);
-                    if matches!(
-                        selection,
-                        super::ConditionalBranchSelection::True
-                            | super::ConditionalBranchSelection::False
-                    ) {
-                        if let Some(Some(selected)) = self.reduce_relation_conditional(node) {
-                            stack.push((
-                                selected,
-                                shadowed
-                                    || (conditional_shadows
-                                        && selection == super::ConditionalBranchSelection::True),
-                            ));
-                        }
+                    if let ConditionalOutcome::Reduced(selected) = self.conditional_outcome(node) {
+                        // Only the true branch is in the scope of the
+                        // pattern's `infer` declarations: an answer that is
+                        // not the false branch may hold it.
+                        let false_branch = self.apply_conditional_branch_pending(
+                            *false_branch_ref,
+                            pending.as_deref(),
+                            false,
+                        );
+                        stack.push((
+                            selected,
+                            shadowed || (conditional_shadows && selected != false_branch),
+                        ));
                         continue;
                     }
                     stack.push((*check, shadowed));
@@ -6363,10 +6513,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn relation_budget_limit(&self) -> u64 {
-        (self.graph().node_count() as u64)
-            .saturating_mul(10)
-            .max(4096)
+    /// Charge `units` of relation work to the connected-work ledger, the
+    /// one operational envelope every evaluation shares. The checker has no
+    /// work allowance of its own below its relation-complexity limit, so a
+    /// refusal is resource incompleteness, never a verdict: it poisons the
+    /// frame with the typed cap the budget outcome reports and the caller
+    /// answers `Unknown`.
+    fn charge_relation_work(&self, units: u64) -> bool {
+        let units = usize::try_from(units).unwrap_or(usize::MAX);
+        if self.connected_demand.charge_units(units).is_ok() {
+            return true;
+        }
+        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+        false
     }
 
     fn note_relation_budget_exceeded(&self, budget_limit: u64) {
@@ -6449,16 +6608,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Pair descent, union alternatives, and member enumeration share one
         // iterative envelope; descendants never open a fresh relation budget.
         let graph = self.graph();
-        let budget_limit = if self
+        let forced_exhaustion = self
             .ctx
             .host_for_fact_tracer_install()
             .relation_knobs
             .force_budget_exhaustion
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.relation_budget_limit()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let charge = |units: u64| {
+            if forced_exhaustion {
+                self.note_relation_budget_exceeded(0);
+                return false;
+            }
+            self.charge_relation_work(units)
         };
         // The pair is canonicalized (lesser node first) once, before any
         // descent: comparability is answer-symmetric, so the frame-local
@@ -6504,7 +6665,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // forced-exhaustion knob bypasses the fast path entirely so a
         // tripped budget is still reported as the TYPED cap outcome, never
         // silently decided.
-        if budget_limit > 0 {
+        if !forced_exhaustion {
             // bounded-loop: at most one nominal widen retry — O(1) graph reads, no allocation.
             for _ in 0..2 {
                 if let Some(leaf) =
@@ -6545,7 +6706,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        let mut budget_used = 0u64;
         let mut work = vec![Work::Eval(source, target)];
         let mut results = Vec::new();
         let mut active = FxHashSet::default();
@@ -6580,9 +6740,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(result);
                 }
                 Work::Eval(source, target) => {
-                    budget_used = budget_used.saturating_add(1);
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    if !charge(1) {
                         return RelationResult::Unknown;
                     }
                     let source = match self.unwrap_identity_carrier_for_relation(source) {
@@ -6814,13 +6972,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                         self.intern_normalized_union_or_intersection(&[value, undefined], true)
                     };
-                    budget_used = budget_used.saturating_add(
+                    if !charge(
                         (source_view.positive_members().len() as u64)
                             .saturating_mul(target_width)
                             .saturating_mul(2),
-                    );
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    ) {
                         return RelationResult::Unknown;
                     }
                     work.push(
@@ -6831,17 +6987,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         },
                     );
                     for source_member in source_view.positive_members() {
-                        budget_used = budget_used.saturating_add(1);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(1) {
                             return RelationResult::Unknown;
                         }
                         let Some(member_key) = source_member.key.cloned_known() else {
                             continue;
                         };
-                        budget_used = budget_used.saturating_add(target_width);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(target_width) {
                             return RelationResult::Unknown;
                         }
                         let crate::semantic_query::SurfaceKeyProjection::Exact(target_member) =
@@ -6939,19 +7091,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(spec) = reverse_spec {
             return self.relate_reverse_homomorphic(key.source, &spec, bindings);
         }
-        match self.reduce_relation_conditional(key.source) {
-            Some(Some(reduced)) => {
-                return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
-            }
-            Some(None) => return RelationResult::Unknown,
-            None => {}
+        let source_conditional = self.conditional_outcome(key.source);
+        if let ConditionalOutcome::Reduced(reduced) = source_conditional {
+            return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
         }
-        match self.reduce_relation_conditional(key.target) {
-            Some(Some(reduced)) => {
-                return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+        let target_conditional = self.conditional_outcome(key.target);
+        if let ConditionalOutcome::Reduced(reduced) = target_conditional {
+            return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+        }
+        let (source_deferred, target_deferred) = match (source_conditional, target_conditional) {
+            (ConditionalOutcome::Undecided, _) | (_, ConditionalOutcome::Undecided) => {
+                return RelationResult::Unknown;
             }
-            Some(None) => return RelationResult::Unknown,
-            None => {}
+            (source, target) => (source.into_deferred(), target.into_deferred()),
+        };
+        if let Some(result) = self.relate_deferred_conditionals(
+            key.source,
+            source_deferred.as_ref(),
+            key.target,
+            target_deferred.as_ref(),
+            bindings,
+        ) {
+            return result;
         }
         // The binding root's bare-`Infer` arm: `check extends infer X`
         // binds `X := check` for any check through the active session.
@@ -7569,35 +7730,330 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Reduce one conditional shell through the canonical conditional query.
-    /// The outer option distinguishes a non-conditional node; the inner
-    /// option distinguishes a decided reduction from an undecided shell.
-    fn reduce_relation_conditional(&self, node: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
-        let data = self.graph().node_data(node)?;
-        let SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            distributive,
-            pending,
-        } = data.as_ref()
-        else {
+    /// A deferred conditional source related to `target`
+    /// (`structuredTypeRelatedTo`): against a conditional of the same
+    /// `extends` type and a related check, branch to branch; otherwise
+    /// through its default constraint, the union of its branches, and for a
+    /// distributive conditional through the conditional instantiated at its
+    /// check type's constraint. It relates when one of those does, and not
+    /// when each is decided against it. A conditional whose `extends`
+    /// declares an `infer` has no default constraint the lane reads.
+    fn relate_deferred_conditional_source(
+        &self,
+        source: &super::conditional_decision::DeferredConditional,
+        target: SemanticNodeId,
+        target_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        if let Some(target_conditional) = target_conditional {
+            if source.extends == target_conditional.extends {
+                let checks = match self.relate_member(
+                    source.check,
+                    target_conditional.check,
+                    bindings,
+                    InferPosition::Covariant,
+                ) {
+                    RelationResult::NotAssignable => self.relate_member(
+                        target_conditional.check,
+                        source.check,
+                        bindings,
+                        InferPosition::Covariant,
+                    ),
+                    related => related,
+                };
+                if let RelationResult::Assignable { .. } = checks {
+                    let branches = result_and(
+                        self.relate_member(
+                            source.true_branch,
+                            target_conditional.true_branch,
+                            bindings,
+                            InferPosition::Covariant,
+                        ),
+                        self.relate_member(
+                            source.false_branch,
+                            target_conditional.false_branch,
+                            bindings,
+                            InferPosition::Covariant,
+                        ),
+                    );
+                    if let RelationResult::Assignable { .. } = branches {
+                        return branches;
+                    }
+                }
+            }
+        }
+        if self.subtree_contains_infer(source.extends) {
+            return RelationResult::Unknown;
+        }
+        let default_constraint = self.intern_normalized_union_or_intersection(
+            &[source.true_branch, source.false_branch],
+            true,
+        );
+        let by_default = self.relate_member(
+            default_constraint,
+            target,
+            bindings,
+            InferPosition::Covariant,
+        );
+        if let RelationResult::Assignable { .. } = by_default {
+            return by_default;
+        }
+        let by_distribution = match self.distributive_constraint_of(source) {
+            Some(constrained) if target_conditional.is_none() => {
+                self.relate_member(constrained, target, bindings, InferPosition::Covariant)
+            }
+            _ => RelationResult::NotAssignable,
+        };
+        match (by_default, by_distribution) {
+            (_, related @ RelationResult::Assignable { .. }) => related,
+            (RelationResult::NotAssignable, RelationResult::NotAssignable) => {
+                RelationResult::NotAssignable
+            }
+            _ => RelationResult::Unknown,
+        }
+    }
+
+    /// A distributive conditional over a type parameter with a constraint,
+    /// instantiated at that constraint (`getConstraintOfDistributiveConditionalType`)
+    /// when that changes it and does not make it `never`.
+    fn distributive_constraint_of(
+        &self,
+        source: &super::conditional_decision::DeferredConditional,
+    ) -> Option<SemanticNodeId> {
+        if !source.distributive {
             return None;
+        }
+        let constraint = match self.graph().node_data(source.check).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
         };
         let key = SemanticQueryKey::Conditional {
-            check: *check,
-            extends: *extends,
-            true_branch: *true_branch_ref,
-            false_branch: *false_branch_ref,
-            distributive: *distributive,
-            pending: pending.clone(),
+            check: constraint,
+            extends: source.extends,
+            true_branch: self.substitute_semantic_type_param(
+                source.true_branch,
+                source.check,
+                constraint,
+            ),
+            false_branch: self.substitute_semantic_type_param(
+                source.false_branch,
+                source.check,
+                constraint,
+            ),
+            distributive: true,
+            pending: None,
         };
-        drop(data);
-        Some(match self.execute_type_node(key) {
-            QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => Some(value),
+        let read = self.execute_read(key);
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(value)
+                if !matches!(
+                    self.graph().node_data(value).as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Primitive(PrimitiveKind::Never)
+                    )
+                ) =>
+            {
+                Some(value)
+            }
             _ => None,
-        })
+        }
+    }
+
+    /// A relation with a deferred conditional on either side, as
+    /// `structuredTypeRelatedTo` takes it: the rule for a conditional target
+    /// first, then the rules for a conditional source; the pair relates when
+    /// either does. `None` when neither side is a deferred conditional, or
+    /// when the target's rule fails for a source that is neither a
+    /// conditional nor a closed type, so the relation goes on as for any
+    /// other target (a type parameter's constraint, say).
+    fn relate_deferred_conditionals(
+        &self,
+        source: SemanticNodeId,
+        source_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        target: SemanticNodeId,
+        target_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if source_conditional.is_none() && target_conditional.is_none() {
+            return None;
+        }
+        // A conditional over a type parameter the enclosing call is still
+        // inferring is not the type the checker relates: the relation both
+        // infers into it and waits on its instantiation.
+        let inferring = |conditional: &super::conditional_decision::DeferredConditional| {
+            let txn = self.dispatch_txn.borrow();
+            self.type_params_within(&[
+                conditional.check,
+                conditional.extends,
+                conditional.true_branch,
+                conditional.false_branch,
+            ])
+            .into_iter()
+            .any(|param| txn.collecting_session_infers(param))
+        };
+        if source_conditional.is_some_and(inferring) || target_conditional.is_some_and(inferring) {
+            return None;
+        }
+        // `never` relates to every type, and `any` to every type but
+        // `never` (`isSimpleTypeRelatedTo`), a conditional among them.
+        if matches!(
+            self.graph().node_data(source).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Never | PrimitiveKind::Any
+            ))
+        ) {
+            return Some(assignable(bindings));
+        }
+        let by_target = match target_conditional {
+            Some(conditional) => self.relate_deferred_conditional_target(
+                source,
+                source_conditional,
+                conditional,
+                bindings,
+            ),
+            None => RelationResult::NotAssignable,
+        };
+        if let RelationResult::Assignable { .. } = by_target {
+            return Some(by_target);
+        }
+        match source_conditional {
+            Some(conditional) => Some(result_or(
+                by_target,
+                self.relate_deferred_conditional_source(
+                    conditional,
+                    target,
+                    target_conditional,
+                    bindings,
+                ),
+            )),
+            // A closed source relates to a conditional only by its rule.
+            None if self.relation_source_is_closed(source) => Some(by_target),
+            None => match by_target {
+                RelationResult::NotAssignable => None,
+                undecided => Some(undecided),
+            },
+        }
+    }
+
+    /// Whether `node` is a type no constraint or reduction stands behind: a
+    /// primitive, a literal, or an object, array, tuple or function type.
+    fn relation_source_is_closed(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+            )
+        )
+    }
+
+    /// `source` related to a deferred conditional target
+    /// (`structuredTypeRelatedTo`): when the target declares no `infer`,
+    /// its branches do not depend on the distribution and the source is not
+    /// the same conditional, `source` relates when it relates to each
+    /// branch the target may still take: the true branch unless the
+    /// permissive instantiation fails, the false branch unless the
+    /// restrictive instantiation holds. Otherwise the rule does not relate
+    /// the pair.
+    ///
+    /// Whether a distributive conditional depends on its distribution is
+    /// read by the checker off the syntax it was written in
+    /// (`isTypeParameterPossiblyReferenced`: a block between the type
+    /// parameter's declaration and the conditional counts as a reference),
+    /// which the conditional's type does not carry; nor does it carry which
+    /// declaration it instantiates. Where either is not known, the rule's
+    /// failure still stands (the rule only ever relates a pair), and its
+    /// success is undecided.
+    fn relate_deferred_conditional_target(
+        &self,
+        source: SemanticNodeId,
+        source_conditional: Option<&super::conditional_decision::DeferredConditional>,
+        target: &super::conditional_decision::DeferredConditional,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        if self.subtree_contains_infer(target.extends) || self.distribution_dependent(target) {
+            return RelationResult::NotAssignable;
+        }
+        let applies = !target.distributive
+            && !source_conditional.is_some_and(|source| {
+                source.extends == target.extends
+                    && source.true_branch == target.true_branch
+                    && source.false_branch == target.false_branch
+            });
+        let params = self.type_params_within(&[target.check, target.extends]);
+        let skip_true = match self.permissive_relation(target.check, target.extends, &params) {
+            super::dispatch_txn::RelationStep::NotAssignable => true,
+            super::dispatch_txn::RelationStep::Assignable { .. } => false,
+            _ => return RelationResult::Unknown,
+        };
+        let skip_false = !skip_true
+            && match self.restrictive_relation(target.check, target.extends, &params) {
+                super::dispatch_txn::RelationStep::Assignable { .. } => true,
+                super::dispatch_txn::RelationStep::NotAssignable => false,
+                _ => return RelationResult::Unknown,
+            };
+        let mut related = assignable(bindings);
+        for (skip, branch) in [
+            (skip_true, target.true_branch),
+            (skip_false, target.false_branch),
+        ] {
+            if !skip {
+                related = result_and(
+                    related,
+                    self.relate_member(source, branch, bindings, InferPosition::Covariant),
+                );
+                if let RelationResult::NotAssignable = related {
+                    return related;
+                }
+            }
+        }
+        match related {
+            RelationResult::Assignable { .. } if !applies => RelationResult::Unknown,
+            related => related,
+        }
+    }
+
+    /// Whether a distributive conditional's branches or `extends` type read
+    /// its check type parameter (`isDistributionDependent`, the references
+    /// the conditional's type shows).
+    fn distribution_dependent(
+        &self,
+        conditional: &super::conditional_decision::DeferredConditional,
+    ) -> bool {
+        if !conditional.distributive {
+            return false;
+        }
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = vec![
+            conditional.extends,
+            conditional.true_branch,
+            conditional.false_branch,
+        ];
+        while let Some(node) = stack.pop() {
+            if node == conditional.check {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(data) = graph.node_data(node) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
     }
 
     /// The checker's TS2590 recovery for the intersection `node` when it
@@ -7868,6 +8324,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // The error-type wildcard fires BEFORE the `(_, Never)` bottom
             // arm — `error` relates bidirectionally like `any` (the same
             // arm order the structural reducer applies).
+            // The permissive wildcard's rule, read from its owner.
+            (from, to) if super::conditional_decision::wildcard_relates(from, to) => {
+                ShallowRelation::Assignable
+            }
             // `any` and the error type are assignable to everything but
             // `never`.
             (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))
@@ -7997,8 +8457,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
-        // Two references to one generic declaration relate by their type
-        // arguments' variance before any structural comparison.
+        // Two references to one generic declaration infer from, and relate
+        // by, their type arguments' variance before any structural
+        // comparison.
+        if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            return result;
+        }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }
@@ -8110,12 +8574,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The iterative structural worklist driver. Consumes a worklist of
     /// pairs and reducers, combining the final [`RelationResult`].
     ///
-    /// **Termination budget.** The driver caps total work at
-    /// `10 × graph.node_count()` with a minimum floor of 4096 entries.
-    /// Exceeding the budget poisons the frame with the typed
-    /// [`RecursionOrBudgetCap`] (the public `BudgetExceeded` outcome) and
-    /// yields `Unknown` — the SCC gate routes the whole component through
-    /// ReturnOnly.
+    /// **Termination.** Every worklist step is charged to the
+    /// connected-work ledger ([`Self::charge_relation_work`]). A refusal
+    /// poisons the frame with the typed [`RecursionOrBudgetCap`] (the public
+    /// `BudgetExceeded` outcome) and yields `Unknown` — the SCC gate routes
+    /// the whole component through ReturnOnly.
     pub(super) fn decide_relation(
         &self,
         source: SemanticNodeId,
@@ -8158,15 +8621,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return assignable(bindings);
         }
-        let budget_limit = self.relation_budget_limit();
-        let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
         work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
-            budget_used = budget_used.saturating_add(1);
-            if budget_used > budget_limit {
-                self.note_relation_budget_exceeded(budget_limit);
+            if !self.charge_relation_work(1) {
                 return RelationResult::Unknown;
             }
             match item {
@@ -8195,6 +8654,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(self.relate_arm_member(s, t, target_arm, bindings));
                     } else {
                         self.expand_pair(s, t, target_arm, bindings, &mut work, &mut results);
+                    }
+                }
+                RelateWork::PositionalArm {
+                    source: s,
+                    positional,
+                    target: t,
+                } => {
+                    let checkpoint = self.relation_session_checkpoint();
+                    let bindings_len = bindings.len();
+                    match self.relate_member(s, positional, bindings, InferPosition::Covariant) {
+                        result @ RelationResult::Assignable { .. } => results.push(result),
+                        _ => {
+                            self.relation_session_rollback(&checkpoint);
+                            bindings.truncate(bindings_len);
+                            work.push(RelateWork::Arm(s, t));
+                        }
                     }
                 }
                 RelateWork::ReduceAnd(n) => {
@@ -9644,6 +10119,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Top / bottom + error-type wildcard ─────────────────────────
         match (&*source_data, &*target_data) {
+            // The permissive wildcard's rule, read from its owner.
+            (from, to) if super::conditional_decision::wildcard_relates(from, to) => {
+                results.push(assignable(bindings));
+                return;
+            }
             // `any` and the error type are assignable to everything but
             // `never`.
             (SemanticNodeData::Opaque(err), SemanticNodeData::Primitive(PrimitiveKind::Never))
@@ -9862,9 +10342,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // it — its holes settled and its unions distributed — and a pattern
         // accepts a string literal or template whose slices fit its holes.
         let mut settled_pair = None;
-        let mut template_budget_exceeded = false;
+        let mut template_exhausted = false;
         for (side, data) in [(source, &source_data), (target, &target_data)] {
-            if settled_pair.is_some() || template_budget_exceeded {
+            if settled_pair.is_some() || template_exhausted {
                 break;
             }
             if let SemanticNodeData::TemplateLiteral {
@@ -9872,33 +10352,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 expressions,
             } = &**data
             {
-                let reduced = self.reduce_template_literal_nodes(
+                let Ok(reduced) = self.reduce_template_literal_nodes(
                     quasis,
                     expressions,
                     ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Expanded,
                     ),
-                );
-                if reduced.keyspace_budget_exceeded {
-                    template_budget_exceeded = true;
+                ) else {
+                    template_exhausted = true;
                     continue;
-                }
-                if reduced.node != side
+                };
+                if reduced != side
                     && !matches!(
-                        graph.node_data(reduced.node).as_deref(),
+                        graph.node_data(reduced).as_deref(),
                         Some(SemanticNodeData::TemplateLiteral { quasis: q, expressions: e })
                             if q == quasis && e == expressions
                     )
                 {
                     settled_pair = Some(if side == source {
-                        (reduced.node, target)
+                        (reduced, target)
                     } else {
-                        (source, reduced.node)
+                        (source, reduced)
                     });
                 }
             }
         }
-        if template_budget_exceeded {
+        if template_exhausted {
             results.push(RelationResult::Unknown);
             return;
         }
@@ -9929,7 +10408,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     graph.node_data(hole).as_deref(),
                     Some(SemanticNodeData::Infer { .. })
                 ) {
-                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    // A constrained hole converts its capture first
+                    // (`infer N extends number` takes `"42"` as `42`).
+                    match self.template_capture(slice, hole) {
+                        Some(capture) => {
+                            undecided |= !self.relation_deposit(hole, capture, occurrence);
+                        }
+                        None => undecided = true,
+                    }
                     continue;
                 }
                 match self.valid_for_template_placeholder(slice, hole) {
@@ -10164,6 +10650,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // member (`eachTypeRelatedToSomeType`), which is no recursion
             // entry of its own; against any other target each member is
             // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
+            if target_is_union {
+                if let Some(positions) = self.positional_union_targets(&members, target) {
+                    distribute_positionally(work, results, &members, &positions, target);
+                    return;
+                }
+            }
             let arm = if target_is_union {
                 RelateWork::Arm
             } else {
@@ -10438,21 +10930,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             drop(source_data);
             drop(target_data);
-            // A generic source relates as it is instantiated in the
-            // target's context (`compareSignaturesRelated`); a relation
-            // under an inference session, or of comparability (which
-            // erases generics), keeps the source as it is — unless the
-            // target is generic itself: its own type parameters are no
-            // inference site of the session, so the pair relates as it
-            // does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
-            // U) => U, x: T)`).
-            if self.current_relation_kind() != RelationKind::Comparable
-                && (!self.relation_session_active() || self.signature_is_generic(target))
-            {
-                if let Some(instantiated) =
-                    self.instantiate_signature_in_context_of(source, target, kind)
-                {
-                    work.push(RelateWork::Eval(instantiated, target));
+            match self.signature_relation_source(source, target, kind) {
+                Some(compared) if compared != source => {
+                    work.push(RelateWork::Eval(compared, target));
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    results.push(RelationResult::Unknown);
                     return;
                 }
             }
@@ -11883,6 +12368,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }),
             _ => None,
         };
+        result_of(source)?;
+        result_of(target)?;
+        // The method's source signature is the one any signature relation
+        // compares (a generic source instantiated or read at its base).
+        let Some(source) = self.signature_relation_source(
+            source,
+            target,
+            crate::semantic_query::SignatureKind::Call,
+        ) else {
+            return Some(RelationResult::Unknown);
+        };
         let source_result = result_of(source)?;
         let target_result = result_of(target)?;
         Some(self.relate_function(
@@ -13009,6 +13505,15 @@ enum RelateWork {
     /// Evaluate one arm of an intersection target like [`Self::Arm`], exempt
     /// from the weak-type check the whole intersection already passed.
     TargetArm(SemanticNodeId, SemanticNodeId),
+    /// Relate one arm of a union source to a union target
+    /// (`eachTypeRelatedToType`): first to the target arm at its own
+    /// position, then, when that does not hold, as [`Self::Arm`] against the
+    /// whole target.
+    PositionalArm {
+        source: SemanticNodeId,
+        positional: SemanticNodeId,
+        target: SemanticNodeId,
+    },
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
     /// Relate a pair the checker relates with an `isRelatedTo` of its own
@@ -13317,6 +13822,36 @@ fn index_key_applies(
 
 /// Build and push the worklist fan-out for a distribution whose reducer
 /// is AND-all, each pair evaluated as `arm` builds it.
+/// [`distribute_and`] over a union source's `members` against the union
+/// `target` whose arms are `positions`: arm `i` first relates to
+/// `positions[i % positions.len()]` (`eachTypeRelatedToType`).
+fn distribute_positionally(
+    work: &mut Vec<RelateWork>,
+    results: &mut Vec<RelationResult>,
+    members: &[SemanticNodeId],
+    positions: &[SemanticNodeId],
+    target: SemanticNodeId,
+) {
+    if members.is_empty() {
+        results.push(RelationResult::Assignable {
+            bindings: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        return;
+    }
+    let mut forward: Vec<RelateWork> = Vec::with_capacity(members.len() + 1);
+    for (index, member) in members.iter().enumerate() {
+        forward.push(RelateWork::PositionalArm {
+            source: *member,
+            positional: positions[index % positions.len()],
+            target,
+        });
+    }
+    if members.len() > 1 {
+        forward.push(RelateWork::ReduceAnd(members.len() as u32));
+    }
+    push_forward_work(work, forward);
+}
+
 fn distribute_and<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,

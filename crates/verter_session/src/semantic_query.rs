@@ -5722,6 +5722,14 @@ pub enum QueryError {
     /// minted itself one frame down: doing so fed the marker straight back
     /// into the frame-level failure it exists to avoid.
     UnmodeledPosition,
+    /// The checker's wildcard type (`wildcardType`): what a conditional's
+    /// definitely-false test substitutes for every type parameter of its
+    /// operands (`getPermissiveInstantiation`). It relates both ways like
+    /// `any`, and an operation over it (a conditional, `keyof`, an indexed
+    /// access) is the wildcard itself rather than the operation over `any`.
+    /// Transient: it lives only in the operands of that test and is never
+    /// published.
+    PermissiveWildcard,
     /// The checker's ERROR TYPE after a diagnostic it recovers from: the
     /// operation [`CheckerDiagnostic::operation`] names raised
     /// [`CheckerDiagnostic::code`], and the checker continues with its error
@@ -5759,7 +5767,10 @@ impl QueryError {
         match self {
             QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
-            | QueryError::CheckerRecovery { .. } => false,
+            | QueryError::CheckerRecovery { .. }
+            // The wildcard stands for every type at once: it is a known
+            // type, and the same wildcard relates to itself.
+            | QueryError::PermissiveWildcard => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5939,6 +5950,7 @@ impl QueryError {
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
             Self::CheckerRecovery { .. } => 21,
+            Self::PermissiveWildcard => 22,
         }
     }
 }
@@ -5993,6 +6005,7 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurface
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
+            | Self::PermissiveWildcard
             | Self::OpenSurface => {}
             Self::CheckerRecovery { diagnostic, beyond } => {
                 diagnostic.hash(state);
@@ -9859,10 +9872,12 @@ pub enum SemanticNodeData {
     /// Modelled as an explicit variant rather than
     /// encoded via scope overloading (rejects anti-pattern #3 — scope-
     /// as-discriminator). The `name` is the infer binding name the
-    /// `true` branch will substitute the bound type into.
+    /// `true` branch will substitute the bound type into; `constraint` is
+    /// the declared `infer X extends C` constraint.
     Infer {
         name: Arc<str>,
         binder: InferBinderId,
+        constraint: Option<SemanticNodeId>,
     },
     /// A true-branch REFERENCE to an in-scope `infer` binder — the node
     /// a `Ref { name }` occurrence resolves to through the conditional's
@@ -10342,12 +10357,14 @@ impl PartialEq for SemanticNodeData {
                 Self::Infer {
                     name: a,
                     binder: ab,
+                    constraint: ac,
                 },
                 Self::Infer {
                     name: b,
                     binder: bb,
+                    constraint: bc,
                 },
-            ) => a == b && ab == bb,
+            ) => a == b && ab == bb && ac == bc,
             (
                 Self::InferRef {
                     name: a,
@@ -10542,9 +10559,14 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name, binder } => {
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => {
                 name.hash(state);
                 binder.hash(state);
+                constraint.hash(state);
             }
             Self::InferRef { name, binder } => {
                 name.hash(state);
@@ -11050,6 +11072,7 @@ mod tests {
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
+            QueryError::PermissiveWildcard,
             QueryError::UnmodeledPosition,
             QueryError::CheckerRecovery {
                 diagnostic: CheckerDiagnostic {

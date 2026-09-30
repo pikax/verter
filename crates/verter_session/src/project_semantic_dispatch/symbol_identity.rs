@@ -728,6 +728,7 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::ValueDomainMismatch { .. } => PropCallableRoleUnresolvedReason::Fault,
     }
 }

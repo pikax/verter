@@ -507,9 +507,16 @@ fn hash_node_rec<H: std::hash::Hasher>(
             decl.hash(hasher);
             hasher.write_u16(*param_index);
         }
-        SemanticNodeData::Infer { name, binder } => {
+        SemanticNodeData::Infer {
+            name,
+            binder,
+            constraint,
+        } => {
             hasher.write(name.as_bytes());
             binder.write_stable_fingerprint(hasher);
+            if let Some(constraint) = constraint {
+                hash_node_rec(ctx, *constraint, hasher, seen, depth + 1);
+            }
         }
         SemanticNodeData::InferRef { name, binder } => {
             hasher.write(name.as_bytes());

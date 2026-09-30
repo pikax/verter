@@ -42,7 +42,9 @@ use crate::semantic_query::{
 use super::inflight::{FlightCell, InflightPanicGuard, MAX_INFLIGHT_RETRIES};
 use super::prepared::{self, PreparedKeyHandle};
 use super::stats::InFlightStatsGuard;
-use super::tasks::{ExecutionScope, ExecutionTask, OpenProducer, TaskId, WaitCycle};
+use super::tasks::{
+    ExecutionScope, ExecutionTask, OpenProducer, SemanticProducers, TaskId, WaitCycle,
+};
 use super::{
     cancelled_cache_read, empty_signature, record_inflight_aborted_retry,
     semantic_operand_evidence, PublishedMemoCandidate, SemanticGraphStore, WarmPublishOutcome,

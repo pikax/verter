@@ -37,6 +37,23 @@ pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 /// many constituents fails with TS2590 before a constituent is built.
 pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 
+/// The checker's relation-complexity allowance for one relation check
+/// (`checkTypeRelatedTo`'s `relationCount`): it starts at `(16,000,000 -
+/// relation cache size) >> 3` and falls by one for each structured
+/// comparison result the check records; at zero the relation is false with
+/// TS2859. The cache term only lowers the start, so its value over an empty
+/// cache, this, is the most the checker ever allows. The count lives on a
+/// relation chain's first frame, one chain per check, and skips memoized
+/// answers as the checker skips cached ones. The connected-work ledger is
+/// to be sized above it (two units per recorded comparison) once it charges
+/// the bytes a relation holds; until then it can refuse a relation first,
+/// as typed incompleteness.
+///
+/// Measured on TypeScript 7.0.2: a union of `M` single-property objects
+/// against the same objects in reverse order records about `M² / 2`
+/// comparisons; `[S] extends [T] ? 1 : 2` is `1` at 1,800 arms and `2` under
+/// TS2859 at 2,100.
+pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
 /// Verter's instantiation budget, checked for one instantiation: `within`
 /// is whether the connected demand's ledger admits its depth. Past it the
 /// instantiation is the checker's TS2589 — its code and message — reported
@@ -102,6 +119,11 @@ impl InstantiationDepth {
 /// settings agree), `Build<999>` is `999` and `Build<1000>` is `any`
 /// under TS2589 — and Verter runs to its own, far larger one, reporting
 /// the same TS2589 there.
+///
+/// Known diagnostic gap: a generic alias whose body applies itself
+/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker
+/// (TS2456, and `any`); Verter runs its tail loop to the tail budget
+/// instead and reports TS2589, with the same `any`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalTail {
     steps: u32,
@@ -118,6 +140,54 @@ impl ConditionalTail {
     pub(crate) fn step(&mut self, budget: u32) -> bool {
         self.steps += 1;
         self.steps < budget
+    }
+}
+
+/// The structured comparisons one relation check has recorded. Reaching
+/// [`RELATION_COMPARISONS`] is the TS2859 fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RelationComplexity {
+    recorded: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELATION_COMPARISONS_FOR_TESTS: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The allowance a relation check records against: the checker's, or a
+/// lower one a test installs on this thread to reach it quickly.
+fn relation_comparisons() -> u32 {
+    #[cfg(test)]
+    if let Some(allowance) = RELATION_COMPARISONS_FOR_TESTS.with(std::cell::Cell::get) {
+        return allowance;
+    }
+    RELATION_COMPARISONS
+}
+
+/// Run `run` with relation checks on this thread recording against
+/// `allowance` instead of the checker's, through the same code path.
+#[cfg(test)]
+pub(crate) fn with_relation_comparisons_for_tests<R>(allowance: u32, run: impl FnOnce() -> R) -> R {
+    let previous = RELATION_COMPARISONS_FOR_TESTS.with(|cell| cell.replace(Some(allowance)));
+    let result = run();
+    RELATION_COMPARISONS_FOR_TESTS.with(|cell| cell.set(previous));
+    result
+}
+
+impl RelationComplexity {
+    /// Record one structured comparison: the TS2859 fact when the check
+    /// has none left.
+    pub(crate) fn record(&mut self) -> Result<(), CheckerDiagnostic> {
+        if self.recorded >= relation_comparisons() {
+            return Err(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::RelationTooComplex,
+                operation: CheckerDiagnosticOperation::Relation,
+            });
+        }
+        self.recorded += 1;
+        Ok(())
     }
 }
 
@@ -207,6 +277,24 @@ mod tests {
             ]),
             ts2590
         );
+    }
+
+    /// A relation check records 2,000,000 structured comparisons and is
+    /// refused the next.
+    #[test]
+    fn a_relation_check_records_the_checkers_comparisons() {
+        let mut check = RelationComplexity::default();
+        for _ in 0..RELATION_COMPARISONS {
+            assert_eq!(check.record(), Ok(()));
+        }
+        assert_eq!(
+            check.record(),
+            Err(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::RelationTooComplex,
+                operation: CheckerDiagnosticOperation::Relation,
+            })
+        );
+        assert_eq!(RELATION_COMPARISONS, 2_000_000);
     }
 
     /// A tail run fails at its budget's step — the checker's at its

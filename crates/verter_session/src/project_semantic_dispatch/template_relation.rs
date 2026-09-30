@@ -4,9 +4,12 @@
 //! (`inferFromLiteralPartsToTemplateLiteral`) and checking it against the
 //! hole (`isValidTypeForTemplateLiteralPlaceholder`).
 
+use std::sync::Arc;
+
 use super::build::TemplatePiece;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query_memo::SemanticGraphStore;
 
 /// One side of a template relation: its texts (one more than its holes)
 /// and its holes.
@@ -471,6 +474,120 @@ fn valid_bigint_string(text: &str) -> bool {
     unsigned == "0"
         || (unsigned.starts_with(|c: char| ('1'..='9').contains(&c))
             && unsigned.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether `pattern` is a pattern literal type (`isPatternLiteralType`): a
+/// template literal type whose every hole is a placeholder — `string`,
+/// `number`, `bigint`, `any` or a pattern literal type — or a string
+/// mapping over one.
+pub(super) fn is_pattern_literal(graph: &SemanticGraphStore, pattern: SemanticNodeId) -> bool {
+    match graph.node_data(pattern).as_deref() {
+        Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => expressions
+            .iter()
+            .all(|hole| is_pattern_placeholder(graph, *hole)),
+        Some(_) => string_mapping(graph, pattern)
+            .is_some_and(|(_, operand)| is_pattern_placeholder(graph, operand)),
+        None => false,
+    }
+}
+
+/// `isPatternLiteralPlaceholderType`, over the placeholders a canonical
+/// template holds.
+fn is_pattern_placeholder(graph: &SemanticGraphStore, hole: SemanticNodeId) -> bool {
+    matches!(
+        graph.node_data(hole).as_deref(),
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::String
+                | PrimitiveKind::Number
+                | PrimitiveKind::BigInt
+                | PrimitiveKind::Any
+        ))
+    ) || is_pattern_literal(graph, hole)
+}
+
+/// The intrinsic string mapping `node` applies and its operand.
+pub(super) fn string_mapping(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<(Arc<str>, SemanticNodeId)> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args })
+            if base.canonical_id.as_ref() == "__builtin__"
+                && matches!(
+                    base.decl_name.as_ref(),
+                    "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize"
+                )
+                && args.len() == 1 =>
+        {
+            Some((Arc::clone(&base.decl_name), args[0]))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the string literal `text` is matched by the pattern literal type
+/// `pattern` (`isTypeMatchedByTemplateLiteralOrStringMapping`): its slices,
+/// each target text matched leftmost, each fit their placeholder; under a
+/// string mapping, the mapping leaves `text` unchanged and the operand
+/// matches it.
+pub(super) fn string_literal_matches_pattern(
+    graph: &SemanticGraphStore,
+    text: &str,
+    pattern: SemanticNodeId,
+) -> bool {
+    if let Some((intrinsic, operand)) = string_mapping(graph, pattern) {
+        return super::build::transform_string_intrinsic(&intrinsic, text) == text
+            && placeholder_accepts(graph, text, operand);
+    }
+    let (quasis, holes) = match graph.node_data(pattern).as_deref() {
+        Some(SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        }) if quasis.len() == expressions.len() + 1 => (quasis.clone(), expressions.clone()),
+        _ => return false,
+    };
+    let last = quasis.len() - 1;
+    let (start, end) = (quasis[0].as_ref(), quasis[last].as_ref());
+    if text.len() < start.len() + end.len() || !text.starts_with(start) || !text.ends_with(end) {
+        return false;
+    }
+    let remaining = &text[..text.len() - end.len()];
+    let mut pos = start.len();
+    let mut slices: Vec<&str> = Vec::with_capacity(holes.len());
+    for delimiter in &quasis[1..last] {
+        let found = if delimiter.is_empty() {
+            match remaining[pos..].chars().next() {
+                Some(c) => pos + c.len_utf8(),
+                None => return false,
+            }
+        } else {
+            match remaining[pos..].find(delimiter.as_ref()) {
+                Some(offset) => pos + offset,
+                None => return false,
+            }
+        };
+        slices.push(&remaining[pos..found]);
+        pos = found + delimiter.len();
+    }
+    slices.push(&remaining[pos..]);
+    slices
+        .iter()
+        .zip(holes.iter())
+        .all(|(slice, hole)| placeholder_accepts(graph, slice, *hole))
+}
+
+/// `isValidTypeForTemplateLiteralPlaceholder` for a string literal slice
+/// against a pattern placeholder.
+fn placeholder_accepts(graph: &SemanticGraphStore, slice: &str, hole: SemanticNodeId) -> bool {
+    match graph.node_data(hole).as_deref() {
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Any)) => true,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => valid_number_string(slice),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => valid_bigint_string(slice),
+        Some(_) if is_pattern_literal(graph, hole) => {
+            string_literal_matches_pattern(graph, slice, hole)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

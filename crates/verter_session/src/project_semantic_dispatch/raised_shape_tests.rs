@@ -2718,6 +2718,7 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::Infer {
                 name: Arc::from("U"),
                 binder: graph.alloc_infer_binder_id(),
+                constraint: None,
             }),
         ),
         (

@@ -1042,19 +1042,21 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
     );
 }
 
-/// The applicability-relation budget is runtime state, not key identity: a
-/// trip abandons every session opened by this call and admits no value. Every
-/// candidate relates its one argument, so one candidate past the budget trips
-/// it. Mutation: remove the relation charge or leave a loser staged; the typed
+/// A call whose work the connected-work ledger refuses is runtime state, not
+/// key identity: the trip abandons every session opened by this call and
+/// admits no value. Every candidate charges its applicability relation, so a
+/// ledger too small for the candidates trips inside the call. Mutation:
+/// remove the relation charge or leave a loser staged; the typed
 /// outcome/state assertions fail.
 #[test]
 fn call_resolution_budget_exceeded_admits_nothing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    dispatch.connected_demand.set_limits_for_tests(256, 24);
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let candidates = (0..=super::call_resolve::MAX_APPLICABILITY_RELATIONS as u32)
+    let candidates = (0..=1024u32)
         .map(|ordinal| {
             signature(
                 &dispatch,
@@ -1473,18 +1475,19 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 /// alone fixes `T`, and the executor hands the withheld argument back with
 /// its contextual type instantiated under that fixed substitution; typed
 /// under it, the argument selects the candidate. Mutation: drop the
-/// context-sensitivity withholding — the lambda's `any` parameter deposits
-/// and beats the literal, and `T` binds `any`. The second half is the
+/// context-sensitivity withholding — the lambda's `any` return deposits
+/// beside the literal, and `T` binds `any`. The second half is the
 /// negative control: the SAME nodes with the argument marked
 /// context-FREE still deposit `any`, proving the assertion tracks the flag
-/// and not the node shapes.
+/// and not the node shapes (TypeScript 7.0.2, in every setting:
+/// `withCallback((item: any) => item, lit)` with `lit: "literal"` is
+/// `any`).
 #[test]
 fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let literal = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("literal".into()),
     ));
@@ -1495,7 +1498,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         default: None,
         display_name: Arc::from("T"),
     });
-    // `cb: (item: T) => unknown`
+    // `cb: (item: T) => T`
     let callback_param = signature(
         &dispatch,
         "callbackParam",
@@ -1503,7 +1506,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         Vec::new(),
-        unknown,
+        t,
     );
     // The authored argument `(item) => item`: an un-annotated parameter
     // lowers to `any`, and so does the arrow's own return.
@@ -1516,7 +1519,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         Vec::new(),
         any,
     );
-    // `declare function withCallback<T>(cb: (item: T) => unknown, item: T): T`
+    // `declare function withCallback<T>(cb: (item: T) => T, item: T): T`
     let with_callback = signature(
         &dispatch,
         "withCallback",
@@ -3026,14 +3029,23 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
     );
 }
 
-/// The `inference_deposits` fuse charges each ACCEPTED deposit, not one
-/// unit per top-level argument: 1025 element deposits from a single tuple
-/// argument exceed the 1024-deposit cap and degrade the call to the typed
-/// `Budget` (admitting nothing), while the 1024-element call still
-/// selects. Mutation recipe: charging once per argument re-accepts the
-/// 1025-element call with a single unit on the counter.
+/// A call has no quota on its accepted inference deposits: the checker
+/// infers from every tuple position. `f<T>(xs: [T, …, T]): T` over 1,025
+/// and 5,000 positions, called with as many `1`s, selects `T := number`;
+/// the deposits, like the relation's own steps, are charged to the
+/// connected-work ledger as work.
+///
+/// Measured on TypeScript 7.0.2 (`declare function f<T>(xs: [T, …]): T;
+/// const r = f([1, …])`, all four `strictNullChecks` × `noImplicitAny`
+/// settings agree): `typeof r` is `number` at 1,025 and at 5,000 positions.
 #[test]
-fn inference_deposit_budget_charges_each_accepted_deposit() {
+fn inference_deposits_have_no_call_quota() {
+    deposits_select_number(&[1025, 5000]);
+}
+
+/// `f<T>(xs: [T, …, T]): T` over each of `counts` positions, called with as
+/// many `1`s, selects `T := number`.
+fn deposits_select_number(counts: &[usize]) {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
@@ -3042,7 +3054,7 @@ fn inference_deposit_budget_charges_each_accepted_deposit() {
         verter_type_expr::LiteralValue::Number(1.0),
     ));
     let t = type_param(&dispatch, "T", 0);
-    let run = |element_count: usize| {
+    for &element_count in counts {
         let sig = signature(
             &dispatch,
             "wide",
@@ -3058,31 +3070,82 @@ fn inference_deposit_budget_charges_each_accepted_deposit() {
             t,
         );
         let callee = callable(&dispatch, vec![sig], Vec::new());
-        dispatch.execute_resolve_call(call_key(
+        let step = dispatch.execute_resolve_call(call_key(
             &dispatch,
             callee,
             CallKind::Call,
             None,
             vec![fresh_literal(tuple_of(&dispatch, vec![one; element_count]))],
-        ))
-    };
-    let under_cap = run(1024);
-    assert!(
-        matches!(
-            selected(under_cap),
-            ResolvedCallResult::Selected { return_type, .. } if return_type == number
-        ),
-        "1024 accepted deposits stay within the cap and select T := number"
-    );
-    let over_cap = run(1025);
-    assert!(
-        matches!(
-            over_cap,
-            super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Budget
+        ));
+        assert!(
+            matches!(
+                selected(step),
+                ResolvedCallResult::Selected { return_type, .. } if return_type == number
+            ),
+            "{element_count} accepted deposits select T := number"
+        );
+        assert!(
+            dispatch.connected_demand.work_used_for_tests() >= element_count,
+            "the {element_count} accepted deposits are charged to the connected-work ledger"
+        );
+    }
+}
+
+/// A call has no quota on its applicability relations: 1,024 overloads that
+/// reject the argument before the one that accepts it still select it.
+///
+/// Measured on TypeScript 7.0.2 (1,024 × `declare function f(x: string):
+/// "s"`, then `declare function f(x: number): "n"`; `const r = f(1)`, all
+/// four settings agree): `typeof r` is `"n"`.
+#[test]
+fn applicability_relations_have_no_call_quota() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let s_literal = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("s".to_owned()),
+    ));
+    let n_literal = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("n".to_owned()),
+    ));
+    let mut candidates: Vec<SemanticNodeId> = (0..1024u32)
+        .map(|ordinal| {
+            signature(
+                &dispatch,
+                "f",
+                ordinal,
+                SignatureKind::Call,
+                vec![FunctionParam::synthetic(None, string, false, false)],
+                Vec::new(),
+                s_literal,
             )
+        })
+        .collect();
+    candidates.push(signature(
+        &dispatch,
+        "f",
+        1024,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        n_literal,
+    ));
+    let callee = callable(&dispatch, candidates, Vec::new());
+    let step = dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![eager(number)],
+    ));
+    assert!(
+        matches!(
+            selected(step),
+            ResolvedCallResult::Selected { return_type, .. } if return_type == n_literal
         ),
-        "1025 accepted deposits trip the deposit fuse, got {over_cap:?}"
+        "the 1,025th overload selects \"n\""
     );
 }
 
