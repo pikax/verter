@@ -9,6 +9,35 @@ use super::*;
 use crate::protocol::*;
 use crate::traits::ProviderFuture;
 
+fn receipt_disposition(receipt: &AppliedReceipt) -> crate::traits::FileLoadDisposition {
+    match (receipt.epoch, receipt.applied) {
+        (None, _) => crate::traits::FileLoadDisposition::Held,
+        (Some(_), false) => crate::traits::FileLoadDisposition::Shadowed,
+        (Some(_), true) => crate::traits::FileLoadDisposition::Forwarded,
+    }
+}
+
+impl<P> ProviderHub<P>
+where
+    P: TypeProvider + ?Sized + Send + Sync + 'static,
+{
+    fn mutation_disposition<'a>(
+        &'a self,
+        mutation: DesiredMutation,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            let lane = match priority {
+                OverlayPriority::Foreground => Lane::Foreground,
+                OverlayPriority::Normal => Lane::Normal,
+                OverlayPriority::Background => Lane::Background,
+            };
+            let receipt = self.submit_mutation(mutation, lane).await?;
+            Ok(receipt_disposition(&receipt))
+        })
+    }
+}
+
 impl<P> TypeProvider for ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
@@ -19,27 +48,43 @@ where
         content: &'a str,
         priority: OverlayPriority,
     ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
-        Box::pin(async move {
-            let lane = match priority {
-                OverlayPriority::Foreground => Lane::Foreground,
-                OverlayPriority::Normal => Lane::Normal,
-                OverlayPriority::Background => Lane::Background,
-            };
-            let receipt = self
-                .submit_mutation(
-                    DesiredMutation::Load {
-                        path: path.into(),
-                        content: content.into(),
-                    },
-                    lane,
-                )
-                .await?;
-            Ok(match (receipt.epoch, receipt.applied) {
-                (None, _) => crate::traits::FileLoadDisposition::Held,
-                (Some(_), false) => crate::traits::FileLoadDisposition::Shadowed,
-                (Some(_), true) => crate::traits::FileLoadDisposition::Forwarded,
-            })
-        })
+        self.mutation_disposition(
+            DesiredMutation::Load {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Open {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Update {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
     }
     fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
         match self

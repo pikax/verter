@@ -804,7 +804,7 @@ impl TsgoSharedProvider {
         // Read only the carrier revision whose ordered injection barrier completed,
         // and use that exact content for both policy and UTF-16 positioning.
         let content =
-            require_synced_carrier_content(self.sync.synced_content(&engine_carrier, carrier))?;
+            require_synced_carrier_content(self.applied_carrier_bytes(&engine_carrier, carrier))?;
         let semantic_enabled = javascript_carrier_semantic_diagnostics_enabled(
             &engine_carrier,
             &content,
@@ -1049,7 +1049,21 @@ where
     }
 }
 
+impl TsgoSharedProvider {
+    fn applied_carrier_bytes(&self, engine_carrier: &str, carrier: &str) -> Option<Arc<str>> {
+        self.sync.synced_content(engine_carrier, carrier)
+    }
+}
+
 impl TypeProvider for TsgoSharedProvider {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.applied_carrier_bytes(path, path) {
+            Some(bytes) => AppliedContent::Applied(bytes),
+            None => AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         // The SHARED dual-surface attach IS the tsgo provider — the editor's engine
         // served non-owningly; every engine-identifying branch treats it as tsgo.

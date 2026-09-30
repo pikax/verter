@@ -160,17 +160,20 @@ hub-issued admission binds the serving epoch and basis, so a replacement
 re-admits fresh. No admission cache survives beside the hub (the per-composite
 `CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
 are `ProviderHub::bound_project` + the hub request cache).
-Background discovery uses `load_file_with_disposition`: `Shadowed` preserves
-editor content and its delivered mapping; `Held` records desired replay state
-without forcing a cold managed fallback to establish. `ProjectSync`'s prepared
-mapper is not an application receipt: `ProviderHub::applied_content` returns
-the exact bytes the serving incarnation accepted, and a held, shadowed, or
-failed write — including a rejected close, which keeps the prior surface for
-replay — does not certify delivery. A close is committed only after the engine
-accepts it. Independent hub groups activate concurrently, each with one
-ordered provider-affine bulk call. An A/B/A activation across two project hubs
-rebuilds each group once per bulk delivery; aliases of one project stay in
-that group's order, and a withdrawn binding delivers nothing.
+Background discovery uses `load_file_with_disposition`. Open and update use the
+same disposition. `Shadowed` preserves editor content and does not record a
+shared overlay or a `ProjectSync` mapper. `Held` records hub desired state for
+replay and does not enter the delivery ledger, and a coordinator does not mark
+that IDE kind synced. `AppliedContent::Uncertified` is not a receipt. After
+replay, `ProviderHub::applied_content` is the bytes the serving incarnation
+accepted, including a rejected close, which keeps the prior surface. A close
+is committed only after the engine accepts it. tsserver companion content
+opens stay suppressed; that membership path is not a second content authority.
+Independent hub groups activate concurrently. A held engine on one project
+does not block another project's group. An A/B/A activation across two project
+hubs keeps aliases in one ordered bulk call per delivery and sends nothing
+after withdrawal. That router seam counts hub bulk calls; live tsserver/tsgo
+process rebuild counters belong to the real-provider lane.
 Dropping a direct overlay write or withdrawal signals that incarnation's
 recovery monitor because its physical outcome is unknown.
 A basis drift observed AFTER a provider write landed splits on what drifted. A

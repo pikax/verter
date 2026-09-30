@@ -1009,7 +1009,6 @@ impl TypeProvider for ProjectTsserverProvider {
         priority: OverlayPriority,
     ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
         Box::pin(async move {
-            use verter_type_runtime::traits::FileLoadDisposition;
             if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
                 return self
                     .provider_for_path(path)
@@ -1019,22 +1018,38 @@ impl TypeProvider for ProjectTsserverProvider {
             }
             self.apply_file_write(path, content, OverlayFileKind::Load, priority)
                 .await?;
-            Ok(FileLoadDisposition::Forwarded)
+            Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
         })
     }
 
     fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
         use verter_type_runtime::traits::AppliedContent;
         let normalized = Self::normalized(path);
-        let Some(route) = self.routes.get(&normalized) else {
-            return AppliedContent::Uncertified;
+        let certify = |content: AppliedContent| match content {
+            AppliedContent::Uncertified => AppliedContent::NotApplied,
+            other => other,
         };
-        for entry in &self.providers {
-            if Self::normalized(&entry.key().project) == route.project {
-                return entry.value().applied_content(path);
+        if let Some(route) = self.routes.get(&normalized) {
+            for entry in &self.providers {
+                if Self::normalized(&entry.key().project) == route.project {
+                    return certify(entry.value().applied_content(path));
+                }
+            }
+            return AppliedContent::NotApplied;
+        }
+        let mut found = None;
+        for entry in self.providers.iter() {
+            if let AppliedContent::Applied(bytes) = entry.value().applied_content(path) {
+                if found.is_some() {
+                    return AppliedContent::NotApplied;
+                }
+                found = Some(AppliedContent::Applied(bytes));
             }
         }
-        AppliedContent::NotApplied
+        found.unwrap_or(AppliedContent::NotApplied)
     }
 
     fn provider_id(&self) -> &'static str {

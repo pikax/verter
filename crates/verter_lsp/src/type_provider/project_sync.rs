@@ -277,11 +277,40 @@ impl ProjectSync {
     ) -> Option<PreparedCarrierProviderContent> {
         use verter_type_runtime::traits::AppliedContent;
         match self.provider.applied_content(path) {
-            AppliedContent::Uncertified => Some(prepared),
             AppliedContent::Applied(bytes) if bytes.as_ref() == prepared.content().as_ref() => {
                 Some(prepared)
             }
-            AppliedContent::Applied(_) | AppliedContent::NotApplied => None,
+            AppliedContent::Applied(_)
+            | AppliedContent::NotApplied
+            | AppliedContent::Uncertified => None,
+        }
+    }
+
+    /// The mapper for bytes the serving provider has already accepted.
+    ///
+    /// A membership-only engine never content-opens the companion, so its
+    /// coordinate space is the prepared surface rather than a file receipt.
+    /// Every other provider must show an exact [`AppliedContent::Applied`]
+    /// match. [`AppliedContent::Uncertified`] is not that match.
+    pub(crate) fn receipt_for_commit(
+        &self,
+        path: &str,
+        generated: &str,
+    ) -> Option<PreparedCarrierProviderContent> {
+        if self.carrier_companion_open_suppressed() {
+            return self.carrier_provider_surface(path, generated);
+        }
+        if let Some(delivered) = self.delivered_carrier_surface_for(path, generated) {
+            return Some(delivered);
+        }
+        let prepared = self.prepare_tsx_surface(path, generated).ok()?;
+        match self.provider.applied_content(path) {
+            verter_type_runtime::traits::AppliedContent::Applied(bytes)
+                if bytes.as_ref() == prepared.prepared.content().as_ref() =>
+            {
+                Some(prepared.prepared)
+            }
+            _ => None,
         }
     }
 
@@ -307,8 +336,11 @@ impl ProjectSync {
     /// Return the immutable bytes from the most recent successful carrier sync.
     #[cfg(test)]
     pub(crate) fn synced_tsx_content(&self, path: &str) -> Option<Arc<str>> {
-        self.delivered_carrier_surface(path)
-            .map(|delivered| Arc::clone(delivered.content()))
+        match self.provider.applied_content(path) {
+            verter_type_runtime::traits::AppliedContent::Applied(bytes) => Some(bytes),
+            verter_type_runtime::traits::AppliedContent::NotApplied
+            | verter_type_runtime::traits::AppliedContent::Uncertified => None,
+        }
     }
 
     /// THE single answer to "what bytes does the provider hold for THESE
@@ -2410,5 +2442,44 @@ mod hub_delivery_tests {
             Some(source),
             "replay into the serving incarnation publishes the receipt"
         );
+    }
+
+    /// A rejected close retires the serving epoch; recovery replays the open,
+    /// a later successful close clears the receipt, and a reopen applies the
+    /// new bytes. Virtual time covers the hub's one-second restart backoff.
+    #[tokio::test(start_paused = true)]
+    async fn failed_close_keeps_the_applied_surface_and_reopen_replaces_it() {
+        let mock = crate::type_provider::mock::MockTypeProvider::new();
+        let hub = Arc::new(ProviderHub::new(
+            Engine(Arc::new(mock.clone())),
+            Arc::new(TracingNotifier),
+            HubPolicy::explicit(1),
+        ));
+        hub.establish().await.unwrap();
+        let sync = ProjectSync::new(
+            Arc::clone(&hub) as Arc<dyn TypeProvider>,
+            ProjectSyncMode::FullProject,
+        );
+        let path = "/ws/App.vue.tsx";
+        let source = "export const value = 'unsaved';";
+        sync.open_tsx(path, source).await.unwrap();
+        assert_eq!(sync.synced_tsx_content(path).as_deref(), Some(source));
+        mock.set_fail_file_ops(true);
+        assert!(sync.close_tsx(path).await.is_err());
+        mock.set_fail_file_ops(false);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            sync.synced_tsx_content(path).as_deref(),
+            Some(source),
+            "recovery replays the open the engine rejected closing"
+        );
+        sync.close_tsx(path).await.unwrap();
+        assert!(
+            sync.synced_tsx_content(path).is_none(),
+            "a successful close clears the receipt"
+        );
+        let reopened = "export const value = 'reopened';";
+        sync.open_tsx(path, reopened).await.unwrap();
+        assert_eq!(sync.synced_tsx_content(path).as_deref(), Some(reopened));
     }
 }

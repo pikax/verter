@@ -275,7 +275,7 @@ impl VerterLanguageServer {
         // and the committed-surface gate then refuses every capture for this
         // source. `ProjectSync` owns that answer for the active engine.
         let delivered = match self.project_sync.as_ref() {
-            Some(sync) => sync.carrier_provider_surface(ide_path, ide_code),
+            Some(sync) => sync.receipt_for_commit(ide_path, ide_code),
             None => {
                 // No provider topology is bound, so no engine holds this buffer.
                 // The shared carrier-import projection is the whole answer.

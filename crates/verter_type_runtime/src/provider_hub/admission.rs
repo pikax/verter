@@ -580,6 +580,9 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
+        if !receipt.applied {
+            return Err(AdmissionRefusal::ShadowedMutation);
+        }
         if receipt.epoch == Some(admission.witness.0.epoch) {
             Ok(())
         } else {
@@ -637,6 +640,9 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
+        if !receipt.applied {
+            return Err(AdmissionRefusal::ShadowedMutation);
+        }
         if receipt.epoch == Some(epoch) {
             Ok(())
         } else {

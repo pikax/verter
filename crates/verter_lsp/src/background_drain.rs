@@ -1140,7 +1140,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
             // this compile, so the just-run provider sync can only make the
             // record fail closed, never falsely pair `ide.code` with a source
             // it wasn't compiled from.
-            if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code) {
+            if let Some(delivered) = sync.receipt_for_commit(&ide_path, &ide.code) {
                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                     provider_surfaces,
                     Some(documents),
@@ -1151,8 +1151,10 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
                     ide.source_map.as_deref(),
                     open_pin,
                 );
+                true
+            } else {
+                false
             }
-            true
         }
         Err(error) => {
             tracing::warn!(
@@ -1401,16 +1403,15 @@ async fn apply_owner_resolved_carrier_sync(
                 };
                 match result {
                     Ok(()) => {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                        synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface), through
                         // the shared fenced choke point: `open_pin` was captured by
                         // the caller BEFORE this compile, so this just-run provider
                         // sync can only make the record fail closed, never falsely
                         // pair `ide.code` with a source it wasn't compiled from.
-                        if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code)
-                        {
+                        if let Some(delivered) = sync.receipt_for_commit(&ide_path, &ide.code) {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced.push(ProviderPathKind::Ide);
                             crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                 documents.provider_surfaces(),
                                 Some(documents),

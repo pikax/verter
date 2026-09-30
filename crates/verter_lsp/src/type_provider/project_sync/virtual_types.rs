@@ -126,52 +126,32 @@ impl ProjectSync {
         lane: ProviderLane,
         verb: ProviderFileVerb,
     ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
-        use verter_type_runtime::traits::FileLoadDisposition;
-        if matches!(verb, ProviderFileVerb::Load) {
-            let priority = match lane {
-                ProviderLane::Foreground => {
-                    verter_type_runtime::provider_hub::OverlayPriority::Foreground
-                }
-                ProviderLane::Normal => verter_type_runtime::provider_hub::OverlayPriority::Normal,
-                ProviderLane::Background => {
-                    verter_type_runtime::provider_hub::OverlayPriority::Background
-                }
-            };
-            return self
-                .provider
-                .load_file_with_disposition(path, content, priority)
-                .await;
-        }
-        match (lane, verb) {
-            (ProviderLane::Foreground, ProviderFileVerb::Load) => {
-                self.provider.load_file(path, content).await
+        let priority = match lane {
+            ProviderLane::Foreground => {
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Open) => {
-                self.provider.open_file(path, content).await
+            ProviderLane::Normal => verter_type_runtime::provider_hub::OverlayPriority::Normal,
+            ProviderLane::Background => {
+                verter_type_runtime::provider_hub::OverlayPriority::Background
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Update) => {
-                self.provider.update_file(path, content).await
+        };
+        match verb {
+            ProviderFileVerb::Load => {
+                self.provider
+                    .load_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Load) => {
-                self.provider.load_file_background(path, content).await
+            ProviderFileVerb::Open => {
+                self.provider
+                    .open_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Open) => {
-                self.provider.open_file_background(path, content).await
-            }
-            (ProviderLane::Background, ProviderFileVerb::Update) => {
-                self.provider.update_file_background(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Load) => {
-                self.provider.load_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Open) => {
-                self.provider.open_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Update) => {
-                self.provider.update_file_normal(path, content).await
+            ProviderFileVerb::Update => {
+                self.provider
+                    .update_file_with_disposition(path, content, priority)
+                    .await
             }
         }
-        .map(|()| FileLoadDisposition::Forwarded)
     }
 
     pub(super) async fn publish_tsx(
@@ -241,7 +221,8 @@ impl ProjectSync {
             .await;
         if matches!(
             &result,
-            Ok(verter_type_runtime::traits::FileLoadDisposition::Shadowed)
+            Ok(verter_type_runtime::traits::FileLoadDisposition::Shadowed
+                | verter_type_runtime::traits::FileLoadDisposition::Held)
         ) {
             if virtual_path.is_some() && !virtual_was_live {
                 self.close_virtual_verter_types(tsx_path, lane).await?;

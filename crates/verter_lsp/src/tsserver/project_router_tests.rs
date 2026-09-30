@@ -465,6 +465,55 @@ async fn two_provider_aba_aliases_share_a_group_and_withdrawal_blocks_stale_deli
 }
 
 #[tokio::test]
+async fn a_held_project_engine_does_not_block_an_independent_hub_group() {
+    let fixture = batch_router_fixture().await;
+    let group_a: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/a/tsconfig.json"))
+        .cloned()
+        .collect();
+    let group_b: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/b/tsconfig.json"))
+        .cloned()
+        .collect();
+    let (arrived, release) = fixture.providers[0].block_next_carrier_batch();
+    let held = fixture.router.activate_carrier_members(&group_a);
+    tokio::pin!(held);
+    let independent = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+            .await
+            .expect("the held engine entered its batch");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.router.activate_carrier_members(&group_b),
+        )
+        .await
+        .expect("an independent hub group must not wait on the held engine")
+        .expect("project B is admitted");
+    };
+    tokio::select! {
+        biased;
+        _ = &mut held => panic!("the held group returned while its engine was blocked"),
+        _ = independent => {}
+    }
+    assert!(
+        fixture.providers[1]
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::ActivateCarrierMembers { .. })),
+        "project B ran its own bulk activation"
+    );
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), held)
+        .await
+        .expect("releasing the engine settles the held group")
+        .expect("project A is admitted once its engine accepts the batch");
+}
+
+#[tokio::test]
 async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered() {
     let fixture = batch_router_fixture().await;
     fixture

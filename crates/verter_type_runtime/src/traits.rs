@@ -164,6 +164,24 @@ pub enum AppliedContent {
     Applied(Arc<str>),
 }
 
+/// Classify one completed write against what the provider can prove it accepted.
+///
+/// [`AppliedContent::Uncertified`] is not a forward: a caller must not record it
+/// as an application receipt.
+#[must_use]
+pub fn disposition_for_applied_bytes(
+    applied: &AppliedContent,
+    content: &str,
+) -> FileLoadDisposition {
+    match applied {
+        AppliedContent::Applied(bytes) if bytes.as_ref() == content => {
+            FileLoadDisposition::Forwarded
+        }
+        AppliedContent::Applied(_) => FileLoadDisposition::Shadowed,
+        AppliedContent::NotApplied | AppliedContent::Uncertified => FileLoadDisposition::Held,
+    }
+}
+
 pub trait TypeProvider: Send + Sync {
     /// Preserve the load's disposition across router/wrapper boundaries.
     fn load_file_with_disposition<'a>(
@@ -184,7 +202,62 @@ pub trait TypeProvider: Send + Sync {
                     self.load_file_background(path, content).await?
                 }
             }
-            Ok(FileLoadDisposition::Forwarded)
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    /// Same contract as [`Self::load_file_with_disposition`] for an editor open.
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.open_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.open_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.open_file_background(path, content).await?
+                }
+            }
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    /// Same contract as [`Self::load_file_with_disposition`] for a content update.
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.update_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.update_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.update_file_background(path, content).await?
+                }
+            }
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
         })
     }
 

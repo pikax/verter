@@ -1367,6 +1367,12 @@ fn effective_javascript_check_policy(
     }
 }
 
+enum ManagedWrite {
+    Open,
+    Load,
+    Update,
+}
+
 impl TsgoCompositeProvider {
     /// Build the layer over a managed provider slot, the binding authority, and an
     /// optional exact-editor route.
@@ -1660,6 +1666,49 @@ impl TsgoCompositeProvider {
 
     /// Record the carrier's content into the SHARED overlay (a cheap in-memory insert
     /// off the managed lifecycle critical path) — a no-op when SHARED is not opted in.
+    async fn forward_managed(
+        &self,
+        path: &str,
+        content: &str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+        kind: ManagedWrite,
+    ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
+        use verter_type_runtime::traits::FileLoadDisposition;
+        let disposition = match kind {
+            ManagedWrite::Open => {
+                self.managed
+                    .open_file_with_disposition(path, content, priority)
+                    .await?
+            }
+            ManagedWrite::Load => {
+                self.managed
+                    .load_file_with_disposition(path, content, priority)
+                    .await?
+            }
+            ManagedWrite::Update => {
+                self.managed
+                    .update_file_with_disposition(path, content, priority)
+                    .await?
+            }
+        };
+        if disposition != FileLoadDisposition::Shadowed {
+            self.record_file_check_directive(path, content);
+            let shared_priority = match priority {
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground => {
+                    OverlayPriority::Interactive
+                }
+                verter_type_runtime::provider_hub::OverlayPriority::Normal => {
+                    OverlayPriority::Normal
+                }
+                verter_type_runtime::provider_hub::OverlayPriority::Background => {
+                    OverlayPriority::Background
+                }
+            };
+            self.shared_record(path, content, shared_priority);
+        }
+        Ok(disposition)
+    }
+
     fn shared_record(&self, path: &str, content: &str, priority: OverlayPriority) {
         if let Some(shared) = &self.shared {
             shared.record_content(path, content, priority);
@@ -1692,27 +1741,32 @@ impl TypeProvider for TsgoCompositeProvider {
         priority: verter_type_runtime::provider_hub::OverlayPriority,
     ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
         Box::pin(async move {
-            use verter_type_runtime::traits::FileLoadDisposition;
-            let disposition = self
-                .managed
-                .load_file_with_disposition(path, content, priority)
-                .await?;
-            if disposition != FileLoadDisposition::Shadowed {
-                self.record_file_check_directive(path, content);
-                let priority = match priority {
-                    verter_type_runtime::provider_hub::OverlayPriority::Foreground => {
-                        OverlayPriority::Interactive
-                    }
-                    verter_type_runtime::provider_hub::OverlayPriority::Normal => {
-                        OverlayPriority::Normal
-                    }
-                    verter_type_runtime::provider_hub::OverlayPriority::Background => {
-                        OverlayPriority::Background
-                    }
-                };
-                self.shared_record(path, content, priority);
-            }
-            Ok(disposition)
+            self.forward_managed(path, content, priority, ManagedWrite::Load)
+                .await
+        })
+    }
+
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            self.forward_managed(path, content, priority, ManagedWrite::Open)
+                .await
+        })
+    }
+
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            self.forward_managed(path, content, priority, ManagedWrite::Update)
+                .await
         })
     }
 
@@ -1741,9 +1795,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1752,9 +1810,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1763,9 +1825,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1784,9 +1850,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1795,9 +1865,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1806,9 +1880,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1827,9 +1905,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1838,9 +1920,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1849,9 +1935,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }
