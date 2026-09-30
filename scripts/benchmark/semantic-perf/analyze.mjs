@@ -210,6 +210,7 @@ export function probeMetrics(inv) {
   const cold = p.cold?.serverMs ?? null;
   return {
     spawnMs: r.phases?.spawnMs ?? null,
+    setupRoundTripMs: r.phases?.setupRoundTripMs ?? null,
     setupMs: setup,
     initMs: init,
     coldMs: cold,
@@ -258,9 +259,11 @@ export function verdict(verterValues, tscValues, resolution = 0) {
   const t = stats(tscValues);
   if (!v || !t) return { verdict: "n/a", ratio: null };
   const ratio = v.median > 0 ? t.median / v.median : null;
-  if (v.max + resolution < t.min) return { verdict: "verter", ratio };
-  if (t.max + resolution < v.min) return { verdict: "tsc", ratio };
-  return { verdict: "overlap", ratio };
+  // Below the timer's resolution a median is not a measurement to divide.
+  const ratioMeaningful = Math.min(v.median, t.median) >= resolution;
+  if (v.max + resolution < t.min) return { verdict: "verter", ratio, ratioMeaningful };
+  if (t.max + resolution < v.min) return { verdict: "tsc", ratio, ratioMeaningful };
+  return { verdict: "overlap", ratio, ratioMeaningful };
 }
 
 /** Printed answers longer than this are embedded in results.json as their digest. */

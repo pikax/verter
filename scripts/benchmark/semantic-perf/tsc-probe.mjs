@@ -12,7 +12,8 @@
 //
 // Phases, each timed separately and never overlapping:
 //   spawn     start the native server and connect (`new API`);
-//   setup     open the project (`updateSnapshot`): parse, bind, program;
+//   setup     open the project (`updateSnapshot`): read, parse, program
+//             (server-side time; the round trip is recorded beside it);
 //   init      getTypeAtPosition on `__BenchInit`'s name (absorbs one-time
 //             lazy checker initialisation);
 //   cold      getTypeAtPosition on `__Probe`'s name: the declared type of
@@ -76,7 +77,11 @@ async function main() {
   const projects = snapshot.getProjects();
   if (projects.length !== 1) throw new Error(`expected one project, got ${projects.length}`);
   const project = projects[0];
-  const setupMs = performance.now() - t;
+  const setupRoundTripMs = performance.now() - t;
+  // The snapshot's server-side time, like every request's: it excludes the
+  // IPC an in-process engine does not pay.
+  const setupServerMs =
+    api.getTimingInfo().recentRequests.filter((r) => r.method === "updateSnapshot").at(-1)?.serverTimeMs ?? null;
   const rootFiles = project.rootFiles.map((f) => f.replace(/\\/g, "/"));
 
   const request = (alias) => {
@@ -157,7 +162,7 @@ async function main() {
     tool: "tsc",
     serverPid,
     rootFiles,
-    phases: { spawnMs, setupMs, initMs: init.serverMs, teardownMs },
+    phases: { spawnMs, setupMs: setupServerMs, setupRoundTripMs, initMs: init.serverMs, teardownMs },
     init,
     probes,
     serverAfterRequests,

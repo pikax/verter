@@ -22,7 +22,7 @@ import {
   sourceTree,
 } from "./provenance.mjs";
 import { renderMarkdown } from "./report.mjs";
-import { SETTINGS, selectScenarios, tsconfigText } from "./scenarios.mjs";
+import { cliSource, SETTINGS, selectScenarios, tsconfigText } from "./scenarios.mjs";
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 import { validateRun } from "./validate.mjs";
@@ -168,6 +168,11 @@ function materialize(outDir, scenario, setting, opts, libText) {
   writeFileSync(join(dir, "lib.bench.d.ts"), libText);
   writeFileSync(join(dir, "scenario.ts"), scenario.source);
   writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
+  const cliDir = join(dir, "cli");
+  mkdirSync(cliDir, { recursive: true });
+  writeFileSync(join(cliDir, "lib.bench.d.ts"), libText);
+  writeFileSync(join(cliDir, "scenario.ts"), cliSource(scenario));
+  writeFileSync(join(cliDir, "tsconfig.json"), tsconfigText(setting));
   const baseJob = {
     schema: 1,
     dir,
@@ -185,6 +190,7 @@ function materialize(outDir, scenario, setting, opts, libText) {
       "lib.bench.d.ts": sha256Text(libText),
       "scenario.ts": sha256Text(scenario.source),
       "tsconfig.json": sha256Text(tsconfigText(setting)),
+      "cli/scenario.ts": sha256Text(cliSource(scenario)),
     },
     baseJob,
   };
@@ -223,10 +229,10 @@ function commandFor(arm, ctx, runBase) {
       };
     }
     case "tsc-cli":
-      return { argv: [typescript.exe, "-p", join(scenarioDir, "tsconfig.json"), "--extendedDiagnostics"], probeOut: null };
+      return { argv: [typescript.exe, "-p", join(scenarioDir, "cli", "tsconfig.json"), "--extendedDiagnostics"], probeOut: null };
     case "tsc-cli-1":
       return {
-        argv: [typescript.exe, "-p", join(scenarioDir, "tsconfig.json"), "--extendedDiagnostics", "--singleThreaded"],
+        argv: [typescript.exe, "-p", join(scenarioDir, "cli", "tsconfig.json"), "--extendedDiagnostics", "--singleThreaded"],
         probeOut: null,
       };
     default:

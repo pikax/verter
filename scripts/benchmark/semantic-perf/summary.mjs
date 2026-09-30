@@ -72,6 +72,7 @@ function probeArmSummary(arm, invs, reference, scenario) {
   out.memoryMetric = metrics.find((m) => m?.memoryMetric)?.memoryMetric ?? null;
   if (ARMS[arm].tool === "tsc") {
     out.metrics.spawnMs = metricStats(metrics, (x) => x?.spawnMs);
+    out.metrics.setupRoundTripMs = metricStats(metrics, (x) => x?.setupRoundTripMs);
     out.metrics.coldRoundTripMs = metricStats(metrics, (x) => x?.coldRoundTripMs);
     out.metrics.warmRoundTripMs = metricStats(metrics, (x) => x?.warmRoundTripMs);
     out.diagnosticCodes = metrics[0]?.diagnosticCodes ?? null;

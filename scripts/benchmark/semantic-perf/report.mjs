@@ -15,9 +15,10 @@ const fmtMb = (s) => {
   return s.n > 1 && s.max - s.min > 1048576 ? `${f(s.median)} [${f(s.min)}–${f(s.max)}]` : f(s.median);
 };
 const fmtRatio = (v) => {
-  if (!v || v.ratio == null) return "—";
+  if (!v || v.verdict === "n/a") return "—";
   const word = v.verdict === "verter" ? "Verter" : v.verdict === "tsc" ? "tsc" : "overlap";
-  return `${word} (×${v.ratio.toFixed(2)})`;
+  // A median below the timer's resolution has no meaningful ratio.
+  return v.ratio != null && Number.isFinite(v.ratio) && v.ratio > 0 && v.ratioMeaningful !== false ? `${word} (×${v.ratio.toFixed(2)})` : word;
 };
 const esc = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 
@@ -150,7 +151,7 @@ export function renderMarkdown(run) {
   if (cli.length) {
     push("## Whole program: tsc -p (reference only)", "");
     push(
-      "Verter exposes no whole-program diagnostic pass, so there is no Verter arm here: these rows show what tsc's full check of the same program costs, in both thread modes, next to the demanded-probe numbers above. `Memory used` is tsc's own counter, reported apart from the OS peak.",
+      "Verter exposes no whole-program diagnostic pass, so there is no Verter arm here: these rows show what tsc's full check costs, in both thread modes, for the scenario plus `declare const __bench_use: __Probe;` (a use, so the full check computes the probe's answer; tsc resolves an unused alias lazily). Wall times include process start. `Memory used` is tsc's own counter, reported apart from the OS peak.",
       "",
     );
     push("| scenario | setting | diagnostics | parallel wall | parallel check | parallel OS peak MB | parallel Memory used MB | single wall | single check | single OS peak MB | single Memory used MB |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");

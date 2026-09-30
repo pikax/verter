@@ -18,7 +18,7 @@ import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
 import { schedule } from "./run.mjs";
 import { sha256Text } from "./provenance.mjs";
-import { allScenarios, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import { allScenarios, cliSource, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
@@ -154,6 +154,7 @@ const INPUTS = {
   "lib.bench.d.ts": "lib-digest",
   "scenario.ts": sha256Text(SCENARIO.source),
   "tsconfig.json": sha256Text(tsconfigText(SETTINGS[0])),
+  "cli/scenario.ts": sha256Text(cliSource(SCENARIO)),
 };
 const PACKAGES = ["verter_bench", "verter_session", "verter_semantic", "verter_workspace", "verter_audit", "verter_type_expr", "verter_scheduler", "verter_compiler"];
 

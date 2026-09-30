@@ -33,9 +33,12 @@ same files on disk, byte for byte.
 | `tsc-cli-1` | `tsc -p --extendedDiagnostics --singleThreaded` | no: whole-program reference |
 
 Verter exposes no whole-program diagnostic pass, so the `tsc -p` arms have no
-Verter counterpart. They show what tsc's full check of the same program costs,
-in both thread modes, beside the demanded-probe numbers. They are never used
-as tsc's time for the demanded probe.
+Verter counterpart. They show what tsc's full check costs, in both thread
+modes, beside the demanded-probe numbers, for the scenario plus
+`declare const __bench_use: __Probe;`: tsc resolves an unused alias lazily, so
+without a use its full check would never compute the answer the probe arms
+demand (on the reversed 2,100-member relation it finishes in milliseconds and
+reports nothing). They are never used as tsc's time for the demanded probe.
 
 ### Phases
 
@@ -44,17 +47,18 @@ Both probe arms time the same phases, separately, never overlapping:
 | Phase | Verter | tsc |
 |---|---|---|
 | spawn | (process start is outside the probe; the supervisor's wall time covers it) | `new API()`: start the server, connect |
-| setup | read the files, build workspace and host, configure the project, upsert library and scenario | `updateSnapshot` (open the project: read, parse, bind, program) |
+| setup | read the files, build workspace and host, configure the project, upsert library and scenario | `updateSnapshot` (open the project), server-side time; the round trip is recorded beside it |
 | init | `resolve_named_symbol_with_audit(scenario, "__BenchInit")` | `getTypeAtPosition` on `__BenchInit`'s name |
 | cold | the same call for `__Probe` | the same request for `__Probe` |
 | observe | materialise and render the answer (outside every timer) | `typeToString`, error-type flag, union members (outside every timer) |
 | warm | the cold request repeated in the same process | the same |
 | teardown | drop the host | close the API (terminates the server): reported, not compared |
 
-**first answer** = setup + init + cold. Each tool defers different work to its
-first request (tsc binds and builds its checker lazily; Verter parses lazily),
-so the split between setup, init and cold is not comparable across tools, but
-their sum is: it is the time from an opened project to the delivered answer.
+**first answer** = setup + init + cold. Each tool splits its work between
+opening a project and answering its first request in its own way (what is
+parsed, bound or indexed eagerly and what lazily), so the split between setup,
+init and cold is not comparable across tools, but their sum is: it is the
+time from opening the project to the delivered answer.
 The report shows the split and the sum, and the verdict on the sum is the
 robust one.
 

@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 
 import { ARMS, compactProbeRecord, invocationEnd, parseCli, probeAnswer } from "./analyze.mjs";
 import { buildProblems, RECORDED_PACKAGES, sha256File, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
-import { allScenarios, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { summarize } from "./summary.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
 
@@ -95,6 +95,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     }
     if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source)) fail(`${key}: scenario.ts is not the catalog's source`);
     if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting))) fail(`${key}: tsconfig.json is not the catalog's`);
+    if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario))) fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
     const measured = expected.scenarios?.[cell.id];
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {

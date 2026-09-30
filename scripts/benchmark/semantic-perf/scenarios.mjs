@@ -32,6 +32,18 @@ function scenario(id, family, note, body, probe, extra = {}) {
   return { id, family, note, probe, source: moduleText(body, probe), ...extra };
 }
 
+/**
+ * The whole-program (`tsc -p`) arms check the scenario plus a use of the
+ * probe: tsc resolves an unused alias lazily, so without a use its full check
+ * never computes the answer the probe arms demand.
+ */
+export const CLI_USE = "declare const __bench_use: __Probe;\n";
+
+/** The module the whole-program arms check. */
+export function cliSource(scenario) {
+  return scenario.source + CLI_USE;
+}
+
 /** Every scenario, in catalog order. */
 export function allScenarios() {
   const out = [];
