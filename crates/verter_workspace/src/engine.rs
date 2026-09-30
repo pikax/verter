@@ -2393,6 +2393,8 @@ impl Engine {
             }
             std::thread::yield_now();
         }
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::PublicationGateWait);
         let _publication = self.resolution_world_write.lock();
         self.capture_resolution_world(population)
             .expect("no world writer is inside its window while the publication gate is held")
@@ -4025,6 +4027,10 @@ impl Engine {
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
             let session_domain = captured.session_domain.clone();
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::PublicationGateWait,
+            );
             let (_publication, _session_publication) = {
                 crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
