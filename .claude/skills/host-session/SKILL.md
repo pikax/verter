@@ -157,6 +157,15 @@ hub-issued admission binds the serving epoch and basis, so a replacement
 re-admits fresh. No admission cache survives beside the hub (the per-composite
 `CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
 are `ProviderHub::bound_project` + the hub request cache).
+A basis drift observed AFTER a provider write landed splits on what drifted. A
+content-only drift (another document's edit while the engine was awaited) leaves
+the publication that decided membership unchanged, so the healthy engine holds
+nothing the live basis excludes: the settlement is refused `StaleBasis`, nothing
+is recorded, the engine keeps serving, and the issuer's fresh admission
+re-applies idempotently (the direct shared write additionally closes its one
+path). Only a replaced publication or project generation — where the engine may
+now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
+project engine on every concurrent edit is the failure this split prevents.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

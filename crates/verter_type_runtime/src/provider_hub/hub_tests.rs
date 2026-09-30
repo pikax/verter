@@ -4329,3 +4329,140 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
         "a basis-only drift must not retire or crash-signal the shared lazy attachment"
     );
 }
+
+/// A CONTENT-ONLY basis drift observed after a successful actor-applied
+/// overlay (another document's edit landing while the engine was awaited)
+/// must not take a healthy explicit engine down. The publication that decided
+/// the unit's membership is unchanged, so the engine holds nothing the live
+/// basis excludes: the settlement is refused as `StaleBasis`, the SAME engine
+/// keeps serving, and a fresh admission re-applies on it.
+#[tokio::test]
+async fn applied_overlay_survives_a_content_only_drift_without_restarting_the_engine() {
+    use super::{AdmissionRefusal, OverlayMutation, ProjectBasis, ProjectBindingInput};
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let serving_epoch = harness.provider.serving_epoch();
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let registrations = |provider: &MockProvider| {
+        provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::RegisterCarrierMember { .. }))
+            .count()
+    };
+    // The live basis advances its content generation by one for every
+    // registration that has LANDED on the engine: each check before a write
+    // sees the basis it was admitted at, the check after it sees a drift.
+    let reader = {
+        let publication = Arc::clone(&publication);
+        let engine = engine.clone();
+        Arc::new(move || {
+            let landed = engine
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MockCall::RegisterCarrierMember { .. }))
+                .count() as u64;
+            Some(ProjectBasis::new(Arc::clone(&publication), 1 + landed, 1))
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let register = |content: &str| OverlayMutation::RegisterCarrier {
+        source_path: source.into(),
+        companion_path: unit.as_str().into(),
+        content: content.into(),
+        project_file_name: project.into(),
+    };
+    let admit = |content_generation: u64| {
+        let witness = harness
+            .provider
+            .bind_project(ProjectBindingInput::new(
+                source.into(),
+                project.into(),
+                Vec::new(),
+                ProjectBasis::new(Arc::clone(&publication), content_generation, 1),
+                Arc::clone(&reader),
+            ))
+            .expect("the live basis binds");
+        harness
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+            .expect("the unit is a member of the bound publication")
+    };
+
+    let refusal = harness
+        .provider
+        .apply_overlay(&admit(1), register("first"))
+        .await
+        .expect_err("a drift after the write refuses the settlement");
+    assert!(
+        matches!(refusal, AdmissionRefusal::StaleBasis),
+        "a content-only drift is a StaleBasis refusal: {refusal:?}"
+    );
+    assert_eq!(registrations(&engine), 1, "the write landed exactly once");
+
+    // Let a (wrongly) armed crash monitor run: it would retire the engine.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        harness.provider.serving_epoch(),
+        serving_epoch,
+        "a content-only drift must not retire or crash-signal the healthy engine"
+    );
+
+    // The retry binds the drifted basis and reaches the SAME engine.
+    let _ = harness
+        .provider
+        .apply_overlay(&admit(2), register("second"))
+        .await;
+    assert_eq!(
+        registrations(&engine),
+        2,
+        "the fresh admission re-applies on the engine that kept serving"
+    );
+    assert_eq!(
+        harness.notifier.started().len(),
+        1,
+        "no replacement engine was started"
+    );
+    assert!(
+        replacement.calls().is_empty(),
+        "no replacement engine received work"
+    );
+}

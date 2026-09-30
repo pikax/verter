@@ -1223,6 +1223,22 @@ async fn run_actor<P>(
                                                     epoch: Some(serving.epoch),
                                                 })
                                             }
+                                            Err(AdmissionRefusal::StaleBasis)
+                                                if admissions
+                                                    .iter()
+                                                    .all(admission::membership_inputs_current) =>
+                                            {
+                                                // A CONTENT-ONLY drift (another document's edit
+                                                // landed while the engine was awaited). The
+                                                // publication that decided membership is unchanged,
+                                                // so the healthy engine holds nothing the live
+                                                // basis excludes: retiring it would restart a
+                                                // whole project engine on every concurrent edit.
+                                                // Only the settlement is refused — nothing is
+                                                // recorded as applied or replayable, and the
+                                                // issuer's fresh admission re-applies idempotently.
+                                                Err(AdmissionRefusal::StaleBasis)
+                                            }
                                             Err(reason) => {
                                                 // A publication raced the forward. The engine
                                                 // may now contain an unadmitted unit, so it cannot

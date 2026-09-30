@@ -324,6 +324,19 @@ pub(super) fn check_current<P: ?Sized>(
     check_witness_current(shared, &admission.witness)
 }
 
+/// Whether the inputs that DECIDED `admission`'s generated-unit membership —
+/// the exact publication and the project generation — are still the live
+/// ones. `true` under a content-only drift: the proof was derived from this
+/// very publication, so the admitted units are still members of the bound
+/// project and an engine holding them holds nothing the live basis excludes.
+pub(super) fn membership_inputs_current(admission: &AdmittedRequest) -> bool {
+    let input = &admission.witness.0.input;
+    (input.current_basis)().is_some_and(|live| {
+        Arc::ptr_eq(&live.publication, &input.basis.publication)
+            && live.project_generation == input.basis.project_generation
+    })
+}
+
 fn check_witness_current<P: ?Sized>(
     shared: &Shared<P>,
     witness: &ProjectWitness,
