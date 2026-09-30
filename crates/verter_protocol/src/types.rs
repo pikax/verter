@@ -1155,6 +1155,8 @@ pub enum FfiSurfacePartialReason {
     /// A conditional type the checker decides stands undecided where its
     /// answer should be.
     UndecidedConditional,
+    /// The connected demand exhausted its construction-byte allowance.
+    ConnectedMemoryLimit,
 }
 
 #[derive(Serialize, Clone)]
@@ -1296,6 +1298,7 @@ pub enum FfiResolutionDiagnosticKind {
     CyclicInstantiation,
     InstantiationError,
     EmptyUnionArm,
+    ConnectedMemoryLimit,
 }
 
 #[derive(Serialize, Clone)]

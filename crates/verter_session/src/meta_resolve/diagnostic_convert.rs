@@ -52,6 +52,11 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
             context: format!("connected-query-depth-limit@{:?}", root),
             property_name: None,
         },
+        ShallowDiagnostic::ConnectedMemoryLimit { root } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::ConnectedMemoryLimit,
+            context: format!("connected-memory-limit@{:?}", root),
+            property_name: None,
+        },
         ShallowDiagnostic::DuplicateArmShortCircuited { node } => ExpansionDiagnostic {
             reason: ExpansionStopReason::IdempotentArm,
             context: format!("duplicate-arm-short-circuited@{:?}", node),

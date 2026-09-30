@@ -720,6 +720,7 @@ pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
     let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
         || reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT)
     {

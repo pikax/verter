@@ -288,6 +288,7 @@ enum ExprMemoKey {
     },
     Infer {
         name: String,
+        constraint_ptr: usize,
     },
     Rest {
         inner_ptr: usize,
@@ -417,7 +418,10 @@ impl ExprMemoKey {
                 expressions_ptr: slice_ptr_id(expressions),
                 expressions_len: expressions.len(),
             },
-            TypeExpr::Infer { name } => Self::Infer { name: name.clone() },
+            TypeExpr::Infer { name, constraint } => Self::Infer {
+                name: name.clone(),
+                constraint_ptr: option_arc_ptr_id(constraint.as_ref()),
+            },
             TypeExpr::Rest(inner) => Self::Rest {
                 inner_ptr: arc_ptr_id(inner),
             },
@@ -1043,9 +1047,26 @@ impl GraphBuilder {
                     raw: self.string_id(&raw),
                 }
             }
-            TypeExpr::Infer { name } => GraphNode::Infer {
+            TypeExpr::Infer {
+                name,
+                constraint: None,
+            } => GraphNode::Infer {
                 name: self.string_id(name),
             },
+            // The component-meta graph's infer node carries no constraint;
+            // a constrained declaration is the opaque `Unknown` wire node
+            // with its display text (never an unconstrained `infer`).
+            TypeExpr::Infer {
+                constraint: Some(_),
+                ..
+            } => {
+                let raw = verter_type_expr::render_type_expr_display(expr)
+                    .map(|rendered| rendered.text)
+                    .unwrap_or_else(|_| String::from("infer"));
+                GraphNode::Unknown {
+                    raw: self.string_id(&raw),
+                }
+            }
             TypeExpr::Rest(inner) => GraphNode::Rest {
                 inner: self.node_id(inner),
             },

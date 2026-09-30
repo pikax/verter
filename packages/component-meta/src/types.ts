@@ -114,7 +114,8 @@ export interface TypeExpansionDiagnostic {
     | "cyclicReference"
     | "cyclicInstantiation"
     | "instantiationError"
-    | "emptyUnionArm";
+    | "emptyUnionArm"
+    | "connectedMemoryLimit";
   context: string;
   propertyName?: string;
 }

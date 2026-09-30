@@ -78,13 +78,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
-    provisional_relate_step, redischarge_is_stable, select_inference_candidates,
-    CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
-    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
-    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
+    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
+    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
+    ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
+    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -182,26 +182,19 @@ enum NakedUnionInference {
     },
 }
 
-/// The shape of an in-scope conditional-`infer` pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InferPatternShape {
-    /// `T extends infer X`.
-    Bare,
-    /// `T extends { a: infer U, .. }` — direct `Infer` member values.
-    ObjectProps,
-    /// `T extends [infer H, .., ...infer Rest]` — direct `Infer` elements.
-    TupleHeadTail,
-    /// `T extends (infer U)[]` — a direct `Infer` array element (the
-    /// `Flatten` class).
-    ArrayElement,
-    /// `T extends (p: infer U, ..) => infer R` — direct `Infer`
-    /// parameter / return positions.
-    Function,
-    /// `{ [P in keyof infer T]: X }` with no key remap.
-    ReverseHomomorphicMapped,
-    /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
-    /// template literal pattern.
-    TemplateLiteral,
+/// The `infer` declarations a pattern holds, as the relation infers them.
+pub(crate) enum InferInventory {
+    /// Each declaration, in discovery order, reached through structure the
+    /// relation infers through: object members and their signatures and
+    /// index signatures, signature parameters, returns and predicates,
+    /// array and tuple elements, union and intersection members, a
+    /// reference's type arguments, a template literal's holes.
+    Sites(Vec<SemanticNodeId>),
+    /// A declaration sits below structure the relation does not infer
+    /// through (an operator such as `keyof`, a mapped type other than a root
+    /// reverse mapping, a nested conditional that declares its own):
+    /// an explicit capability gap.
+    Unsupported,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -263,18 +256,16 @@ pub(super) struct InferParamSite {
     priority: InferenceCandidatePriority,
 }
 
-/// The detected pattern payload: shape plus the one frozen session setup
-/// shared by key construction and session opening.
+/// The detected pattern payload: the one frozen session setup shared by key
+/// construction and session opening.
 #[derive(Debug, Clone)]
 pub(crate) struct InferPatternInfo {
-    pub(crate) shape: InferPatternShape,
     setup: InferenceSessionSetup,
     reverse_homomorphic: Option<ReverseHomomorphicSpec>,
 }
 
 impl InferPatternInfo {
     fn new(
-        shape: InferPatternShape,
         sites: Vec<InferParamSite>,
         reverse_homomorphic: Option<ReverseHomomorphicSpec>,
     ) -> Self {
@@ -296,7 +287,6 @@ impl InferPatternInfo {
                 .into_boxed_slice(),
         );
         Self {
-            shape,
             setup: InferenceSessionSetup::new(
                 infos,
                 VariancePhase::Covariant,
@@ -805,12 +795,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         negative: bool,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
@@ -874,12 +866,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub fn mixed_binding_scc_discharge_for_tests(
         &self,
     ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
         let member_key = self.relate_key_for(string, number);
@@ -924,12 +918,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// exposes the consumed binding snapshot and the real stability gate.
     #[cfg(test)]
     pub fn binding_scc_substitution_edge_for_tests(&self) -> (Arc<[InferBinding]>, bool) {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
         let graph = self.graph();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -1411,6 +1407,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             (top, chain)
         };
+        // One more structured comparison of the chain's check: past the
+        // checker's allowance the check overflows, false (TS2859).
+        let exhausted = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let counts = &mut txn.relation.chain_comparisons;
+            match counts
+                .iter_mut()
+                .rev()
+                .find(|(base, _)| *base == chain.base)
+            {
+                Some((_, comparisons)) => comparisons.record().is_err(),
+                None => false,
+            }
+        };
+        if exhausted {
+            self.overflow_relation_chain(&chain);
+            return Some(RelationResult::NotAssignable);
+        }
+        // The pair's frame, memo entry and proof are reserved before the
+        // pair is related; a refusal is resource incompleteness.
+        if self
+            .connected_demand
+            .reserve_bytes(super::connected_demand::RELATION_PAIR_BYTES)
+            .is_err()
+        {
+            self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+            return Some(RelationResult::Unknown);
+        }
         let depth = chain.depth + 1;
         let mut expanding = chain.expanding;
         {
@@ -1561,6 +1585,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// explicit stack, each alias once (a member naming an alias already
     /// read stays as it is written). `members` itself when none names
     /// such an alias.
+    /// The target arms a union source's arms first relate to by position
+    /// (`eachTypeRelatedToType`): the target union's arms — without
+    /// `undefined` when the source holds none
+    /// (`getUndefinedStrippedTargetIfNeeded`) — when the source has a
+    /// multiple of their number. `None` otherwise.
+    fn positional_union_targets(
+        &self,
+        source_members: &[SemanticNodeId],
+        target: SemanticNodeId,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.graph();
+        let target_members = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return None,
+        };
+        let target_members = self.relation_union_members(&target_members);
+        let is_undefined = |node: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )
+        };
+        let positions: Vec<SemanticNodeId> = if !source_members.iter().any(is_undefined)
+            && target_members.iter().any(is_undefined)
+        {
+            target_members
+                .iter()
+                .copied()
+                .filter(|member| !is_undefined(member))
+                .collect()
+        } else {
+            target_members.to_vec()
+        };
+        (!positions.is_empty()
+            && source_members.len() >= positions.len()
+            && source_members.len().is_multiple_of(positions.len()))
+        .then_some(positions)
+    }
+
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
         let graph = self.graph();
         let mut seen: FxHashSet<DeclIdentity> = FxHashSet::default();
@@ -2518,6 +2581,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(test)]
         MOST_OPEN_FRAMES.with(|most| most.set(most.get().max(idx + 1)));
         txn.note_inline_flight(idx, inline_flight);
+        // A relation frame with no relation frame below it starts a chain —
+        // one check — whose comparisons count from zero; a chain at or above
+        // this index has closed.
+        if parent_chain.is_none() {
+            let counts = &mut txn.relation.chain_comparisons;
+            counts.retain(|(base, _)| *base < idx);
+            counts.push((idx, Default::default()));
+        }
         if let Some(state) = txn
             .reentry_mut()
             .frame_mut_for_update(idx)
@@ -4147,11 +4218,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key.inference_context == expected
     }
 
-    /// Detect an in-scope conditional-`infer` pattern on `target`. Direct
-    /// infer occupants are supported in bare, object, tuple, array, and
-    /// function positions. An exact unremapped homomorphic mapped target
-    /// enables reverse projection; all other deeper nesting stays deferred.
-    /// Results are cached per target node on the transaction.
+    /// Detect an in-scope conditional-`infer` pattern on `target`: a bare
+    /// `infer`, an exact unremapped homomorphic mapped target (reverse
+    /// projection), or the declarations its inventory reaches
+    /// ([`Self::infer_inventory`]). Results are cached per target node on the
+    /// transaction.
     pub(super) fn relation_pattern_info(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         if let Some(cached) = self
             .dispatch_txn
@@ -4171,51 +4242,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
         computed
     }
 
-    /// The `infer` placeholders `root` holds through structure alone —
-    /// object members and their signatures, signature parameters and
-    /// returns, array and tuple elements, union arms — in discovery order.
-    /// `None` when a placeholder sits anywhere else (a conditional or
-    /// mapped type scoping its own, an application, an operator), where
-    /// the relation that deposits into it is not the structural one.
-    pub(super) fn structural_infer_sites(
-        &self,
-        root: SemanticNodeId,
-    ) -> Option<Vec<SemanticNodeId>> {
+    /// The `infer` declarations `pattern` holds ([`InferInventory`]): one
+    /// walk over the pattern, each node read once. A declaration's
+    /// constraint is read where the conditional is written, so no
+    /// declaration of the pattern sits in it.
+    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> InferInventory {
         let graph = self.graph();
         let mut sites = Vec::new();
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack = vec![root];
+        let mut stack = vec![pattern];
         while let Some(node) = stack.pop() {
             if !visited.insert(node) {
                 continue;
             }
-            let data = graph.node_data(node)?;
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
             match data.as_ref() {
-                SemanticNodeData::Infer { .. } => sites.push(node),
+                SemanticNodeData::Infer { .. } => {
+                    if !sites.contains(&node) {
+                        sites.push(node);
+                    }
+                }
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
                 SemanticNodeData::Object(surface) => {
                     stack.extend(surface.positive_members().iter().map(|member| member.value));
                     stack.extend(surface.call_signatures.iter().copied());
                     stack.extend(surface.construct_signatures.iter().copied());
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if surface
+                        .keyspace
+                        .is_some_and(|keyspace| self.subtree_contains_infer(keyspace))
+                    {
+                        return InferInventory::Unsupported;
+                    }
                 }
                 SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
-                } if type_parameters.is_empty() => {
+                } => {
+                    if type_parameters.iter().any(|parameter| {
+                        parameter
+                            .constraint
+                            .is_some_and(|constraint| self.subtree_contains_infer(constraint))
+                            || parameter
+                                .default
+                                .is_some_and(|default| self.subtree_contains_infer(default))
+                    }) {
+                        return InferInventory::Unsupported;
+                    }
                     stack.extend(params.iter().map(|param| param.ty));
                     stack.push(*return_type);
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
-                _ if self.subtree_contains_infer(node) => return None,
+                // A source infers into every member of an intersection.
+                SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.members_arc().iter().copied());
+                }
+                // A builtin utility (`Uppercase<infer U>`, `Partial<infer T>`)
+                // is an operation the relation does not infer through.
+                SemanticNodeData::InstantiationRef { base, .. }
+                    if base.canonical_id.as_ref() == "__builtin__" =>
+                {
+                    if self.subtree_contains_infer(node) {
+                        return InferInventory::Unsupported;
+                    }
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
+                // A template literal infers into the holes that are
+                // declarations themselves.
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for hole in expressions.iter() {
+                        if matches!(
+                            graph.node_data(*hole).as_deref(),
+                            Some(SemanticNodeData::Infer { .. })
+                        ) {
+                            stack.push(*hole);
+                        } else if self.subtree_contains_infer(*hole) {
+                            return InferInventory::Unsupported;
+                        }
+                    }
+                }
+                _ if self.subtree_contains_infer(node) => return InferInventory::Unsupported,
                 _ => {}
             }
         }
-        Some(sites)
+        InferInventory::Sites(sites)
     }
 
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
@@ -4226,7 +4351,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
-                InferPatternShape::ReverseHomomorphicMapped,
                 vec![InferParamSite {
                     node: spec.base_infer,
                     name,
@@ -4235,177 +4359,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(spec),
             ));
         }
-        match graph.node_data(target).as_deref() {
-            Some(SemanticNodeData::Infer { name, .. }) => Some(InferPatternInfo::new(
-                InferPatternShape::Bare,
+        if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
+            return Some(InferPatternInfo::new(
                 vec![InferParamSite {
                     node: target,
                     name: Arc::clone(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
                 None,
-            )),
-            Some(SemanticNodeData::Object(view)) => {
-                let mut sites = Vec::new();
-                for member in view.positive_members().iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(member.value).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: member.value,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    } else {
-                        // `infer` placeholders nested in a member through
-                        // structure alone (a method's callback parameter)
-                        // are sites of the same pattern.
-                        for node in self
-                            .structural_infer_sites(member.value)
-                            .unwrap_or_default()
-                        {
-                            if let Some(SemanticNodeData::Infer { name, .. }) =
-                                graph.node_data(node).as_deref()
-                            {
-                                sites.push(InferParamSite {
-                                    node,
-                                    name: Arc::clone(name),
-                                    priority: InferenceCandidatePriority::Argument,
-                                });
-                            }
-                        }
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::ObjectProps, sites, None))
-            }
-            Some(SemanticNodeData::Tuple { elements, .. }) => {
-                let mut sites = Vec::new();
-                for element in elements.iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(element.value).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: element.value,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::TupleHeadTail, sites, None))
-            }
-            Some(SemanticNodeData::Array { element, .. }) => {
-                if let Some(SemanticNodeData::Infer { name, .. }) =
-                    graph.node_data(*element).as_deref()
-                {
-                    Some(InferPatternInfo::new(
-                        InferPatternShape::ArrayElement,
-                        vec![InferParamSite {
-                            node: *element,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        }],
-                        None,
-                    ))
-                } else {
-                    None
-                }
-            }
-            Some(SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            }) => {
-                let mut sites = Vec::new();
-                for param in params.iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(param.ty).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: param.ty,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    } else {
-                        // A function parameter may itself be a variadic
-                        // tuple/array inference pattern (`...args:
-                        // [...infer R]`). The function relation flips the
-                        // occurrence to contravariant; the nested
-                        // container reducer deposits into these exact
-                        // sites.
-                        match graph.node_data(param.ty).as_deref() {
-                            Some(SemanticNodeData::Tuple { elements, .. }) => {
-                                for element in elements.iter() {
-                                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                                        graph.node_data(element.value).as_deref()
-                                    {
-                                        sites.push(InferParamSite {
-                                            node: element.value,
-                                            name: Arc::clone(name),
-                                            priority: InferenceCandidatePriority::Argument,
-                                        });
-                                    }
-                                }
-                            }
-                            Some(SemanticNodeData::Array { element, .. }) => {
-                                if let Some(SemanticNodeData::Infer { name, .. }) =
-                                    graph.node_data(*element).as_deref()
-                                {
-                                    sites.push(InferParamSite {
-                                        node: *element,
-                                        name: Arc::clone(name),
-                                        priority: InferenceCandidatePriority::Argument,
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                if let Some(SemanticNodeData::Infer { name, .. }) =
-                    graph.node_data(*return_type).as_deref()
-                {
-                    sites.push(InferParamSite {
-                        node: *return_type,
-                        name: Arc::clone(name),
-                        priority: InferenceCandidatePriority::ReturnType,
-                    });
-                }
-                // `x is infer U`: the predicate target is inferred from the
-                // source predicate where the return would be.
-                if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(target).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: target,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::ReturnType,
-                        });
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
-            }
-            Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
-                let sites: Vec<InferParamSite> = expressions
-                    .iter()
-                    .filter_map(|hole| match graph.node_data(*hole).as_deref() {
-                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
-                            node: *hole,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::TemplateLiteral, sites, None))
-            }
-            _ => None,
+            ));
         }
+        let InferInventory::Sites(nodes) = self.infer_inventory(target) else {
+            return None;
+        };
+        let sites: Vec<InferParamSite> = nodes
+            .into_iter()
+            .filter_map(|node| match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                    node,
+                    name: Arc::clone(name),
+                    priority: InferenceCandidatePriority::Argument,
+                }),
+                _ => None,
+            })
+            .collect();
+        (!sites.is_empty()).then(|| InferPatternInfo::new(sites, None))
     }
 
     /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
@@ -5093,6 +5071,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> RelationResult {
         let mut any_unknown = false;
         for (source, target) in alternatives {
+            // Each alternative is relation work of its own, whether or not
+            // it enters a worklist.
+            if !self.charge_relation_work(1) {
+                return RelationResult::Unknown;
+            }
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
             let result = if excess_prepass_completed {
@@ -5215,6 +5198,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The source signature a relation of `source` to the signature
+    /// `target` compares. A generic source relates as it is instantiated
+    /// in the target's context (`compareSignaturesRelated`); a relation of
+    /// comparability (which erases generics) keeps the source as it is.
+    /// Under an inference session a generic source infers as its base
+    /// signature (`inferFromSignatures` reads `getBaseSignature`: `<T>(x:
+    /// T) => T` against `(...a: infer A) => infer R` infers `[x: unknown]`
+    /// and `unknown`) — unless the target is generic itself: its own type
+    /// parameters are no inference site of the session, so the pair relates
+    /// as it does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
+    /// U) => U, x: T)`). `None` when the base signature cannot be read.
+    fn signature_relation_source(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> Option<SemanticNodeId> {
+        if self.current_relation_kind() == RelationKind::Comparable {
+            return Some(source);
+        }
+        if !self.relation_session_active() || self.signature_is_generic(target) {
+            return Some(
+                self.instantiate_signature_in_context_of(source, target, kind)
+                    .unwrap_or(source),
+            );
+        }
+        if self.signature_is_generic(source) {
+            return self.base_signature(source);
+        }
+        Some(source)
+    }
+
     /// Whether `signature` declares type parameters of its own.
     fn signature_is_generic(&self, signature: SemanticNodeId) -> bool {
         matches!(
@@ -5233,12 +5248,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// tried last first.
     fn infers_from_last_source_signature(&self, target: SemanticNodeId) -> bool {
         self.relation_session_active()
-            && (matches!(
+            && matches!(
                 self.graph().node_data(target).as_deref(),
                 Some(SemanticNodeData::Signature { .. })
-            ) || self
-                .relation_pattern_info(target)
-                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function))
+            )
     }
 
     /// The two slices a fixed-length `remainder` tuple splits into against
@@ -5592,10 +5605,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .active_session()
             .map(|session| session.projection_candidates_since(checkpoint))
             .unwrap_or_default();
-        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
-        let projection_recovered = !candidate_nodes.is_empty();
+        let winning = super::inference::winning_candidates(&candidates);
+        let projection_recovered = !winning.is_empty();
         let recovered = if projection_recovered {
-            self.relation_combine_candidates(&candidate_nodes, variance)
+            let (candidate_nodes, variance) = winning.inferred_from();
+            self.relation_combine_candidates(candidate_nodes, variance)
         } else {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
@@ -5689,6 +5703,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::Infer {
             name: base_name,
             binder: base_binder,
+            ..
         }) = graph.node_data(base_infer).as_deref().cloned()
         else {
             return Vec::new();
@@ -6361,10 +6376,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn relation_budget_limit(&self) -> u64 {
-        (self.graph().node_count() as u64)
-            .saturating_mul(10)
-            .max(4096)
+    /// Charge `units` of relation work to the connected-work ledger, the
+    /// one operational envelope every evaluation shares. The checker has no
+    /// work allowance of its own below its relation-complexity limit, so a
+    /// refusal is resource incompleteness, never a verdict: it poisons the
+    /// frame with the typed cap the budget outcome reports and the caller
+    /// answers `Unknown`.
+    fn charge_relation_work(&self, units: u64) -> bool {
+        let units = usize::try_from(units).unwrap_or(usize::MAX);
+        if self.connected_demand.charge_units(units).is_ok() {
+            return true;
+        }
+        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+        false
     }
 
     fn note_relation_budget_exceeded(&self, budget_limit: u64) {
@@ -6447,16 +6471,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Pair descent, union alternatives, and member enumeration share one
         // iterative envelope; descendants never open a fresh relation budget.
         let graph = self.graph();
-        let budget_limit = if self
+        let forced_exhaustion = self
             .ctx
             .host_for_fact_tracer_install()
             .relation_knobs
             .force_budget_exhaustion
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.relation_budget_limit()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let charge = |units: u64| {
+            if forced_exhaustion {
+                self.note_relation_budget_exceeded(0);
+                return false;
+            }
+            self.charge_relation_work(units)
         };
         // The pair is canonicalized (lesser node first) once, before any
         // descent: comparability is answer-symmetric, so the frame-local
@@ -6502,7 +6528,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // forced-exhaustion knob bypasses the fast path entirely so a
         // tripped budget is still reported as the TYPED cap outcome, never
         // silently decided.
-        if budget_limit > 0 {
+        if !forced_exhaustion {
             // bounded-loop: at most one nominal widen retry — O(1) graph reads, no allocation.
             for _ in 0..2 {
                 if let Some(leaf) =
@@ -6543,7 +6569,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        let mut budget_used = 0u64;
         let mut work = vec![Work::Eval(source, target)];
         let mut results = Vec::new();
         let mut active = FxHashSet::default();
@@ -6578,9 +6603,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(result);
                 }
                 Work::Eval(source, target) => {
-                    budget_used = budget_used.saturating_add(1);
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    if !charge(1) {
                         return RelationResult::Unknown;
                     }
                     let source = match self.unwrap_identity_carrier_for_relation(source) {
@@ -6812,13 +6835,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                         self.intern_normalized_union_or_intersection(&[value, undefined], true)
                     };
-                    budget_used = budget_used.saturating_add(
+                    if !charge(
                         (source_view.positive_members().len() as u64)
                             .saturating_mul(target_width)
                             .saturating_mul(2),
-                    );
-                    if budget_used > budget_limit {
-                        self.note_relation_budget_exceeded(budget_limit);
+                    ) {
                         return RelationResult::Unknown;
                     }
                     work.push(
@@ -6829,17 +6850,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         },
                     );
                     for source_member in source_view.positive_members() {
-                        budget_used = budget_used.saturating_add(1);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(1) {
                             return RelationResult::Unknown;
                         }
                         let Some(member_key) = source_member.key.cloned_known() else {
                             continue;
                         };
-                        budget_used = budget_used.saturating_add(target_width);
-                        if budget_used > budget_limit {
-                            self.note_relation_budget_exceeded(budget_limit);
+                        if !charge(target_width) {
                             return RelationResult::Unknown;
                         }
                         let crate::semantic_query::SurfaceKeyProjection::Exact(target_member) =
@@ -8303,8 +8320,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
-        // Two references to one generic declaration relate by their type
-        // arguments' variance before any structural comparison.
+        // Two references to one generic declaration infer from, and relate
+        // by, their type arguments' variance before any structural
+        // comparison.
+        if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            return result;
+        }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }
@@ -8350,19 +8371,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Function pattern, a check still riding a deferred /
         // `InstantiationRef` shell materialises through the oracle demand
         // so positional binding can zip its signature.
-        if self.relation_session_active() {
-            if let Some(pattern) = self.relation_pattern_info(target) {
-                if pattern.shape == InferPatternShape::Function {
-                    let materialised = self.materialise_function_infer_check(source);
-                    if materialised != source {
-                        return self.decide_relation(
-                            materialised,
-                            target,
-                            bindings,
-                            intersection_target_arm,
-                        );
-                    }
-                }
+        if self.relation_session_active()
+            && self.relation_pattern_info(target).is_some()
+            && matches!(
+                self.graph().node_data(target).as_deref(),
+                Some(SemanticNodeData::Signature { .. })
+            )
+        {
+            let materialised = self.materialise_function_infer_check(source);
+            if materialised != source {
+                return self.decide_relation(
+                    materialised,
+                    target,
+                    bindings,
+                    intersection_target_arm,
+                );
             }
         }
         self.decide_relation(source, target, bindings, intersection_target_arm)
@@ -8416,12 +8439,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The iterative structural worklist driver. Consumes a worklist of
     /// pairs and reducers, combining the final [`RelationResult`].
     ///
-    /// **Termination budget.** The driver caps total work at
-    /// `10 × graph.node_count()` with a minimum floor of 4096 entries.
-    /// Exceeding the budget poisons the frame with the typed
-    /// [`RecursionOrBudgetCap`] (the public `BudgetExceeded` outcome) and
-    /// yields `Unknown` — the SCC gate routes the whole component through
-    /// ReturnOnly.
+    /// **Termination.** Every worklist step is charged to the
+    /// connected-work ledger ([`Self::charge_relation_work`]). A refusal
+    /// poisons the frame with the typed [`RecursionOrBudgetCap`] (the public
+    /// `BudgetExceeded` outcome) and yields `Unknown` — the SCC gate routes
+    /// the whole component through ReturnOnly.
     pub(super) fn decide_relation(
         &self,
         source: SemanticNodeId,
@@ -8464,15 +8486,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return assignable(bindings);
         }
-        let budget_limit = self.relation_budget_limit();
-        let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
         work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
-            budget_used = budget_used.saturating_add(1);
-            if budget_used > budget_limit {
-                self.note_relation_budget_exceeded(budget_limit);
+            if !self.charge_relation_work(1) {
                 return RelationResult::Unknown;
             }
             match item {
@@ -8501,6 +8519,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(self.relate_arm_member(s, t, target_arm, bindings));
                     } else {
                         self.expand_pair(s, t, target_arm, bindings, &mut work, &mut results);
+                    }
+                }
+                RelateWork::PositionalArm {
+                    source: s,
+                    positional,
+                    target: t,
+                } => {
+                    let checkpoint = self.relation_session_checkpoint();
+                    let bindings_len = bindings.len();
+                    match self.relate_member(s, positional, bindings, InferPosition::Covariant) {
+                        result @ RelationResult::Assignable { .. } => results.push(result),
+                        _ => {
+                            self.relation_session_rollback(&checkpoint);
+                            bindings.truncate(bindings_len);
+                            work.push(RelateWork::Arm(s, t));
+                        }
                     }
                 }
                 RelateWork::ReduceAnd(n) => {
@@ -8776,9 +8810,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .take(remainder_end - prefix_len)
                         .cloned()
                         .collect();
+                    // The capture is the slice of the concrete tuple, its
+                    // labels, optionality and rest kept and never readonly
+                    // (`sliceTupleType`).
                     let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
                         elements: Arc::from(remainder.into_boxed_slice()),
-                        readonly: if rest_on_source { t_ro } else { s_ro },
+                        readonly: false,
                     });
                     if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
                         results.push(RelationResult::Unknown);
@@ -10239,7 +10276,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     graph.node_data(hole).as_deref(),
                     Some(SemanticNodeData::Infer { .. })
                 ) {
-                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    // A constrained hole converts its capture first
+                    // (`infer N extends number` takes `"42"` as `42`).
+                    match self.template_capture(slice, hole) {
+                        Some(capture) => {
+                            undecided |= !self.relation_deposit(hole, capture, occurrence);
+                        }
+                        None => undecided = true,
+                    }
                     continue;
                 }
                 match self.valid_for_template_placeholder(slice, hole) {
@@ -10474,6 +10518,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // member (`eachTypeRelatedToSomeType`), which is no recursion
             // entry of its own; against any other target each member is
             // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
+            if target_is_union {
+                if let Some(positions) = self.positional_union_targets(&members, target) {
+                    distribute_positionally(work, results, &members, &positions, target);
+                    return;
+                }
+            }
             let arm = if target_is_union {
                 RelateWork::Arm
             } else {
@@ -10748,21 +10798,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             drop(source_data);
             drop(target_data);
-            // A generic source relates as it is instantiated in the
-            // target's context (`compareSignaturesRelated`); a relation
-            // under an inference session, or of comparability (which
-            // erases generics), keeps the source as it is — unless the
-            // target is generic itself: its own type parameters are no
-            // inference site of the session, so the pair relates as it
-            // does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
-            // U) => U, x: T)`).
-            if self.current_relation_kind() != RelationKind::Comparable
-                && (!self.relation_session_active() || self.signature_is_generic(target))
-            {
-                if let Some(instantiated) =
-                    self.instantiate_signature_in_context_of(source, target, kind)
-                {
-                    work.push(RelateWork::Eval(instantiated, target));
+            match self.signature_relation_source(source, target, kind) {
+                Some(compared) if compared != source => {
+                    work.push(RelateWork::Eval(compared, target));
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    results.push(RelationResult::Unknown);
                     return;
                 }
             }
@@ -12193,6 +12236,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }),
             _ => None,
         };
+        result_of(source)?;
+        result_of(target)?;
+        // The method's source signature is the one any signature relation
+        // compares (a generic source instantiated or read at its base).
+        let Some(source) = self.signature_relation_source(
+            source,
+            target,
+            crate::semantic_query::SignatureKind::Call,
+        ) else {
+            return Some(RelationResult::Unknown);
+        };
         let source_result = result_of(source)?;
         let target_result = result_of(target)?;
         Some(self.relate_function(
@@ -13319,6 +13373,15 @@ enum RelateWork {
     /// Evaluate one arm of an intersection target like [`Self::Arm`], exempt
     /// from the weak-type check the whole intersection already passed.
     TargetArm(SemanticNodeId, SemanticNodeId),
+    /// Relate one arm of a union source to a union target
+    /// (`eachTypeRelatedToType`): first to the target arm at its own
+    /// position, then, when that does not hold, as [`Self::Arm`] against the
+    /// whole target.
+    PositionalArm {
+        source: SemanticNodeId,
+        positional: SemanticNodeId,
+        target: SemanticNodeId,
+    },
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
     /// Relate a pair the checker relates with an `isRelatedTo` of its own
@@ -13627,6 +13690,36 @@ fn index_key_applies(
 
 /// Build and push the worklist fan-out for a distribution whose reducer
 /// is AND-all, each pair evaluated as `arm` builds it.
+/// [`distribute_and`] over a union source's `members` against the union
+/// `target` whose arms are `positions`: arm `i` first relates to
+/// `positions[i % positions.len()]` (`eachTypeRelatedToType`).
+fn distribute_positionally(
+    work: &mut Vec<RelateWork>,
+    results: &mut Vec<RelationResult>,
+    members: &[SemanticNodeId],
+    positions: &[SemanticNodeId],
+    target: SemanticNodeId,
+) {
+    if members.is_empty() {
+        results.push(RelationResult::Assignable {
+            bindings: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        return;
+    }
+    let mut forward: Vec<RelateWork> = Vec::with_capacity(members.len() + 1);
+    for (index, member) in members.iter().enumerate() {
+        forward.push(RelateWork::PositionalArm {
+            source: *member,
+            positional: positions[index % positions.len()],
+            target,
+        });
+    }
+    if members.len() > 1 {
+        forward.push(RelateWork::ReduceAnd(members.len() as u32));
+    }
+    push_forward_work(work, forward);
+}
+
 fn distribute_and<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,

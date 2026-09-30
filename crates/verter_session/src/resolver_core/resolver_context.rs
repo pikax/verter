@@ -1900,7 +1900,55 @@ impl Drop for TracerScope {
     }
 }
 
+/// A fact tracer whose cell a suspendable compute owns: it is installed on
+/// the thread only while one of the compute's steps runs
+/// ([`Self::install`]), and yields its read set once, when the compute
+/// completes.
+pub(crate) struct OwnedFactTracer {
+    cell: Box<crate::resolver_core::FactReadSetCell>,
+}
+
+impl OwnedFactTracer {
+    /// Install the cell until the returned scope drops, unwinding included.
+    pub(crate) fn install(&self) -> OwnedTracerScope<'_> {
+        fact_tracer_tls::install(&self.cell);
+        OwnedTracerScope {
+            _tracer: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn into_read_set(self) -> crate::resolver_core::FactReadSet {
+        (*self.cell).into_inner()
+    }
+}
+
+/// One installation of an [`OwnedFactTracer`]; dropping it uninstalls
+/// the cell, which it borrows so the cell outlives the installation.
+pub(crate) struct OwnedTracerScope<'t> {
+    _tracer: std::marker::PhantomData<&'t OwnedFactTracer>,
+}
+
+impl Drop for OwnedTracerScope<'_> {
+    fn drop(&mut self) {
+        fact_tracer_tls::clear();
+    }
+}
+
 impl crate::VerterHost {
+    /// A fact tracer for a compute that runs in steps, its basis installed
+    /// now exactly as [`Self::with_fact_tracer_cell`] installs one.
+    pub(crate) fn owned_fact_tracer(
+        &self,
+        seed: verter_workspace::AggregateBasisSeed,
+    ) -> OwnedFactTracer {
+        let cell = Box::new(crate::resolver_core::FactReadSetCell::new());
+        cell.set_aggregate_basis(verter_workspace::AggregateGenerations::from_seed(
+            &seed,
+            &self.live_aggregate_counters(),
+        ));
+        OwnedFactTracer { cell }
+    }
+
     /// Run `f` with a fact tracer installed; return
     /// `(R, FactReadSet)`.
     ///

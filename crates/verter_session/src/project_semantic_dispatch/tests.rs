@@ -642,6 +642,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             )),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(TypeExpr::Ref {
                 name: Arc::from("T"),
@@ -653,6 +654,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(inner),
             false_type: Arc::new(loser),
@@ -923,8 +925,12 @@ fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
     );
 }
 
+/// An `infer` at an object's index signature value or at a call or
+/// construct signature's return infers through the relation like a
+/// property's (TypeScript 7.0.2: `{ [k: string]: string } extends { [k:
+/// string]: infer U }`, and the call and construct forms, are `string`).
 #[test]
-fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_positions() {
+fn conditional_infer_reaches_object_index_call_and_construct_positions() {
     use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
 
     let host = host();
@@ -935,6 +941,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("UnsupportedObjectPosition"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let signature = |kind, value| {
         graph.intern_node(SemanticNodeData::Signature {
@@ -1001,7 +1008,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
         spans: Default::default(),
         declaration_origin: None,
     };
-    let unsupported = [
+    let positions = [
         (
             "index",
             object(
@@ -1048,14 +1055,11 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             ),
         ),
     ];
-    for (label, source, target) in unsupported {
+    for (label, source, target) in positions {
         let result = reverse_test_conditional(&dispatch, source, target, infer, never);
-        assert!(
-            matches!(
-                graph.node_data(result).as_deref(),
-                Some(SemanticNodeData::Conditional { .. })
-            ),
-            "an object {label}-signature infer position is deliberately unsupported and must stay deferred, never select true with an unresolved Infer"
+        assert_eq!(
+            result, string,
+            "an object {label}-signature infer position infers the source's type"
         );
     }
 }
@@ -1975,6 +1979,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Rest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let rest_pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2069,6 +2074,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("ExactRest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2082,10 +2088,21 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         ),
         readonly: true,
     });
+    // The capture keeps labels, optionality and rest and is never readonly
+    // (TypeScript 7.0.2, every setting: `readonly [head?: string, ...tail:
+    // number[]] extends readonly [...infer R] ? R : never` is `[head?:
+    // string, ...tail: number[]]`).
+    let captured = graph.intern_node(SemanticNodeData::Tuple {
+        elements: match graph.node_data(concrete).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+            _ => unreachable!("a tuple"),
+        },
+        readonly: false,
+    });
     assert_eq!(
         reverse_test_conditional(&dispatch, concrete, pattern, infer, never),
-        concrete,
-        "covariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "covariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 
     let signature = |param_ty| {
@@ -2118,8 +2135,8 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             infer,
             never,
         ),
-        concrete,
-        "contravariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "contravariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 }
 
@@ -2147,6 +2164,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Tail"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -7311,6 +7329,7 @@ fn infer_in_closed_conditional_binds_via_relation() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: binder.clone(),
+        constraint: None,
     });
     let true_branch = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),
@@ -7384,11 +7403,13 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = simple_object(&graph, &[("a", infer_x)]);
     let true_branch = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let false_branch = primitive(&graph, PrimitiveKind::Never);
 
@@ -13900,6 +13921,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -14029,6 +14051,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = call_sig(infer_u, string_node);
 
@@ -14061,6 +14084,7 @@ fn reverse_test_binders(
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from(infer_name),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
@@ -14716,6 +14740,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let mapper_parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("<reverse-mapper>"),
@@ -15458,6 +15483,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("AbortFencedT"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let key = dispatch.relation_key_with_inference(dispatch.relate_key_for(string, infer));
     assert!(
@@ -15953,6 +15979,7 @@ fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("InactiveU"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = reverse_test_target(
         &graph,
@@ -16598,51 +16625,30 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
     }
 }
 
+/// A direct candidate outranks a reverse homomorphic mapped one: the
+/// inference owner fixes from the strongest priority a variable received,
+/// and complete reverse recovery outranks partial recovery.
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use super::dispatch_txn::InferenceCandidate;
+    use crate::semantic_query::InferenceCandidatePriority;
 
     let host = host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
-    let never = primitive(&graph, PrimitiveKind::Never);
-    let (infer, parameter) = reverse_test_binders(&graph, "PriorityT", 31);
-    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
-        object: infer,
-        index: IndexKey::Computed(parameter),
-    });
-    let template = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", projection, false, false),
-            surface_member("direct", infer, false, false),
-        ],
-    );
-    let target = reverse_test_target(
-        &graph,
-        infer,
-        parameter,
-        template,
-        OptionalityMod::Keep,
-        ReadonlyMod::Keep,
-    );
-    let source_value = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", string, false, false),
-            surface_member("direct", number, false, false),
-        ],
-    );
-    let source = intern_object_with_members(
-        &graph,
-        vec![surface_member("a", source_value, false, false)],
-    );
-
-    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let candidate = |node, priority| InferenceCandidate {
+        node,
+        priority,
+        variance: crate::semantic_query::VariancePhase::Covariant,
+    };
+    let winning = super::inference::winning_candidates(&[
+        candidate(string, InferenceCandidatePriority::HomomorphicMapped),
+        candidate(number, InferenceCandidatePriority::Argument),
+    ]);
     assert_eq!(
-        result, number,
+        winning.covariant,
+        vec![number],
         "the direct Argument candidate must outrank the aggregate HomomorphicMapped candidate"
     );
     assert!(
@@ -19885,6 +19891,7 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let label_obj = simple_object(&graph, &[("label", string_ty)]);
     let node_cond = graph.intern_node(SemanticNodeData::Conditional {
@@ -26417,7 +26424,8 @@ fn typeof_instantiation_args_do_not_clobber_same_name_infer_declaration() {
     assert_eq!(
         expect_object_property(extends, "boxed", "extends carrier surface"),
         verter_type_expr::TypeExpr::Infer {
-            name: "T".to_string()
+            name: "T".to_string(),
+            constraint: None,
         },
         "the `infer T` declaration survives in the extends position"
     );
@@ -28480,6 +28488,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let string_ty = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
@@ -28639,6 +28648,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
@@ -28720,6 +28730,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let root = graph.intern_node(SemanticNodeData::Array {
         element: infer_t,
@@ -29734,32 +29745,23 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     );
 }
 
-#[test]
-fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
-    // GROWING-GENERIC discriminator. A recursive generic whose every
-    // instantiation mints a FRESH node id (`type Grow<T> = Grow<[T]>` — each step
-    // wraps the arg in a new tuple, so `Grow<string>` → `Grow<[string]>` →
-    // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
-    // can NEVER match) DEFEATS visited-ID cycle detection. The demand primitive
-    // instantiates each residual `InstantiationRef` and re-evaluates; because the
-    // ids never repeat, the regrowth is bounded EXACTLY by the connected-demand
-    // work budget (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
-    // (`SAME_PATH_RECURSION`), which would only fire if the growth had FOLDED.
-    // The outcome types `Partial` — never a fabricated concrete type, never a
-    // hang.
-    //
-    // This test proves BOTH discriminating facts codex required: (1) distinct
-    // instantiated node ids per level (fresh-node growth, below), and (2) the
-    // reason is the connected work budget, NOT same-path recursion.
-    //
-    // The demand runs inside an enclosing taint frame, so the operational
-    // truncation ALSO refuses warm admission (`result_is_partial` +
-    // `cache_suppress`).
+/// `Grow<string>` over `source`'s `Grow`, demanded at `Navigate` under a
+/// connected-work budget of `work` (the production caps when `None`)
+/// inside an enclosing taint frame: the demand's outcome, the frame's
+/// partial and suppression rails, and the node its instantiation answers.
+fn grow_string_demand(
+    source: &str,
+    work: Option<usize>,
+) -> (
+    StructuralFactDemandOutcome,
+    bool,
+    bool,
+    Option<SemanticNodeData>,
+) {
     let host = host();
-    upsert_ts(&host, "/grow.ts", "export type Grow<T> = Grow<[T]>;\n");
+    upsert_ts(&host, "/grow.ts", source);
     let dispatch = ProjectSemanticDispatch::new(&host);
     let navigate = ProjectionReductionContext::published(ProjectionMode::Navigate);
-
     let string_ref = verter_type_expr::TypeExpr::Ref {
         name: Arc::from("string"),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -29771,103 +29773,115 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     let carrier = dispatch
         .lower_type_expr_in_scope_with_context("/grow.ts", &grow_ref, navigate)
         .expect("Grow<string> lowers to a carrier");
-    // Precondition: the raw node is genuinely an uninstantiated
-    // `InstantiationRef` carrier (the growth happens at instantiation, not in
-    // the raw node) — so the demand exercises the growing-instantiation path.
-    assert!(
-        matches!(
-            host.project_type_store()
-                .semantic_graph()
-                .node_data(carrier)
-                .as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        ),
-        "FIXTURE INVALID: Grow<string> must lower to an InstantiationRef carrier, got {:?}",
-        host.project_type_store()
-            .semantic_graph()
-            .node_data(carrier)
-            .as_deref()
-    );
-
-    // DISTINCT-NODE-ID EVIDENCE. Manually drive two instantiation levels of the
-    // SAME `Grow` decl: each mints a STRUCTURALLY-DISTINCT `InstantiationRef`
-    // (`Grow<[string]>` then `Grow<[[string]]>`), i.e. a FRESH node id per level.
-    // This is precisely what defeats the demand loop's `visited`-ID cycle
-    // detection — a same-id back-edge would be CAUGHT (`SAME_PATH_RECURSION`),
-    // but these ids never repeat, so ONLY the connected work budget can bound
-    // the regrowth.
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let (base0, args0) = match graph.node_data(carrier).as_deref() {
+    // Precondition: the raw node is an uninstantiated `InstantiationRef`
+    // carrier, so the demand exercises the instantiation path.
+    let (base, args) = match graph.node_data(carrier).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
         other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
     };
-    let slot0 = dispatch.type_slot_for(
-        Arc::clone(&base0.canonical_id),
-        base0.owner,
-        Arc::clone(&base0.decl_name),
-    );
-    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
-    let level1 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Grow<string> must instantiate to its grown body, got {other:?}"),
-    };
-    let (base1, args1) = match graph.node_data(level1).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
-        other => panic!(
-            "level-1 instantiation of Grow<string> must GROW to a fresh Grow<[string]> \
-             InstantiationRef (not terminate), got {other:?}"
+    let (work, depth) = match work {
+        Some(work) => (work, super::connected_demand::MAX_CONNECTED_QUERY_DEPTH),
+        None => (
+            super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+            super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
         ),
     };
-    let slot1 = dispatch.type_slot_for(
-        Arc::clone(&base1.canonical_id),
-        base1.owner,
-        Arc::clone(&base1.decl_name),
-    );
-    let level2 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot1, args1, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("level-1 must instantiate to its grown body, got {other:?}"),
-    };
-    assert!(
-        matches!(
-            graph.node_data(level2).as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        ),
-        "level-2 instantiation must GROW to a fresh Grow<[[string]]> InstantiationRef, got {:?}",
-        graph.node_data(level2).as_deref()
-    );
-    assert_ne!(
-        level1, level2,
-        "each Grow instantiation level MUST mint a DISTINCT node id (fresh-node growth) — equal \
-         ids would mean the growth folded and the visited-ID guard could catch it"
-    );
-    assert_ne!(
-        carrier, level1,
-        "the level-1 grown body is a DISTINCT node id from the Grow<string> carrier (fresh growth)"
-    );
-
     let guard =
         crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
-    dispatch.set_connected_limits_for_tests(256, 24);
+    dispatch.set_connected_limits_for_tests(work, depth);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
     let frame = guard.finish();
+    let slot = dispatch.type_slot_for(
+        Arc::clone(&base.canonical_id),
+        base.owner,
+        Arc::clone(&base.decl_name),
+    );
+    let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
+    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot, args, context),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
+            graph.node_data(value).as_deref().cloned()
+        }
+        _ => None,
+    };
+    (
+        outcome,
+        frame.result_is_partial,
+        frame.cache_suppress,
+        instantiated,
+    )
+}
 
+#[test]
+fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
+    // `type Grow<T> = Grow<[T]>` applies itself with no conditional type
+    // deciding: its declared type requires itself. That is the checker's
+    // TS2456 — a checker ERROR, not a resource limit — so `Grow<string>` is
+    // its recovery (`any`) under a starved ledger and the production ledger
+    // alike, complete, never a budget partial.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): TS2456 "Type
+    // alias 'Grow' circularly references itself.", and `Grow<string>` is
+    // `any`.
+    let is_ts2456 = |data: &Option<SemanticNodeData>| {
+        matches!(
+            data,
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.code == crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
+        )
+    };
+    for work in [Some(256), None] {
+        let (outcome, partial, suppressed, instantiated) =
+            grow_string_demand("export type Grow<T> = Grow<[T]>;\n", work);
+        assert!(
+            matches!(outcome, StructuralFactDemandOutcome::Complete(_)),
+            "a circular alias is a checker error, never a budget partial (work {work:?})"
+        );
+        assert!(
+            !partial && !suppressed,
+            "the checker's TS2456 does not taint the enclosing build (work {work:?})"
+        );
+        assert!(
+            is_ts2456(&instantiated),
+            "Grow<string> is the checker's TS2456 recovery (work {work:?}), got {instantiated:?}"
+        );
+    }
+}
+
+#[test]
+fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
+    // GROWING-GENERIC discriminator. A conditional generic whose every
+    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
+    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
+    // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
+    // visited-ID cycle detection. Under a ledger too small for its tail run
+    // the regrowth is bounded by the connected-demand work budget
+    // (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
+    // (`SAME_PATH_RECURSION`), which would only fire if the growth had
+    // FOLDED — and types `Partial`, never a fabricated concrete type, never
+    // a hang. The demand runs inside an enclosing taint frame, so the
+    // operational truncation ALSO refuses warm admission (`result_is_partial`
+    // + `cache_suppress`). Under a ledger with room, the run reaches its tail
+    // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
+    // tail budget than production's stands in on the same path.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
+    // is `any` under TS2589.
+    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Partial(reasons) => reasons,
         StructuralFactDemandOutcome::Complete(node) => panic!(
-            "a fresh-node growing generic MUST type Partial (bounded by the fuse / recursion \
-             guard), got Complete({:?})",
-            dispatch.graph().node_data(node).as_deref()
+            "a fresh-node growing generic MUST type Partial under a starved ledger, got \
+             Complete({node:?})"
         ),
     };
-    // The fresh-node regrowth is bounded by the connected-demand work budget
-    // (`PROJECTION_WORK_LIMIT`), NOT by the `visited`-ID cycle guard: the
-    // ids never repeat (proven distinct above), so `SAME_PATH_RECURSION` must
-    // NOT be the reason — its presence would mean visited-ID CAUGHT the loop, the
-    // OPPOSITE of the fresh-node-growth class this test characterises.
     assert!(
         reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
         "the growing-generic truncation MUST be bounded by PROJECTION_WORK_LIMIT — \
@@ -29876,23 +29890,29 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     assert!(
         !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
         "fresh-node growth defeats the visited-ID guard, so the reason MUST NOT be \
-         SAME_PATH_RECURSION (that would mean visited-ID caught it — not fresh-node growth), \
-         got {reasons:?}"
+         SAME_PATH_RECURSION, got {reasons:?}"
     );
     assert!(
-        frame.result_is_partial && frame.cache_suppress,
+        partial && suppressed,
         "the build-enclosed growing-generic partial MUST refuse warm admission \
          (result_is_partial + cache_suppress on the frame)"
     );
 
-    // SCOPE (honest): this characterises fresh-node growth at the DEMAND-PRIMITIVE
-    // layer (`normalize_node_for_structural_fact_demand`'s Instantiate loop),
-    // where the pure-recursion `Grow<T> = Grow<[T]>` grows through the top-level
-    // carrier. The union-base variant `Grow<T> = T | Grow<[T]>` terminates the
-    // demand's top-level carrier at the `Union` (Complete), so it does NOT
-    // exercise growth HERE. The CRASH-SCALE `Grow<T> = T | Grow<[[[[T]]]]>`
-    // fresh-node-growth proof over the Instantiate / projection publication path
-    // is owned by the deep-recursion crash-regression suite, not this unit test.
+    let _budget = super::connected_demand::TailBudgetForTests::install(200);
+    let (_, _, _, instantiated) = grow_string_demand(GROW, None);
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.code
+                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
+        ),
+        "Grow<string> reaches the tail budget as the checker's TS2589 recovery, got \
+         {instantiated:?}"
+    );
 }
 
 #[test]

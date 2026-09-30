@@ -441,7 +441,7 @@ impl ReadSetSignature {
         let mut out = Vec::new();
         for fact in self.facts.iter() {
             if let FactVersionRef::Receipt(receipt) = fact {
-                for canonical_id in receipt.canonicals() {
+                for canonical_id in receipt.canonicals().iter() {
                     if seen.insert(Arc::clone(canonical_id)) {
                         out.push(Arc::clone(canonical_id));
                     }

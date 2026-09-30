@@ -275,9 +275,14 @@ impl TypeExpr {
             // -- Terminals with no spans and no children --
             Self::Primitive(_)
             | Self::Literal(_)
-            | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
             | Self::Unknown(_) => {}
+
+            Self::Infer { constraint, .. } => {
+                if let Some(constraint) = constraint.as_mut() {
+                    Arc::make_mut(constraint).shift_spans(delta);
+                }
+            }
 
             // -- `typeof C.make<string>`: the instantiation-expression args
             //    are children; the path itself carries no span --
@@ -379,9 +384,14 @@ impl TypeExpr {
         match self {
             Self::Primitive(_)
             | Self::Literal(_)
-            | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
             | Self::Unknown(_) => {}
+
+            Self::Infer { constraint, .. } => {
+                if let Some(constraint) = constraint.as_mut() {
+                    Arc::make_mut(constraint).clear_spans();
+                }
+            }
 
             Self::TypeOf(value_ref) => {
                 for arg in value_ref.type_args.iter_mut() {

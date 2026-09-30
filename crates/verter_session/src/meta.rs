@@ -97,6 +97,7 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
             ExpansionStopReason::BudgetExceeded
                 | ExpansionStopReason::ProjectionWorkLimit
                 | ExpansionStopReason::ConnectedQueryDepthLimit
+                | ExpansionStopReason::ConnectedMemoryLimit
         )
     };
 

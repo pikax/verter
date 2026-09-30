@@ -268,6 +268,13 @@ pub(super) enum CarrierResolutionPlan {
     NeedsArgs(CarrierArgsContinuation),
 }
 
+/// How a resolved head finishes over its arguments: with a node, or with the
+/// instantiation whose node it is.
+pub(super) enum CarrierFinish {
+    Node(SemanticNodeId),
+    Instantiate(SemanticQueryKey),
+}
+
 /// Owned second half of a reference resolution whose head consumes arguments.
 /// Keeping this continuation independent of [`CarrierResolverContext`] is what
 /// lets the projection worklist resume it after all argument nodes complete.
@@ -298,9 +305,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
+        // Outside a projection run the reference's position is not known:
+        // it keeps the declaration-level back-edge.
+        match self.plan_carrier_finish(continuation, type_args, &|| true) {
+            CarrierFinish::Node(node) => node,
+            CarrierFinish::Instantiate(key) => self.instantiated_node(key),
+        }
+    }
+
+    /// How a resolved head finishes over its lowered arguments: a carrier or
+    /// reduced node, or the instantiation whose node it is.
+    /// `in_deferred_position` answers whether the reference sits where the
+    /// checker defers instantiating it; it is asked only for an application
+    /// of a declaration an enclosing build is materialising.
+    pub(super) fn plan_carrier_finish(
+        &self,
+        continuation: CarrierArgsContinuation,
+        type_args: Arc<[SemanticNodeId]>,
+        in_deferred_position: &dyn Fn() -> bool,
+    ) -> CarrierFinish {
         match continuation {
             CarrierArgsContinuation::Intern { head, name, scope } => {
-                self.intern_ref_head_carrier(head, &name, &scope, type_args)
+                CarrierFinish::Node(self.intern_ref_head_carrier(head, &name, &scope, type_args))
             }
             CarrierArgsContinuation::Builtin {
                 identity,
@@ -347,14 +373,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .flow_return_callee_for_typeof_arg(type_args[0])
                             .is_some());
                 if build_carrier {
-                    return self.intern_ref_head_carrier(
+                    return CarrierFinish::Node(self.intern_ref_head_carrier(
                         RefHeadResolution::Builtin(identity),
                         &name,
                         &scope,
                         type_args,
-                    );
+                    ));
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -364,26 +390,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
-                )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                    _ => self.opaque(QueryError::Miss),
-                }
+                ))
             }
             CarrierArgsContinuation::Instantiate { identity, context } => {
-                // The same back-edge rule as a 0-arg head: an application of
-                // a declaration an enclosing `build_instantiate` frame is
-                // still materialising is its recursive reference, recording
-                // the instantiation it stands for (`G<[T]>` inside the body
-                // of `G<string>` is the back-edge to `G<[string]>`), never an
-                // eager re-entry of the declaration being built.
+                // An application of a declaration an enclosing
+                // `build_instantiate` frame is still materialising, in a
+                // position the checker defers, is its recursive reference,
+                // recording the instantiation it stands for (`G<[T]>` in a
+                // member of `G<string>`'s body is the back-edge to
+                // `G<[string]>`). In a position the checker instantiates
+                // eagerly it is instantiated: over the same arguments the
+                // memo's same-path claim answers it, over others it is the
+                // next instantiation, bounded by the instantiation budget.
                 if self.is_instantiate_active(
                     identity.canonical_id.as_ref(),
                     identity.owner,
                     identity.decl_name.as_ref(),
-                ) {
-                    return self.recursive_ref_sentinel(&identity, type_args);
+                ) && in_deferred_position()
+                {
+                    return CarrierFinish::Node(self.recursive_ref_sentinel(&identity, type_args));
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -393,13 +420,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
-                )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                    _ => self.opaque(QueryError::Miss),
-                }
+                ))
             }
             CarrierArgsContinuation::ApplyTypeof { base } => {
-                self.apply_typeof_instantiation_args(base, &type_args)
+                CarrierFinish::Node(self.apply_typeof_instantiation_args(base, &type_args))
             }
         }
     }

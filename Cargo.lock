@@ -3780,6 +3780,7 @@ dependencies = [
  "bitflags",
  "glob",
  "hotpath",
+ "imbl",
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",

@@ -489,7 +489,7 @@ fn budget_domain(
         Session::SolverResolveSteps => Some(wire::BudgetDomain::SolverResolveSteps),
         Session::SolverArenaNodes => Some(wire::BudgetDomain::SolverArenaNodes),
         Session::SolverInstantiationDepth => Some(wire::BudgetDomain::SolverInstantiationDepth),
-        Session::ProjectionOperation => None,
+        Session::ProjectionOperation | Session::ConstructionBytes => None,
     }
 }
 
@@ -509,6 +509,7 @@ fn budget_domain_label(
         Session::SolverArenaNodes => "solver arena nodes",
         Session::SolverInstantiationDepth => "solver instantiation depth",
         Session::ProjectionOperation => "projection operation",
+        Session::ConstructionBytes => "construction bytes",
     }
 }
 

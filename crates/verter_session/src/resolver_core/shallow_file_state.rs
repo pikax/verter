@@ -469,6 +469,9 @@ pub enum BudgetDomain {
     SolverResolveSteps,
     SolverArenaNodes,
     SolverInstantiationDepth,
+    /// The bytes a connected semantic demand reserves before it constructs a
+    /// type.
+    ConstructionBytes,
 }
 
 impl std::fmt::Display for BudgetExceededFailure {

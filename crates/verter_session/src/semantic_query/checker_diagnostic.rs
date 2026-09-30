@@ -29,17 +29,20 @@ impl CheckerDiagnostic {
     /// The error type the checker continues with after reporting this
     /// diagnostic, which prints and relates as `any`. `None` for a
     /// call-resolution diagnostic: that call continues with its
-    /// error-recovery candidate, which the call's result carries.
+    /// error-recovery candidate, which the call's result carries. `None`
+    /// for a relation diagnostic too: the relation is false.
     #[must_use]
     pub const fn recovery(self) -> Option<PrimitiveKind> {
         match self.code {
             CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+            | CheckerDiagnosticCode::CircularTypeAlias
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
             | CheckerDiagnosticCode::TupleTooLarge => Some(PrimitiveKind::Any),
             CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
-            | CheckerDiagnosticCode::ArgumentCountAtLeast => None,
+            | CheckerDiagnosticCode::ArgumentCountAtLeast
+            | CheckerDiagnosticCode::RelationTooComplex => None,
         }
     }
 }
@@ -51,8 +54,15 @@ pub enum CheckerDiagnosticCode {
     /// instantiation depth, or a conditional tail run longer than its tail
     /// limit ([`checker_policy`](super::checker_policy)) — including the lib
     /// `Awaited<T>` conditional re-entering an application it is still
-    /// evaluating, whose instantiation never terminates.
+    /// evaluating, whose instantiation never terminates — or nested past
+    /// Verter's own instantiation budget.
     ExcessivelyDeepInstantiation,
+    /// TS2456: a type alias whose declared type requires itself — its body
+    /// applies the alias, directly or through other aliases, where the
+    /// checker instantiates eagerly rather than deferring
+    /// ([`checker_policy::circular_type_alias`](super::checker_policy::circular_type_alias)).
+    /// A checker error, not a resource limit: the alias is `any`.
+    CircularTypeAlias,
     /// TS2590: a cross product over unions has at least the checker's
     /// product limit of constituents, checked before one is built
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
@@ -61,6 +71,11 @@ pub enum CheckerDiagnosticCode {
     /// tuple-size limit. Written in an expression, the checker reports the
     /// same limit as TS2800.
     TupleTooLarge,
+    /// TS2859: one relation check recorded as many structured comparisons as
+    /// the checker allows it
+    /// ([`checker_policy::RelationComplexity`](super::checker_policy::RelationComplexity));
+    /// the relation is false.
+    RelationTooComplex,
     /// TS1062: the awaited-type relation reached a thenable whose promised
     /// value is a type it is already unwrapping.
     RecursiveFulfillmentCallback,
@@ -85,8 +100,10 @@ impl CheckerDiagnosticCode {
     pub const fn code(self) -> u32 {
         match self {
             Self::ExcessivelyDeepInstantiation => 2589,
+            Self::CircularTypeAlias => 2456,
             Self::UnionTooComplex => 2590,
             Self::TupleTooLarge => 2799,
+            Self::RelationTooComplex => 2859,
             Self::RecursiveFulfillmentCallback => 1062,
             Self::ArgumentNotAssignable => 2345,
             Self::ArgumentCount => 2554,
@@ -101,10 +118,12 @@ impl CheckerDiagnosticCode {
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }
+            Self::CircularTypeAlias => "Type alias '{0}' circularly references itself.",
             Self::UnionTooComplex => {
                 "Expression produces a union type that is too complex to represent."
             }
             Self::TupleTooLarge => "Type produces a tuple type that is too large to represent.",
+            Self::RelationTooComplex => "Excessive complexity comparing types '{0}' and '{1}'.",
             Self::RecursiveFulfillmentCallback => {
                 "Type is referenced directly or indirectly in the fulfillment callback of its \
                  own 'then' method."
@@ -145,4 +164,12 @@ pub enum CheckerDiagnosticOperation {
     /// One tail run of a conditional alias (`getConditionalType`): its
     /// selected branch applying the alias again.
     ConditionalTail,
+    /// One relation check (`checkTypeRelatedTo`).
+    Relation,
+    /// An instantiation nested past Verter's own instantiation budget,
+    /// which lies far past the checker's depth limit.
+    InstantiationBudget,
+    /// A type alias's declared type (`getDeclaredTypeOfTypeAlias`), whose
+    /// body requires the alias itself.
+    TypeAliasDeclaration,
 }

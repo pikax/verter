@@ -720,10 +720,14 @@ impl<'a> Walker<'a> {
                     self.buf.push(0xFE);
                 }
             }
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 self.buf.push(0x36);
                 self.buf.extend_from_slice(name.as_bytes());
                 self.buf.push(0xFF);
+                if let Some(constraint) = constraint {
+                    self.buf.push(0x01);
+                    self.walk_node(constraint);
+                }
             }
             TypeExpr::Rest(inner) => {
                 self.buf.push(0x37);
@@ -1496,9 +1500,13 @@ impl<'a> Walker<'a> {
                 key.extend_from_slice(&(quasis.as_ptr() as usize).to_le_bytes());
                 key.extend_from_slice(&(expressions.as_ptr() as usize).to_le_bytes());
             }
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 key.push(0xB0);
                 key.extend_from_slice(name.as_bytes());
+                if let Some(constraint) = constraint {
+                    key.push(0xFF);
+                    key.extend_from_slice(&(Arc::as_ptr(constraint) as usize).to_le_bytes());
+                }
             }
             TypeExpr::Rest(inner) => {
                 key.push(0xB1);

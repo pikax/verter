@@ -22,15 +22,149 @@
 //! demand resets the COUNTERS, never the caps, so there is exactly one place a
 //! limit can come from.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
+
+use rustc_hash::FxHashSet;
+
+use super::cost_receipt::{
+    CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage, ReplayRefusal,
+};
 
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::PartialReasonSet;
 
-/// Work-unit cap for one connected semantic demand.
-pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
+/// The work units one structured comparison the checker records costs the
+/// relation at most, on the shape its relation-complexity limit is reached
+/// by: a union arm scanning a union target of object types charges the
+/// alternative and its pair's worklist step (measured: 22,329 units for the
+/// 20,100 comparisons of 200 reversed arms).
+pub(super) const RELATION_UNITS_PER_COMPARISON: usize = 2;
+
+/// The construction bytes one structured comparison reserves: what a pair
+/// the relation relates holds live at its peak — its frame, its memo entry
+/// and its proof (measured: 1.9 KB per pair relating 200 reversed object
+/// arms). Provisional: the per-pair footprint and this charge are sized
+/// together in the combined performance phase.
+pub(super) const RELATION_PAIR_BYTES: usize = 2_048;
+
+/// The construction bytes interning one derived node reserves: its payload
+/// record, held twice (the arena slot and the dedup index's key), a fixed
+/// index entry, and the `payload_bytes` of text and children it owns.
+pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
+    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>() + 32 + payload_bytes
+}
+
+/// Work-unit cap for one connected semantic demand: the operational
+/// backstop, sized from the checker's relation-complexity envelope
+/// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
+/// [`RELATION_UNITS_PER_COMPARISON`] units each). Work units do not bound
+/// memory; the construction-byte rail
+/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does, and on a relation it binds
+/// first: at [`RELATION_PAIR_BYTES`] per comparison it stops a relation
+/// near 262,000 comparisons as typed incompleteness, until the per-pair
+/// footprint shrinks.
+///
+/// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
+pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize =
+    crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
+        * RELATION_UNITS_PER_COMPARISON;
 /// Nested query-boundary cap for one connected semantic demand.
 pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
+/// Construction-byte allowance for one connected semantic demand: the bytes
+/// it reserves before it builds, never refunded within the demand, so the
+/// allowance bounds what the demand holds at its peak. Provisional: sized
+/// with the per-unit footprint in the combined performance phase.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
+
+/// What one connected demand has charged so far: its work units and its
+/// construction bytes.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DemandUsage {
+    pub(crate) work: usize,
+    pub(crate) bytes: usize,
+}
+
+/// Verter's own instantiation budget for one connected semantic demand:
+/// how deep instantiations evaluated on the continuation runtime may nest
+/// (each one's frame is held on the heap while the one it needs builds).
+/// Far past the checker's own depth limit, so Verter answers where the
+/// checker gives up; reaching it is the checker's TS2589, reported at
+/// Verter's limit ([`checker_policy::instantiation_budget`]). It bounds
+/// the frames one chain holds, so an instantiation that never terminates
+/// stops in bounded memory; the work ledger bounds its time.
+///
+/// [`checker_policy::instantiation_budget`]: crate::semantic_query::checker_policy::instantiation_budget
+pub(super) const MAX_CONNECTED_INSTANTIATION_DEPTH: u32 = 10_000;
+
+/// Verter's own budget for one tail run of a conditional type: how many
+/// tail steps (each the conditional over its next arguments, evaluated in
+/// place) one run may take. Far past the checker's own tail limit, so
+/// Verter answers where the checker gives up; reaching it is the checker's
+/// TS2589 ([`ConditionalTail`]). A run holds one step's arguments at a
+/// time, and the arguments it has seen for its recurrence check.
+///
+/// [`ConditionalTail`]: crate::semantic_query::checker_policy::ConditionalTail
+pub(super) const MAX_CONNECTED_TAIL_STEPS: u32 = 10_000;
+
+#[cfg(test)]
+thread_local! {
+    /// A lower instantiation budget for the ledgers this thread installs,
+    /// set by [`InstantiationBudgetForTests`].
+    static INSTANTIATION_DEPTH_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+    /// A lower tail budget for the ledgers this thread installs, set by
+    /// [`TailBudgetForTests`].
+    static TAIL_STEPS_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Install `limit` as the tail budget of every ledger this thread creates
+/// until the guard drops — the production budget's code path at a length a
+/// test can reach quickly. Test-only.
+#[cfg(test)]
+pub(super) struct TailBudgetForTests {
+    previous: Option<u32>,
+}
+
+#[cfg(test)]
+impl TailBudgetForTests {
+    pub(super) fn install(limit: u32) -> Self {
+        Self {
+            previous: TAIL_STEPS_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TailBudgetForTests {
+    fn drop(&mut self) {
+        TAIL_STEPS_FOR_TESTS.with(|slot| slot.set(self.previous));
+    }
+}
+
+/// Install `limit` as the instantiation budget of every ledger this
+/// thread creates until the guard drops — the production budget's code
+/// path at a depth a test can reach quickly. Test-only.
+#[cfg(test)]
+pub(super) struct InstantiationBudgetForTests {
+    previous: Option<u32>,
+}
+
+#[cfg(test)]
+impl InstantiationBudgetForTests {
+    pub(super) fn install(limit: u32) -> Self {
+        Self {
+            previous: INSTANTIATION_DEPTH_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for InstantiationBudgetForTests {
+    fn drop(&mut self) {
+        INSTANTIATION_DEPTH_FOR_TESTS.with(|slot| slot.set(self.previous));
+    }
+}
 
 /// The one signal the ledger observes from outside its own accounting:
 /// whether the owning request has been cancelled.
@@ -69,9 +203,21 @@ pub(crate) struct ConnectedDemandLedger<'a> {
     active: Cell<bool>,
     work_used: Cell<usize>,
     work_limit: Cell<usize>,
+    bytes_used: Cell<usize>,
+    bytes_limit: Cell<usize>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
+    instantiation_depth_limit: u32,
+    tail_steps_limit: u32,
     tripped: Cell<PartialReasonSet>,
+    /// The cold computations recording their exclusive cost, innermost
+    /// last; `scope_open` mirrors "the stack is not empty" so a charge
+    /// taken outside any recording pays one flag read.
+    scopes: RefCell<Vec<CostScope>>,
+    scope_open: Cell<bool>,
+    /// The computations whose receipt, and its whole prerequisite closure,
+    /// this connected demand has paid.
+    paid: RefCell<FxHashSet<CostIdentity>>,
 }
 
 impl std::fmt::Debug for ConnectedDemandLedger<'_> {
@@ -80,8 +226,12 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("active", &self.active.get())
             .field("work_used", &self.work_used.get())
             .field("work_limit", &self.work_limit.get())
+            .field("bytes_used", &self.bytes_used.get())
+            .field("bytes_limit", &self.bytes_limit.get())
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
+            .field("instantiation_depth_limit", &self.instantiation_depth_limit)
+            .field("tail_steps_limit", &self.tail_steps_limit)
             .field("tripped", &self.tripped.get())
             .finish()
     }
@@ -95,10 +245,40 @@ impl<'a> ConnectedDemandLedger<'a> {
             active: Cell::new(false),
             work_used: Cell::new(0),
             work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            bytes_used: Cell::new(0),
+            bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
             query_depth: Cell::new(0),
             query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
+            #[cfg(not(test))]
+            instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
+            #[cfg(test)]
+            instantiation_depth_limit: INSTANTIATION_DEPTH_FOR_TESTS
+                .with(Cell::get)
+                .unwrap_or(MAX_CONNECTED_INSTANTIATION_DEPTH),
+            #[cfg(not(test))]
+            tail_steps_limit: MAX_CONNECTED_TAIL_STEPS,
+            #[cfg(test)]
+            tail_steps_limit: TAIL_STEPS_FOR_TESTS
+                .with(Cell::get)
+                .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
             tripped: Cell::new(PartialReasonSet::empty()),
+            scopes: RefCell::new(Vec::new()),
+            scope_open: Cell::new(false),
+            paid: RefCell::new(FxHashSet::default()),
         }
+    }
+
+    /// The tail steps one conditional tail run may take
+    /// ([`MAX_CONNECTED_TAIL_STEPS`]).
+    pub(crate) fn tail_steps_budget(&self) -> u32 {
+        self.tail_steps_limit
+    }
+
+    /// Whether an instantiation nested `depth` deep on the continuation
+    /// runtime is within Verter's instantiation budget
+    /// ([`MAX_CONNECTED_INSTANTIATION_DEPTH`]).
+    pub(crate) fn instantiation_within_budget(&self, depth: u32) -> bool {
+        depth <= self.instantiation_depth_limit
     }
 
     /// Join the active connected demand, or install a fresh one when this is
@@ -113,6 +293,10 @@ impl<'a> ConnectedDemandLedger<'a> {
         let root = !self.active.get();
         if root {
             self.work_used.set(0);
+            self.bytes_used.set(0);
+            self.paid.borrow_mut().clear();
+            self.scopes.borrow_mut().clear();
+            self.scope_open.set(false);
             self.query_depth.set(0);
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
@@ -197,6 +381,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             return Err(tripped);
         }
         self.work_used.set(work_used + 1);
+        self.accrue(1, 0);
         Ok(())
     }
 
@@ -210,6 +395,19 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
         self.commit(units);
         Ok(())
+    }
+
+    /// Add `work` units and `bytes` to the open recording, if any: the cost
+    /// the computation on top of the scope stack performs itself.
+    #[inline(always)]
+    fn accrue(&self, work: usize, bytes: usize) {
+        if !self.scope_open.get() {
+            return;
+        }
+        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+            scope.exclusive.work = scope.exclusive.work.saturating_add(work as u64);
+            scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes as u64);
+        }
     }
 
     /// Snapshot the remaining work available to a query-free terminal run. The
@@ -242,6 +440,43 @@ impl<'a> ConnectedDemandLedger<'a> {
         let work_used = self.work_used.get();
         verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
         self.work_used.set(work_used + consumed);
+        self.accrue(consumed, 0);
+    }
+
+    /// Reserve `bytes` of construction before building what they hold.
+    /// `Err` carries the sticky trip set when the demand cannot pay for them
+    /// ([`PartialReasonSet::CONNECTED_MEMORY_LIMIT`] when this reservation
+    /// is the one refused).
+    pub(crate) fn reserve_bytes(&self, bytes: usize) -> Result<(), PartialReasonSet> {
+        verter_debug_assert!(
+            self.active.get(),
+            "construction bytes must be reserved inside a connected-demand guard"
+        );
+        if self.cancellation.is_cancelled() {
+            return Err(self.record_trip(PartialReasonSet::CANCELLED));
+        }
+        let tripped = self.tripped.get();
+        if !tripped.is_empty() {
+            return Err(tripped);
+        }
+        let used = self.bytes_used.get();
+        match used.checked_add(bytes) {
+            Some(total) if total <= self.bytes_limit.get() => {
+                self.bytes_used.set(total);
+                self.accrue(0, bytes);
+                Ok(())
+            }
+            _ => Err(self.record_trip(PartialReasonSet::CONNECTED_MEMORY_LIMIT)),
+        }
+    }
+
+    /// What the active demand has charged so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn usage(&self) -> DemandUsage {
+        DemandUsage {
+            work: self.work_used.get(),
+            bytes: self.bytes_used.get(),
+        }
     }
 
     /// The `(limit, actual, rail)` triple describing why the demand tripped,
@@ -257,6 +492,12 @@ impl<'a> ConnectedDemandLedger<'a> {
                 usize::from(self.query_depth_limit.get()),
                 u64::from(self.query_depth.get()),
                 "connected-query-depth",
+            )
+        } else if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
+            (
+                self.bytes_limit.get(),
+                self.bytes_used.get() as u64,
+                "construction-bytes",
             )
         } else {
             (
@@ -279,6 +520,24 @@ impl<'a> ConnectedDemandLedger<'a> {
         self.query_depth_limit.set(depth);
     }
 
+    /// Replace the construction-byte allowance. Test-only, and refused inside
+    /// an active demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn set_byte_limit_for_tests(&self, bytes: usize) {
+        assert!(
+            !self.active.get(),
+            "test limits must be set before entering a connected demand"
+        );
+        self.bytes_limit.set(bytes);
+    }
+
+    /// The construction bytes the last connected demand reserved. Test-only:
+    /// kept after the demand ends, and reset when the next one enters.
+    #[cfg(test)]
+    pub(super) fn bytes_used_for_tests(&self) -> usize {
+        self.bytes_used.get()
+    }
+
     /// The work units the last connected demand charged. Test-only: kept
     /// after the demand ends, and reset when the next one enters.
     #[cfg(test)]
@@ -295,6 +554,129 @@ impl<'a> ConnectedDemandLedger<'a> {
         let tripped = self.tripped.get().union(reason);
         self.tripped.set(tripped);
         tripped
+    }
+}
+
+/// The cost-receipt operations: recording each cold computation's
+/// exclusive cost and admitting warm results by replaying their receipts.
+/// The memo and continuation carriers consume them; until those carriers
+/// are threaded, only the substrate's own tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+impl ConnectedDemandLedger<'_> {
+    /// Open the recording of a cold computation of `identity`: until it is
+    /// sealed or abandoned, every charge the demand takes is its exclusive
+    /// cost, except the charges of computations opened above it.
+    pub(crate) fn open_cost_scope(&self, identity: CostIdentity) {
+        self.scopes.borrow_mut().push(CostScope {
+            identity,
+            exclusive: LogicalUsage::default(),
+            prerequisites: Vec::new(),
+        });
+        self.scope_open.set(true);
+    }
+
+    /// Record that the open computation consumed the result `receipt`
+    /// costs, at `nesting` (1 when entered as a nested demand, 0 when read
+    /// in place). Recorded however the result arrived — computed, served
+    /// or already paid — so the receipt being built owes it in full.
+    pub(crate) fn record_prerequisite(&self, receipt: &Arc<DemandCostReceipt>, nesting: u16) {
+        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+            scope.prerequisites.push(CostDependency {
+                receipt: Arc::clone(receipt),
+                nesting,
+            });
+        }
+    }
+
+    /// Seal the open computation's recording: its receipt, now paid for
+    /// this demand together with its closure, which it consumed paid.
+    /// `None` when no computation is recording.
+    pub(crate) fn seal_cost_scope(&self) -> Option<Arc<DemandCostReceipt>> {
+        let scope = {
+            let mut scopes = self.scopes.borrow_mut();
+            let scope = scopes.pop()?;
+            self.scope_open.set(!scopes.is_empty());
+            scope
+        };
+        let receipt = DemandCostReceipt::new(scope.identity, scope.exclusive, scope.prerequisites);
+        self.paid.borrow_mut().insert(receipt.identity().clone());
+        Some(receipt)
+    }
+
+    /// Drop the open computation's recording without a receipt: it did not
+    /// complete, so nothing it charged may be served warm as paid.
+    pub(crate) fn abandon_cost_scope(&self) {
+        let mut scopes = self.scopes.borrow_mut();
+        scopes.pop();
+        self.scope_open.set(!scopes.is_empty());
+    }
+
+    /// Whether this demand has paid `identity`'s receipt and its closure.
+    pub(crate) fn is_paid(&self, identity: &CostIdentity) -> bool {
+        self.paid.borrow().contains(identity)
+    }
+
+    /// Admit serving the result `receipt` costs without computing it:
+    /// charge, in one admission, the exclusive usage of every computation
+    /// in its closure this demand has not paid, and mark them paid. The
+    /// receipt's nesting is checked against the remaining query depth even
+    /// when it is paid. A refusal charges and marks nothing, and leaves the
+    /// stored result untouched: this caller receives plain resource
+    /// incompleteness, never a checker diagnostic, and another demand with
+    /// room may still serve it. Replayed charges belong to no open recording
+    /// — the consumer records the receipt as a prerequisite instead.
+    pub(crate) fn replay_admit(
+        &self,
+        receipt: &Arc<DemandCostReceipt>,
+    ) -> Result<(), ReplayRefusal> {
+        let tripped = self.tripped.get();
+        if !tripped.is_empty() || self.cancellation.is_cancelled() {
+            return Err(ReplayRefusal::Tripped);
+        }
+        if u32::from(self.query_depth.get()) + u32::from(receipt.depth())
+            > u32::from(self.query_depth_limit.get())
+        {
+            return Err(ReplayRefusal::Depth);
+        }
+        let (unpaid, total) = {
+            let paid = self.paid.borrow();
+            let mut unpaid: Vec<&CostIdentity> = Vec::new();
+            let mut seen: FxHashSet<&CostIdentity> = FxHashSet::default();
+            let mut total = LogicalUsage::default();
+            let mut stack: Vec<&Arc<DemandCostReceipt>> = vec![receipt];
+            while let Some(next) = stack.pop() {
+                let identity = next.identity();
+                if paid.contains(identity) || !seen.insert(identity) {
+                    continue;
+                }
+                total = total
+                    .checked_add(next.exclusive())
+                    .ok_or(ReplayRefusal::Work)?;
+                unpaid.push(identity);
+                stack.extend(
+                    next.prerequisites()
+                        .iter()
+                        .rev()
+                        .map(|dependency| &dependency.receipt),
+                );
+            }
+            let unpaid: Vec<CostIdentity> = unpaid.into_iter().cloned().collect();
+            (unpaid, total)
+        };
+        let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
+        if total.work > work_room {
+            return Err(ReplayRefusal::Work);
+        }
+        let byte_room = self.bytes_limit.get().saturating_sub(self.bytes_used.get()) as u64;
+        if total.bytes > byte_room {
+            return Err(ReplayRefusal::Bytes);
+        }
+        self.work_used
+            .set(self.work_used.get() + total.work as usize);
+        self.bytes_used
+            .set(self.bytes_used.get() + total.bytes as usize);
+        self.paid.borrow_mut().extend(unpaid);
+        Ok(())
     }
 }
 

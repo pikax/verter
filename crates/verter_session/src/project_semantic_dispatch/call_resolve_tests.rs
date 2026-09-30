@@ -1475,18 +1475,19 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 /// alone fixes `T`, and the executor hands the withheld argument back with
 /// its contextual type instantiated under that fixed substitution; typed
 /// under it, the argument selects the candidate. Mutation: drop the
-/// context-sensitivity withholding — the lambda's `any` parameter deposits
-/// and beats the literal, and `T` binds `any`. The second half is the
+/// context-sensitivity withholding — the lambda's `any` return deposits
+/// beside the literal, and `T` binds `any`. The second half is the
 /// negative control: the SAME nodes with the argument marked
 /// context-FREE still deposit `any`, proving the assertion tracks the flag
-/// and not the node shapes.
+/// and not the node shapes (TypeScript 7.0.2, in every setting:
+/// `withCallback((item: any) => item, lit)` with `lit: "literal"` is
+/// `any`).
 #[test]
 fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let literal = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("literal".into()),
     ));
@@ -1497,7 +1498,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         default: None,
         display_name: Arc::from("T"),
     });
-    // `cb: (item: T) => unknown`
+    // `cb: (item: T) => T`
     let callback_param = signature(
         &dispatch,
         "callbackParam",
@@ -1505,7 +1506,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         Vec::new(),
-        unknown,
+        t,
     );
     // The authored argument `(item) => item`: an un-annotated parameter
     // lowers to `any`, and so does the arrow's own return.
@@ -1518,7 +1519,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         Vec::new(),
         any,
     );
-    // `declare function withCallback<T>(cb: (item: T) => unknown, item: T): T`
+    // `declare function withCallback<T>(cb: (item: T) => T, item: T): T`
     let with_callback = signature(
         &dispatch,
         "withCallback",
@@ -3030,23 +3031,16 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
 
 /// A call has no quota on its accepted inference deposits: the checker
 /// infers from every tuple position. `f<T>(xs: [T, …, T]): T` over 1,025
-/// positions, called with as many `1`s, selects `T := number`; the deposits
-/// are charged to the connected-work ledger as work.
+/// and 5,000 positions, called with as many `1`s, selects `T := number`;
+/// the deposits, like the relation's own steps, are charged to the
+/// connected-work ledger as work.
 ///
 /// Measured on TypeScript 7.0.2 (`declare function f<T>(xs: [T, …]): T;
 /// const r = f([1, …])`, all four `strictNullChecks` × `noImplicitAny`
 /// settings agree): `typeof r` is `number` at 1,025 and at 5,000 positions.
 #[test]
 fn inference_deposits_have_no_call_quota() {
-    deposits_select_number(&[1025]);
-}
-
-/// The same call over 5,000 positions: the checker answers `number` (see
-/// [`inference_deposits_have_no_call_quota`]).
-#[test]
-#[ignore = "the relation work allowance, derived from the graph size, stops a 5,000-element tuple relation"]
-fn five_thousand_inference_deposits_select_the_checkers_answer() {
-    deposits_select_number(&[5000]);
+    deposits_select_number(&[1025, 5000]);
 }
 
 /// `f<T>(xs: [T, …, T]): T` over each of `counts` positions, called with as

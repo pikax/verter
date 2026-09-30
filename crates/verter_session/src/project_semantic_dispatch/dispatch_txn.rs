@@ -2712,8 +2712,9 @@ impl InferenceSession {
         let mut bindings = Vec::with_capacity(self.infos.len());
         let infos = std::mem::take(&mut self.infos);
         for info in &infos {
-            let (candidates, variance) = select_inference_candidates(&info.candidates);
-            let bound = combine(&candidates, variance);
+            let winning = super::inference::winning_candidates(&info.candidates);
+            let (candidates, variance) = winning.inferred_from();
+            let bound = combine(candidates, variance);
             bindings.push(InferBinding {
                 param: info.param_node,
                 name: Arc::clone(&info.param_name),
@@ -2744,14 +2745,10 @@ impl InferenceSession {
         Some(
             self.infos
                 .iter()
-                .map(|info| {
-                    let (candidates, variance) = select_inference_candidates(&info.candidates);
-                    FixationInput {
-                        param: info.param_node,
-                        name: Arc::clone(&info.param_name),
-                        candidates,
-                        variance,
-                    }
+                .map(|info| FixationInput {
+                    param: info.param_node,
+                    name: Arc::clone(&info.param_name),
+                    candidates: super::inference::winning_candidates(&info.candidates),
                 })
                 .collect(),
         )
@@ -2816,41 +2813,9 @@ pub(crate) struct FixationInput {
     pub(crate) param: SemanticNodeId,
     /// The binder's display name.
     pub(crate) name: Arc<str>,
-    /// The winning candidate rung (empty when the parameter is uninferred).
-    pub(crate) candidates: Vec<SemanticNodeId>,
-    /// That rung's combination variance.
-    pub(crate) variance: VariancePhase,
-}
-
-/// Select the winning priority rung and combination variance for a candidate
-/// list. This is shared by top-level fixation and reverse-projection recovery.
-pub(crate) fn select_inference_candidates(
-    candidates: &[InferenceCandidate],
-) -> (Vec<SemanticNodeId>, VariancePhase) {
-    let Some(priority) = candidates
-        .iter()
-        .map(|candidate| candidate.priority)
-        .max_by_key(|priority| crate::semantic_query::inference_candidate_precedence(*priority))
-    else {
-        return (Vec::new(), VariancePhase::Covariant);
-    };
-    let chosen: Vec<&InferenceCandidate> = candidates
-        .iter()
-        .filter(|candidate| candidate.priority == priority)
-        .collect();
-    let contravariant: Vec<SemanticNodeId> = chosen
-        .iter()
-        .filter(|candidate| candidate.variance == VariancePhase::Contravariant)
-        .map(|candidate| candidate.node)
-        .collect();
-    if contravariant.is_empty() {
-        (
-            chosen.iter().map(|candidate| candidate.node).collect(),
-            VariancePhase::Covariant,
-        )
-    } else {
-        (contravariant, VariancePhase::Contravariant)
-    }
+    /// The strongest-priority candidates (empty when the parameter is
+    /// uninferred).
+    pub(crate) candidates: super::inference::WinningCandidates,
 }
 
 /// The decided provisional verdict of a popped member.
@@ -2934,6 +2899,15 @@ pub(crate) struct CompletedSccMember {
 pub(crate) struct RelationDomainRuntime {
     /// The active inference-session stack.
     pub(crate) sessions: Vec<InferenceSession>,
+    /// The structured comparisons each open relation chain has entered,
+    /// keyed by the stack index of its first frame: the checker's
+    /// `relationCount` for its `checkTypeRelatedTo` call. An entry starts
+    /// when a chain starts at that index, and one whose chain has closed is
+    /// dropped when the next chain starts.
+    pub(crate) chain_comparisons: Vec<(
+        usize,
+        crate::semantic_query::checker_policy::RelationComplexity,
+    )>,
     /// Per-session deferred-admission ledger.
     pub(crate) session_admission: SessionAdmissionLedger,
     /// SCC-closed members queued for the root's batched publish drain.

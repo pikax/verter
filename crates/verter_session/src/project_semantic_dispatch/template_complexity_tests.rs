@@ -199,3 +199,137 @@ fn the_limit_answers_the_same_cold_warm_and_reordered() {
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A union absorbs the string literals a template literal type in it
+/// already matches (`removeStringLiteralsMatchedByTemplateLiterals`), so
+/// `A = "a0" | … | "a399" | `a${number}`` is the one constituent
+/// `` `a${number}` `` and `` `${A}-${B}` `` over 250 `B` literals is 250
+/// concatenations; without the pattern the same span is 400 × 250, the
+/// checker's limit.
+///
+/// Measured: `A` is `` `a${number}` ``, `` IsAny<`${A}-${B}`> `` is
+/// `"not-any"`, `` "x" extends `${A}-${B}` ? 1 : 2 `` is `2`, and `` "x"
+/// extends `${A2}-${B}` ? 1 : 2 `` is `any` under TS2590.
+#[test]
+fn a_union_absorbs_the_literals_its_template_matches() {
+    let source = format!(
+        "{IS_ANY}type A = {} | `a${{number}}`;\n{}{}",
+        (0..400)
+            .map(|i| format!("\"a{i}\""))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        string_union("A2", "a", 400),
+        string_union("B", "b", 250),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<`${A}-${B}`>", "\"not-any\""),
+            ("\"x\" extends `${A}-${B}` ? 1 : 2", "2"),
+            ("\"x\" extends `${A2}-${B}` ? 1 : 2", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The union's literal reduction (`removeRedundantLiteralTypes`, then
+/// `removeStringLiteralsMatchedByTemplateLiterals`): `string` absorbs a
+/// template literal type and a string mapping, and a pattern literal type
+/// absorbs every string literal (a string enum member included) whose
+/// slices fit its placeholders, each text matched leftmost. A written union
+/// is that reduced union too: `type U = "a" | string` is `string`.
+///
+/// Measured on TypeScript 7.0.2 (all four settings agree), with `enum E { A
+/// = "a7", B = "zz" }`, `type U = "a" | string`, `type P = "a1" |
+/// `a${number}`` and `type R = "ab" | `${string}${string}``: each probe below
+/// prints as its row's answer.
+#[test]
+fn a_union_drops_the_literals_its_patterns_match() {
+    let source = "enum E { A = \"a7\", B = \"zz\" }\n\
+                  type U = \"a\" | string;\n\
+                  type P = \"a1\" | `a${number}`;\n\
+                  type R = \"ab\" | `${string}${string}`;\n";
+    let failures = mismatches(
+        source,
+        &[
+            ("\"a1\" | `a${number}`", "`a${number}`"),
+            ("\"ab\" | `a${number}`", "\"ab\" | `a${number}`"),
+            ("\"A\" | Uppercase<string>", "Uppercase<string>"),
+            ("\"a\" | Uppercase<string>", "\"a\" | Uppercase<string>"),
+            ("string | `a${number}`", "string"),
+            ("string | Uppercase<string>", "string"),
+            (
+                "\"1e3\" | \" 1\" | \"x\" | `${number}`",
+                "\"x\" | `${number}`",
+            ),
+            (
+                "\"0x10\" | \"-0\" | \"1.5\" | `${bigint}`",
+                "\"1.5\" | `${bigint}`",
+            ),
+            (
+                "\"a-b\" | \"ab\" | `${string}-${string}`",
+                "\"ab\" | `${string}-${string}`",
+            ),
+            ("E.A | E.B | `a${number}`", "E.B | `a${number}`"),
+            (
+                "\"a1b\" | `a${number}b` | \"a1c\"",
+                "\"a1c\" | `a${number}b`",
+            ),
+            ("\"ab\" | `${string}${string}`", "string"),
+            ("U", "string"),
+            ("P", "`a${number}`"),
+            ("R", "string"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every concatenation's bytes are reserved before it is built: under a
+/// 4 KiB construction allowance, 40 × 40 concatenations stop on the memory
+/// rail as a typed partial, never a truncated union.
+#[test]
+fn a_template_past_its_byte_allowance_is_a_memory_partial() {
+    use crate::semantic_query::{
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, ResultCompleteness,
+    };
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = super::ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let union = |prefix: &str| {
+        let members: Vec<crate::semantic_query::SemanticNodeId> = (0..40)
+            .map(|i| {
+                graph.intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::String(format!("{prefix}{i}")),
+                ))
+            })
+            .collect();
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(std::sync::Arc::from(
+                members.into_boxed_slice(),
+            )),
+        ))
+    };
+    let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis: std::sync::Arc::from(
+            vec![
+                std::sync::Arc::<str>::from(""),
+                std::sync::Arc::from("-"),
+                std::sync::Arc::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: std::sync::Arc::from(vec![union("a"), union("b")].into_boxed_slice()),
+    });
+    dispatch.set_construction_byte_limit_for_tests(4 << 10);
+    let (_, completeness) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
+        template,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    match completeness {
+        ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT),
+            "the partial is the memory rail's, got {reasons:?}"
+        ),
+        ResultCompleteness::Complete => panic!("4 KiB cannot hold 1,600 concatenations"),
+    }
+}

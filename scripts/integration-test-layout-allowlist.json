@@ -21,6 +21,12 @@
       "reason": "single counting #[global_allocator] for allocation canaries"
     },
     {
+      "package": "verter_semantic",
+      "target": "allocator_canaries",
+      "src_path": "crates/verter_semantic/tests/allocator_canaries.rs",
+      "reason": "single counting #[global_allocator] for allocation canaries (result-receipt summaries keep near-linear memory as the evidence graph grows)"
+    },
+    {
       "package": "verter_lsp",
       "target": "lsp_audit_trace_out_env_var",
       "src_path": "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",

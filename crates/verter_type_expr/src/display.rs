@@ -385,8 +385,12 @@ pub fn render_type_expr_display(
                     work.push(Frame::TemplateQuasi(&quasis[0]));
                     work.push(Frame::Text("`"));
                 }
-                TypeExpr::Infer { name } => {
+                TypeExpr::Infer { name, constraint } => {
                     ensure_type_name(name, "infer binding")?;
+                    if let Some(constraint) = constraint {
+                        work.push(Frame::Expr(constraint, Precedence::Union));
+                        work.push(Frame::Text(" extends "));
+                    }
                     work.push(Frame::Borrowed(name));
                     work.push(Frame::Text("infer "));
                 }
@@ -622,9 +626,13 @@ fn primitive_keyword(name: PrimitiveName) -> &'static str {
 
 fn expression_precedence(expression: &TypeExpr) -> Precedence {
     match expression {
-        TypeExpr::Conditional { .. } | TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => {
-            Precedence::ConditionalOrFunction
-        }
+        TypeExpr::Conditional { .. }
+        | TypeExpr::Function(_)
+        | TypeExpr::ConstructorType(_)
+        | TypeExpr::Infer {
+            constraint: Some(_),
+            ..
+        } => Precedence::ConditionalOrFunction,
         TypeExpr::Union(types) if !types.is_empty() => Precedence::Union,
         TypeExpr::Intersection(types) if !types.is_empty() => Precedence::Intersection,
         TypeExpr::KeyOf(_) | TypeExpr::TypeOf(_) | TypeExpr::Infer { .. } => Precedence::Prefix,

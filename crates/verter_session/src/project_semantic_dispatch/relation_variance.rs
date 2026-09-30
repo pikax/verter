@@ -133,11 +133,89 @@ impl ProjectSemanticDispatch<'_> {
         {
             return None;
         }
-        let variances = match self.declaration_variance(&declaration, source_args.len())? {
+        let variances = match self.parameter_variances(&declaration, source_args.len(), false)? {
             DeclarationVariance::Known(variances) => variances,
             DeclarationVariance::InProgress(result) => return Some(result),
         };
         self.relate_variances(&source_args, &target_args, &variances, bindings)
+    }
+
+    /// Two references to one generic declaration under an inference session,
+    /// the target's type arguments holding an `infer` site, infer from
+    /// their type arguments pairwise (`inferFromTypeArguments`: a
+    /// contravariant parameter's argument contravariantly, any other's
+    /// covariantly) and relate by them (`Box<"a">` against `Box<infer P>`
+    /// infers `"a"`, whatever `Box` expands to) — an alias's parameters
+    /// measured as the checker's `getAliasVariances` measures them. `None`
+    /// relates the pair as before: not two such references, a variance that
+    /// is unmeasurable, unreliable or being measured, or type arguments that
+    /// do not relate — their deposits rolled back.
+    pub(super) fn infer_from_type_arguments(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        use super::relation::InferPosition;
+        if !self.relation_session_active() {
+            return None;
+        }
+        let (declaration, source_args) = self.generic_reference(source)?;
+        let (target_declaration, target_args) = self.generic_reference(target)?;
+        if !same_declaration(&declaration, &target_declaration)
+            || source_args.len() != target_args.len()
+            || !target_args
+                .iter()
+                .any(|arg| self.subtree_contains_infer(*arg))
+            || self.variance_measurement(source).is_some()
+            || self.variance_measurement(target).is_some()
+        {
+            return None;
+        }
+        let DeclarationVariance::Known(variances) =
+            self.parameter_variances(&declaration, source_args.len(), true)?
+        else {
+            return None;
+        };
+        if variances
+            .iter()
+            .any(|variance| variance.unmeasurable || variance.unreliable)
+        {
+            return None;
+        }
+        let checkpoint = self.relation_session_checkpoint();
+        let bindings_len = bindings.len();
+        let mut acc = assignable(bindings);
+        for ((&source, &target), variance) in
+            source_args.iter().zip(target_args.iter()).zip(&variances)
+        {
+            let related = match variance.mask {
+                Variance::CONTRAVARIANT => {
+                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam)
+                }
+                Variance::INDEPENDENT => {
+                    // Inferred from all the same; no argument decides the
+                    // relation.
+                    let _ = self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    continue;
+                }
+                Variance::INVARIANT => result_and(
+                    self.relate_member(source, target, bindings, InferPosition::Covariant),
+                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam),
+                ),
+                _ => self.relate_member(source, target, bindings, InferPosition::Covariant),
+            };
+            acc = result_and(acc, related);
+            if !matches!(acc, RelationResult::Assignable { .. }) {
+                break;
+            }
+        }
+        if !matches!(acc, RelationResult::Assignable { .. }) {
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+            return None;
+        }
+        Some(acc)
     }
 
     /// The checker's `relateVariances` over `typeArgumentsRelatedTo`: each
@@ -232,10 +310,11 @@ impl ProjectSemanticDispatch<'_> {
     /// fixes them), an alias's when one of its parameters carries an
     /// annotation. A parameter's annotation is its variance; any other is
     /// measured — unless the declaration's variance is being measured.
-    fn declaration_variance(
+    fn parameter_variances(
         &self,
         declaration: &DeclIdentity,
         arity: usize,
+        measure_aliases: bool,
     ) -> Option<DeclarationVariance> {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         use verter_type_expr::facts::TypeParamVariance;
@@ -267,7 +346,10 @@ impl ProjectSemanticDispatch<'_> {
                 TypeParamVariance::InOut => Some(Variance::exact(Variance::INVARIANT)),
             })
             .collect::<Vec<_>>();
-        if prepared.kind == TypeDeclKind::Alias && annotated.iter().all(Option::is_none) {
+        if !measure_aliases
+            && prepared.kind == TypeDeclKind::Alias
+            && annotated.iter().all(Option::is_none)
+        {
             return None;
         }
         if annotated.iter().any(Option::is_none) {

@@ -680,6 +680,7 @@ fn resolution_diagnostic_to_proto(
         F::BudgetExceeded => P::BudgetExceeded,
         F::ProjectionWorkLimit => P::ProjectionWorkLimit,
         F::ConnectedQueryDepthLimit => P::ConnectedQueryDepthLimit,
+        F::ConnectedMemoryLimit => P::ConnectedMemoryLimit,
         F::MappedDepthExceeded => P::MappedDepthExceeded,
         F::UnresolvedReference => P::UnresolvedReference,
         F::IndeterminateConditional => P::IndeterminateConditional,
@@ -2503,6 +2504,7 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
         "budgetExceeded" => proto::ExpansionStopReason::BudgetExceeded,
         "projectionWorkLimit" => proto::ExpansionStopReason::ProjectionWorkLimit,
         "connectedQueryDepthLimit" => proto::ExpansionStopReason::ConnectedQueryDepthLimit,
+        "connectedMemoryLimit" => proto::ExpansionStopReason::ConnectedMemoryLimit,
         "mappedDepthExceeded" => proto::ExpansionStopReason::MappedDepthExceeded,
         "unresolvedReference" => proto::ExpansionStopReason::UnresolvedReference,
         "indeterminateConditional" => proto::ExpansionStopReason::IndeterminateConditional,
@@ -2564,6 +2566,9 @@ fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::Sur
         }
         FfiSurfacePartialReason::ConnectedQueryDepthLimit => {
             proto::SurfacePartialReason::ConnectedQueryDepthLimit
+        }
+        FfiSurfacePartialReason::ConnectedMemoryLimit => {
+            proto::SurfacePartialReason::ConnectedMemoryLimit
         }
         FfiSurfacePartialReason::MissingDependency => {
             proto::SurfacePartialReason::MissingDependency
@@ -2951,6 +2956,7 @@ mod tests {
             R::FlowReturnUnverified,
             R::FlowReturnNoSurface,
             R::UndecidedConditional,
+            R::ConnectedMemoryLimit,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
@@ -3132,6 +3138,14 @@ mod tests {
         assert_eq!(
             super::proto::ExpansionStopReason::ConnectedQueryDepthLimit as i32,
             14
+        );
+        assert_eq!(
+            super::expansion_reason_to_proto("connectedMemoryLimit") as i32,
+            super::proto::ExpansionStopReason::ConnectedMemoryLimit as i32
+        );
+        assert_eq!(
+            super::proto::ExpansionStopReason::ConnectedMemoryLimit as i32,
+            15
         );
     }
 

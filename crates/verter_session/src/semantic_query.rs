@@ -5039,6 +5039,12 @@ impl PartialReasonSet {
     /// gap, never the checker's answer; a conditional the checker itself
     /// defers (a generic operand) is complete.
     pub const UNDECIDED_CONDITIONAL: Self = Self(1 << 17);
+    /// The connected semantic demand exhausted its construction-byte
+    /// allowance: the bytes it reserves before it builds a type grew past
+    /// the envelope. Like [`Self::PROJECTION_WORK_LIMIT`], a resource stop,
+    /// never a checker fact: the returned node is an intermediate carrier
+    /// stop and is never admitted to a shared memo or result cache.
+    pub const CONNECTED_MEMORY_LIMIT: Self = Self(1 << 18);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -5145,11 +5151,13 @@ pub enum PartialReason {
     FlowReturnNoSurface,
     /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`].
     UndecidedConditional,
+    /// [`PartialReasonSet::CONNECTED_MEMORY_LIMIT`].
+    ConnectedMemoryLimit,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -5168,6 +5176,7 @@ impl PartialReason {
         Self::FlowReturnUnverified,
         Self::FlowReturnNoSurface,
         Self::UndecidedConditional,
+        Self::ConnectedMemoryLimit,
     ];
 
     /// The single-reason set this variant names.
@@ -5192,6 +5201,7 @@ impl PartialReason {
             Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
             Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
+            Self::ConnectedMemoryLimit => PartialReasonSet::CONNECTED_MEMORY_LIMIT,
         }
     }
 
@@ -5219,6 +5229,7 @@ impl PartialReason {
             Self::FlowReturnUnverified => "flowReturnUnverified",
             Self::FlowReturnNoSurface => "flowReturnNoSurface",
             Self::UndecidedConditional => "undecidedConditional",
+            Self::ConnectedMemoryLimit => "connectedMemoryLimit",
         }
     }
 }
@@ -9876,10 +9887,12 @@ pub enum SemanticNodeData {
     /// Modelled as an explicit variant rather than
     /// encoded via scope overloading (rejects anti-pattern #3 — scope-
     /// as-discriminator). The `name` is the infer binding name the
-    /// `true` branch will substitute the bound type into.
+    /// `true` branch will substitute the bound type into; `constraint` is
+    /// the declared `infer X extends C` constraint.
     Infer {
         name: Arc<str>,
         binder: InferBinderId,
+        constraint: Option<SemanticNodeId>,
     },
     /// A true-branch REFERENCE to an in-scope `infer` binder — the node
     /// a `Ref { name }` occurrence resolves to through the conditional's
@@ -10359,12 +10372,14 @@ impl PartialEq for SemanticNodeData {
                 Self::Infer {
                     name: a,
                     binder: ab,
+                    constraint: ac,
                 },
                 Self::Infer {
                     name: b,
                     binder: bb,
+                    constraint: bc,
                 },
-            ) => a == b && ab == bb,
+            ) => a == b && ab == bb && ac == bc,
             (
                 Self::InferRef {
                     name: a,
@@ -10559,9 +10574,14 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name, binder } => {
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => {
                 name.hash(state);
                 binder.hash(state);
+                constraint.hash(state);
             }
             Self::InferRef { name, binder } => {
                 name.hash(state);

@@ -669,7 +669,7 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
             }
             buf.push('`');
         }
-        TypeExpr::Infer { name } => {
+        TypeExpr::Infer { name, .. } => {
             buf.push_str("infer ");
             buf.push_str(name);
         }

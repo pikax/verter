@@ -1327,10 +1327,21 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 }
             }
         }
-        SemanticNodeData::Infer { name, binder } => {
+        SemanticNodeData::Infer {
+            name,
+            binder,
+            constraint,
+        } => {
             enc.header(category::BINDER, subtag::INFER);
             enc.str(name);
             enc.bytes(&binder.stable_fingerprint_bytes());
+            match constraint {
+                None => enc.u8(0),
+                Some(c) => {
+                    enc.u8(1);
+                    enc.child(*c);
+                }
+            }
         }
         SemanticNodeData::InferRef { name, binder } => {
             enc.header(category::BINDER, subtag::INFER_REF);
@@ -1962,6 +1973,9 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::ObjectSpread => 7,
                 crate::semantic_query::CheckerDiagnosticOperation::TupleSpread => 8,
                 crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail => 9,
+                crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
+                crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
+                crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

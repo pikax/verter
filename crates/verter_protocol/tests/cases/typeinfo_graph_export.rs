@@ -611,6 +611,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
             "infer",
             TypeExpr::Infer {
                 name: "U".to_string(),
+                constraint: None,
             },
             graph_type_node::Kind::InferNode(g::InferNode {
                 name_id: 1,

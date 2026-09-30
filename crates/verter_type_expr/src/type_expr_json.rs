@@ -246,6 +246,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
         }
         "infer" => Some(TypeExpr::Infer {
             name: v.get("name")?.as_str()?.to_string(),
+            constraint: match v.get("constraint") {
+                Some(constraint) => Some(Arc::new(type_expr_from_json(constraint)?)),
+                None => None,
+            },
         }),
         "rest" => Some(TypeExpr::Rest(Arc::new(type_expr_from_json(
             v.get("inner")?,
@@ -755,7 +759,14 @@ impl TypeExpr {
                 "quasis": quasis,
                 "expressions": expressions.iter().map(|e| e.to_json_value()).collect::<Vec<_>>()
             }),
-            Self::Infer { name } => json!({ "kind": "infer", "name": name }),
+            Self::Infer { name, constraint } => match constraint {
+                Some(constraint) => json!({
+                    "kind": "infer",
+                    "name": name,
+                    "constraint": constraint.to_json_value(),
+                }),
+                None => json!({ "kind": "infer", "name": name }),
+            },
             Self::Rest(inner) => json!({ "kind": "rest", "inner": inner.to_json_value() }),
             Self::Parenthesized(inner) => {
                 json!({ "kind": "parenthesized", "inner": inner.to_json_value() })

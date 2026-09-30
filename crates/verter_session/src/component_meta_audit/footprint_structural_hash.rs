@@ -723,13 +723,18 @@ impl StructuralEncoder<'_> {
                 // `SemanticNodeId` in any arm), so its `Debug` is content-only.
                 self.push_str(&format!("{err:?}"));
             }
-            SemanticNodeData::Infer { name, binder } => {
+            SemanticNodeData::Infer {
+                name,
+                binder,
+                constraint,
+            } => {
                 self.buf.push(SemanticNodeTag::Infer.stable_id());
                 self.push_str(name);
                 let fingerprint = binder.stable_fingerprint_bytes();
                 self.buf
                     .extend_from_slice(&(fingerprint.len() as u64).to_le_bytes());
                 self.buf.extend_from_slice(&fingerprint);
+                self.encode_child_opt(*constraint, depth);
             }
             SemanticNodeData::InferRef { name, binder } => {
                 self.buf.push(SemanticNodeTag::InferRef.stable_id());

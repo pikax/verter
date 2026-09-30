@@ -263,7 +263,13 @@ fn ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
             quasis.hash(h);
             ref_hash_slice(expressions, h);
         }
-        TypeExpr::Infer { name } => name.hash(h),
+        TypeExpr::Infer { name, constraint } => {
+            name.hash(h);
+            constraint.is_some().hash(h);
+            if let Some(constraint) = constraint {
+                ref_hash(constraint, h);
+            }
+        }
         TypeExpr::RecursiveRef {
             name,
             type_arguments,
@@ -880,7 +886,13 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     ));
 
     // Infer.
-    v.push(("infer", TypeExpr::Infer { name: "R".into() }));
+    v.push((
+        "infer",
+        TypeExpr::Infer {
+            name: "R".into(),
+            constraint: None,
+        },
+    ));
 
     // RecursiveRef — type_arguments + conditional_context (both branches).
     v.push((

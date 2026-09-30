@@ -2357,7 +2357,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                         };
                         let base_infer = match graph.node_data(inner_id).as_deref() {
-                            Some(SemanticNodeData::Infer { name, binder }) => {
+                            Some(SemanticNodeData::Infer { name, binder, .. }) => {
                                 Some((Arc::clone(name), binder.clone()))
                             }
                             _ => None,
@@ -2582,10 +2582,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends_env_owned = env.clone();
                     for site in infer_sites {
                         let binder = infer_binders.binder_at(&site.path);
+                        // A declared constraint is read where the
+                        // conditional is written: no `infer` of the
+                        // pattern is in scope there (`[infer A, infer B
+                        // extends A]` reports TS2304 for `A`).
+                        let constraint = site.constraint.map(|constraint| {
+                            self.lower_type_expr_with_infer_factory(
+                                infer_binders,
+                                constraint,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                extends_context,
+                            )
+                        });
                         let declaration = graph.intern_node_with_scope(
                             SemanticNodeData::Infer {
                                 name: Arc::clone(&site.name),
                                 binder: binder.clone(),
+                                constraint,
                             },
                             scope.clone(),
                         );
@@ -3101,7 +3119,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `substitute_semantic_type_param`; `build_conditional`
             // recognises a bare Infer in `extends` and binds the
             // true-branch's placeholder to the check side.
-            TypeExpr::Infer { name } => {
+            // An `infer` no conditional's `extends` declares (the checker
+            // reports it) reads no constraint.
+            TypeExpr::Infer { name, .. } => {
                 if let Some(declaration) = env.get(&infer_declaration_env_key(name)) {
                     *declaration
                 } else {
@@ -3109,6 +3129,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         SemanticNodeData::Infer {
                             name: Arc::from(name.as_str()),
                             binder: infer_binders.binder_for_expr(expr),
+                            constraint: None,
                         },
                         scope.clone(),
                     )
