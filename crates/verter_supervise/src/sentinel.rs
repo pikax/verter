@@ -108,6 +108,11 @@ fn wait(wakeups: &Wakeups, limit: std::time::Duration) {
 
 /// Whether `pid` has exited, observed without reaping it (`WNOWAIT`): the
 /// unreaped process keeps its pid and group id reserved.
+///
+/// The record's `si_code` decides, not its mere presence: macOS `waitid`
+/// reports a stopped child (one spawned `POSIX_SPAWN_START_SUSPENDED`) as
+/// `CLD_STOPPED` even without `WSTOPPED`, and taking that for an exit would
+/// block the reap on a child that never runs.
 fn exited(pid: libc::pid_t) -> bool {
     // SAFETY: waitid with a zeroed local out-parameter.
     unsafe {
@@ -118,7 +123,12 @@ fn exited(pid: libc::pid_t) -> bool {
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         );
-        observed == 0 && info.si_pid() == pid
+        observed == 0
+            && info.si_pid() == pid
+            && matches!(
+                info.si_code,
+                libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+            )
     }
 }
 

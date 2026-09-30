@@ -172,7 +172,14 @@ fn a_grandchild_that_leaves_the_process_group_does_not_escape() {
         &["spawn-setsid", &pidfile_text, "sleep", "60000"],
         &[],
     );
-    let grandchild = published_pid(&pidfile);
+    // On macOS the escape is detected, and the tree killed, as soon as the
+    // grandchild leaves the group: possibly before the fixture publishes its
+    // pid. The report names it instead.
+    let grandchild = if cfg!(target_os = "macos") {
+        reported_escapee(&run.result)
+    } else {
+        published_pid(&pidfile)
+    };
     let gone = exits_within(grandchild, Duration::from_secs(5));
     if !gone {
         kill_pid(grandchild);
@@ -181,13 +188,27 @@ fn a_grandchild_that_leaves_the_process_group_does_not_escape() {
     if cfg!(target_os = "macos") {
         assert_eq!(run.code, Some(125), "stderr: {}", run.stderr);
         assert_eq!(str_field(&run.result, "killedBy"), Some("supervisor-error"));
-        assert!(run.result["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|error| error.as_str().unwrap().contains("left the process group")));
     } else {
         assert_eq!(run.code, Some(124), "stderr: {}", run.stderr);
         assert_eq!(str_field(&run.result, "killedBy"), Some("timeout"));
     }
+}
+
+/// The pid of the descendant the result reports as having left the group.
+#[cfg(unix)]
+fn reported_escapee(result: &serde_json::Value) -> u32 {
+    result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|error| error.as_str())
+        .find_map(|error| {
+            error
+                .strip_prefix("descendant ")?
+                .split_once(" left the process group")?
+                .0
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no escape reported: {result}"))
 }

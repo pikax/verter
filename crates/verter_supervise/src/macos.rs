@@ -23,10 +23,14 @@
 //!   and asks the watchdog to kill the group when the sum reaches the kill
 //!   trigger (the cap less a headroom of 1/16). A fork wakes a sweep at once.
 //! - Fail closed mid-run: an unreadable live process, a descendant that left
-//!   the process group, a sweep older than twice the sampling interval, a
+//!   the process group, an observation older than twice the sampling
+//!   interval (at least 50 ms: macOS sometimes wakes a sleep that late), a
 //!   dead watchdog or host memory pressure kills the group and invalidates
-//!   the run. A descendant that left the group is reported, not killed:
-//!   nothing is ever killed by a cached process id.
+//!   the run. Nothing is ever killed by a cached process id. A descendant
+//!   that left the group dies with the tree only when its pid is pinned: the
+//!   kill stops the group first, and a stopped parent cannot reap its child,
+//!   so the child it still parents keeps its pid. One whose parent already
+//!   exited belongs to launchd and is only reported.
 //!
 //! Sampling proves no overshoot bound: allocation between two sweeps, and
 //! kill latency, are not bounded by anything the supervisor controls. The
@@ -79,13 +83,13 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         return;
     }
     let interval = spec.sample_interval.unwrap_or(DEFAULT_SAMPLE_INTERVAL);
-    let max_age = interval * 2;
+    let max_age = sample_age_budget(interval);
     let cap = spec.mem_limit_bytes;
     let trigger = cap - cap / 16;
     report.kill_trigger_bytes = Some(trigger);
     report.sampling.interval_ms = ms(interval);
 
-    if let Err(error) = preflight(spec, interval, max_age, launch.fault) {
+    if let Err(error) = preflight(spec, interval, interval * 2, launch.fault) {
         report.errors.push(error);
         return;
     }
@@ -257,7 +261,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     if let Some(escapee) = outcome.escaped {
                         report.errors.push(format!(
                             "descendant {escapee} left the process group; the tree is no longer \
-                             fully observable and that process is outside the teardown"
+                             fully observable"
                         ));
                         kill(KilledBy::SupervisorError, &mut link, &mut cause);
                     } else if outcome.footprint >= trigger {
@@ -295,7 +299,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     kill(KilledBy::SupervisorError, &mut link, &mut cause);
                 }
             }
-            next_sample = (next_sample + interval).max(Instant::now());
+            next_sample = next_sweep_due(Instant::now(), interval);
         }
 
         let now = Instant::now();
@@ -376,9 +380,22 @@ impl Workload {
         Ok(start_ns)
     }
 
+    /// Kill the group and every descendant that left it while its pid is
+    /// still pinned (see [`pinned_escapees`]).
     pub(crate) fn kill(&self) {
         // SAFETY: the group's leader is our unreaped child, so the group id
         // still names this workload's group.
+        unsafe {
+            libc::kill(-self.pid, libc::SIGSTOP);
+        }
+        for escapee in pinned_escapees(self.pid) {
+            // SAFETY: the pid is pinned: its parent, or the escapee itself,
+            // is stopped and has not been reaped.
+            unsafe {
+                libc::kill(escapee, libc::SIGKILL);
+            }
+        }
+        // SAFETY: as above.
         unsafe {
             libc::kill(-self.pid, libc::SIGKILL);
         }
@@ -413,7 +430,7 @@ impl Workload {
 fn preflight(
     spec: &crate::cli::RunSpec,
     interval: Duration,
-    max_age: Duration,
+    sweep_budget: Duration,
     fault: Option<Fault>,
 ) -> Result<(), String> {
     let memsize = sysctl_u64("hw.memsize")
@@ -451,17 +468,36 @@ fn preflight(
         let _ = group_members(own_group);
         let _ = children(own);
         let took = started.elapsed();
-        if took > max_age {
+        if took > sweep_budget {
             return Err(format!(
                 "cannot establish telemetry: a sampling sweep took {:.1} ms, over the {:.1} ms \
                  budget for a {:.1} ms interval",
                 ms(took),
-                ms(max_age),
+                ms(sweep_budget),
                 ms(interval)
             ));
         }
     }
     Ok(())
+}
+
+/// When the sweep after one that finished at `observed` is due. Keyed to
+/// the observation, not the previous slot: a fork wakes a sweep early, and
+/// advancing the old slot instead would let the next observation age to
+/// almost twice the interval.
+fn next_sweep_due(observed: Instant, interval: Duration) -> Instant {
+    observed + interval
+}
+
+/// The floor of the mid-run observation-age budget.
+const MIN_SAMPLE_AGE_BUDGET: Duration = Duration::from_millis(50);
+
+/// How old a mid-run observation may get before the run fails closed:
+/// twice the interval, never under [`MIN_SAMPLE_AGE_BUDGET`]. macOS now
+/// and then wakes a timed sleep tens of milliseconds late, whatever the
+/// thread's priority or timer class; a stalled sampler still fails the run.
+fn sample_age_budget(interval: Duration) -> Duration {
+    (interval * 2).max(MIN_SAMPLE_AGE_BUDGET)
 }
 
 /// The result of one sweep over the tree.
@@ -508,6 +544,9 @@ fn sweep(
                 gone.push(member);
                 continue;
             }
+            // An exited, unreaped member (the leader the watchdog holds
+            // until the group is empty) has nothing left to read.
+            Err(error) if is_zombie_error(&error) => continue,
             Err(error) => return Err(format!("process {member} is unreadable: {error}")),
         };
         if info.pbi_status == libc::SZOMB {
@@ -580,10 +619,70 @@ fn c_string(text: &std::ffi::OsStr) -> Result<CString, String> {
     CString::new(text.as_bytes()).map_err(|_| format!("{text:?} contains a NUL byte"))
 }
 
+/// Whether a process-information failure for a pid that still exists means
+/// it is a zombie: the kernel answers `ESRCH` for an exited, unreaped
+/// process, which `kill(pid, 0)` still finds.
+fn is_zombie_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH)
+}
+
+/// How long one kill waits for a process to report itself stopped.
+const FREEZE_LIMIT: Duration = Duration::from_millis(100);
+
+/// Wait until `pid` is stopped; `false` if it is gone, a zombie, or still
+/// running at `deadline`.
+fn stopped(pid: libc::pid_t, deadline: Instant) -> bool {
+    loop {
+        match bsd_info(pid) {
+            Ok(info) if info.pbi_status == libc::SSTOP => return true,
+            Ok(info) if info.pbi_status != libc::SZOMB && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The descendants outside group `pgid` whose pids cannot have been reused,
+/// once the group has been sent `SIGSTOP`. A child of a stopped process is
+/// pinned: its parent cannot reap it. So each group member is confirmed
+/// stopped before its children are read, and each escapee is stopped and
+/// confirmed before its own children are. An escapee whose parent exited
+/// belongs to launchd and is never found here.
+fn pinned_escapees(pgid: libc::pid_t) -> Vec<libc::pid_t> {
+    let deadline = Instant::now() + FREEZE_LIMIT;
+    let mut frontier = Vec::new();
+    for member in group_members(pgid) {
+        if stopped(member, deadline) {
+            frontier.extend(children(member).into_iter().filter(|&child| {
+                bsd_info(child).is_ok_and(|info| info.pbi_pgid as libc::pid_t != pgid)
+            }));
+        }
+    }
+    let mut pinned = Vec::new();
+    let mut seen = BTreeSet::new();
+    while let Some(escapee) = frontier.pop() {
+        if !seen.insert(escapee) {
+            continue;
+        }
+        pinned.push(escapee);
+        // SAFETY: `escapee` is pinned by its stopped parent.
+        unsafe {
+            libc::kill(escapee, libc::SIGSTOP);
+        }
+        if stopped(escapee, deadline) {
+            frontier.extend(children(escapee));
+        }
+    }
+    pinned
+}
+
 fn alive_not_zombie(pid: libc::pid_t) -> bool {
     exists(pid) && bsd_info(pid).is_ok_and(|info| info.pbi_status != libc::SZOMB)
 }
 
+/// `fill` is one of libproc's pid listings, which take the buffer size in
+/// bytes and return the number of pids written.
 fn pid_list(fill: impl Fn(*mut libc::c_void, c_int) -> c_int) -> Vec<libc::pid_t> {
     let mut capacity = 64usize;
     loop {
@@ -593,7 +692,7 @@ fn pid_list(fill: impl Fn(*mut libc::c_void, c_int) -> c_int) -> Vec<libc::pid_t
         if returned <= 0 {
             return Vec::new();
         }
-        let count = returned as usize / std::mem::size_of::<libc::pid_t>();
+        let count = returned as usize;
         if count < capacity {
             buffer.truncate(count);
             buffer.retain(|&pid| pid > 0);
@@ -867,5 +966,97 @@ impl Queue {
             }
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    fn spawn_in_own_group(program: &str, args: &[&str]) -> std::process::Child {
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn")
+    }
+
+    /// Block until `pid` is a zombie, without reaping it.
+    fn wait_for_zombie(pid: libc::pid_t) {
+        // SAFETY: waitid with a zeroed local out-parameter; WNOWAIT leaves
+        // the child unreaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            );
+        }
+    }
+
+    /// A fork wakes a sweep before its slot; the one after it is still due
+    /// an interval later, never an interval past the skipped slot, so no
+    /// observation ages to twice the interval.
+    #[test]
+    fn an_early_sweep_does_not_skip_the_next_slot() {
+        let interval = Duration::from_millis(10);
+        let base = Instant::now();
+        let early = base + Duration::from_millis(1);
+        let due = next_sweep_due(early, interval);
+        assert!(
+            due.duration_since(early) <= interval,
+            "due {:?} after the last observation",
+            due.duration_since(early)
+        );
+    }
+
+    /// A late wakeup of the size macOS produces now and then (tens of
+    /// milliseconds) must not fail a run at the default cadence; a slow
+    /// interval still gets twice itself.
+    #[test]
+    fn the_age_budget_absorbs_a_late_wakeup_but_scales_with_the_interval() {
+        assert!(sample_age_budget(DEFAULT_SAMPLE_INTERVAL) >= Duration::from_millis(50));
+        assert_eq!(
+            sample_age_budget(Duration::from_millis(100)),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn the_group_and_child_listings_name_every_member() {
+        let mut child = spawn_in_own_group("/bin/sleep", &["30"]);
+        let pid = child.id() as libc::pid_t;
+        let members = group_members(pid);
+        // SAFETY: getpid has no preconditions.
+        let own_children = children(unsafe { libc::getpid() });
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(members, vec![pid]);
+        assert!(
+            own_children.contains(&pid),
+            "{pid} missing from {own_children:?}"
+        );
+    }
+
+    #[test]
+    fn a_sweep_over_an_unreaped_exited_leader_is_not_a_telemetry_loss() {
+        let mut child = spawn_in_own_group("/usr/bin/true", &[]);
+        let pid = child.id() as libc::pid_t;
+        wait_for_zombie(pid);
+        let mut known = BTreeSet::from([pid]);
+        let outcome = sweep(pid, &mut known, false);
+        let still_alive = alive_not_zombie(pid);
+        child.wait().ok();
+        let outcome = outcome.expect("a zombie leader is exited, not unreadable");
+        assert_eq!(outcome.footprint, 0);
+        assert!(outcome.escaped.is_none());
+        assert!(!still_alive);
     }
 }
