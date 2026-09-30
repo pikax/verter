@@ -1,0 +1,67 @@
+[package]
+name = "verter_supervise"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Process supervisor for compiler probes and benchmarks: launches a command under OS-backed process-tree memory containment and a deadline, tears the tree down on every exit path, and reports truthful peak-memory and timing telemetry."
+publish = false
+
+# Test and benchmark tooling only. No production crate may depend on this
+# crate; the workspace dependency-layer guard lists it among the harnesses
+# nothing may depend on.
+
+[[bin]]
+name = "verter-supervise"
+path = "src/main.rs"
+
+# The fixture the integration tests launch under the supervisor: an allocator
+# that runs until it is killed, a parent that hands the allocation to a
+# grandchild, sleepers and exit-code/stdio probes. It is a separate target so
+# the tests exercise exactly the process tree a real probe would build.
+[[bin]]
+name = "verter-supervise-fixture"
+path = "src/bin/fixture.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The Windows backend: a job object created before the child runs (the child
+# starts suspended and is resumed only once it is inside the job), its memory
+# limit, kill-on-close teardown, completion-port limit notifications and job
+# accounting. `windows-sys 0.61` is already resolved in the workspace lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+# The Unix backends: process groups, signals, rlimits, and on macOS the
+# per-process footprint and descendant enumeration (`proc_pid_rusage`,
+# `proc_listchildpids`, `proc_listpgrppids`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+verter_test_support = { path = "../verter_test_support" }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
