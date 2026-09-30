@@ -71,6 +71,7 @@ mod admission;
 mod desired;
 mod epoch;
 mod forwarding;
+pub mod overlay;
 mod quarantine;
 
 pub use admission::{
@@ -264,6 +265,7 @@ impl HubPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppliedReceipt {
     pub(crate) epoch: Option<ProviderEpoch>,
+    pub(crate) applied: bool,
 }
 
 /// One serving incarnation.
@@ -329,6 +331,7 @@ struct Shared<P: ?Sized> {
     lifecycle: StdMutex<Lifecycle>,
     query_watch: Arc<StdMutex<QueryWatch>>,
     admission: StdMutex<admission::AdmissionState>,
+    overlay: overlay::LazyOverlayCore<overlay::HubAdmittedTransport<P>>,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -435,6 +438,18 @@ pub struct ProviderHub<P: ?Sized> {
     state: Arc<HubState<P>>,
 }
 
+/// A dropped direct application has an unknown physical outcome. Wake only
+/// that incarnation's crash monitor so it cannot keep serving partial state.
+struct DirectApplicationGuard(Option<Arc<Notify>>);
+
+impl Drop for DirectApplicationGuard {
+    fn drop(&mut self) {
+        if let Some(signal) = self.0.take() {
+            signal.notify_one();
+        }
+    }
+}
+
 impl<P> ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
@@ -460,6 +475,7 @@ where
             }),
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
             admission: StdMutex::new(admission::AdmissionState::default()),
+            overlay: overlay::LazyOverlayCore::new(),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
@@ -480,6 +496,90 @@ where
                 policy,
             }),
         }
+    }
+
+    /// The hub-owned shared overlay state. Producers may collect admission
+    /// inputs from its paths; application and synchronization remain hub-owned.
+    pub fn overlay_state(&self) -> &overlay::LazyOverlayCore<overlay::HubAdmittedTransport<P>> {
+        &self.state.shared.overlay
+    }
+
+    /// Synchronize the admitted desired overlay set against one exact serving
+    /// incarnation. Independent carrier gates preserve concurrent engine barriers;
+    /// the receipt contains only member writes that actually committed.
+    pub async fn synchronize<S, F>(
+        self: &Arc<Self>,
+        expected_epoch: ProviderEpoch,
+        generation: u64,
+        in_scope: S,
+        admission: F,
+    ) -> Result<overlay::SynchronizationReceipt, AdmissionRefusal>
+    where
+        S: Fn(&str, overlay::OverlayPriority) -> bool,
+        F: Fn(&str) -> Option<overlay::GeneratedUnitWritePermit>,
+    {
+        let (provider, epoch) = self.serving().ok_or(AdmissionRefusal::NoServingProvider)?;
+        if epoch != expected_epoch {
+            return Err(AdmissionRefusal::StaleProvider);
+        }
+        self.state.shared.overlay.observe_serving_epoch(epoch);
+        let serving = overlay::ServingTransport {
+            transport: Arc::new(overlay::HubAdmittedTransport::new(
+                provider,
+                Arc::clone(self),
+                epoch,
+            )),
+            epoch,
+        };
+        let receipt = self
+            .state
+            .shared
+            .overlay
+            .inject_all_dirty(&serving, generation, in_scope, admission)
+            .await;
+        if self.serving_epoch() != Some(expected_epoch) {
+            return Err(AdmissionRefusal::StaleProvider);
+        }
+        Ok(receipt)
+    }
+
+    /// Application status belongs to the hub, and cannot attest a retired epoch.
+    pub fn overlay_sync_state(
+        &self,
+        path: &str,
+        epoch: ProviderEpoch,
+    ) -> overlay::OverlaySyncState {
+        if self.serving_epoch() != Some(epoch) {
+            return overlay::OverlaySyncState::NoActiveTransport;
+        }
+        self.state.shared.overlay.sync_state_for_epoch(path, epoch)
+    }
+
+    /// Withdraw from the exact serving incarnation; a retired close never
+    /// reaches its replacement. Withdrawals consume no generated-unit admission.
+    pub async fn retract_overlay(
+        &self,
+        epoch: ProviderEpoch,
+        path: &str,
+    ) -> Result<(), TypeProviderError> {
+        let serving = self
+            .state
+            .shared
+            .serving()
+            .ok_or_else(|| self.restarting())?;
+        if serving.epoch != epoch {
+            return Err(self.restarting());
+        }
+        let mut application = DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
+        let result = serving.provider.close_file(path).await;
+        application.0 = None;
+        if result.is_err() {
+            serving.crash_signal.notify_one();
+        }
+        if self.serving_epoch() != Some(epoch) {
+            return Err(self.restarting());
+        }
+        result
     }
 
     /// The serving epoch, or `None` while no engine serves.
@@ -1166,14 +1266,16 @@ async fn run_actor<P>(
                 admissions,
                 lane,
                 deadline,
-                ack,
+                mut ack,
             } => {
                 let current = || {
                     admissions
                         .iter()
                         .try_for_each(|admission| admission::check_current(&shared, admission))
                 };
-                let result = if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                let result = if ack.is_closed() {
+                    Err(AdmissionRefusal::Cancelled)
+                } else if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {
                     Err(AdmissionRefusal::DeadlineElapsed)
                 } else {
                     match current() {
@@ -1192,11 +1294,15 @@ async fn run_actor<P>(
                                         &mutation,
                                         lane,
                                     );
-                                    match deadline {
-                                        Some(at) => {
-                                            crate::deadline::with_deadline_at(at, forwarded).await
-                                        }
-                                        None => forwarded.await,
+                                    tokio::select! {
+                                        biased;
+                                        _ = ack.closed() => Err(TypeProviderError::new("admitted synchronization cancelled during application")),
+                                        result = async {
+                                            match deadline {
+                                                Some(at) => crate::deadline::with_deadline_at(at, forwarded).await,
+                                                None => forwarded.await,
+                                            }
+                                        } => result,
                                     }
                                 };
                                 match await_receptive(
@@ -1221,6 +1327,7 @@ async fn run_actor<P>(
                                                 }
                                                 Ok(AppliedReceipt {
                                                     epoch: Some(serving.epoch),
+                                                    applied: true,
                                                 })
                                             }
                                             Err(AdmissionRefusal::StaleBasis)
@@ -1301,9 +1408,13 @@ async fn run_actor<P>(
                     }
                 }
                 let result = match (shared.serving(), disposition) {
-                    (None, _) => Ok(AppliedReceipt { epoch: None }),
+                    (None, _) => Ok(AppliedReceipt {
+                        epoch: None,
+                        applied: false,
+                    }),
                     (Some(serving), Disposition::Shadowed) => Ok(AppliedReceipt {
                         epoch: Some(serving.epoch),
+                        applied: false,
                     }),
                     (Some(serving), Disposition::Forward) => {
                         let forwarding = async {
@@ -1324,6 +1435,7 @@ async fn run_actor<P>(
                         {
                             Ok(Ok(())) => Ok(AppliedReceipt {
                                 epoch: Some(serving.epoch),
+                                applied: true,
                             }),
                             Ok(Err(error)) => {
                                 // A failed forward is DIVERGENCE: the mutation
@@ -1427,6 +1539,7 @@ async fn run_actor<P>(
                     Ok(()) => {
                         let dropped = desired.discard_admitted();
                         let epoch = shared.epochs.mint();
+                        shared.overlay.observe_serving_epoch(epoch);
                         // Record the installed engine's tier BEFORE releasing
                         // it into the serving cell: from that instant
                         // `provider_id()` must name it even after it retires —

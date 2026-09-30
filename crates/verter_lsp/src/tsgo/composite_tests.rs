@@ -33,8 +33,8 @@ use verter_workspace::workspace_snapshot::{
 };
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
-use crate::tsgo::overlay_core::{HubAdmittedTransport, ServingTransport};
 use crate::tsgo::shared::EstablishSharedParams;
+use verter_type_runtime::provider_hub::overlay::{HubAdmittedTransport, ServingTransport};
 
 use super::{
     carrier_source_of, compose_establishment_discriminant, effective_javascript_check_policy,
@@ -492,11 +492,11 @@ async fn serve_recording(
         .await
         .expect("the test attach establishes");
     let (provider, epoch) = overlay.inner.hub.serving().expect("serving");
-    overlay.inner.core.observe_serving_epoch(epoch);
     ServingTransport {
         transport: Arc::new(HubAdmittedTransport::new(
             provider,
             Arc::clone(&overlay.inner.hub),
+            epoch,
         )),
         epoch,
     }
@@ -940,14 +940,15 @@ async fn sweep_writes_only_carriers_whose_generated_units_are_admitted() {
     ] {
         overlay
             .inner
-            .core
+            .hub
+            .overlay_state()
             .record_content_at_priority(unit, "export {}", OverlayPriority::Normal);
     }
     let serving = serve_recording(&overlay).await;
 
     overlay
         .inject_editor_demand(
-            &overlay.inner.core,
+            overlay.inner.hub.overlay_state(),
             &serving,
             "d:/ws/src/admitted/Ok.vue.tsx",
             overlay.sweep_generation(),
@@ -976,8 +977,8 @@ async fn a_new_publication_re_evaluates_generated_unit_admission() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(companion, "export {}");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(companion, "export {}", OverlayPriority::Interactive);
     let serving = serve_recording(&overlay).await;
     let sweep = || async {
         overlay
@@ -1027,15 +1028,34 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(path, "export const value = 1;");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
     let serving = serve_recording(&overlay).await;
     // Sync the carrier through the REAL write gate (a hub-issued admission).
     let permit = overlay
         .generated_unit_write_permit(core, path)
         .expect("the carrier's generated units are admitted");
-    core.inject_permitted(&serving, path, overlay.sweep_generation(), permit)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
 
     // The serving incarnation is retired AFTER selection but BEFORE the
@@ -1086,14 +1106,33 @@ async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(path, "export const value = 1;");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
     let serving = serve_recording(&overlay).await;
     let permit = overlay
         .generated_unit_write_permit(core, path)
         .expect("the carrier's generated units are admitted");
-    core.inject_permitted(&serving, path, overlay.sweep_generation(), permit)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
 
     // The shared hover blocks mid-flight; the retirement lands UNDERNEATH it.
@@ -1387,8 +1426,8 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(companion, "export {}");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(companion, "export {}", OverlayPriority::Interactive);
     let serving = serve_recording(&overlay).await;
 
     // Epoch A: the owning snapshot binds the carrier and its write set admits.
@@ -1398,8 +1437,23 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
     let permit_a = overlay
         .generated_unit_write_permit(core, companion)
         .expect("epoch A: the write set is admitted");
-    core.inject_permitted(&serving, companion, overlay.sweep_generation(), permit_a)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == companion,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit_a.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(attach.ops(), vec![format!("write:{companion}")]);
     attach.clear_ops();
 

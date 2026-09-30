@@ -2307,3 +2307,59 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod hub_delivery_tests {
+    use super::*;
+    use verter_type_runtime::provider_hub::{
+        EstablishFuture, HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
+    };
+    struct Engine(Arc<dyn TypeProvider>);
+    impl ProviderEstablisher<dyn TypeProvider> for Engine {
+        fn log_name(&self) -> &'static str {
+            "fixture"
+        }
+        fn user_label(&self) -> &'static str {
+            "tsgo"
+        }
+        fn restarting_error(&self) -> &'static str {
+            "fixture unavailable"
+        }
+        fn supports_completion_resolve(&self) -> bool {
+            false
+        }
+        fn establish<'a>(
+            &'a self,
+            _: Arc<tokio::sync::Notify>,
+        ) -> EstablishFuture<'a, dyn TypeProvider> {
+            Box::pin(async { Ok(Arc::clone(&self.0)) })
+        }
+    }
+    #[tokio::test]
+    async fn discovery_load_cannot_attest_disk_bytes_over_an_unsaved_editor_surface() {
+        let mock = crate::type_provider::mock::MockTypeProvider::new();
+        let hub = Arc::new(ProviderHub::new(
+            Engine(Arc::new(mock.clone())),
+            Arc::new(TracingNotifier),
+            HubPolicy::explicit(0),
+        ));
+        hub.establish().await.unwrap();
+        let sync = ProjectSync::new(hub, ProjectSyncMode::FullProject);
+        let path = "/ws/App.vue.tsx";
+        sync.open_tsx(path, "export const value = 'unsaved';")
+            .await
+            .unwrap();
+        sync.load_tsx(path, "export const value = 'disk';")
+            .await
+            .unwrap();
+        assert_eq!(
+            sync.synced_tsx_content(path).as_deref(),
+            Some("export const value = 'unsaved';")
+        );
+        assert_eq!(
+            mock.file_sync_calls().len(),
+            1,
+            "the engine accepted only the editor write"
+        );
+    }
+}

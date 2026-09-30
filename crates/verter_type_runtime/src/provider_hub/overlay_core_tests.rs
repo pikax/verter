@@ -9,12 +9,12 @@ use std::time::Duration;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Notify;
 
-use verter_type_runtime::protocol::TypeProviderError;
-use verter_type_runtime::traits::ProviderFuture;
+use crate::protocol::TypeProviderError;
+use crate::traits::ProviderFuture;
 
 use super::ServingTransport;
 use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport};
-use verter_type_runtime::provider_hub::ProviderEpoch;
+use crate::provider_hub::ProviderEpoch;
 
 /// A transport double: records each injection/retraction and reports controllable
 /// liveness. No real relay/engine. `inject_fails` models a barrier error (a failed

@@ -11,6 +11,34 @@ impl<P> TypeProvider for ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            let lane = match priority {
+                OverlayPriority::Foreground => Lane::Foreground,
+                OverlayPriority::Normal => Lane::Normal,
+                OverlayPriority::Background => Lane::Background,
+            };
+            let receipt = self
+                .submit_mutation(
+                    DesiredMutation::Load {
+                        path: path.into(),
+                        content: content.into(),
+                    },
+                    lane,
+                )
+                .await?;
+            Ok(match (receipt.epoch, receipt.applied) {
+                (None, _) => crate::traits::FileLoadDisposition::Held,
+                (Some(_), false) => crate::traits::FileLoadDisposition::Shadowed,
+                (Some(_), true) => crate::traits::FileLoadDisposition::Forwarded,
+            })
+        })
+    }
     fn provider_id(&self) -> &'static str {
         // The engine identity is tier-accurate while an incarnation serves.
         // Between incarnations the LAST serving tier is the truthful identity:

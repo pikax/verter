@@ -142,7 +142,40 @@ pub type ProviderFuture<'a, T> =
 /// the caller (LSP layer or resolver layer) before/after calling the provider.
 ///
 /// Uses boxed futures instead of `async fn` to allow `dyn TypeProvider` usage.
+/// Whether a discovery load was forwarded, held as desired state, or
+/// suppressed by a higher-authority editor overlay. This is a disposition,
+/// not an application or readiness certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLoadDisposition {
+    Forwarded,
+    Held,
+    Shadowed,
+}
+
 pub trait TypeProvider: Send + Sync {
+    /// Preserve the load's disposition across router/wrapper boundaries.
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.load_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.load_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.load_file_background(path, content).await?
+                }
+            }
+            Ok(FileLoadDisposition::Forwarded)
+        })
+    }
+
     /// Stable identity of this provider implementation.
     ///
     /// Returns one of `"tsgo"`, `"tsserver"`, `"extension"`. The LSP layer

@@ -117,6 +117,7 @@ pub enum AdmissionRefusal {
     /// A higher-authority live overlay suppressed this mutation before forwarding.
     ShadowedMutation,
     DeadlineElapsed,
+    Cancelled,
 }
 
 struct WitnessInner {
@@ -680,6 +681,8 @@ where
         if serving.epoch != admission.witness.0.epoch {
             return Err(AdmissionRefusal::StaleProvider);
         }
+        let mut application =
+            super::DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
         let forwarded = match kind {
             OverlayFileKind::Open => match priority {
                 OverlayPriority::Foreground => serving.provider.open_file(path, content).await,
@@ -703,7 +706,7 @@ where
                 }
             },
         };
-        match forwarded {
+        let result = match forwarded {
             Ok(()) => match check_current(&self.state.shared, admission) {
                 Ok(()) => {
                     // The written path's content changed: lift its crash
@@ -743,7 +746,9 @@ where
                     .await;
                 Err(AdmissionRefusal::ProviderWriteFailed)
             }
-        }
+        };
+        application.0 = None;
+        result
     }
 
     /// The post-failure disposition of a direct admitted write: an on-demand

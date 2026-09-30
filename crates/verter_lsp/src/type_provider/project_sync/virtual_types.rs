@@ -125,7 +125,23 @@ impl ProjectSync {
         content: &str,
         lane: ProviderLane,
         verb: ProviderFileVerb,
-    ) -> Result<(), TypeProviderError> {
+    ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
+        use verter_type_runtime::traits::FileLoadDisposition;
+        if matches!(verb, ProviderFileVerb::Load) {
+            let priority = match lane {
+                ProviderLane::Foreground => {
+                    verter_type_runtime::provider_hub::OverlayPriority::Foreground
+                }
+                ProviderLane::Normal => verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ProviderLane::Background => {
+                    verter_type_runtime::provider_hub::OverlayPriority::Background
+                }
+            };
+            return self
+                .provider
+                .load_file_with_disposition(path, content, priority)
+                .await;
+        }
         match (lane, verb) {
             (ProviderLane::Foreground, ProviderFileVerb::Load) => {
                 self.provider.load_file(path, content).await
@@ -155,6 +171,7 @@ impl ProjectSync {
                 self.provider.update_file_normal(path, content).await
             }
         }
+        .map(|()| FileLoadDisposition::Forwarded)
     }
 
     pub(super) async fn publish_tsx(
@@ -222,6 +239,15 @@ impl ProjectSync {
         let result = self
             .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
+        if matches!(
+            &result,
+            Ok(verter_type_runtime::traits::FileLoadDisposition::Shadowed)
+        ) {
+            if virtual_path.is_some() && !virtual_was_live {
+                self.close_virtual_verter_types(tsx_path, lane).await?;
+            }
+            return Ok(false);
+        }
         if let Err(error) = result {
             // A dependency created solely for a failed carrier publication has
             // no live consumer. Preserve an older overlay because the provider

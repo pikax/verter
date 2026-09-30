@@ -145,8 +145,11 @@ that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
 The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
-authority: its overlay owns a `ProviderHub<TsgoSharedProvider>` that establishes
-the attach through the re-arm door, and every per-carrier sweep write carries a
+authority: the composite holds a `ProviderHub<TsgoSharedProvider>` that establishes
+the attach through the re-arm door. The hub owns shared overlay content, per-carrier
+application gates and applied epochs in `provider_hub/overlay.rs`; the composite
+collects inputs and calls `ProviderHub::synchronize`. Receipts list only successful
+member writes with exact bytes and epoch. Every per-carrier sweep write carries a
 hub-issued `AdmittedRequest` forwarded by
 `ProviderHub::forward_admitted_file` — off the actor queue, because the sweep's
 writes are concurrent barrier-coalesced (the single-writer actor would serialize
@@ -157,6 +160,12 @@ hub-issued admission binds the serving epoch and basis, so a replacement
 re-admits fresh. No admission cache survives beside the hub (the per-composite
 `CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
 are `ProviderHub::bound_project` + the hub request cache).
+Background discovery uses `load_file_with_disposition`: `Shadowed` preserves
+editor content and its delivered mapping; `Held` records desired replay state
+without forcing a cold managed fallback to establish. Independent hub groups
+activate concurrently, each with one ordered provider-affine bulk call.
+Dropping a direct overlay write or withdrawal signals that incarnation's
+recovery monitor because its physical outcome is unknown.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
@@ -921,7 +930,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsgo/ipc.rs` | TSGO LSP client, `LspTransport`, hang detection |
 | `crates/verter_type_runtime/src/provider_hub/` | `ProviderHub`: the ONE provider lifecycle owner (establish, recover, replay, serving `ProviderEpoch`, receipts, `bind_project`/`admit_request` admission and the lazy-attach re-arm door) |
 | `crates/verter_lsp/src/tsgo/resilient.rs` | Owned tsgo establishment strategy (`establish_owned`) |
-| `crates/verter_lsp/src/tsgo/project_sync.rs` | `ProjectSync` (batched provider file ops) |
+| `crates/verter_lsp/src/type_provider/project_sync.rs` | `ProjectSync` (batched provider file ops) |
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | tsserver establishment strategy (`hub`) |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |

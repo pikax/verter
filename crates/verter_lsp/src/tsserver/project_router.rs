@@ -1002,6 +1002,27 @@ pub fn probe_source_label(source: TsserverSource) -> &'static str {
 }
 
 impl TypeProvider for ProjectTsserverProvider {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            use verter_type_runtime::traits::FileLoadDisposition;
+            if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
+                return self
+                    .provider_for_path(path)
+                    .await?
+                    .load_file_with_disposition(path, content, priority)
+                    .await;
+            }
+            self.apply_file_write(path, content, OverlayFileKind::Load, priority)
+                .await?;
+            Ok(FileLoadDisposition::Forwarded)
+        })
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsserver"
     }
@@ -1428,23 +1449,30 @@ impl TypeProvider for ProjectTsserverProvider {
             }
             // Preserve each engine's input order and its single-refresh bulk
             // activation contract. Scalar editor opens keep their separate path.
-            for (hub, members) in batches {
-                let routes: Vec<_> = members
-                    .iter()
-                    .map(|(_, member)| {
-                        (
-                            member.source_path.clone(),
-                            member.companion_path.clone(),
-                            member.project_file_name.clone(),
-                        )
-                    })
-                    .collect();
-                hub.apply_overlay_batch(members).await.map_err(|reason| {
-                    TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
-                })?;
-                for (source, companion, project) in routes {
-                    self.register_route(&source, &companion, &project);
-                }
+            let outcomes = futures_util::future::join_all(batches.into_iter().map(
+                |(hub, members)| async move {
+                    let routes: Vec<_> = members
+                        .iter()
+                        .map(|(_, member)| {
+                            (
+                                member.source_path.clone(),
+                                member.companion_path.clone(),
+                                member.project_file_name.clone(),
+                            )
+                        })
+                        .collect();
+                    hub.apply_overlay_batch(members).await.map_err(|reason| {
+                        TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
+                    })?;
+                    for (source, companion, project) in routes {
+                        self.register_route(&source, &companion, &project);
+                    }
+                    Ok::<(), TypeProviderError>(())
+                },
+            ))
+            .await;
+            for outcome in outcomes {
+                outcome?;
             }
             Ok(())
         })

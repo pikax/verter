@@ -975,3 +975,41 @@ async fn generated_write_admission_racing_a_content_edit_is_readmitted() {
         "the re-admitted registration must reach the owning engine"
     );
 }
+
+#[tokio::test]
+async fn a_held_provider_batch_does_not_delay_an_independently_admitted_provider() {
+    let fixture = batch_router_fixture().await;
+    let router = Arc::new(fixture.router);
+    let held_hub = router
+        .provider_for_path(&fixture.members[0].source_path)
+        .await
+        .unwrap();
+    let (started, release) = fixture.providers[0].block_configure_paths();
+    let held = tokio::spawn(async move {
+        held_hub
+            .configure_paths("/held", serde_json::json!({}))
+            .await
+            .unwrap();
+    });
+    started.notified().await;
+    let healthy_applied = fixture.providers[1].observe_carrier_batch();
+    let members = fixture.members.clone();
+    let batch = tokio::spawn(async move { router.activate_carrier_members(&members).await });
+    let healthy_progress = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        healthy_applied.notified(),
+    )
+    .await;
+    release.notify_one();
+    held.await.unwrap();
+    batch.await.unwrap().unwrap();
+    assert!(
+        healthy_progress.is_ok(),
+        "the healthy provider must receive its bulk call while the other hub's actor is held"
+    );
+    let calls = fixture.providers[1].calls();
+    assert!(
+        matches!(calls.as_slice(), [MockCall::ActivateCarrierMembers { members }] if members == &vec![fixture.members[1].clone()]),
+        "the healthy group remains one actual bulk call: {calls:?}"
+    );
+}

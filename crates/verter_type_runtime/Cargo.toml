@@ -20,6 +20,7 @@ path = "src/bin/verter_type_runtime_fake_engine.rs"
 required-features = ["test-fake-engine"]
 
 [dependencies]
+futures-util = "0.3.32"
 verter_debug_assert = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -159,6 +159,7 @@ mod inner {
     /// Shared state for the mock provider.
     #[derive(Default)]
     struct MockState {
+        carrier_batch_observer: Option<std::sync::Arc<tokio::sync::Notify>>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -593,6 +594,12 @@ mod inner {
         /// [`MockState::on_query`].
         pub fn set_on_query(&self, path: &str, callback: Box<dyn FnOnce() + Send>) {
             self.state.lock().unwrap().on_query = Some((path.to_string(), callback));
+        }
+
+        pub fn observe_carrier_batch(&self) -> std::sync::Arc<tokio::sync::Notify> {
+            let observer = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_batch_observer = Some(observer.clone());
+            observer
         }
 
         /// Get all recorded calls.
@@ -1237,6 +1244,9 @@ mod inner {
                 .push(MockCall::ActivateCarrierMembers {
                     members: members.to_vec(),
                 });
+            if let Some(observer) = &self.state.lock().unwrap().carrier_batch_observer {
+                observer.notify_one();
+            }
             Box::pin(async { Ok(()) })
         }
 

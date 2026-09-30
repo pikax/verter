@@ -11,7 +11,7 @@
 //!   SHARED cannot trip the OWNED file-lifecycle timing (the foreground TSX sync is
 //!   budgeted far below the SHARED establishment bound).
 //! - **Query (OFF the foreground-sync budget).** The composite establishes the
-//!   SHARED attach lazily through its [`ProviderHub`](verter_type_runtime::provider_hub::ProviderHub)
+//!   SHARED attach lazily through its [`ProviderHub`](crate::provider_hub::ProviderHub)
 //!   (singleflight, discriminant-re-arming, retire-on-death) and injects the
 //!   carrier's recorded content ([`LazyOverlayCore::inject_all_dirty`], only when
 //!   it changed since the last injection). Fail-closed: until the attach
@@ -19,7 +19,7 @@
 //!   query.
 //!
 //! The SERVING identity — the transport instance and its [`ProviderEpoch`] — is
-//! minted by the hub the composite owns; the core only OBSERVES it
+//! minted by the hub actor; its overlay partition observes each successful install
 //! ([`LazyOverlayCore::observe_serving_epoch`]) so a re-attachment resets the
 //! injection markers atomically (the open carrier set replays into the fresh
 //! attach; a reconnect is never served against an attach that never received the
@@ -47,12 +47,46 @@ use std::time::Duration;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Mutex as AsyncMutex;
 
-use verter_type_runtime::protocol::TypeProviderError;
-use verter_type_runtime::provider_hub::{
+use crate::protocol::TypeProviderError;
+use crate::provider_hub::{
     AdmittedRequest, OverlayFileKind, OverlayPriority as HubOverlayPriority, ProviderEpoch,
     ProviderHub,
 };
-use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
+use crate::traits::{ProviderFuture, TypeProvider};
+
+/// Exact bytes of one member successfully applied to one serving incarnation.
+/// Construction stays in the hub's application partition.
+#[derive(Clone)]
+pub struct AppliedOverlayMember {
+    path: Arc<str>,
+    content: Arc<str>,
+    epoch: ProviderEpoch,
+}
+impl AppliedOverlayMember {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn content(&self) -> &Arc<str> {
+        &self.content
+    }
+    pub fn epoch(&self) -> ProviderEpoch {
+        self.epoch
+    }
+}
+
+/// Successful work from one synchronization pass, never its candidate set.
+pub struct SynchronizationReceipt {
+    pub(super) epoch: ProviderEpoch,
+    pub(super) members: Vec<AppliedOverlayMember>,
+}
+impl SynchronizationReceipt {
+    pub fn epoch(&self) -> ProviderEpoch {
+        self.epoch
+    }
+    pub fn members(&self) -> &[AppliedOverlayMember] {
+        &self.members
+    }
+}
 
 /// The bound on a compensating retract issued from the query-time injection path — both
 /// the inject transaction's own not-committed-safe cleanup and the sweep's flip-to-unsafe
@@ -74,7 +108,7 @@ const OVERLAY_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 /// ([`LazyOverlayCore::inject_permitted`]) takes a permit by value, and there
 /// is no way to build one from a path or a `bool` — only the hub issues it,
 /// and the hub-issued admission IS the write authorization.
-pub(crate) struct GeneratedUnitWritePermit(WriteProof);
+pub struct GeneratedUnitWritePermit(WriteProof);
 
 enum WriteProof {
     /// The hub-issued admission the production write routes through.
@@ -86,12 +120,12 @@ enum WriteProof {
 
 impl GeneratedUnitWritePermit {
     /// The permit carrying a hub-issued admission — the ONLY production form.
-    pub(crate) fn admitted(admission: AdmittedRequest) -> Self {
+    pub fn admitted(admission: AdmittedRequest) -> Self {
         Self(WriteProof::Admitted(admission))
     }
 
     /// The hub-issued admission this permit routes the write through, if any.
-    pub(crate) fn admission(&self) -> Option<&AdmittedRequest> {
+    pub fn admission(&self) -> Option<&AdmittedRequest> {
         match &self.0 {
             WriteProof::Admitted(admission) => Some(admission),
             #[cfg(test)]
@@ -102,14 +136,14 @@ impl GeneratedUnitWritePermit {
     /// The permit a transport double's sweep carries (tests of the overlay
     /// state machine, never of admission).
     #[cfg(test)]
-    pub(crate) fn bare() -> Self {
+    pub fn bare() -> Self {
         Self(WriteProof::Bare)
     }
 }
 
 /// A sweep predicate's verdict for one recorded unit: a [`GeneratedUnitWritePermit`]
 /// to write it, or none — skip it, and retract it if a prior sweep wrote it.
-pub(crate) struct InjectionVerdict(Option<GeneratedUnitWritePermit>);
+pub struct InjectionVerdict(Option<GeneratedUnitWritePermit>);
 
 impl From<Option<GeneratedUnitWritePermit>> for InjectionVerdict {
     fn from(permit: Option<GeneratedUnitWritePermit>) -> Self {
@@ -132,7 +166,7 @@ impl From<bool> for InjectionVerdict {
 /// double — it never resolves types or reads a store. Liveness and teardown
 /// are NOT part of the seam: the hub that owns the serving incarnation owns
 /// its death detection and teardown.
-pub(crate) trait OverlayTransport: Send + Sync + 'static {
+pub trait OverlayTransport: Send + Sync + 'static {
     /// Inject (or refresh) a carrier overlay — the ordered per-carrier state
     /// machine, gated by the write permit's hub-issued admission in
     /// production.
@@ -153,8 +187,9 @@ pub(crate) trait OverlayTransport: Send + Sync + 'static {
 /// stays dirty and the next sweep re-admits at the fresh basis, with zero
 /// writes). Retracts and teardown order directly through the serving
 /// provider: a withdrawal owns no admission to consume.
-pub(crate) struct HubAdmittedTransport<P: ?Sized> {
+pub struct HubAdmittedTransport<P: ?Sized> {
     provider: Arc<P>,
+    epoch: ProviderEpoch,
     hub: Arc<ProviderHub<P>>,
 }
 
@@ -163,12 +198,16 @@ where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
     /// Bind the hub's serving provider to the hub's admission door.
-    pub(crate) fn new(provider: Arc<P>, hub: Arc<ProviderHub<P>>) -> Self {
-        Self { provider, hub }
+    pub fn new(provider: Arc<P>, hub: Arc<ProviderHub<P>>, epoch: ProviderEpoch) -> Self {
+        Self {
+            provider,
+            hub,
+            epoch,
+        }
     }
 
     /// The serving provider this transport carries.
-    pub(crate) fn provider(&self) -> &Arc<P> {
+    pub fn provider(&self) -> &Arc<P> {
         &self.provider
     }
 }
@@ -210,14 +249,15 @@ where
     }
 
     fn retract(&self, path: &str) -> ProviderFuture<'_, ()> {
-        self.provider.close_file(path)
+        let path = path.to_owned();
+        Box::pin(async move { self.hub.retract_overlay(self.epoch, &path).await })
     }
 }
 
 /// A hub-owned serving incarnation handed to the overlay core: the provider
 /// plus the EXACT [`ProviderEpoch`] the hub minted for it. Every core
 /// operation is attributed to that epoch, never a re-read of the current one.
-pub(crate) struct ServingTransport<T> {
+pub struct ServingTransport<T> {
     pub transport: Arc<T>,
     pub epoch: ProviderEpoch,
 }
@@ -240,7 +280,7 @@ struct ShadowSafetyCache {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum OverlayPriority {
+pub enum OverlayPriority {
     Background,
     Normal,
     Interactive,
@@ -300,7 +340,7 @@ fn record_is_synced(rec: &ContentRecord, active_epoch: Option<ProviderEpoch>) ->
 /// a refusal must distinguish missing content, a failed/dirty injection, a shadow-safety
 /// veto, and a transport replacement that happened after the query captured its provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OverlaySyncState {
+pub enum OverlaySyncState {
     /// No lifecycle lane recorded this companion.
     Unrecorded,
     /// The overlay has not observed any established transport yet.
@@ -327,7 +367,7 @@ pub(crate) enum OverlaySyncState {
 
 impl OverlaySyncState {
     #[must_use]
-    pub(crate) fn is_synced(self) -> bool {
+    pub fn is_synced(self) -> bool {
         self == Self::Synced
     }
 }
@@ -335,7 +375,7 @@ impl OverlaySyncState {
 /// The lazy SHARED-overlay core: a per-carrier content cache (recorded by the OWNED
 /// lifecycle, off the establishment path) plus the per-carrier synchronization state
 /// driven against the HUB-OWNED serving incarnation. Generic over the transport `T`.
-pub(crate) struct LazyOverlayCore<T: OverlayTransport> {
+pub struct LazyOverlayCore<T> {
     /// The per-carrier recorded state + the active serving epoch under ONE sync
     /// lock — the OWNED lifecycle writes content without any establishment.
     state: SyncMutex<OverlayState>,
@@ -351,7 +391,7 @@ pub(crate) struct LazyOverlayCore<T: OverlayTransport> {
 }
 
 impl<T: OverlayTransport> LazyOverlayCore<T> {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: SyncMutex::new(OverlayState {
                 active_epoch: None,
@@ -368,7 +408,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// production routes through [`Self::record_content_at_priority`] with the
     /// caller's lifecycle-lane authority.
     #[cfg(test)]
-    pub(crate) fn record_content(&self, path: &str, content: &str) {
+    pub fn record_content(&self, path: &str, content: &str) {
         self.record_content_at_priority(path, content, OverlayPriority::Interactive);
     }
 
@@ -377,12 +417,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// BACKGROUND record (sourced from an older disk snapshot) can never overwrite
     /// INTERACTIVE editor bytes; the editor lane keeps absolute priority until the
     /// record is retracted on close.
-    pub(crate) fn record_content_at_priority(
-        &self,
-        path: &str,
-        content: &str,
-        priority: OverlayPriority,
-    ) {
+    pub fn record_content_at_priority(&self, path: &str, content: &str, priority: OverlayPriority) {
         let mut state = self.state.lock();
         match state.content.get_mut(path) {
             Some(rec) if priority >= rec.priority => {
@@ -423,7 +458,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
 
     /// Every recorded unit path, sorted — the candidate write set a caller groups by
     /// carrier source to decide generated-unit admission.
-    pub(crate) fn recorded_paths(&self) -> Vec<String> {
+    pub fn recorded_paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = self.state.lock().content.keys().cloned().collect();
         paths.sort();
         paths
@@ -501,7 +536,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     ///
     /// Called by the composite RIGHT AFTER the hub hands it a serving incarnation —
     /// before any injection runs against that epoch.
-    pub(crate) fn observe_serving_epoch(&self, epoch: ProviderEpoch) {
+    pub(super) fn observe_serving_epoch(&self, epoch: ProviderEpoch) {
         let mut state = self.state.lock();
         let adopt = match state.active_epoch {
             None => true,
@@ -528,12 +563,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// is satisfiable. Best-effort + fail-closed: on failure the content
     /// stays dirty and a later query retries (self-healing).
     #[cfg(test)]
-    pub(crate) async fn inject_dirty(
-        &self,
-        serving: &ServingTransport<T>,
-        path: &str,
-        generation: u64,
-    ) {
+    pub async fn inject_dirty(&self, serving: &ServingTransport<T>, path: &str, generation: u64) {
         self.inject_permitted(serving, path, generation, GeneratedUnitWritePermit::bare())
             .await;
     }
@@ -543,13 +573,13 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// so reaching the shared engine requires the ProviderHub's admission for
     /// the unit's whole write set; the permit also stands for the
     /// shadow-safety decision recorded here for `generation`.
-    pub(crate) async fn inject_permitted(
+    pub(super) async fn inject_permitted(
         &self,
         serving: &ServingTransport<T>,
         path: &str,
         generation: u64,
         permit: GeneratedUnitWritePermit,
-    ) {
+    ) -> Option<AppliedOverlayMember> {
         let run_epoch = serving.epoch;
         self.cache_shadow_decision(path, run_epoch, generation, true);
         let gate = self.carrier_gate(path);
@@ -561,7 +591,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
             &gate,
             &permit,
         )
-        .await;
+        .await
     }
 
     /// The gated per-carrier injection transaction: physically inject the carrier's
@@ -610,7 +640,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         generation: u64,
         carrier_gate: &Arc<AsyncMutex<()>>,
         permit: &GeneratedUnitWritePermit,
-    ) {
+    ) -> Option<AppliedOverlayMember> {
         let gate_wait = std::time::Instant::now();
         let _gate = carrier_gate.lock().await;
         let gate_waited = gate_wait.elapsed();
@@ -626,11 +656,9 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         let (content, had_prior_overlay) = {
             let mut state = self.state.lock();
             if state.active_epoch != Some(run_epoch) {
-                return;
+                return None;
             }
-            let Some(rec) = state.content.get_mut(path) else {
-                return;
-            };
+            let rec = state.content.get_mut(path)?;
             // Require the EXACT `{generation, safe:true}` admission BEFORE touching the
             // transport — a carrier without the fresh safe decision for THIS generation is
             // never physically injected (the admission is the shadow-safe gate).
@@ -639,10 +667,10 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 .as_ref()
                 .is_some_and(|c| c.generation == generation && c.safe);
             if !admitted {
-                return;
+                return None;
             }
             if record_is_synced(rec, Some(run_epoch)) {
-                return;
+                return None;
             }
             // Clear any matching old `run_epoch` marker BEFORE the physical inject — the
             // overlay is being re-landed, so keep the marker ABSENT through the inject AND
@@ -685,9 +713,10 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 let _ =
                     tokio::time::timeout(OVERLAY_CLEANUP_TIMEOUT, transport.retract(path)).await;
             }
-            return;
+            return None;
         }
         // Classify the outcome atomically under the sync lock.
+        let mut applied = None;
         let needs_retract = {
             let mut state = self.state.lock();
             if state.active_epoch != Some(run_epoch) {
@@ -700,6 +729,11 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                     .as_ref()
                     .is_some_and(|c| c.generation == generation && c.safe);
                 if admitted && rec.content.as_ref() == content.as_ref() {
+                    applied = Some(AppliedOverlayMember {
+                        path: Arc::from(path),
+                        content: Arc::clone(&content),
+                        epoch: run_epoch,
+                    });
                     rec.injected = Some(InjectedRecord {
                         content,
                         epoch: run_epoch,
@@ -721,6 +755,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
             // compensating retract needs NO post-await marker clear.
             let _ = tokio::time::timeout(OVERLAY_CLEANUP_TIMEOUT, transport.retract(path)).await;
         }
+        applied
     }
 
     /// The gated unsafe-flip retract: acquire the carrier gate, then, under ONE state lock,
@@ -844,19 +879,20 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// it is content-dirty — its shadow-safety decision is keyed on the workspace
     /// content generation, orthogonal to the serving epoch, so while the real user file
     /// still occupies its companion path it must not be injected into the fresh attach.
-    pub(crate) async fn inject_all_dirty<S, F, V>(
+    pub(super) async fn inject_all_dirty<S, F, V>(
         &self,
         serving: &ServingTransport<T>,
         generation: u64,
         in_scope: S,
         should_inject: F,
-    ) where
+    ) -> SynchronizationReceipt
+    where
         S: Fn(&str, OverlayPriority) -> bool,
         F: Fn(&str) -> V,
         V: Into<InjectionVerdict>,
     {
         self.inject_all_dirty_paced(serving, generation, in_scope, should_inject, usize::MAX)
-            .await;
+            .await
     }
 
     /// [`Self::inject_all_dirty`] issuing at most `at_once` carriers together, and
@@ -867,14 +903,14 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// editor's engine absorbs an overlay in a few hundred milliseconds and the
     /// relay's control channel is serial, so a request arriving mid-sweep waits for
     /// at most one small group rather than for the rest of the project.
-    pub(crate) async fn inject_all_dirty_paced<S, F, V>(
+    pub(super) async fn inject_all_dirty_paced<S, F, V>(
         &self,
         serving: &ServingTransport<T>,
         generation: u64,
         in_scope: S,
         should_inject: F,
         at_once: usize,
-    ) -> usize
+    ) -> SynchronizationReceipt
     where
         S: Fn(&str, OverlayPriority) -> bool,
         F: Fn(&str) -> V,
@@ -947,40 +983,44 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         let sweep_started = std::time::Instant::now();
         let predicate_micros = std::sync::atomic::AtomicU64::new(0);
         let predicate_micros = &predicate_micros;
+        let mut members = Vec::new();
         for group in candidates.chunks(at_once.max(1)) {
-            futures_util::future::join_all(group.iter().cloned().map(|path| async move {
-                // The FRESH shadow-safety decision for THIS generation is recorded BEFORE the
-                // gated inject/retract (never held across it; monotonic, so an older-generation
-                // run cannot regress a newer decision). A concurrent in-flight injection then
-                // observes this generation's decision at ITS commit: a concurrent flip to
-                // `{safe:false}` VETOES the stale commit, while a genuine re-inject after a
-                // flip-back-to-safe (`{safe:true}`) is not spuriously vetoed by the PRIOR
-                // generation's cached-unsafe decision.
-                let started = std::time::Instant::now();
-                let InjectionVerdict(permit) = should_inject(&path).into();
-                predicate_micros.fetch_add(
-                    started.elapsed().as_micros() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                if let Some(permit) = permit {
-                    // The single-carrier entry records the `{safe:true}` admission and runs the
-                    // gated inject transaction against the bound epoch.
-                    self.inject_permitted(serving, &path, generation, permit)
-                        .await;
-                } else {
-                    // No permit — shadow-unsafe or hub-refused: cache `{safe:false}` (so
-                    // `is_synced` fails closed the instant it is observed) then retract the
-                    // carrier's overlay so it leaves the SHARED Program (its
-                    // `ContentRecord` is KEPT so it re-injects if it later flips back to
-                    // safe), under the carrier gate so it is ordered w.r.t. any
-                    // in-flight inject of the same carrier.
-                    self.cache_shadow_decision(&path, run_epoch, generation, false);
-                    let gate = self.carrier_gate(&path);
-                    self.retract_unsafe_bound(transport, run_epoch, &path, generation, &gate)
-                        .await;
-                }
-            }))
-            .await;
+            let applied =
+                futures_util::future::join_all(group.iter().cloned().map(|path| async move {
+                    // The FRESH shadow-safety decision for THIS generation is recorded BEFORE the
+                    // gated inject/retract (never held across it; monotonic, so an older-generation
+                    // run cannot regress a newer decision). A concurrent in-flight injection then
+                    // observes this generation's decision at ITS commit: a concurrent flip to
+                    // `{safe:false}` VETOES the stale commit, while a genuine re-inject after a
+                    // flip-back-to-safe (`{safe:true}`) is not spuriously vetoed by the PRIOR
+                    // generation's cached-unsafe decision.
+                    let started = std::time::Instant::now();
+                    let InjectionVerdict(permit) = should_inject(&path).into();
+                    predicate_micros.fetch_add(
+                        started.elapsed().as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if let Some(permit) = permit {
+                        // The single-carrier entry records the `{safe:true}` admission and runs the
+                        // gated inject transaction against the bound epoch.
+                        self.inject_permitted(serving, &path, generation, permit)
+                            .await
+                    } else {
+                        // No permit — shadow-unsafe or hub-refused: cache `{safe:false}` (so
+                        // `is_synced` fails closed the instant it is observed) then retract the
+                        // carrier's overlay so it leaves the SHARED Program (its
+                        // `ContentRecord` is KEPT so it re-injects if it later flips back to
+                        // safe), under the carrier gate so it is ordered w.r.t. any
+                        // in-flight inject of the same carrier.
+                        self.cache_shadow_decision(&path, run_epoch, generation, false);
+                        let gate = self.carrier_gate(&path);
+                        self.retract_unsafe_bound(transport, run_epoch, &path, generation, &gate)
+                            .await;
+                        None
+                    }
+                }))
+                .await;
+            members.extend(applied.into_iter().flatten());
         }
         if considered > 0 {
             tracing::debug!(
@@ -990,7 +1030,10 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 "shared overlay: sweep finished"
             );
         }
-        considered
+        SynchronizationReceipt {
+            epoch: run_epoch,
+            members,
+        }
     }
 
     /// Whether the carrier's CURRENT recorded content is confirmed synced into the
@@ -1002,7 +1045,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// overlay-shadow a real user file (`carrier_never_shadows_real_user_file`). An
     /// unrecorded carrier is not synced.
     #[cfg(test)]
-    pub(crate) fn is_synced(&self, path: &str) -> bool {
+    pub fn is_synced(&self, path: &str) -> bool {
         let state = self.state.lock();
         let active = state.active_epoch;
         state
@@ -1016,7 +1059,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// can retain transport A while another query observes replacement B. In that window,
     /// B's marker makes the old `is_synced(path)` true even though returning A would cross
     /// the barrier. This terminal check fails closed on that mismatch.
-    pub(crate) fn sync_state_for_epoch(
+    pub fn sync_state_for_epoch(
         &self,
         path: &str,
         expected_epoch: ProviderEpoch,
@@ -1105,7 +1148,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// A gate-acquire timeout fails closed within the deadline — an in-flight gated inject
     /// will observe the absence and compensate, and a reopen's inject is ordered behind this
     /// gate.
-    pub(crate) async fn retract_bounded(
+    pub async fn retract_bounded(
         &self,
         path: &str,
         timeout: Duration,
