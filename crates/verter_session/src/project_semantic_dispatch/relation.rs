@@ -182,29 +182,19 @@ enum NakedUnionInference {
     },
 }
 
-/// The shape of an in-scope conditional-`infer` pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InferPatternShape {
-    /// `T extends infer X`.
-    Bare,
-    /// `T extends { a: infer U, .. }` — direct `Infer` member values.
-    ObjectProps,
-    /// `T extends [infer H, .., ...infer Rest]` — direct `Infer` elements.
-    TupleHeadTail,
-    /// `T extends (infer U)[]` — a direct `Infer` array element (the
-    /// `Flatten` class).
-    ArrayElement,
-    /// `T extends (p: infer U, ..) => infer R` — direct `Infer`
-    /// parameter / return positions.
-    Function,
-    /// `{ [P in keyof infer T]: X }` with no key remap.
-    ReverseHomomorphicMapped,
-    /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
-    /// template literal pattern.
-    TemplateLiteral,
-    /// `T extends Box<infer P>` — `Infer` sites among the type arguments
-    /// of a reference to a generic declaration.
-    Reference,
+/// The `infer` declarations a pattern holds, as the relation infers them.
+pub(crate) enum InferInventory {
+    /// Each declaration, in discovery order, reached through structure the
+    /// relation infers through: object members and their signatures and
+    /// index signatures, signature parameters, returns and predicates,
+    /// array and tuple elements, union and intersection members, a
+    /// reference's type arguments, a template literal's holes.
+    Sites(Vec<SemanticNodeId>),
+    /// A declaration sits below structure the relation does not infer
+    /// through (an operator such as `keyof`, a mapped type other than a root
+    /// reverse mapping, a nested conditional that declares its own):
+    /// an explicit capability gap.
+    Unsupported,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -266,18 +256,16 @@ pub(super) struct InferParamSite {
     priority: InferenceCandidatePriority,
 }
 
-/// The detected pattern payload: shape plus the one frozen session setup
-/// shared by key construction and session opening.
+/// The detected pattern payload: the one frozen session setup shared by key
+/// construction and session opening.
 #[derive(Debug, Clone)]
 pub(crate) struct InferPatternInfo {
-    pub(crate) shape: InferPatternShape,
     setup: InferenceSessionSetup,
     reverse_homomorphic: Option<ReverseHomomorphicSpec>,
 }
 
 impl InferPatternInfo {
     fn new(
-        shape: InferPatternShape,
         sites: Vec<InferParamSite>,
         reverse_homomorphic: Option<ReverseHomomorphicSpec>,
     ) -> Self {
@@ -299,7 +287,6 @@ impl InferPatternInfo {
                 .into_boxed_slice(),
         );
         Self {
-            shape,
             setup: InferenceSessionSetup::new(
                 infos,
                 VariancePhase::Covariant,
@@ -4153,11 +4140,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key.inference_context == expected
     }
 
-    /// Detect an in-scope conditional-`infer` pattern on `target`. Direct
-    /// infer occupants are supported in bare, object, tuple, array, and
-    /// function positions. An exact unremapped homomorphic mapped target
-    /// enables reverse projection; all other deeper nesting stays deferred.
-    /// Results are cached per target node on the transaction.
+    /// Detect an in-scope conditional-`infer` pattern on `target`: a bare
+    /// `infer`, an exact unremapped homomorphic mapped target (reverse
+    /// projection), or the declarations its inventory reaches
+    /// ([`Self::infer_inventory`]). Results are cached per target node on the
+    /// transaction.
     pub(super) fn relation_pattern_info(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         if let Some(cached) = self
             .dispatch_txn
@@ -4177,55 +4164,105 @@ impl<'a> ProjectSemanticDispatch<'a> {
         computed
     }
 
-    /// The `infer` placeholders `root` holds through structure alone —
-    /// object members and their signatures, signature parameters and
-    /// returns, array and tuple elements, union arms — in discovery order.
-    /// `None` when a placeholder sits anywhere else (a conditional or
-    /// mapped type scoping its own, an application, an operator), where
-    /// the relation that deposits into it is not the structural one.
-    pub(super) fn structural_infer_sites(
-        &self,
-        root: SemanticNodeId,
-    ) -> Option<Vec<SemanticNodeId>> {
+    /// The `infer` declarations `pattern` holds ([`InferInventory`]): one
+    /// walk over the pattern, each node read once. A declaration's
+    /// constraint is read where the conditional is written, so no
+    /// declaration of the pattern sits in it.
+    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> InferInventory {
         let graph = self.graph();
         let mut sites = Vec::new();
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack = vec![root];
+        let mut stack = vec![pattern];
         while let Some(node) = stack.pop() {
             if !visited.insert(node) {
                 continue;
             }
-            let data = graph.node_data(node)?;
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
             match data.as_ref() {
-                SemanticNodeData::Infer { .. } => sites.push(node),
+                SemanticNodeData::Infer { .. } => {
+                    if !sites.contains(&node) {
+                        sites.push(node);
+                    }
+                }
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
                 SemanticNodeData::Object(surface) => {
                     stack.extend(surface.positive_members().iter().map(|member| member.value));
                     stack.extend(surface.call_signatures.iter().copied());
                     stack.extend(surface.construct_signatures.iter().copied());
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if surface
+                        .keyspace
+                        .is_some_and(|keyspace| self.subtree_contains_infer(keyspace))
+                    {
+                        return InferInventory::Unsupported;
+                    }
                 }
                 SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
-                } if type_parameters.is_empty() => {
+                } => {
+                    if type_parameters.iter().any(|parameter| {
+                        parameter
+                            .constraint
+                            .is_some_and(|constraint| self.subtree_contains_infer(constraint))
+                            || parameter
+                                .default
+                                .is_some_and(|default| self.subtree_contains_infer(default))
+                    }) {
+                        return InferInventory::Unsupported;
+                    }
                     stack.extend(params.iter().map(|param| param.ty));
                     stack.push(*return_type);
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
-                // A reference infers from its type arguments.
+                // A source infers into every member of an intersection.
+                SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.members_arc().iter().copied());
+                }
+                // A builtin utility (`Uppercase<infer U>`, `Partial<infer T>`)
+                // is an operation the relation does not infer through.
+                SemanticNodeData::InstantiationRef { base, .. }
+                    if base.canonical_id.as_ref() == "__builtin__" =>
+                {
+                    if self.subtree_contains_infer(node) {
+                        return InferInventory::Unsupported;
+                    }
+                }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }
-                _ if self.subtree_contains_infer(node) => return None,
+                // A template literal infers into the holes that are
+                // declarations themselves.
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for hole in expressions.iter() {
+                        if matches!(
+                            graph.node_data(*hole).as_deref(),
+                            Some(SemanticNodeData::Infer { .. })
+                        ) {
+                            stack.push(*hole);
+                        } else if self.subtree_contains_infer(*hole) {
+                            return InferInventory::Unsupported;
+                        }
+                    }
+                }
+                _ if self.subtree_contains_infer(node) => return InferInventory::Unsupported,
                 _ => {}
             }
         }
-        Some(sites)
+        InferInventory::Sites(sites)
     }
 
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
@@ -4236,7 +4273,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
-                InferPatternShape::ReverseHomomorphicMapped,
                 vec![InferParamSite {
                     node: spec.base_infer,
                     name,
@@ -4245,212 +4281,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(spec),
             ));
         }
-        match graph.node_data(target).as_deref() {
-            Some(SemanticNodeData::Infer { name, .. }) => Some(InferPatternInfo::new(
-                InferPatternShape::Bare,
+        if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
+            return Some(InferPatternInfo::new(
                 vec![InferParamSite {
                     node: target,
                     name: Arc::clone(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
                 None,
-            )),
-            Some(SemanticNodeData::Object(view)) => {
-                let mut sites = Vec::new();
-                for member in view.positive_members().iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(member.value).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: member.value,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    } else {
-                        // `infer` placeholders nested in a member through
-                        // structure alone (a method's callback parameter)
-                        // are sites of the same pattern.
-                        for node in self
-                            .structural_infer_sites(member.value)
-                            .unwrap_or_default()
-                        {
-                            if let Some(SemanticNodeData::Infer { name, .. }) =
-                                graph.node_data(node).as_deref()
-                            {
-                                sites.push(InferParamSite {
-                                    node,
-                                    name: Arc::clone(name),
-                                    priority: InferenceCandidatePriority::Argument,
-                                });
-                            }
-                        }
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::ObjectProps, sites, None))
-            }
-            Some(SemanticNodeData::Tuple { elements, .. }) => {
-                let mut sites = Vec::new();
-                for element in elements.iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(element.value).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: element.value,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    } else {
-                        // `infer` placeholders an element reaches through
-                        // structure or a reference (`[PE<infer M, any>]`)
-                        // are sites of the same pattern.
-                        for node in self
-                            .structural_infer_sites(element.value)
-                            .unwrap_or_default()
-                        {
-                            if let Some(SemanticNodeData::Infer { name, .. }) =
-                                graph.node_data(node).as_deref()
-                            {
-                                sites.push(InferParamSite {
-                                    node,
-                                    name: Arc::clone(name),
-                                    priority: InferenceCandidatePriority::Argument,
-                                });
-                            }
-                        }
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::TupleHeadTail, sites, None))
-            }
-            Some(SemanticNodeData::Array { element, .. }) => {
-                if let Some(SemanticNodeData::Infer { name, .. }) =
-                    graph.node_data(*element).as_deref()
-                {
-                    Some(InferPatternInfo::new(
-                        InferPatternShape::ArrayElement,
-                        vec![InferParamSite {
-                            node: *element,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        }],
-                        None,
-                    ))
-                } else {
-                    None
-                }
-            }
-            Some(SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            }) => {
-                let mut sites = Vec::new();
-                for param in params.iter() {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(param.ty).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: param.ty,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        });
-                    } else {
-                        // A function parameter may itself be a variadic
-                        // tuple/array inference pattern (`...args:
-                        // [...infer R]`). The function relation flips the
-                        // occurrence to contravariant; the nested
-                        // container reducer deposits into these exact
-                        // sites.
-                        match graph.node_data(param.ty).as_deref() {
-                            Some(SemanticNodeData::Tuple { elements, .. }) => {
-                                for element in elements.iter() {
-                                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                                        graph.node_data(element.value).as_deref()
-                                    {
-                                        sites.push(InferParamSite {
-                                            node: element.value,
-                                            name: Arc::clone(name),
-                                            priority: InferenceCandidatePriority::Argument,
-                                        });
-                                    }
-                                }
-                            }
-                            Some(SemanticNodeData::Array { element, .. }) => {
-                                if let Some(SemanticNodeData::Infer { name, .. }) =
-                                    graph.node_data(*element).as_deref()
-                                {
-                                    sites.push(InferParamSite {
-                                        node: *element,
-                                        name: Arc::clone(name),
-                                        priority: InferenceCandidatePriority::Argument,
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                if let Some(SemanticNodeData::Infer { name, .. }) =
-                    graph.node_data(*return_type).as_deref()
-                {
-                    sites.push(InferParamSite {
-                        node: *return_type,
-                        name: Arc::clone(name),
-                        priority: InferenceCandidatePriority::ReturnType,
-                    });
-                }
-                // `x is infer U`: the predicate target is inferred from the
-                // source predicate where the return would be.
-                if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
-                    if let Some(SemanticNodeData::Infer { name, .. }) =
-                        graph.node_data(target).as_deref()
-                    {
-                        sites.push(InferParamSite {
-                            node: target,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::ReturnType,
-                        });
-                    }
-                }
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
-            }
-            Some(SemanticNodeData::InstantiationRef { .. }) => {
-                let sites: Vec<InferParamSite> = self
-                    .structural_infer_sites(target)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|node| match graph.node_data(node).as_deref() {
-                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
-                            node,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::Reference, sites, None))
-            }
-            Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
-                let sites: Vec<InferParamSite> = expressions
-                    .iter()
-                    .filter_map(|hole| match graph.node_data(*hole).as_deref() {
-                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
-                            node: *hole,
-                            name: Arc::clone(name),
-                            priority: InferenceCandidatePriority::Argument,
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                (!sites.is_empty())
-                    .then(|| InferPatternInfo::new(InferPatternShape::TemplateLiteral, sites, None))
-            }
-            _ => None,
+            ));
         }
+        let InferInventory::Sites(nodes) = self.infer_inventory(target) else {
+            return None;
+        };
+        let sites: Vec<InferParamSite> = nodes
+            .into_iter()
+            .filter_map(|node| match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                    node,
+                    name: Arc::clone(name),
+                    priority: InferenceCandidatePriority::Argument,
+                }),
+                _ => None,
+            })
+            .collect();
+        (!sites.is_empty()).then(|| InferPatternInfo::new(sites, None))
     }
 
     /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
@@ -5310,12 +5165,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// tried last first.
     fn infers_from_last_source_signature(&self, target: SemanticNodeId) -> bool {
         self.relation_session_active()
-            && (matches!(
+            && matches!(
                 self.graph().node_data(target).as_deref(),
                 Some(SemanticNodeData::Signature { .. })
-            ) || self
-                .relation_pattern_info(target)
-                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function))
+            )
     }
 
     /// The two slices a fixed-length `remainder` tuple splits into against
@@ -8433,19 +8286,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Function pattern, a check still riding a deferred /
         // `InstantiationRef` shell materialises through the oracle demand
         // so positional binding can zip its signature.
-        if self.relation_session_active() {
-            if let Some(pattern) = self.relation_pattern_info(target) {
-                if pattern.shape == InferPatternShape::Function {
-                    let materialised = self.materialise_function_infer_check(source);
-                    if materialised != source {
-                        return self.decide_relation(
-                            materialised,
-                            target,
-                            bindings,
-                            intersection_target_arm,
-                        );
-                    }
-                }
+        if self.relation_session_active()
+            && self.relation_pattern_info(target).is_some()
+            && matches!(
+                self.graph().node_data(target).as_deref(),
+                Some(SemanticNodeData::Signature { .. })
+            )
+        {
+            let materialised = self.materialise_function_infer_check(source);
+            if materialised != source {
+                return self.decide_relation(
+                    materialised,
+                    target,
+                    bindings,
+                    intersection_target_arm,
+                );
             }
         }
         self.decide_relation(source, target, bindings, intersection_target_arm)
@@ -8859,9 +8714,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .take(remainder_end - prefix_len)
                         .cloned()
                         .collect();
+                    // The capture is the slice of the concrete tuple, its
+                    // labels, optionality and rest kept and never readonly
+                    // (`sliceTupleType`).
                     let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
                         elements: Arc::from(remainder.into_boxed_slice()),
-                        readonly: if rest_on_source { t_ro } else { s_ro },
+                        readonly: false,
                     });
                     if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
                         results.push(RelationResult::Unknown);
