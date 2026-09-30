@@ -119,7 +119,6 @@ fn slash_path(path: &Path) -> String {
 /// workspace over the project, the batch-typecheck host, the carrier
 /// upserted, then its public API demanded (the TSC macro demand).
 #[test]
-#[ignore = "livelock: runtime-object expose projection"]
 fn exposing_a_ref_finishes_the_runtime_object_expose_projection() {
     let node_modules = workspace_node_modules();
     let project = tempfile::tempdir().expect("temp project");
