@@ -603,7 +603,6 @@ async fn scanner_loop(
                     carrier_transaction_coordinator: std::sync::Arc::clone(
                         &config.carrier_transaction_coordinator,
                     ),
-                    redrive_armed: std::sync::atomic::AtomicBool::new(false),
                 }),
                 crate::server::PENDING_SYNC_REDRIVE,
                 1,

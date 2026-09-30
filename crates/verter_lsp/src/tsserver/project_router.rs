@@ -166,6 +166,12 @@ pub struct ProjectTsserverProvider {
     /// first hub can exist — hubs are created lazily on first demand.
     admitted_state_rearm:
         parking_lot::RwLock<Option<crate::resilient_provider::AdmittedStateRearm>>,
+    /// Fired every time one of this pool's engines begins serving (each hub
+    /// created by [`Self::hub_for_binding`] notifies it on its initial start
+    /// and every crash replacement). Exposed through
+    /// [`TypeProvider::provider_restart_pulse`] so the pending provider-sync
+    /// re-drive can treat an engine (re)start as its retry signal.
+    restart_pulse: Arc<tokio::sync::Notify>,
 }
 
 impl ProjectTsserverProvider {
@@ -195,6 +201,7 @@ impl ProjectTsserverProvider {
             providers: DashMap::new(),
             routes: DashMap::new(),
             admitted_state_rearm: parking_lot::RwLock::new(None),
+            restart_pulse: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -428,6 +435,7 @@ impl ProjectTsserverProvider {
                     Arc::clone(&self.client),
                     3,
                     self.admitted_state_rearm.read().clone(),
+                    Arc::clone(&self.restart_pulse),
                 ))
             })
             .clone();
@@ -882,6 +890,10 @@ pub fn probe_source_label(source: TsserverSource) -> &'static str {
 impl TypeProvider for ProjectTsserverProvider {
     fn provider_id(&self) -> &'static str {
         "tsserver"
+    }
+
+    fn provider_restart_pulse(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(Arc::clone(&self.restart_pulse))
     }
 
     fn supports_completion_resolve(&self) -> bool {

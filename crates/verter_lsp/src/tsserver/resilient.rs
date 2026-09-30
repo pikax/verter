@@ -99,27 +99,36 @@ impl ProviderEstablisher<dyn TypeProvider> for TsserverBackend {
 /// old epoch's admitted generated state — the router's re-publication hook, so
 /// a recovered engine regains its carrier registrations through FRESH
 /// admission instead of waiting for the next ordinary publication.
+///
+/// `restart_pulse` is fired every time an engine of this hub begins serving
+/// (the initial start and every crash replacement): the pending provider-sync
+/// re-drive treats it as its retry signal, so carrier syncs refused during a
+/// replacement gap are re-driven the moment the fresh epoch serves.
 pub(crate) fn hub(
     inputs: TsserverEngineInputs,
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
     admitted_state_rearm: Option<crate::resilient_provider::AdmittedStateRearm>,
+    restart_pulse: Arc<tokio::sync::Notify>,
 ) -> ProviderHub<dyn TypeProvider> {
     ProviderHub::new(
         TsserverBackend { inputs },
         Arc::new(RearmNotifier {
             inner: LspNotifier::new(client, "tsserver"),
             rearm: admitted_state_rearm,
+            restart_pulse,
         }),
         HubPolicy::explicit(max_restarts),
     )
 }
 
-/// The tsserver hub notifier: the LSP wire notifier plus the admitted-state
-/// recovery re-arm, which must run off the actor's install path.
+/// The tsserver hub notifier: the LSP wire notifier, the admitted-state
+/// recovery re-arm (which must run off the actor's install path), and the
+/// engine-start pulse the pending-sync re-drive waits on.
 struct RearmNotifier {
     inner: LspNotifier,
     rearm: Option<crate::resilient_provider::AdmittedStateRearm>,
+    restart_pulse: Arc<tokio::sync::Notify>,
 }
 
 impl verter_type_runtime::provider_hub::ProviderNotifier for RearmNotifier {
@@ -128,6 +137,7 @@ impl verter_type_runtime::provider_hub::ProviderNotifier for RearmNotifier {
     }
 
     fn provider_started(&self, pid: Option<u32>, start: EngineStart) {
+        self.restart_pulse.notify_one();
         self.inner.provider_started(pid, start);
     }
 

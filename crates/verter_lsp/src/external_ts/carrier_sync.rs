@@ -1204,12 +1204,86 @@ pub struct CarrierTransactionCoordinator {
     /// survives to refuse a late token (removing then re-inserting the barrier would lose
     /// the tombstone).
     barriers: DashMap<String, CarrierAdmissionBarrier>,
+    /// Single-flight guard + per-entry exhaustion budget of the pending-snapshot
+    /// re-drive chain. This coordinator is the ONE retry-disposition authority
+    /// every drain context of a server shares (the coordinator's long-lived
+    /// context, background init's pre/post-scan drains and the scanner's
+    /// carrier-phase drain), so the gate it holds bounds the WHOLE queue:
+    /// at most one bounded successor chain drains it at a time, and an entry
+    /// the chain exhausted its attempt budget on is retried only after a
+    /// genuine retry signal (an external drain pass, an engine start) —
+    /// never by a mere coordinator wake.
+    pending_redrive_armed: std::sync::atomic::AtomicBool,
+    /// The canonical ids still queued when the last chain exhausted its
+    /// attempt budget. Replaced wholesale each time a chain exhausts; cleared
+    /// by a retry signal. Ids no longer queued are inert (eligibility is the
+    /// intersection with the live queue), so a dequeued entry leaves no
+    /// lasting block behind.
+    pending_redrive_exhausted: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Bumped by every retry signal ([`Self::pending_redrive_clear_exhausted`]).
+    /// A running chain captures it before each pass and compares at its end:
+    /// a signal that landed mid-chain must NOT be overwritten by the chain's
+    /// own exhaustion record — the chain instead yields to it (skips the
+    /// record, so the cleared budget stands and a fresh chain follows).
+    pending_redrive_signal_generation: std::sync::atomic::AtomicU64,
 }
 
 impl CarrierTransactionCoordinator {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Begin a pending-snapshot re-drive chain: `true` only for the one
+    /// caller that flipped the guard from disarmed to armed. The guard is
+    /// released by [`Self::pending_redrive_disarm`] when the chain ends.
+    pub(crate) fn pending_redrive_try_arm(&self) -> bool {
+        !self
+            .pending_redrive_armed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Release the single-flight guard when a chain ends (attempt cap or an
+    /// empty queue), so a later signal can arm a fresh chain.
+    pub(crate) fn pending_redrive_disarm(&self) {
+        self.pending_redrive_armed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The retry-signal generation — compare two reads around provider work
+    /// to learn whether a signal landed in between.
+    pub(crate) fn pending_redrive_signal_generation(&self) -> u64 {
+        self.pending_redrive_signal_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record the entries still queued when a chain exhausted its attempt
+    /// budget: each recorded id stays INELIGIBLE for a later chain until a
+    /// retry signal clears the budget ([`Self::pending_redrive_clear_exhausted`]).
+    pub(crate) fn pending_redrive_record_exhausted<I, S>(&self, still_queued: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.pending_redrive_exhausted.lock() = still_queued.into_iter().map(Into::into).collect();
+    }
+
+    /// Clear the exhaustion budget — the retry signal half: an external drain
+    /// pass (a publication, a scanner sweep) or an engine start repaired the
+    /// inputs the exhausted entries were refused on, so every queued entry is
+    /// eligible for a fresh bounded chain again.
+    pub(crate) fn pending_redrive_clear_exhausted(&self) {
+        self.pending_redrive_signal_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.pending_redrive_exhausted.lock().clear();
+    }
+
+    /// Whether the queue holds at least one entry this chain may attempt:
+    /// a queued id NOT in the exhausted cohort (new work stays live even
+    /// while an older cohort holds its budget).
+    pub(crate) fn pending_redrive_eligible(&self, queued: &dashmap::DashSet<String>) -> bool {
+        let exhausted = self.pending_redrive_exhausted.lock();
+        queued.iter().any(|id| !exhausted.contains(id.key()))
     }
 
     /// The source's CURRENT owner-loss barrier value — the local intent epoch a starting

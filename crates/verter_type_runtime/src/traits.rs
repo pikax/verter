@@ -507,6 +507,20 @@ pub trait TypeProvider: Send + Sync {
         None
     }
 
+    /// A pulse fired every time one of this provider's engines BEGINS serving
+    /// — the initial start and every crash replacement alike. `None` (the
+    /// default) when the provider does not expose engine starts; a pool
+    /// provider returns one pulse that every engine it manages fires.
+    ///
+    /// Consumers re-drive work that was transiently refused while no engine
+    /// served (the pending provider-sync queue); firing on the initial start
+    /// too is contract — re-driving an empty or settled queue is a no-op.
+    /// `Notify::notify_one` coalesces, so a burst of engine starts grants at
+    /// most one queued re-drive.
+    fn provider_restart_pulse(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        None
+    }
+
     // ── Background-priority file operations ────────────────────────────
 
     fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {

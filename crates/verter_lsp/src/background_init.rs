@@ -329,23 +329,25 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         canonical_roots.len()
     );
 
-    drain_pending_snapshot_provider_sync_owned(
-        Arc::new(PendingSyncDrain {
-            project_sync: project_sync.clone(),
-            documents: Arc::clone(&documents),
-            vfs_workspace: Arc::clone(&vfs_workspace),
-            provider_sync_states: Arc::clone(&provider_sync_states),
-            pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-            is_tsgo,
-            mru_canonical_ids: Some(Arc::clone(&mru_canonical_ids)),
-            carrier_publish_coordinator: carrier_publish_coordinator.clone(),
-            carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
-            redrive_armed: std::sync::atomic::AtomicBool::new(false),
-        }),
-        PENDING_SYNC_REDRIVE,
-        1,
-    )
-    .await;
+    // ONE drain context serves both the pre-scan drain here and the
+    // post-scan drain below: the re-drive single-flight guard and the
+    // exhaustion budget live on the shared carrier transaction coordinator,
+    // so two contexts could never run competing successor chains — but a
+    // shared context also keeps the two arms' passes on the same MRU view
+    // and avoids rebuilding identical shared owners twice.
+    let pending_drain = Arc::new(PendingSyncDrain {
+        project_sync: project_sync.clone(),
+        documents: Arc::clone(&documents),
+        vfs_workspace: Arc::clone(&vfs_workspace),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+        is_tsgo,
+        mru_canonical_ids: Some(Arc::clone(&mru_canonical_ids)),
+        carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+        carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+    });
+    drain_pending_snapshot_provider_sync_owned(Arc::clone(&pending_drain), PENDING_SYNC_REDRIVE, 1)
+        .await;
 
     // 4b. Re-resolve aliased imports for open files now that the VFS snapshot is built.
     let aliased_imports_synced = resync_aliased_imports_for_open_files(
@@ -450,15 +452,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // Spawn waiter task: after the scanner completes, publish fresh diagnostics
     // for all open files and send $/verter/typeProviderSyncComplete.
     {
-        let documents = documents.clone();
+        let pending_drain = Arc::clone(&pending_drain);
         let init_generation = Arc::clone(&init_generation);
-        let vfs_workspace = Arc::clone(&vfs_workspace);
-        let provider_sync_states = Arc::clone(&provider_sync_states);
-        let project_sync = project_sync.clone();
-        let pending_snapshot_provider_sync = Arc::clone(&pending_snapshot_provider_sync);
-        let mru_canonical_ids = Arc::clone(&mru_canonical_ids);
-        let carrier_publish_coordinator = carrier_publish_coordinator.clone();
-        let carrier_transaction_coordinator = Arc::clone(&carrier_transaction_coordinator);
         let server = server.clone();
         tokio::spawn(async move {
             // Level 2 of the readiness ladder is emitted only after level 1: a fast
@@ -489,23 +484,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             // The scanner may enqueue owner-aware carrier retries after the
             // pre-scan drain above. Settle those retries before announcing the
             // provider frontier; a non-empty queue means level 2 is not true yet.
-            drain_pending_snapshot_provider_sync_owned(
-                Arc::new(PendingSyncDrain {
-                    project_sync: project_sync.clone(),
-                    documents: Arc::clone(&documents),
-                    vfs_workspace: Arc::clone(&vfs_workspace),
-                    provider_sync_states: Arc::clone(&provider_sync_states),
-                    pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-                    is_tsgo,
-                    mru_canonical_ids: Some(Arc::clone(&mru_canonical_ids)),
-                    carrier_publish_coordinator: carrier_publish_coordinator.clone(),
-                    carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
-                    redrive_armed: std::sync::atomic::AtomicBool::new(false),
-                }),
-                PENDING_SYNC_REDRIVE,
-                1,
-            )
-            .await;
+            drain_pending_snapshot_provider_sync_owned(pending_drain, PENDING_SYNC_REDRIVE, 1)
+                .await;
 
             // The drain awaits provider work, so this generation may have been
             // superseded while it ran. Never publish level 2 for the old one.

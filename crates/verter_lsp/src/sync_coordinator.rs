@@ -846,7 +846,10 @@ async fn coordinator_loop(
     // (a provider replacement gap, a superseded commit, cold bootstrap) park in
     // the pending snapshot queue with no editor signal of their own, and after
     // startup's last scanner pass no external drain exists to retry them. One
-    // long-lived context keeps at most one bounded successor chain armed.
+    // long-lived context serves both the loop's plain arms and the engine-start
+    // re-drive below; the single-flight guard and exhaustion budget live on the
+    // shared carrier transaction coordinator, so this context competes with
+    // NONE of the other drain sites' chains.
     let pending_redrive = Arc::new(crate::server::PendingSyncDrain {
         project_sync: deps.project_sync.clone(),
         documents: Arc::clone(&deps.documents),
@@ -857,8 +860,31 @@ async fn coordinator_loop(
         mru_canonical_ids: None,
         carrier_publish_coordinator: deps.carrier_publish_coordinator.clone(),
         carrier_transaction_coordinator: Arc::clone(&deps.carrier_transaction_coordinator),
-        redrive_armed: std::sync::atomic::AtomicBool::new(false),
     });
+
+    // A completed engine (re)start is the retry signal an exhausted pending
+    // sync waits for: a carrier refused while the provider was between epochs
+    // (or racing a republish) becomes admissible the moment a fresh epoch
+    // serves, and after startup's drains nothing else observes that moment.
+    // Without this re-drive, a CI-paced replacement gap longer than the
+    // bounded chain strands the parked syncs for the rest of the session and
+    // the owed diagnostics never settle. `notify_one` coalesces bursts.
+    if let Some(restart_pulse) = deps
+        .type_provider
+        .as_ref()
+        .and_then(|provider| provider.provider_restart_pulse())
+    {
+        let drain = Arc::clone(&pending_redrive);
+        tokio::spawn(async move {
+            loop {
+                restart_pulse.notified().await;
+                crate::server::signal_pending_sync_redrive(
+                    &drain,
+                    crate::server::PENDING_SYNC_REDRIVE,
+                );
+            }
+        });
+    }
 
     loop {
         // Calculate next deadline from pending files. With every pull slot
@@ -895,6 +921,11 @@ async fn coordinator_loop(
         // Transiently refused syncs parked in the pending snapshot queue get
         // the queue's own bounded redrive chain — checked here, before the
         // loop parks, because the signals that queued them are already spent.
+        // A plain arm: it respects the shared single-flight guard AND the
+        // exhaustion budget, so repeated wakes cannot retry an entry that
+        // spent its attempt budget (only a retry signal — an external drain
+        // pass or an engine start — clears the budget), while work that
+        // ARRIVED after the last exhaustion still arms.
         if !deps.pending_snapshot_provider_sync.is_empty() {
             crate::server::arm_pending_sync_redrive_once(
                 &pending_redrive,

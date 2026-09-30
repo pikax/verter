@@ -88,6 +88,7 @@ async fn batch_router_fixture_with_generated_membership(
         providers: DashMap::new(),
         routes: DashMap::new(),
         admitted_state_rearm: parking_lot::RwLock::new(None),
+        restart_pulse: Arc::new(tokio::sync::Notify::new()),
     };
     let providers = [
         Arc::new(MockTypeProvider::new()),

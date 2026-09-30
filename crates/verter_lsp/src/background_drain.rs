@@ -89,7 +89,10 @@ pub(super) struct CarrierPublishCtx<'a> {
 /// The shared state one pending-sync drain pass needs, held behind `Arc`s so
 /// a bounded successor pass can outlive the caller that armed it. The fields
 /// are the same shared owners the server, background init, and the scanner
-/// drain through — nothing here is drain-private state.
+/// drain through — nothing here is drain-private state. The chain budget
+/// (single-flight + exhaustion) lives on the shared
+/// [`crate::external_ts::CarrierTransactionCoordinator`], so every context of
+/// one server bounds the SAME queue no matter which site built it.
 pub(crate) struct PendingSyncDrain {
     pub(crate) project_sync: Option<ProjectSync>,
     pub(crate) documents: Arc<DocumentRegistry>,
@@ -102,10 +105,6 @@ pub(crate) struct PendingSyncDrain {
     pub(crate) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
     pub(crate) carrier_transaction_coordinator:
         Arc<crate::external_ts::CarrierTransactionCoordinator>,
-    /// Single-flight guard for this context's successor chain: at most one
-    /// bounded chain runs per context at a time. Cleared when the chain ends,
-    /// so a later signal can arm a fresh bounded chain.
-    pub(crate) redrive_armed: std::sync::atomic::AtomicBool,
 }
 
 /// The production redrive schedule: a pass that leaves entries queued arms one
@@ -115,9 +114,15 @@ pub(crate) struct PendingSyncDrain {
 /// replacement, a commit was superseded, compilation was transiently cold) has
 /// no later external drain after startup's last scanner pass — the queue's
 /// documented contract is "retried on a later drain", so the drain itself must
-/// arm that later pass while entries remain. The chain is bounded: it stops at
-/// the attempt cap or an empty queue, whichever comes first, and every external
-/// drain (scanner pass, background init) keeps working unchanged.
+/// arm that later pass while entries remain. The chain is BOUNDED: it stops at
+/// the attempt cap or an empty queue, whichever comes first. When it stops at
+/// the cap with entries still queued, their attempt budget is exhausted — a
+/// mere coordinator wake must not restart a chain for them (the same refused
+/// entry would be retried for the rest of the session); only a RETRY SIGNAL
+/// re-arms: an external drain pass (a publication, a scanner sweep — the
+/// inputs may have been repaired), or an engine start ([`signal_pending_sync_redrive`]
+/// consumers). Queued ids that are NOT in the exhausted cohort — work that
+/// arrived after the last exhaustion — stay eligible for every chain.
 pub(crate) const PENDING_SYNC_REDRIVE: PendingSyncRedrive = PendingSyncRedrive {
     initial_delay_ms: 500,
     backoff_factor: 2,
@@ -142,9 +147,10 @@ impl PendingSyncRedrive {
     }
 }
 
-/// Drain the pending snapshot queue through the shared pass, then arm the
-/// bounded successor chain while entries remain. `attempt` is 1 for the
-/// immediate pass; each successor increments it.
+/// Drain the pending snapshot queue through the shared pass, then — because
+/// this call IS a retry signal (an external drain ran: a publication, a
+/// scanner sweep) — re-arm the bounded successor chain for anything the pass
+/// left queued.
 pub(crate) async fn drain_pending_snapshot_provider_sync_owned(
     drain: Arc<PendingSyncDrain>,
     redrive: PendingSyncRedrive,
@@ -165,24 +171,66 @@ pub(crate) async fn drain_pending_snapshot_provider_sync_owned(
     if attempt >= redrive.max_attempts || drain.pending_snapshot_provider_sync.is_empty() {
         return;
     }
-    arm_pending_sync_redrive_once(&drain, redrive);
+    signal_pending_sync_redrive(&drain, redrive);
 }
 
-/// Arm this context's bounded successor chain unless one is already running.
-/// The chain re-runs the shared drain pass after a backoff delay while entries
-/// remain, and clears the guard when it ends (empty queue or attempt cap), so
-/// a later signal can arm a fresh chain.
+/// The RETRY SIGNAL for the pending-snapshot re-drive chain: the inputs an
+/// exhausted entry was refused on may have been repaired (a publication, a
+/// scanner sweep, an engine that (re)started serving), so the exhaustion
+/// budget is cleared and a fresh bounded chain armed. Distinct from
+/// [`arm_pending_sync_redrive_once`], which respects an armed chain and an
+/// unspent budget alike.
+pub(crate) fn signal_pending_sync_redrive(
+    drain: &Arc<PendingSyncDrain>,
+    redrive: PendingSyncRedrive,
+) {
+    drain
+        .carrier_transaction_coordinator
+        .pending_redrive_clear_exhausted();
+    arm_pending_sync_redrive_once(drain, redrive);
+}
+
+/// Arm this server's bounded successor chain unless one is already running
+/// (the shared single-flight guard) or every queued entry has exhausted its
+/// attempt budget. The chain re-runs the shared drain pass after a backoff
+/// delay while entries remain; when it ends at the attempt cap with entries
+/// still queued it records them as exhausted (unless a retry signal landed
+/// mid-chain — the chain then yields the baton to the signal's fresh chain
+/// instead), and when it ends on an empty queue or a later signal re-arms it,
+/// the guard is released for the next chain.
 pub(crate) fn arm_pending_sync_redrive_once(
     drain: &Arc<PendingSyncDrain>,
     redrive: PendingSyncRedrive,
 ) {
-    use std::sync::atomic::Ordering;
-    if drain.redrive_armed.swap(true, Ordering::Relaxed) {
+    if !drain
+        .carrier_transaction_coordinator
+        .pending_redrive_try_arm()
+    {
+        return;
+    }
+    if !drain
+        .carrier_transaction_coordinator
+        .pending_redrive_eligible(&drain.pending_snapshot_provider_sync)
+    {
+        // No chain: every queued entry already spent its budget. The next
+        // retry signal (an external drain pass or an engine start) clears
+        // the budget and re-arms.
+        drain
+            .carrier_transaction_coordinator
+            .pending_redrive_disarm();
         return;
     }
     let successor = Arc::clone(drain);
     tokio::spawn(async move {
         let mut attempt = 1u32;
+        // The retry-signal generation as of the pass that just ran: a signal
+        // landing after it (an engine start while this chain was between
+        // passes) must survive the chain's end, so the exhaustion record
+        // yields to it — the cleared budget stands and a fresh chain follows.
+        let mut pass_generation = successor
+            .carrier_transaction_coordinator
+            .pending_redrive_signal_generation();
+        let mut exhausted = false;
         loop {
             tokio::time::sleep(redrive.delay_for_successor(attempt + 1)).await;
             // An external drain (scanner pass, background init) may have
@@ -203,14 +251,41 @@ pub(crate) fn arm_pending_sync_redrive_once(
                 &successor.carrier_transaction_coordinator,
             )
             .await;
-            if attempt + 1 >= redrive.max_attempts
-                || successor.pending_snapshot_provider_sync.is_empty()
-            {
+            pass_generation = successor
+                .carrier_transaction_coordinator
+                .pending_redrive_signal_generation();
+            if attempt + 1 >= redrive.max_attempts {
+                exhausted = !successor.pending_snapshot_provider_sync.is_empty();
+                break;
+            }
+            if successor.pending_snapshot_provider_sync.is_empty() {
                 break;
             }
             attempt += 1;
         }
-        successor.redrive_armed.store(false, Ordering::Relaxed);
+        let signalled_since_pass = successor
+            .carrier_transaction_coordinator
+            .pending_redrive_signal_generation()
+            != pass_generation;
+        if exhausted && !signalled_since_pass {
+            let still_queued: Vec<String> = successor
+                .pending_snapshot_provider_sync
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect();
+            successor
+                .carrier_transaction_coordinator
+                .pending_redrive_record_exhausted(still_queued);
+        }
+        successor
+            .carrier_transaction_coordinator
+            .pending_redrive_disarm();
+        if signalled_since_pass {
+            // A retry signal landed mid-chain: its own arm found this chain's
+            // guard held and stood down, so the chain hands the baton back —
+            // the signal's cleared budget gets the fresh chain it asked for.
+            arm_pending_sync_redrive_once(&successor, redrive);
+        }
     });
 }
 
