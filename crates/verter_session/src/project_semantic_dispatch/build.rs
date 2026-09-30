@@ -2570,7 +2570,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // back-edge — bounded, no hang.
         let active_identity: super::InstantiateIdentity =
             (Arc::clone(decl_canonical), decl_owner, Arc::from("default"));
-        let pushed = self.push_instantiate_active(active_identity);
+        let pushed = self.push_instantiate_active(active_identity, Arc::from([]));
         if !pushed {
             return Some(
                 (
@@ -4915,21 +4915,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // bodies that reference other declarations produce proper
         // sub-Instantiate shells instead of opaque placeholders.
         //
-        // Recursive-ref guard: push `(decl_canonical, decl_name)`
-        // onto the dispatcher's `instantiate_active` stack before body
-        // lowering. A nested `TypeExpr::Ref` resolving back to the same
-        // identity — e.g. `type TreeNode = { children: TreeNode[] }` —
-        // sees the active entry in `shallow_lower_type_expr` and emits
-        // `Opaque(RecursiveRef)` at the back-edge instead of recursing.
-        // When the identity is already active (should never happen for
-        // top-level `build_instantiate` calls, but safely handled),
-        // short-circuit to `RecursiveRef` here too.
+        // Recursive-ref guard: push `(decl_canonical, decl_name)` over the
+        // arguments onto the dispatcher's `instantiate_active` stack before
+        // body lowering. A nested reference in a position the checker
+        // defers (an object member, an array or tuple element, a signature,
+        // an interface's type argument) resolving back to the same
+        // declaration — e.g. `type TreeNode = { children: TreeNode[] }` —
+        // sees the active entry and emits `Opaque(RecursiveRef)` at the
+        // back-edge instead of recursing. When this same instantiation is
+        // already active (the memo's same-path claim answers that first,
+        // but safely handled), short-circuit to `RecursiveRef` here too;
+        // the declaration over other arguments is another instantiation.
         let active_identity: super::InstantiateIdentity = (
             Arc::clone(decl_canonical),
             decl_owner,
             Arc::clone(decl_name),
         );
-        let pushed = self.push_instantiate_active(active_identity.clone());
+        let pushed = self.push_instantiate_active(active_identity.clone(), Arc::clone(args));
         if !pushed {
             let unresolved_owner_debt = authored_resolution_debt
                 .as_ref()
@@ -18620,7 +18622,7 @@ pub(super) struct InstantiateBuild {
     is_non_file_base: bool,
     decl_whole_hash: crate::semantic_query::HashValue,
     base: SemanticNodeId,
-    args: Arc<[SemanticNodeId]>,
+    pub(super) args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
     prepared: Arc<PreparedTypeDecl>,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,

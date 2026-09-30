@@ -318,6 +318,22 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `build_instantiate` invocations share the active set.
 pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
+/// One build on the active-instantiation stack: the declaration it
+/// materialises and the arguments it materialises it over.
+#[derive(Debug, Clone)]
+pub(super) struct ActiveInstantiation {
+    identity: InstantiateIdentity,
+    args: Arc<[SemanticNodeId]>,
+}
+
+impl ActiveInstantiation {
+    fn is(&self, identity: &InstantiateIdentity) -> bool {
+        self.identity.0.as_ref() == identity.0.as_ref()
+            && self.identity.1 == identity.1
+            && self.identity.2.as_ref() == identity.2.as_ref()
+    }
+}
+
 /// Host-bound dispatcher for [`SemanticQueryApi`].
 ///
 /// The dispatcher borrows the host for the duration of a query — every
@@ -336,7 +352,7 @@ pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwner
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
-    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
@@ -1583,34 +1599,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Push `identity` onto the active-instantiation stack. Returns `true`
-    /// when the identity was not already present (caller MUST pair with
-    /// `pop_instantiate_active` on the same identity). Returns `false`
-    /// when the identity is already active — caller should emit
-    /// `Opaque(RecursiveRef)` and must NOT pop.
-    pub(super) fn push_instantiate_active(&self, identity: InstantiateIdentity) -> bool {
+    /// Push `identity` over `args` onto the active-instantiation stack.
+    /// Returns `true` when that same instantiation was not already present
+    /// (caller MUST pair with `pop_instantiate_active`). Returns `false`
+    /// when it is already active — caller should emit
+    /// `Opaque(RecursiveRef)` and must NOT pop. The same declaration over
+    /// other arguments is another instantiation, as the checker's
+    /// instantiations are: it may be active beside this one.
+    pub(super) fn push_instantiate_active(
+        &self,
+        identity: InstantiateIdentity,
+        args: Arc<[SemanticNodeId]>,
+    ) -> bool {
         let mut active = self.instantiate_active.borrow_mut();
-        if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref()
-                && existing.1 == identity.1
-                && existing.2.as_ref() == identity.2.as_ref()
-        }) {
+        if active
+            .iter()
+            .any(|existing| existing.is(&identity) && existing.args == args)
+        {
             return false;
         }
-        active.push(identity);
+        active.push(ActiveInstantiation { identity, args });
         true
     }
 
-    /// Leave `identity`'s active instantiation wherever it stands: a build
-    /// stopped between the steps of a continuation frame, whose later
-    /// entries have already left.
-    pub(super) fn leave_instantiate_active(&self, identity: &InstantiateIdentity) {
+    /// Leave `identity`'s active instantiation over `args` wherever it
+    /// stands: a build stopped between the steps of a continuation frame,
+    /// whose later entries have already left.
+    pub(super) fn leave_instantiate_active(
+        &self,
+        identity: &InstantiateIdentity,
+        args: &Arc<[SemanticNodeId]>,
+    ) {
         let mut active = self.instantiate_active.borrow_mut();
-        if let Some(position) = active.iter().rposition(|existing| {
-            existing.0.as_ref() == identity.0.as_ref()
-                && existing.1 == identity.1
-                && existing.2.as_ref() == identity.2.as_ref()
-        }) {
+        if let Some(position) = active
+            .iter()
+            .rposition(|existing| existing.is(identity) && existing.args == *args)
+        {
             active.remove(position);
         }
     }
@@ -1656,13 +1680,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
     ) -> bool {
         let active = self.instantiate_active.borrow();
-        active
-            .iter()
-            .any(|(existing_canonical, existing_owner, existing_name)| {
-                existing_canonical.as_ref() == canonical_id
-                    && *existing_owner == owner
-                    && existing_name.as_ref() == name
-            })
+        active.iter().any(|existing| {
+            existing.identity.0.as_ref() == canonical_id
+                && existing.identity.1 == owner
+                && existing.identity.2.as_ref() == name
+        })
     }
 
     pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
