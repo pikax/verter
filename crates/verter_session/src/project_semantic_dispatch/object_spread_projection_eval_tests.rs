@@ -3484,7 +3484,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
 }
 
 #[test]
-fn formula_closed_keyof_intersects_dual_spellings_as_one_js_property() {
+fn formula_closed_keyof_intersects_dual_spellings_nominally() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -3492,9 +3492,9 @@ fn formula_closed_keyof_intersects_dual_spellings_as_one_js_property() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // `{...({1: string} | {"1": number})}` — both alternatives closed,
     // each holding ONE spelling of the same JS property. The formula's
-    // exact keyof must keep the property (first alternative's spelling),
-    // not intersect to empty. (Deliberate engine-level JS-identity rule —
-    // tsc's nominal `1 & "1"` is never; fold/lookups already collide.)
+    // exact keyof intersects the alternatives' keys nominally, as the
+    // checker's `keyof (A | B)` does (`1 & "1"` is never): no key is
+    // common, though an element access reads the two as one property.
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let string_arm = object(graph, [surface_member("1", number, false)]);
     let union = graph.intern_node(SemanticNodeData::Union(
@@ -3518,8 +3518,8 @@ fn formula_closed_keyof_intersects_dual_spellings_as_one_js_property() {
         closed
             .keyof()
             .expect("a Surface-selector formula is whole-domain"),
-        &[numeric_property_key(1)],
-        "the dual spellings are one JS property — keyof keeps it (first alternative's spelling)"
+        &[] as &[PropertyKey],
+        "the dual spellings are no common key"
     );
 }
 
@@ -4420,4 +4420,41 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         "the indeterminate value publishes as the honest open marker; observed {:?}",
         graph.node_data(a.value)
     );
+}
+
+/// `keyof` over a spread of a union intersects the alternatives' keys as
+/// the checker's `keyof (A | B)` does, nominally: `1` in one alternative and
+/// `"1"` in the other name one property to an element access, but no common
+/// key (`1 & "1"` is never). A member read still finds the property under
+/// either spelling.
+///
+/// Measured on TypeScript 7.0.2 (all four settings agree), with `type A = {
+/// 1: string; a: 0 }`, `type B = { "1": number; a: 1 }`, `declare const ab: A
+/// | B; const s = { ...ab }; type S = typeof s` and `type T = typeof { ...a1
+/// }` for `a1: A`: `keyof S` is `"a"` (`Exclude<keyof S, "a">` is `never`,
+/// and neither `[1]` nor `["1"]` extends `[keyof S]`), `S["1"]` and `S[1]` are
+/// `string | number`, and `keyof T` is `"a" | 1` (`Exclude<keyof T, "a">` is
+/// `1`).
+#[test]
+fn a_spread_union_keyof_intersects_keys_nominally() {
+    let source = "type A = { 1: string; a: 0 };\n\
+                  type B = { \"1\": number; a: 1 };\n\
+                  declare const ab: A | B;\n\
+                  const s = { ...ab };\n\
+                  type S = typeof s;\n\
+                  declare const a1: A;\n\
+                  const t = { ...a1 };\n\
+                  type T = typeof t;\n";
+    let failures = super::checker_probe_lane_tests::mismatches(
+        source,
+        &[
+            ("Exclude<keyof S, \"a\">", "never"),
+            ("[1] extends [keyof S] ? 1 : 2", "2"),
+            ("[\"1\"] extends [keyof S] ? 1 : 2", "2"),
+            ("S[\"1\"]", "string | number"),
+            ("S[1]", "string | number"),
+            ("Exclude<keyof T, \"a\">", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
