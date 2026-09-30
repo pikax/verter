@@ -31,22 +31,6 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// deep fails with TS2589.
 pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 
-/// The checker's limit on one TAIL run of a conditional type
-/// (`getConditionalType`'s `tailCount`): the run fails with TS2589 at its
-/// 1000th tail step.
-///
-/// Measured on TypeScript 7.0.2 over `type Build<N extends number, Acc
-/// extends unknown[] = []> = Acc["length"] extends N ? Acc["length"] :
-/// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
-/// settings agree): `Build<998>` is `998`, `Build<999>` is `999`, and
-/// `Build<1000>` is `any` under TS2589.
-///
-/// Known diagnostic gap: a generic alias whose body applies itself
-/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker (TS2456,
-/// and `any`); Verter reaches this tail limit instead and reports TS2589,
-/// with the same `any`.
-pub(crate) const CONDITIONAL_TAIL_STEPS: u32 = 1000;
-
 /// The checker's `checkCrossProductUnion` limit: an intersection
 /// distributed over unions, a template literal over union spans, or an
 /// object spread over union operands whose cross product has at least this
@@ -126,8 +110,20 @@ impl InstantiationDepth {
     }
 }
 
-/// One tail run of a conditional type (`tailCount`). Reaching
-/// [`CONDITIONAL_TAIL_STEPS`] is the TS2589 fact.
+/// One tail run of a conditional type, counted as the checker counts it
+/// (`getConditionalType`'s `tailCount`) against a budget: the run fails
+/// with TS2589 at its budget's step. The checker's own budget is 1,000 —
+/// measured on TypeScript 7.0.2 over `type Build<N extends number, Acc
+/// extends unknown[] = []> = Acc["length"] extends N ? Acc["length"] :
+/// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
+/// settings agree), `Build<999>` is `999` and `Build<1000>` is `any`
+/// under TS2589 — and Verter runs to its own, far larger one, reporting
+/// the same TS2589 there.
+///
+/// Known diagnostic gap: a generic alias whose body applies itself
+/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker (TS2456,
+/// and `any`); Verter reaches its tail budget instead and reports TS2589,
+/// with the same `any`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalTail {
     steps: u32,
@@ -139,11 +135,11 @@ impl ConditionalTail {
         Self { steps }
     }
 
-    /// Take one more tail step. `false` when the run reaches the checker's
-    /// limit there.
-    pub(crate) fn step(&mut self) -> bool {
+    /// Take one more tail step. `false` when the run reaches `budget`
+    /// there.
+    pub(crate) fn step(&mut self, budget: u32) -> bool {
         self.steps += 1;
-        self.steps < CONDITIONAL_TAIL_STEPS
+        self.steps < budget
     }
 }
 
@@ -301,16 +297,19 @@ mod tests {
         assert_eq!(RELATION_COMPARISONS, 2_000_000);
     }
 
-    /// A tail run fails at its 1000th step; a run resumed with steps already
-    /// counted fails that many steps sooner.
+    /// A tail run fails at its budget's step — the checker's at its
+    /// 1000th; a run resumed with steps already counted fails that many
+    /// steps sooner.
     #[test]
-    fn a_tail_run_fails_at_the_checker_step() {
-        let mut run = ConditionalTail::resumed(0);
-        assert!((1..CONDITIONAL_TAIL_STEPS).all(|_| run.step()));
-        assert!(!run.step());
-        let mut resumed = ConditionalTail::resumed(1);
-        assert!((2..CONDITIONAL_TAIL_STEPS).all(|_| resumed.step()));
-        assert!(!resumed.step());
+    fn a_tail_run_fails_at_its_budget_step() {
+        for budget in [1000, 5] {
+            let mut run = ConditionalTail::resumed(0);
+            assert!((1..budget).all(|_| run.step(budget)));
+            assert!(!run.step(budget));
+            let mut resumed = ConditionalTail::resumed(1);
+            assert!((2..budget).all(|_| resumed.step(budget)));
+            assert!(!resumed.step(budget));
+        }
     }
 
     /// A path fails on the level that reaches depth 100, and leaving levels

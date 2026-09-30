@@ -236,6 +236,63 @@ enum ProjectionChildPlan<'a> {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// Whether an application of a declaration an enclosing build is
+    /// materialising stays its recursive back-edge where the run finishes
+    /// it now, read off its enclosing nodes' frames on the run's stack:
+    ///
+    /// - where the checker defers instantiating it — inside an object type
+    ///   (its members and signatures), an array or tuple element, a
+    ///   signature, or a type argument of an interface or class;
+    /// - or where it is the body's own value through conditional branches
+    ///   alone: the checker's tail loop, which the build runs in place
+    ///   (`getConditionalType`).
+    ///
+    /// Anywhere else — an alias's type argument, a conditional's check or
+    /// extends type, a union's member — the checker instantiates it
+    /// eagerly. An instantiated body starts at its own root.
+    fn in_deferred_position(&self, ancestors: &[ProjectionFrame]) -> bool {
+        let tail = ancestors.iter().all(|frame| match frame {
+            ProjectionFrame::ConditionalSelectedFinish { .. }
+            | ProjectionFrame::ConditionalAfterTrue { .. }
+            | ProjectionFrame::ConditionalFinish { .. }
+            | ProjectionFrame::Enter { .. } => true,
+            ProjectionFrame::CompositeResume { data, .. } => {
+                matches!(data.as_ref(), SemanticNodeData::Alias(_))
+            }
+            _ => false,
+        });
+        tail || ancestors.iter().any(|frame| match frame {
+            ProjectionFrame::CompositeResume { data, .. } => match data.as_ref() {
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. } => true,
+                SemanticNodeData::InstantiationRef { base, .. } => self.defers_type_arguments(base),
+                _ => false,
+            },
+            ProjectionFrame::ReferenceArgsResume { state, .. } => matches!(
+                &state.continuation,
+                CarrierArgsContinuation::Instantiate { identity, .. }
+                    if self.defers_type_arguments(identity)
+            ),
+            _ => false,
+        })
+    }
+
+    /// Whether the checker defers instantiating the type arguments of an
+    /// application of `declaration`: an interface's or a class's (a
+    /// library one included), never an alias's.
+    fn defers_type_arguments(&self, declaration: &crate::semantic_query::DeclIdentity) -> bool {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if declaration.canonical_id.as_ref() == "__builtin__" {
+            return true;
+        }
+        !matches!(
+            self.prepared_decl_kind(declaration),
+            Some(TypeDeclKind::Alias)
+        )
+    }
+
     #[inline(always)]
     fn active_decl_recursion_sentinel(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
         let SemanticNodeData::DeclRef { identity } = data else {
@@ -628,6 +685,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 inputs,
                                 substitutions,
                                 memo,
+                                frames,
                             ) {
                                 ProjectionFinish::Node(result) => result,
                                 ProjectionFinish::Instantiate(key) if seam.suspend => {
@@ -1042,9 +1100,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .into_boxed_slice(),
                         );
                         work_credit.settle();
-                        let result = match self
-                            .plan_carrier_finish(state.continuation, projected_args)
-                        {
+                        let deferred = || self.in_deferred_position(frames);
+                        let result = match self.plan_carrier_finish(
+                            state.continuation,
+                            projected_args,
+                            &deferred,
+                        ) {
                             CarrierFinish::Node(result) => result,
                             CarrierFinish::Instantiate(key) if seam.suspend => {
                                 frames.push(ProjectionFrame::AwaitInstantiation { node, context });
@@ -1301,6 +1362,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inputs,
             substitutions,
             memo,
+            frames,
         ) {
             ProjectionFinish::Node(result) => result,
             ProjectionFinish::Instantiate(key) if seam.suspend => {

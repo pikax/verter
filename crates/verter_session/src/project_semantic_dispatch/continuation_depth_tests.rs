@@ -317,7 +317,6 @@ fn verters_instantiation_budget_reports_the_checkers_ts2589() {
 /// X extends unknown ? [X, X] : never` and `type Grow<T> = T extends never
 /// ? never : Pair<Grow<[T]>>` is TS2589.
 #[test]
-#[ignore = "a growing application of one alias is cut as a deferred recursive reference by the declaration recurrence guard, before Verter's budget"]
 fn an_unbounded_instantiation_stops_at_verters_budget_with_ts2589() {
     const GROW: &str = "type Pair<X> = X extends unknown ? [X, X] : never;\n\
                         type Grow<T> = T extends never ? never : Pair<Grow<[T]>>;\n";
@@ -551,4 +550,131 @@ fn a_budget_recovery_is_never_kept_in_the_memo() {
         (limited, evaluate())
     });
     assert_eq!(recovered_then_answered, (None, Some("\"ok\"".to_owned())));
+}
+
+/// Whether `probe`'s evaluated type, under `options` and an instantiation
+/// budget of `budget`, holds the checker's TS2589 recovery anywhere in it.
+fn holds_a_ts2589(options: &'static str, budget: u32, source: String, probe: &str) -> bool {
+    evaluated_in(
+        Some(budget),
+        options,
+        source,
+        probe.to_owned(),
+        |dispatch, value| {
+            let mut seen = rustc_hash::FxHashSet::default();
+            let mut stack = vec![value];
+            while let Some(node) = stack.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                let Some(data) = dispatch.graph().node_data(node) else {
+                    continue;
+                };
+                if matches!(
+                    data.as_ref(),
+                    SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })
+                        if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                ) {
+                    return true;
+                }
+                data.for_each_retained_child(|child| stack.push(child));
+            }
+            false
+        },
+    )
+}
+
+/// A recursive application over new arguments, in a position the checker
+/// defers — an object member, an array or tuple element, a signature, an
+/// interface's type argument, or an alias application inside a member — is
+/// the lazy recursive reference: evaluating the application enters no
+/// instantiation of it, so it never reaches a budget.
+///
+/// TypeScript 7.0.2, all four settings: `X<"ok">` over each declaration
+/// below reports nothing.
+#[test]
+fn recursive_applications_in_deferred_positions_stay_lazy() {
+    const DEFERRED: [&str; 9] = [
+        "type X<T> = { v: T; kids: X<[T]>[] };",
+        "type X<T> = [T, X<[T]>];",
+        "type X<T> = (x: T) => X<[T]>;",
+        "type X<T> = T extends any ? { a: X<[T]> } : never;",
+        "type X<T> = T extends any ? X<[T]>[] : never;",
+        "type X<T> = T extends any ? [X<[T]>] : never;",
+        "type W<Y> = { w: Y }; type X<T> = { v: T; next: W<X<[T]>> };",
+        "type X<T> = Promise<X<[T]>>;",
+        "interface I<Y> { y: Y } type X<T> = T extends any ? I<X<[T]>> : never;",
+    ];
+    for options in SETTINGS {
+        for declaration in DEFERRED {
+            assert!(
+                !holds_a_ts2589(
+                    options,
+                    150,
+                    format!(
+                        "{declaration}
+"
+                    ),
+                    "X<\"ok\">"
+                ),
+                "`{declaration}` under {options} stays lazy"
+            );
+        }
+    }
+}
+
+/// A recursive application over new arguments, as a type argument of
+/// another alias in a conditional's branch, is instantiated as the checker
+/// instantiates it — each one the next, without end — and stops at
+/// Verter's instantiation budget with the checker's TS2589. A lower budget
+/// than production's stands in for it on the same path.
+///
+/// TypeScript 7.0.2, all four settings: `X<"ok">` over each declaration
+/// below is TS2589.
+#[test]
+fn recursive_applications_in_eager_positions_reach_verters_budget() {
+    const EAGER: [&str; 3] = [
+        "type Id<Y> = Y; type X<T> = T extends any ? Id<X<[T]>> : never;",
+        "type W<Y> = { w: Y }; type X<T> = T extends any ? W<X<[T]>> : never;",
+        "type W<Y> = Y[]; type X<T> = T extends any ? W<X<[T]>> : never;",
+    ];
+    for options in SETTINGS {
+        for declaration in EAGER {
+            assert!(
+                holds_a_ts2589(
+                    options,
+                    150,
+                    format!(
+                        "{declaration}
+"
+                    ),
+                    "X<\"ok\">"
+                ),
+                "`{declaration}` under {options} reaches TS2589"
+            );
+        }
+    }
+}
+
+/// A homomorphic mapped type whose template applies the declaration over
+/// new arguments is TS2589 in the checker, even over a primitive.
+///
+/// TypeScript 7.0.2, all four settings: `X<"ok">` over `type X<T> = { [K
+/// in keyof T]: X<[T]> }` is TS2589.
+#[test]
+#[ignore = "a homomorphic mapped type over a primitive is the primitive, without instantiating its template"]
+fn a_mapped_template_applying_its_declaration_reaches_ts2589() {
+    for options in SETTINGS {
+        assert!(
+            holds_a_ts2589(
+                options,
+                150,
+                "type X<T> = { [K in keyof T]: X<[T]> };
+"
+                .to_owned(),
+                "X<\"ok\">"
+            ),
+            "the mapped template under {options} reaches TS2589"
+        );
+    }
 }

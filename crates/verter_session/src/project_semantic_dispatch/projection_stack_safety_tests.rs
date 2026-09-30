@@ -486,11 +486,14 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
             decl_name: Arc::from("Recursive"),
         },
     });
-    assert!(dispatch.push_instantiate_active((
-        Arc::from("/recursive.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Recursive"),
-    )));
+    assert!(dispatch.push_instantiate_active(
+        (
+            Arc::from("/recursive.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Recursive"),
+        ),
+        Arc::from([]),
+    ));
     let (_demand_guard, initial_trip) = dispatch.enter_connected_demand(false);
     assert_eq!(initial_trip, None);
     let tripped = dispatch

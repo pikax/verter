@@ -65,11 +65,48 @@ pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// [`checker_policy::instantiation_budget`]: crate::semantic_query::checker_policy::instantiation_budget
 pub(super) const MAX_CONNECTED_INSTANTIATION_DEPTH: u32 = 10_000;
 
+/// Verter's own budget for one tail run of a conditional type: how many
+/// tail steps (each the conditional over its next arguments, evaluated in
+/// place) one run may take. Far past the checker's own tail limit, so
+/// Verter answers where the checker gives up; reaching it is the checker's
+/// TS2589 ([`ConditionalTail`]). A run holds one step's arguments at a
+/// time, and the arguments it has seen for its recurrence check.
+///
+/// [`ConditionalTail`]: crate::semantic_query::checker_policy::ConditionalTail
+pub(super) const MAX_CONNECTED_TAIL_STEPS: u32 = 10_000;
+
 #[cfg(test)]
 thread_local! {
     /// A lower instantiation budget for the ledgers this thread installs,
     /// set by [`InstantiationBudgetForTests`].
     static INSTANTIATION_DEPTH_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+    /// A lower tail budget for the ledgers this thread installs, set by
+    /// [`TailBudgetForTests`].
+    static TAIL_STEPS_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Install `limit` as the tail budget of every ledger this thread creates
+/// until the guard drops — the production budget's code path at a length a
+/// test can reach quickly. Test-only.
+#[cfg(test)]
+pub(super) struct TailBudgetForTests {
+    previous: Option<u32>,
+}
+
+#[cfg(test)]
+impl TailBudgetForTests {
+    pub(super) fn install(limit: u32) -> Self {
+        Self {
+            previous: TAIL_STEPS_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TailBudgetForTests {
+    fn drop(&mut self) {
+        TAIL_STEPS_FOR_TESTS.with(|slot| slot.set(self.previous));
+    }
 }
 
 /// Install `limit` as the instantiation budget of every ledger this
@@ -136,6 +173,7 @@ pub(crate) struct ConnectedDemandLedger<'a> {
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     instantiation_depth_limit: u32,
+    tail_steps_limit: u32,
     tripped: Cell<PartialReasonSet>,
 }
 
@@ -148,6 +186,7 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
             .field("instantiation_depth_limit", &self.instantiation_depth_limit)
+            .field("tail_steps_limit", &self.tail_steps_limit)
             .field("tripped", &self.tripped.get())
             .finish()
     }
@@ -169,8 +208,20 @@ impl<'a> ConnectedDemandLedger<'a> {
             instantiation_depth_limit: INSTANTIATION_DEPTH_FOR_TESTS
                 .with(Cell::get)
                 .unwrap_or(MAX_CONNECTED_INSTANTIATION_DEPTH),
+            #[cfg(not(test))]
+            tail_steps_limit: MAX_CONNECTED_TAIL_STEPS,
+            #[cfg(test)]
+            tail_steps_limit: TAIL_STEPS_FOR_TESTS
+                .with(Cell::get)
+                .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
             tripped: Cell::new(PartialReasonSet::empty()),
         }
+    }
+
+    /// The tail steps one conditional tail run may take
+    /// ([`MAX_CONNECTED_TAIL_STEPS`]).
+    pub(crate) fn tail_steps_budget(&self) -> u32 {
+        self.tail_steps_limit
     }
 
     /// Whether an instantiation nested `depth` deep on the continuation

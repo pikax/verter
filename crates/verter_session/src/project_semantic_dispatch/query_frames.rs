@@ -69,8 +69,12 @@ pub(super) struct InstantiateFrame<'p, 'a> {
     tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p>>,
     taint: BuildLocalTaint,
     build: Option<Box<InstantiateBuild>>,
-    /// The declaration the build entered as active, until it leaves it.
-    active: Option<super::InstantiateIdentity>,
+    /// The declaration and arguments the build entered as active, until it
+    /// leaves them.
+    active: Option<(
+        super::InstantiateIdentity,
+        Arc<[crate::semantic_query::SemanticNodeId]>,
+    )>,
     /// How deep this instantiation nests in the drive's chain: the root's
     /// is 1.
     depth: u32,
@@ -80,8 +84,8 @@ impl Drop for InstantiateFrame<'_, '_> {
     fn drop(&mut self) {
         // A build stopped between its steps leaves the declaration it
         // entered; its lease aborts its flight on drop.
-        if let Some(identity) = self.active.take() {
-            self.dispatch.leave_instantiate_active(&identity);
+        if let Some((identity, args)) = self.active.take() {
+            self.dispatch.leave_instantiate_active(&identity, &args);
         }
     }
 }
@@ -438,7 +442,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match begun {
                     InstantiateStart::Done(output) => InstantiatePoll::Done(output),
                     InstantiateStart::Build(build) => {
-                        frame.active = Some(build.active_identity.clone());
+                        frame.active =
+                            Some((build.active_identity.clone(), Arc::clone(&build.args)));
                         let build = frame.build.insert(build);
                         self.drain_instantiate(build, None)
                     }
