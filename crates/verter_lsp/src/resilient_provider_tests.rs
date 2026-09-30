@@ -1,12 +1,10 @@
 //! Restart-replay and resolve-delegation coverage for the shared
-//! [`ResilientProvider`](crate::resilient_provider::ResilientProvider).
+//! [`ProviderHub`](crate::resilient_provider::ProviderHub) over the LSP mock
+//! provider and the LSP notifier.
 //!
-//! The restart mechanics live in `verter_type_runtime::resilient`, but the only
-//! place a `TypeProvider` mock exists — and where `ResilientProvider` /
-//! `ResilientBackend` / a `ProviderNotifier` impl are all reachable — is
-//! `verter_lsp`. These tests therefore live here, exercising the wrapper through
-//! its PUBLIC `TypeProvider` surface plus the recorded calls on a replacement
-//! mock, never through private wrapper state.
+//! The lifecycle mechanics live in `verter_type_runtime::provider_hub`; these
+//! tests exercise the hub through its PUBLIC `TypeProvider` surface plus the
+//! recorded calls on a replacement mock, never through private hub state.
 //!
 //! What they characterize:
 //!   * a workspace-folder update issued WHILE the inner provider is down (mid
@@ -17,13 +15,15 @@
 //!   * `resolve_completion` is forwarded to the inner provider with its typed
 //!     resolve handle intact.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::{Notify, Semaphore};
+use futures_util::StreamExt as _;
+use tokio::sync::{Notify, OnceCell, Semaphore};
+use tower_lsp_server::Client;
 
-use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
+use crate::resilient_provider::{
+    EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
+};
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol::{
     CompletionResolveData, CompletionResolveResult, ResolvedTextEdit,
@@ -31,20 +31,23 @@ use crate::type_provider::protocol::{
 use crate::type_provider::traits::TypeProvider;
 use verter_type_runtime::protocol::TypeProviderError;
 
-/// Backend that respawns a pre-built [`MockTypeProvider`].
+/// Establisher whose first establishment installs `initial` and whose
+/// respawns hand back a pre-built [`MockTypeProvider`].
 ///
-/// `spawn` blocks on `spawn_gate` (a semaphore that starts with zero permits)
+/// A respawn blocks on `spawn_gate` (a semaphore that starts with zero permits)
 /// before handing back the replacement. The crash monitor clears the inner
 /// provider BEFORE calling `spawn`, so holding the gate keeps the wrapper in its
 /// "inner is down" (restarting) state deterministically — letting a test issue a
 /// call while the provider is mid-restart without poking the wrapper's private
 /// fields. Tests that don't need that window simply pre-release the gate.
 struct TestBackend {
+    initial: parking_lot::Mutex<Option<MockTypeProvider>>,
+    initial_crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>>,
     replacement: MockTypeProvider,
     spawn_gate: Arc<Semaphore>,
 }
 
-impl ResilientBackend<MockTypeProvider> for TestBackend {
+impl ProviderEstablisher<MockTypeProvider> for TestBackend {
     fn log_name(&self) -> &'static str {
         "test-provider"
     }
@@ -57,11 +60,15 @@ impl ResilientBackend<MockTypeProvider> for TestBackend {
         "test provider is restarting"
     }
 
-    fn spawn<'a>(
-        &'a self,
-        _crash_notify: Arc<Notify>,
-    ) -> Pin<Box<dyn Future<Output = Result<MockTypeProvider, TypeProviderError>> + Send + 'a>>
-    {
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
+    fn establish<'a>(&'a self, crash_notify: Arc<Notify>) -> EstablishFuture<'a, MockTypeProvider> {
+        if let Some(initial) = self.initial.lock().take() {
+            *self.initial_crash_notify.lock() = Some(crash_notify);
+            return Box::pin(async move { Ok(Arc::new(initial)) });
+        }
         let provider = self.replacement.clone();
         let gate = Arc::clone(&self.spawn_gate);
         Box::pin(async move {
@@ -73,41 +80,46 @@ impl ResilientBackend<MockTypeProvider> for TestBackend {
                 .await
                 .map_err(|_| TypeProviderError::new("test spawn gate closed"))?;
             permit.forget();
-            Ok(provider)
+            Ok(Arc::new(provider))
         })
     }
 }
 
-/// Build a [`ResilientProvider`] over `initial`, respawning `replacement` on
-/// crash. Returns the provider, the crash-notify handle, and the spawn gate.
+/// Build a [`ProviderHub`] that establishes `initial` and respawns
+/// `replacement` on crash. Returns the hub, the crash signal of the initial
+/// engine, and the spawn gate.
 ///
 /// The notifier is an [`LspNotifier`] over an unpopulated client cell: it only
 /// logs / no-ops while the cell is empty, which is exactly the honest
 /// observability seam these tests need.
-fn make_resilient(
+async fn make_resilient(
     initial: MockTypeProvider,
     replacement: MockTypeProvider,
-) -> (
-    ResilientProvider<MockTypeProvider, TestBackend>,
-    Arc<Notify>,
-    Arc<Semaphore>,
-) {
-    let crash_notify = Arc::new(Notify::new());
+) -> (ProviderHub<MockTypeProvider>, Arc<Notify>, Arc<Semaphore>) {
     let spawn_gate = Arc::new(Semaphore::new(0));
+    let initial_crash_notify = Arc::new(parking_lot::Mutex::new(None));
     let notifier = Arc::new(LspNotifier::new(
         Arc::new(tokio::sync::OnceCell::new()),
         "tsgo",
     ));
-    let provider = ResilientProvider::new(
-        initial,
-        Arc::clone(&crash_notify),
+    let provider = ProviderHub::new(
         TestBackend {
+            initial: parking_lot::Mutex::new(Some(initial)),
+            initial_crash_notify: Arc::clone(&initial_crash_notify),
             replacement,
             spawn_gate: Arc::clone(&spawn_gate),
         },
         notifier,
-        3,
+        HubPolicy::explicit(3),
     );
+    provider
+        .establish()
+        .await
+        .expect("the first establishment installs the initial engine");
+    let crash_notify = initial_crash_notify
+        .lock()
+        .clone()
+        .expect("the initial engine received its crash signal");
     (provider, crash_notify, spawn_gate)
 }
 
@@ -122,7 +134,7 @@ fn make_resilient(
 /// the test releases it, so this returns as soon as the monitor has cleared the
 /// inner provider. Returns `true` once down, `false` if the deadline elapses.
 async fn wait_for_restarting(
-    provider: &ResilientProvider<MockTypeProvider, TestBackend>,
+    provider: &ProviderHub<MockTypeProvider>,
     crash_notify: &Notify,
 ) -> bool {
     // Generous deadline: the crash monitor sleeps ~1s (the first-attempt backoff)
@@ -163,7 +175,7 @@ async fn update_workspace_folders_is_cached_while_restarting() {
     let replacement_clone = replacement.clone();
     // Gate the respawn so the wrapper stays in its restarting (inner-down) state
     // while we issue the workspace-folder update below.
-    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement).await;
 
     // Trip the crash monitor: it clears the inner provider, then blocks in
     // `spawn` on the gate, so the wrapper is now genuinely mid-restart. The
@@ -208,7 +220,7 @@ async fn restart_replays_each_file_in_the_state_the_provider_last_held_it() {
     let initial = MockTypeProvider::new();
     let replacement = MockTypeProvider::new();
     let replacement_clone = replacement.clone();
-    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement).await;
 
     // Background-only: the provider never held an overlay for it.
     provider
@@ -308,7 +320,7 @@ async fn restart_replays_all_cached_path_configs() {
     let initial = MockTypeProvider::new();
     let replacement = MockTypeProvider::new();
     let replacement_clone = replacement.clone();
-    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement).await;
 
     provider
         .configure_paths("/project/pkg-a", serde_json::json!({ "@a/*": ["./src/*"] }))
@@ -352,7 +364,7 @@ async fn register_carrier_member_forwards_and_replays_after_restart() {
     let replacement = MockTypeProvider::new();
     let initial_clone = initial.clone();
     let replacement_clone = replacement.clone();
-    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement).await;
 
     // (i) forward + (ii) cache: a carrier companion registered on the wrapper must
     // reach the LIVE inner provider (the wrapper must not swallow it in a trait
@@ -422,7 +434,7 @@ async fn register_carrier_member_forwards_and_replays_after_restart() {
 /// success-as-cached, and be in NEITHER the replay set NOR the live inner. The fix
 /// serializes registration against the snapshot→replay→swap via a gate.
 ///
-/// This drives the PRODUCTION `ResilientProvider` wrapper: it pauses the real
+/// This drives the PRODUCTION `ProviderHub`: it pauses the real
 /// respawn INSIDE its carrier replay (by blocking the replacement mock's
 /// `register_carrier_member` on the replayed carrier A — the gate-held window) and
 /// then issues a registration for a DIFFERENT carrier B through the wrapper's
@@ -442,7 +454,7 @@ async fn registration_racing_respawn_replay_reaches_fresh_inner() {
     // replacement's `register_carrier_member(A)` records then blocks until released.
     let release_a = replacement.block_register_carrier_member(carrier_a);
 
-    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement).await;
     let provider = Arc::new(provider);
 
     // Register carrier A on the wrapper BEFORE the crash so it is in the respawn's
@@ -543,7 +555,7 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
             ..Default::default()
         }),
     );
-    let (provider, _crash_notify, _spawn_gate) = make_resilient(initial.clone(), replacement);
+    let (provider, _crash_notify, _spawn_gate) = make_resilient(initial.clone(), replacement).await;
 
     let result = provider
         .resolve_completion("/project/src/App.vue.tsx", key.clone())
@@ -561,5 +573,151 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
             MockCall::ResolveCompletion { path, .. } if path == "/project/src/App.vue.tsx"
         )),
         "resolve_completion should be forwarded to the inner provider"
+    );
+}
+
+// ── Structural start announcements on the real LSP wire ───────────────────
+//
+// The shared-tsgo route attests "managed TSGO remains cold until an observed
+// attach failure", and the editor-neutral contract asserts exactly that over
+// the `$/verter/typeProviderStarted` channel: no started notification may
+// appear while the relay is alive. The composite still activates the managed
+// fallback for carriers whose generated units are not admitted to their
+// owning project, so the fallback's notifier — not its lifecycle — is what
+// keeps that attestation truthful on the wire.
+
+/// A handshake-only `LanguageServer` so a real
+/// [`tower_lsp_server::Client`](Client) with its outgoing socket exists
+/// in-process for the wire tests below.
+struct HandshakeOnlyServer;
+
+impl tower_lsp_server::LanguageServer for HandshakeOnlyServer {
+    async fn initialize(
+        &self,
+        _params: tower_lsp_server::ls_types::InitializeParams,
+    ) -> Result<tower_lsp_server::ls_types::InitializeResult, tower_lsp_server::jsonrpc::Error>
+    {
+        Ok(tower_lsp_server::ls_types::InitializeResult::default())
+    }
+
+    async fn shutdown(&self) -> Result<(), tower_lsp_server::jsonrpc::Error> {
+        Ok(())
+    }
+}
+
+/// Drive one real [`Client`] through a completed handshake and return it with
+/// the outgoing socket the editor would read. Structural start announcements
+/// are suppressed by the client until the server is initialized, so the
+/// handshake is part of the fixture, not optional setup. The socket is the
+/// undrained server→client stream: every notification the client sends lands
+/// there, in order.
+async fn initialized_client_with_socket() -> (Arc<OnceCell<Client>>, tower_lsp_server::ClientSocket)
+{
+    let client_cell: Arc<OnceCell<Client>> = Arc::new(OnceCell::new());
+    let cell_for_init = Arc::clone(&client_cell);
+    let (mut service, socket) = tower_lsp_server::LspService::new(move |client| {
+        let _ = cell_for_init.set(client);
+        HandshakeOnlyServer
+    });
+    use tower_service::Service as _;
+    let params = serde_json::to_value(tower_lsp_server::ls_types::InitializeParams::default())
+        .expect("initialize params serialize");
+    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
+        .params(params)
+        .id(1)
+        .finish();
+    futures_util::future::poll_fn(|cx| service.poll_ready(cx))
+        .await
+        .expect("the service accepts the handshake");
+    let _ = service.call(initialize).await;
+    (client_cell, socket)
+}
+
+/// The shared route's managed fallback: the engine's INITIAL start must stay
+/// off the `$/verter/typeProviderStarted` wire (the attested promise), while a
+/// crash REPLACEMENT is still announced so the editor's pid tracking follows
+/// the fresh child.
+///
+/// RED against the pre-fix announce-everything notifier: the initial engine's
+/// pid reaches the wire, which is exactly the CI failure shape ("managed
+/// fallback was activated: startedKinds=[\"tsgo\"]").
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_announced() {
+    let (client_cell, wire) = initialized_client_with_socket().await;
+    let mut wire = wire;
+
+    let initial = MockTypeProvider::new();
+    initial.set_child_pid(Some(4321));
+    let replacement = MockTypeProvider::new();
+    replacement.set_child_pid(Some(8765));
+
+    let spawn_gate = Arc::new(Semaphore::new(0));
+    let initial_crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>> =
+        Arc::new(parking_lot::Mutex::new(None));
+    let provider = ProviderHub::new(
+        TestBackend {
+            initial: parking_lot::Mutex::new(Some(initial)),
+            initial_crash_notify: Arc::clone(&initial_crash_notify),
+            replacement,
+            spawn_gate: Arc::clone(&spawn_gate),
+        },
+        Arc::new(LspNotifier::recovery_only(Arc::clone(&client_cell), "tsgo")),
+        HubPolicy::explicit(3),
+    );
+    provider
+        .establish()
+        .await
+        .expect("the first establishment installs the initial engine");
+    let crash_notify = initial_crash_notify
+        .lock()
+        .clone()
+        .expect("the initial engine received its crash signal");
+
+    assert!(
+        wait_for_restarting(&provider, &crash_notify).await,
+        "inner provider should be down (restarting) after crash notify"
+    );
+    spawn_gate.add_permits(1);
+
+    // Drain the outgoing wire until the respawn's announcement. Every item is
+    // inspected, so an initial-start announcement is caught wherever it lands.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut started = Vec::new();
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("the respawn must announce itself on the wire within 30s");
+        let message = tokio::time::timeout(remaining, wire.next())
+            .await
+            .expect("the respawn announcement arrives within the bound")
+            .expect("the wire stays open while the hub serves");
+        if message.method() != "$/verter/typeProviderStarted" {
+            continue;
+        }
+        let params = message.params().expect("started carries params");
+        let pid = params
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .expect("started carries a numeric pid");
+        let kind = params
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .expect("started carries a provider kind");
+        assert_eq!(kind, "tsgo", "the fallback engine is announced as tsgo");
+        assert_ne!(
+            pid, 4321,
+            "the shared fallback's INITIAL engine start must stay off the wire — the route \
+             attests the managed engine stays cold, and that attestation is asserted \
+             over exactly this channel"
+        );
+        started.push(pid);
+        if pid == 8765 {
+            break;
+        }
+    }
+    assert_eq!(
+        started,
+        vec![8765],
+        "exactly one structural start — the crash replacement — may reach the wire"
     );
 }

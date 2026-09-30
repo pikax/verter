@@ -314,6 +314,10 @@ mod inner {
         /// subsequent queries of the same path, are unaffected.
         #[allow(clippy::type_complexity)]
         on_query: Option<(String, Box<dyn FnOnce() + Send>)>,
+        /// Test seam: the pid `child_pid` reports. Structural start
+        /// announcements carry a real child pid; tests of the announcement
+        /// wire policy distinguish engines by it.
+        child_pid: Option<u32>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -363,6 +367,12 @@ mod inner {
         pub fn set_hover(&self, path: &str, offset: u32, info: Option<HoverInfo>) {
             let mut state = self.state.lock().unwrap();
             state.hover_responses.push((path.to_string(), offset, info));
+        }
+
+        /// Set the pid `child_pid` reports — the identity structural start
+        /// announcements carry, so wire-policy tests can tell engines apart.
+        pub fn set_child_pid(&self, pid: Option<u32>) {
+            self.state.lock().unwrap().child_pid = pid;
         }
 
         /// Script the next `count` `get_hover` calls to fail with `Err`
@@ -946,6 +956,10 @@ mod inner {
     impl TypeProvider for MockTypeProvider {
         fn provider_id(&self) -> &'static str {
             self.state.lock().unwrap().provider_id.unwrap_or("tsgo")
+        }
+
+        fn child_pid(&self) -> Option<u32> {
+            self.state.lock().unwrap().child_pid
         }
 
         fn supports_completion_resolve(&self) -> bool {

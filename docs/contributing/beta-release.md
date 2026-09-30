@@ -2,14 +2,16 @@
 
 Step-by-step guide for bumping from alpha to beta (or between beta releases).
 
-The current flow is `pnpm bump` → push to `main` → `release-tag.yml` tags →
-`release.yml` publishes; see [Publishing a Release](ci-cd.md#publishing-a-release).
-When `release.yml` finishes its build matrix but cannot publish (a red test
-lane), publish from the run's artifacts with
+The current flow is `pnpm bump` → a `release: v<version>` pull request, whose
+CI runs every lane and the `Release Check` rehearsal → squash-merge it with that
+exact subject → `release-tag.yml` tags → `release.yml` proves the pull
+request's CI and publishes its artifacts; see
+[Publishing a Release](ci-cd.md#publishing-a-release). When `release.yml` cannot
+publish, publish the same proven artifacts with
 `node scripts/release-publish.mjs local` — see
-[Publishing locally](ci-cd.md#publishing-locally). The manual version-bump and
-tagging steps below are the pre-`pnpm bump` procedure, kept for reference; they
-are superseded by the script-driven flow above.
+[Publishing locally](ci-cd.md#publishing-locally). The manual version-bump steps
+below (sections 1–3) are the pre-`pnpm bump` procedure, kept for reference;
+sections 4–5 are how any release lands, through its pull request.
 
 ## Prerequisites
 
@@ -69,30 +71,35 @@ git cliff --tag v0.0.1-beta.1 -o CHANGELOG.md
 git cliff --tag v0.0.1-beta.1 --unreleased
 ```
 
-## 4. Commit and Tag
+## 4. Commit and open the release pull request
 
 ```bash
+git switch -c release/v0.0.1-beta.1
 git add -A
-git commit -m "release(all): v0.0.1-beta.1"
-git tag v0.0.1-beta.1
+git commit -m "release: v0.0.1-beta.1"
+git push -u origin release/v0.0.1-beta.1
+gh pr create --title "release: v0.0.1-beta.1" --fill
 ```
 
-## 5. Push (triggers release workflow)
+The pull request's CI runs every lane plus the `Release Check` rehearsal (every
+build, the packaging and the clean-room smoke test). Do not push the release
+commit to `main` or tag it by hand: the tag publishes only the artifacts of a
+merged release pull request's green CI.
 
-```bash
-git push origin main
-git push origin v0.0.1-beta.1
-```
+## 5. Merge (tags and triggers the release workflow)
 
-The `release.yml` workflow runs automatically on tag push:
+Squash-merge the pull request once `CI Required` is green, with the commit
+subject exactly `release: v0.0.1-beta.1`: remove the ` (#N)` GitHub appends,
+since `release-tag.yml` tags only an exact release subject. It then tags the squash commit `v0.0.1-beta.1`, and the tag push runs `release.yml`:
 
-1. **validate** — clippy, fmt, test
-2. **build-native** — 7 platform targets (parallel)
-3. **build-wasm** — WASM binary (parallel)
-4. **publish-crates** — crates.io (after validate)
-5. **publish-npm** — npm with `--tag beta` (after native + wasm builds)
-6. **github-release** — GitHub Release with binaries
-7. **deploy-playground** — Netlify deployment
+1. **validate** — proves the tag is the squash of the release pull request
+   whose CI passed for this tree (`scripts/release-proof.mjs`); the tests and
+   every build already ran there, as its CI lanes and `Release Check`
+2. **publish-crates** — crates.io (after validate)
+3. **publish-npm** — npm with `--tag beta`, from the release pull request's
+   CI artifacts
+4. **github-release** — GitHub Release with the same binaries
+5. **deploy-playground** — Netlify deployment
 
 ## 6. Post-Release Verification
 

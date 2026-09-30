@@ -359,18 +359,28 @@ test("formatGithubOutput emits one gate line per gate plus the fallback flag", (
   assert.deepEqual(lines, ["gate_rust=true", "gate_wasm=false", "impact_full=true", "release="]);
 });
 
-// v0.0.1-beta.6's release PR (#705, 2026-09-28) ran the whole ordinary suite on a
-// version bump; its CI is the release rehearsal instead.
-test("a release pull request turns every lane off and names its kind, whatever changed", () => {
+// A release pull request's tests are CI's own lanes, selected as for any PR; the
+// tag's release reuses them. Its squash commit on main was already tested as
+// that pull request's head, so CI does not test the same tree again.
+test("a release pull request keeps its lanes and names its kind; its landed commit runs none", () => {
   const gates = { rust: "true", wasm: "true", js: "false" };
   assert.equal(releaseGates(gates, ""), gates);
-  assert.deepEqual(releaseGates(gates, "project"), { rust: "false", wasm: "false", js: "false" });
+  assert.equal(releaseGates(gates, "project"), gates);
+  assert.equal(releaseGates(gates, "ide"), gates);
+  assert.deepEqual(releaseGates(gates, "landed"), { rust: "false", wasm: "false", js: "false" });
   assert.deepEqual(formatGithubOutput(releaseGates(gates, "ide"), { full: true }, "ide"), [
+    "gate_rust=true",
+    "gate_wasm=true",
+    "gate_js=false",
+    "impact_full=true",
+    "release=ide",
+  ]);
+  assert.deepEqual(formatGithubOutput(releaseGates(gates, "landed"), { full: true }, "landed"), [
     "gate_rust=false",
     "gate_wasm=false",
     "gate_js=false",
     "impact_full=false",
-    "release=ide",
+    "release=landed",
   ]);
 
   const rootCrates = [...new Set(Object.values(LANE_ROOTS).flat())];
@@ -380,8 +390,7 @@ test("a release pull request turns every lane off and names its kind, whatever c
     const outputsPath = join(dir, "filter-outputs.json");
     const metadataPath = join(dir, "metadata.json");
     const githubOutput = join(dir, "github-output");
-    // A workspace manifest forces the full fallback on an ordinary PR, and a
-    // filter that matched would turn its lane on; a release PR still runs none.
+    // A version bump rewrites the workspace manifests, which selects every lane.
     const filterOutputs = {
       any: "true",
       any_files: JSON.stringify(["Cargo.toml", "package.json"]),
@@ -394,8 +403,9 @@ test("a release pull request turns every lane off and names its kind, whatever c
     }
     writeFileSync(outputsPath, JSON.stringify(filterOutputs));
     writeFileSync(metadataPath, JSON.stringify(metadata));
-    const run = (release) =>
-      spawnSync(
+    const run = (release) => {
+      writeFileSync(githubOutput, "");
+      const result = spawnSync(
         process.execPath,
         [
           join(SCRIPT_DIR, "ci-impact.mjs"),
@@ -410,23 +420,31 @@ test("a release pull request turns every lane off and names its kind, whatever c
         ],
         { encoding: "utf8", cwd: REPO_ROOT, env: { ...process.env, CI_IMPACT_RELEASE: "" } },
       );
-    const released = run("project");
-    assert.equal(released.status, 0, released.stderr);
-    const lines = readFileSync(githubOutput, "utf8").trimEnd().split(/\r?\n/u);
+      const lines = readFileSync(githubOutput, "utf8").trimEnd().split(/\r?\n/u);
+      return { result, lines, gateLines: lines.filter((line) => line.startsWith("gate_")) };
+    };
+    const pr = run("project");
+    assert.equal(pr.result.status, 0, pr.result.stderr);
     assert.ok(
-      lines.some((line) => line.startsWith("gate_")),
-      lines.join(" "),
+      pr.gateLines.length > 0 && pr.gateLines.every((line) => line.endsWith("=true")),
+      pr.lines.join(" "),
+    );
+    assert.ok(pr.lines.includes("release=project"), pr.lines.join(" "));
+    assert.match(
+      pr.result.stdout,
+      /Release pull request \(project\): the release rehearsal runs beside these lanes/u,
+    );
+    const landed = run("landed");
+    assert.equal(landed.result.status, 0, landed.result.stderr);
+    assert.ok(
+      landed.gateLines.every((line) => line.endsWith("=false")),
+      landed.lines.join(" "),
     );
     assert.ok(
-      lines.filter((line) => line.startsWith("gate_")).every((line) => line.endsWith("=false")),
-      lines.join(" "),
+      landed.lines.includes("impact_full=false") && landed.lines.includes("release=landed"),
+      landed.lines.join(" "),
     );
-    assert.ok(
-      lines.includes("impact_full=false") && lines.includes("release=project"),
-      lines.join(" "),
-    );
-    assert.match(released.stdout, /Release pull request \(project\)/u);
-    assert.equal(run("beta").status, 2);
+    assert.equal(run("beta").result.status, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

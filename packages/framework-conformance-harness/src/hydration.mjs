@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
 import { HARNESS_ROOT } from "./paths.mjs";
@@ -67,10 +68,21 @@ export async function hydrateVue(ssrHtml, clientCode) {
     "CustomEvent",
     "MouseEvent",
   ];
-  const previous = new Map(globalKeys.map((key) => [key, globalThis[key]]));
-  globalThis.window = dom.window;
+  // Defined, not assigned: since Node 21 `navigator` is a getter-only global
+  // and assigning through it throws. Each property's own descriptor is
+  // restored afterwards (as execute-svelte-client.mjs's installNavigator does).
+  const previous = new Map(
+    globalKeys.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
   for (const key of globalKeys) {
-    if (key !== "window" && dom.window[key] !== undefined) globalThis[key] = dom.window[key];
+    const value = key === "window" ? dom.window : dom.window[key];
+    if (value !== undefined)
+      Object.defineProperty(globalThis, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value,
+      });
   }
   let mismatchLogged = false;
   const originalWarn = console.warn;
@@ -82,7 +94,7 @@ export async function hydrateVue(ssrHtml, clientCode) {
     const filePath = scratchModulePath("vue", "vue-client", clientCode);
     const [{ createSSRApp }, mod] = await Promise.all([
       importOracleModule("vue", "vue"),
-      import(new URL(`file://${filePath}`).href),
+      import(pathToFileURL(filePath).href),
     ]);
     const component = mod.default;
     const container = dom.window.document.getElementById("app");
@@ -103,9 +115,9 @@ export async function hydrateVue(ssrHtml, clientCode) {
     };
   } finally {
     console.warn = originalWarn;
-    for (const [key, value] of previous) {
-      if (value === undefined) delete globalThis[key];
-      else globalThis[key] = value;
+    for (const [key, descriptor] of previous) {
+      if (descriptor === undefined) delete globalThis[key];
+      else Object.defineProperty(globalThis, key, descriptor);
     }
   }
 }
@@ -155,14 +167,16 @@ export async function hydrateVue(ssrHtml, clientCode) {
 export function hydrateSvelteClient(ssrHtml, clientCode, propsJson = "{}") {
   const clientPath = scratchModulePath("svelte", "svelte-client", clientCode);
   const runnerSource = `
-import { JSDOM } from ${JSON.stringify(path.join(HARNESS_ROOT, "node_modules", "jsdom", "lib", "api.js"))};
+import { JSDOM } from ${JSON.stringify(pathToFileURL(path.join(HARNESS_ROOT, "node_modules", "jsdom", "lib", "api.js")).href)};
 import { mount, hydrate, flushSync } from "svelte";
 const dom = new JSDOM(${JSON.stringify(
     '<!doctype html><html><body><div id="app"></div></body></html>',
   )}, { url: "http://localhost/" });
 globalThis.window = dom.window;
+// Defined, not assigned: Node's navigator global is getter-only.
 for (const key of ["document", "navigator", "Node", "Element", "HTMLElement", "SVGElement", "Text", "Comment", "DocumentFragment", "Event", "CustomEvent", "MouseEvent"]) {
-  if (dom.window[key] !== undefined) globalThis[key] = dom.window[key];
+  if (dom.window[key] !== undefined)
+    Object.defineProperty(globalThis, key, { configurable: true, enumerable: true, writable: true, value: dom.window[key] });
 }
 const container = dom.window.document.getElementById("app");
 container.innerHTML = ${JSON.stringify(ssrHtml)};
@@ -183,7 +197,7 @@ console.warn = (...args) => {
 // would make the reuse signal vacuously clean for its recovery class).
 const initialServerNodes = [...container.childNodes];
 
-const mod = await import(${JSON.stringify(`file://${clientPath}`)});
+const mod = await import(${JSON.stringify(pathToFileURL(clientPath).href)});
 try {
   hydrate(mod.default, { target: container, props });
   flushSync();

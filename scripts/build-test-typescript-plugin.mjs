@@ -3,7 +3,7 @@
 //
 // SINGLE shared builder for the source-built `@verter/typescript-plugin` test
 // fixture consumed by the Rust real-provider recovery tests
-// (`verter_type_runtime` resilient/ipc recovery suites and the `verter_lsp`
+// (`verter_type_runtime` provider-hub/ipc recovery suites and the `verter_lsp`
 // lazy-managed recovery suite). Both call sites used to shell out to
 // `node node_modules/esbuild/bin/esbuild ...`; that bin is the platform NATIVE
 // executable (Mach-O/ELF/PE), so node parses its header as JavaScript and the
