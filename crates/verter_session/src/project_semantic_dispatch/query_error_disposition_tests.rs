@@ -13,7 +13,7 @@ use super::{classify_query_error, query_error_disposition, QueryErrorDisposition
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
-    SemanticQueryValueTag,
+    RecoveryBasis, SemanticQueryValueTag,
 };
 
 fn budget_failure() -> BudgetExceededFailure {
@@ -60,6 +60,7 @@ fn every_variant() -> Vec<QueryError> {
         QueryError::UnrepresentableSurfaceMember,
         QueryError::CheckerRecovery {
             diagnostic: recursive_fulfillment(),
+            basis: RecoveryBasis::Certified,
             origin: None,
         },
     ]
@@ -281,6 +282,7 @@ fn genuine_failures_are_the_error_type() {
 fn checker_recovery_is_a_complete_error_type() {
     let err = QueryError::CheckerRecovery {
         diagnostic: recursive_fulfillment(),
+        basis: RecoveryBasis::Certified,
         origin: None,
     };
     let class = classify_query_error(&err);
@@ -288,6 +290,26 @@ fn checker_recovery_is_a_complete_error_type() {
     assert!(class.disposition.is_error_type());
     assert!(!class.disposition.is_unknown_materializing());
     assert!(!err.means_type_is_not_yet_known());
+}
+
+/// A TS2589 recovery a certified divergence decides is a complete answer:
+/// the basis, not the code, classifies a recovery.
+#[test]
+fn a_certified_divergence_is_a_complete_error_type() {
+    let err = QueryError::CheckerRecovery {
+        diagnostic: CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::ConditionalTail,
+        },
+        basis: RecoveryBasis::Certified,
+        origin: None,
+    };
+    let class = classify_query_error(&err);
+    assert_eq!(class.disposition, QueryErrorDisposition::CheckerRecovery);
+    assert_eq!(
+        class.domain_reason,
+        ClosedLiteralDomainUnresolvedReason::Unsupported
+    );
 }
 
 /// A recovery after a resource diagnostic — an operation that exhausted its
@@ -307,6 +329,7 @@ fn a_resource_recovery_is_a_partial_error_type() {
                 code,
                 operation: CheckerDiagnosticOperation::Intersection,
             },
+            basis: RecoveryBasis::Budget,
             origin: None,
         };
         let class = classify_query_error(&err);

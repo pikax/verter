@@ -19,11 +19,13 @@ use super::PrimitiveKind;
 /// success.
 ///
 /// A resource diagnostic ([`CheckerDiagnosticCode::is_resource_limit`]) is
-/// reported where one operation exhausts Verter's own allowance for it, and
-/// only there: the operation's budget gate
-/// ([`checker_policy`](super::checker_policy)) is its sole source. Its
-/// recovery is usable but incomplete — a resource partial, never kept —
-/// because the allowance, not the types, decided it.
+/// reported in exactly two places, both owned by
+/// [`checker_policy`](super::checker_policy): where one operation exhausts
+/// Verter's own allowance for it — a [`RecoveryBasis::Budget`] recovery,
+/// usable but incomplete, never kept, because the allowance rather than the
+/// types decided it — and, for TS2589, where a sound proof certifies that
+/// the operation can never reach a value — a [`RecoveryBasis::Certified`]
+/// recovery, complete and kept like any semantic answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CheckerDiagnostic {
     /// The diagnostic the checker reports.
@@ -97,9 +99,8 @@ pub enum CheckerDiagnosticCode {
 impl CheckerDiagnosticCode {
     /// Whether the checker reports this code when a type operation runs out
     /// of an allowance (TS2589, TS2590, TS2799, TS2859). Verter reports these
-    /// at its own allowance for the operation, and the recovery after one is
-    /// a resource partial: usable as the checker's recovery, never a
-    /// complete answer, never kept.
+    /// at its own allowance for the operation, as a resource partial, or —
+    /// TS2589 only — at a certified divergence, as a complete answer.
     #[must_use]
     pub const fn is_resource_limit(self) -> bool {
         match self {
@@ -186,4 +187,17 @@ pub enum CheckerDiagnosticOperation {
     /// An instantiation nested past Verter's own instantiation budget,
     /// which lies far past the checker's depth limit.
     InstantiationBudget,
+}
+
+/// Why a checker recovery is the answer: what the recovery proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecoveryBasis {
+    /// The types decide the diagnostic, independent of any allowance: a
+    /// diagnostic the checker derives from the types themselves, or a
+    /// certified divergence — a sound proof that the operation can never
+    /// reach a value. The recovery is a complete answer and may be kept.
+    Certified,
+    /// The operation exhausted Verter's own allowance for it. The recovery
+    /// is usable but a resource partial: never complete, never kept.
+    Budget,
 }

@@ -168,6 +168,7 @@ fn the_ts2590_recovery_is_a_partial_holding_the_authored_template() {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
+            basis: crate::semantic_query::RecoveryBasis::Budget,
             origin: Some(origin),
         })) = data.as_deref()
         else {

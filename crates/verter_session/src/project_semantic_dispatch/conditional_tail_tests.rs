@@ -4,10 +4,11 @@
 //! nested instantiation, and a run fails with TS2589 at the checker's tail
 //! limit of 1,000 steps. An application with arguments of its own (`A8<Eat<I>>`)
 //! evaluates them before the step; arguments that come round again can never
-//! reach a value, which is TS2589 at once. The TS2589 recovery is the
-//! checker's error type: it relates as `any` does (assignable to everything
-//! but `never`) and, as a conditional's check or extends type, is the
-//! conditional's answer. It is a resource partial, never kept.
+//! reach a value, a certified divergence: TS2589 at once, a complete answer.
+//! The TS2589 recovery is the checker's error type: it relates as `any`
+//! does (assignable to everything but `never`) and, as a conditional's
+//! check or extends type, is the conditional's answer. At the tail limit
+//! it is a resource partial, never kept.
 //!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on [`FIXTURE`], each probe read off a
@@ -17,7 +18,7 @@
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_recovered_probe};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
-    SemanticNodeData,
+    RecoveryBasis, SemanticNodeData,
 };
 
 const FIXTURE: &str = r#"
@@ -84,19 +85,50 @@ fn a_tail_recursive_conditional_runs_to_its_value() {
 fn a_tail_run_fails_with_ts2589_at_the_checker_step() {
     let failures = mismatches(FIXTURE, &[("Len<Rep<999>>", "999")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_ts2589(FIXTURE, "Rep<1000>");
+    assert_ts2589(FIXTURE, "Rep<1000>", RecoveryBasis::Budget);
 }
 
-/// A run whose arguments come round again never reaches a value: the
-/// checker's count is certain to run out, so the application is the TS2589
-/// recovery at once.
+/// A run whose arguments come round again is in a state it already left,
+/// and repeats it forever: a certified divergence, the TS2589 recovery at
+/// once and a complete answer. A run whose arguments grow repeats nothing;
+/// it stops only at its allowance, a resource partial.
 ///
-/// Measured: `Same<0>` and `Loop<0>` are `any` under TS2589 (`Loop`'s
-/// arguments grow, and it reaches the tail limit).
+/// Measured (all four settings agree): `Same<0>`, `Pair<0, 0>` for `type
+/// Pair<A, B> = A extends 0 ? Pair<B, A> : 1`, and `Loop<0>` are `any`
+/// under TS2589 (`Loop`'s arguments grow, and it reaches the tail limit);
+/// `Same<1>` is `1`.
 #[test]
 fn a_run_that_cannot_reach_a_value_is_ts2589() {
-    assert_ts2589(FIXTURE, "Same<0>");
-    assert_ts2589(FIXTURE, "Loop<0>");
+    assert_ts2589(FIXTURE, "Same<0>", RecoveryBasis::Certified);
+    assert_ts2589(FIXTURE, "Loop<0>", RecoveryBasis::Budget);
+}
+
+/// A certified divergence holds under every allowance, so it is kept: a
+/// second read on the same host is the same complete recovery.
+#[test]
+fn a_certified_divergence_is_complete_cold_and_warm() {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    for read in ["cold", "warm"] {
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            FIXTURE,
+            "Same<0>",
+            |dispatch, outcome| match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => assert!(
+                    matches!(
+                        dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                            basis: RecoveryBasis::Certified,
+                            ..
+                        }))
+                    ),
+                    "{read}: the certified TS2589 recovery"
+                ),
+                other => panic!("{read}: a certified divergence is complete, got {other:?}"),
+            },
+        );
+    }
 }
 
 /// The TS2589 recovery relates as the checker's error type: assignable to
@@ -119,8 +151,12 @@ fn the_ts2589_recovery_relates_as_the_error_type() {
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_ts2589(FIXTURE, "E extends string ? 1 : 2");
-    assert_ts2589(FIXTURE, "0 extends E ? 1 : 2");
+    assert_ts2589(
+        FIXTURE,
+        "E extends string ? 1 : 2",
+        RecoveryBasis::Certified,
+    );
+    assert_ts2589(FIXTURE, "0 extends E ? 1 : 2", RecoveryBasis::Certified);
 }
 
 /// The answers are the same read cold or warm, and in either order: a run is
@@ -156,20 +192,37 @@ fn a_recursive_application_inside_a_branch_is_instantiated() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `probe` reads as the TS2589 recovery of a conditional tail run, a
-/// resource partial.
-fn assert_ts2589(source: &str, probe: &str) {
-    with_recovered_probe(source, probe, |dispatch, node| {
+/// `probe` reads as the TS2589 recovery of a conditional tail run: a
+/// complete answer when a certified divergence decides it, a resource
+/// partial when the run's allowance did.
+fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
+    let check = |dispatch: &super::ProjectSemanticDispatch<'_>, node| {
         let data = dispatch.graph().node_data(node);
         assert!(
             matches!(
                 data.as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                     diagnostic,
+                    basis: measured,
                     origin: None,
-                })) if *diagnostic == TS2589
+                })) if *diagnostic == TS2589 && *measured == basis
             ),
-            "`{probe}` must be the TS2589 recovery, measured {data:?}"
+            "`{probe}` must be the {basis:?} TS2589 recovery, measured {data:?}"
         );
-    });
+    };
+    match basis {
+        RecoveryBasis::Certified => super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &super::checker_probe_lane_tests::default_probe_host(),
+            Default::default(),
+            source,
+            probe,
+            |dispatch, outcome| match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                    check(dispatch, node);
+                }
+                other => panic!("`{probe}` is a certified divergence, complete; got {other:?}"),
+            },
+        ),
+        RecoveryBasis::Budget => with_recovered_probe(source, probe, check),
+    }
 }

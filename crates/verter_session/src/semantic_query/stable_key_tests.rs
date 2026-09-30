@@ -1926,7 +1926,7 @@ fn the_retention_walk_visits_every_retained_id() {
 /// as its origin: the semantic walk treats the recovery as a leaf
 /// (it is the checker's error type), the retention walk visits the
 /// origin, and the stable key tells recoveries apart by that origin and by
-/// their diagnostic.
+/// their diagnostic and basis.
 #[test]
 fn a_checker_recovery_keys_and_retains_its_origin() {
     use crate::semantic_query::{
@@ -1942,6 +1942,7 @@ fn a_checker_recovery_keys_and_retains_its_origin() {
     let recovery = |diagnostic: CheckerDiagnostic, origin: Option<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
+            basis: crate::semantic_query::RecoveryBasis::Budget,
             origin,
         }))
     };
@@ -1962,6 +1963,19 @@ fn a_checker_recovery_keys_and_retains_its_origin() {
     assert_eq!(key(with_origin), key(recovery(ts2590, Some(origin))));
     assert_ne!(key(with_origin), key(recovery(ts2590, Some(other_origin))));
     assert_ne!(key(with_origin), key(recovery(ts2590, None)));
+    // A certified recovery and a budget recovery of the same diagnostic are
+    // different answers: one complete, one partial.
+    let with_basis = |basis| {
+        graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: ts2590,
+            basis,
+            origin: Some(origin),
+        }))
+    };
+    assert_ne!(
+        key(with_basis(crate::semantic_query::RecoveryBasis::Certified)),
+        key(with_basis(crate::semantic_query::RecoveryBasis::Budget))
+    );
     assert_ne!(
         key(with_origin),
         key(recovery(
@@ -2006,6 +2020,7 @@ fn closing_a_document_releases_a_recovery_holding_its_type() {
             code: CheckerDiagnosticCode::UnionTooComplex,
             operation: CheckerDiagnosticOperation::Intersection,
         },
+        basis: crate::semantic_query::RecoveryBasis::Budget,
         origin: Some(origin),
     }));
     let kept = prim(&graph, PrimitiveKind::String);

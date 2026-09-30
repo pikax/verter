@@ -93,6 +93,7 @@ fn the_ts2590_recovery_is_a_partial_holding_the_written_intersection() {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
+            basis: crate::semantic_query::RecoveryBasis::Budget,
             origin: Some(origin),
         })) = data.as_deref()
         else {
@@ -137,6 +138,7 @@ fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
             match data.as_deref() {
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                     diagnostic,
+                    basis: crate::semantic_query::RecoveryBasis::Budget,
                     origin: Some(origin),
                 })) => {
                     assert!(

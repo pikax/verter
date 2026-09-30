@@ -149,7 +149,7 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, RecoveryBasis,
 };
 /// The checker compatibility policy: the limits at which the checker gives up
 /// on a type operation, and the diagnostic it reports there.
@@ -5767,14 +5767,16 @@ pub enum QueryError {
     /// A language-defined answer: it relates, absorbs and raises as that
     /// recovery, carrying the diagnostic that produced it. Never a stand-in
     /// for something this substrate cannot answer — those stay typed gaps.
-    /// After a diagnostic the types decide it is complete; after a resource
-    /// diagnostic ([`CheckerDiagnosticCode::is_resource_limit`]) — an
+    /// Its [`RecoveryBasis`] says whether it is complete: a diagnostic the
+    /// types decide, or a certified divergence, is a complete answer; an
     /// operation that exhausted Verter's own allowance for it
-    /// ([`checker_policy`]) — it is a resource partial: usable, but never
-    /// a complete answer and never kept.
+    /// ([`checker_policy`]) leaves a resource partial — usable, but never a
+    /// complete answer and never kept.
     CheckerRecovery {
         /// The diagnostic the checker reports.
         diagnostic: CheckerDiagnostic,
+        /// Whether the recovery is proven or the allowance decided it.
+        basis: RecoveryBasis,
         /// The authored form of the refused operation, where one already
         /// exists (the written template or intersection), kept for display.
         /// It is never the operation's answer and nothing reads it as one:
@@ -5939,13 +5941,15 @@ impl PartialEq for QueryError {
             (
                 Self::CheckerRecovery {
                     diagnostic: a_d,
+                    basis: a_s,
                     origin: a_b,
                 },
                 Self::CheckerRecovery {
                     diagnostic: b_d,
+                    basis: b_s,
                     origin: b_b,
                 },
-            ) => a_d == b_d && a_b == b_b,
+            ) => a_d == b_d && a_s == b_s && a_b == b_b,
             _ => false,
         }
     }
@@ -6038,7 +6042,12 @@ impl std::hash::Hash for QueryError {
             | Self::UnmodeledPosition
             | Self::PermissiveWildcard
             | Self::OpenSurface => {}
-            Self::CheckerRecovery { diagnostic, origin } => {
+            Self::CheckerRecovery {
+                diagnostic,
+                basis,
+                origin,
+            } => {
+                basis.hash(state);
                 diagnostic.hash(state);
                 origin.hash(state);
             }
@@ -11110,6 +11119,7 @@ mod tests {
                     code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                     operation: CheckerDiagnosticOperation::LibAwaited,
                 },
+                basis: RecoveryBasis::Certified,
                 origin: None,
             },
         ];

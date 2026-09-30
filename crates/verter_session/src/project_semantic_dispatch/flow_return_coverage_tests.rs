@@ -5951,6 +5951,7 @@ fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
             data,
             SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                 diagnostic: ts2589,
+                basis: crate::semantic_query::RecoveryBasis::Certified,
                 origin: None
             }),
             "{name}"
@@ -6246,6 +6247,7 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
+            basis: crate::semantic_query::RecoveryBasis::Certified,
             origin: None,
         })
     );
@@ -6306,6 +6308,7 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
+            basis: crate::semantic_query::RecoveryBasis::Budget,
             origin: None,
         })
     );

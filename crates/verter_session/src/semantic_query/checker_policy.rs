@@ -4,14 +4,17 @@
 //!
 //! Each operation's allowance is checked by its budget GATE here, and only a
 //! gate mints an [`OperationRefusal`]: the witness that this operation, and
-//! not some other work, ran out of its own allowance. The refusal is the sole
-//! source of a resource diagnostic (TS2589, TS2590, TS2799, TS2859), and the
-//! answer after one is the checker's recovery — its error type
+//! not some other work, ran out of its own allowance. The answer after a
+//! refusal is the checker's recovery — its error type
 //! ([`resource_recovery`]), or a false relation — as a RESOURCE PARTIAL:
 //! usable, but incomplete and never kept, because the allowance rather than
-//! the types decided it. How much work a demand spends overall is a separate,
-//! operational bound: the connected-demand ledger's trip is plain typed
-//! incompleteness and never becomes one of these diagnostics.
+//! the types decided it. The only other source of a resource diagnostic is
+//! a [`CertifiedDivergence`]: a sound proof that an operation can never
+//! reach a value, reported at once with the checker's TS2589 and its
+//! recovery ([`divergence_recovery`]) as a complete answer. How much work a
+//! demand spends overall is a separate, operational bound: the
+//! connected-demand ledger's trip is plain typed incompleteness and never
+//! becomes one of these diagnostics.
 //!
 //! Each counter below starts where the checker's starts and resets where the
 //! checker's resets, so a refusal never depends on what an earlier query
@@ -19,7 +22,7 @@
 
 use super::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
-    SemanticNodeData, SemanticNodeId,
+    RecoveryBasis, SemanticNodeData, SemanticNodeId,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -105,17 +108,54 @@ pub(crate) fn instantiation_budget(within: bool) -> Result<(), OperationRefusal>
     ))
 }
 
-/// The refusal of an instantiation of `operation` that recurs on its own
-/// path with the arguments it is already evaluating: it can never reach a
-/// value, so every allowance runs out on it, and the refusal is certain
-/// without spending one.
-pub(crate) fn non_terminating_instantiation(
+/// A sound, budget-independent proof that one operation can never reach a
+/// value: a CERTIFIED divergence. It is minted only by the constructors
+/// below, each of which names the one proof class it stands for, so a
+/// divergence can never be claimed from growth, from repeated names with
+/// different arguments, or from a query that merely meets itself on its
+/// path (a deferred position legitimately does, and a circular declaration
+/// is the checker's TS2456 instead).
+#[must_use = "a certified divergence decides its operation's answer"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CertifiedDivergence {
     operation: CheckerDiagnosticOperation,
-) -> OperationRefusal {
-    OperationRefusal::of(
-        CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-        operation,
-    )
+}
+
+impl CertifiedDivergence {
+    /// The operation reached a state IDENTICAL to one it is still
+    /// evaluating on its own path: the same declaration with the same
+    /// arguments under the same evaluation context and phase, each step a
+    /// deterministic function of that state. The run from there repeats
+    /// forever. Only the operation that holds both states may claim it —
+    /// a conditional tail run meeting arguments it already took, or the lib
+    /// `Awaited<T>` conditional re-entering itself with the same argument.
+    pub(crate) const fn exact_recurrence(operation: CheckerDiagnosticOperation) -> Self {
+        Self { operation }
+    }
+
+    /// The diagnostic the checker reports for the divergence (TS2589).
+    pub(crate) const fn diagnostic(self) -> CheckerDiagnostic {
+        CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: self.operation,
+        }
+    }
+}
+
+/// The checker's error type after `divergence`, as the typed recovery
+/// carrier: a complete answer, kept like any semantic answer, because the
+/// proof holds under every allowance. `origin` is the diverging
+/// operation's authored form, if one already exists.
+pub(crate) fn divergence_recovery(
+    graph: &SemanticGraphStore,
+    divergence: CertifiedDivergence,
+    origin: Option<SemanticNodeId>,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: divergence.diagnostic(),
+        basis: RecoveryBasis::Certified,
+        origin,
+    }))
 }
 
 /// The checker's error type after `refusal`, as the typed recovery carrier.
@@ -135,6 +175,7 @@ pub(crate) fn resource_recovery(
     );
     graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
         diagnostic: refusal.diagnostic(),
+        basis: RecoveryBasis::Budget,
         origin,
     }))
 }
@@ -148,10 +189,11 @@ pub(crate) fn checker_recovery(
 ) -> SemanticNodeId {
     verter_debug_assert::verter_debug_assert!(
         !diagnostic.code.is_resource_limit(),
-        "a resource diagnostic comes only from its operation's refusal"
+        "a resource diagnostic comes only from a refusal or a certified divergence"
     );
     graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
         diagnostic,
+        basis: RecoveryBasis::Certified,
         origin: None,
     }))
 }
@@ -415,7 +457,9 @@ mod tests {
     fn every_refusal_is_a_resource_diagnostic() {
         let refusals = [
             instantiation_budget(false).unwrap_err(),
-            non_terminating_instantiation(CheckerDiagnosticOperation::LibAwaited),
+            ConditionalTail::resumed(CONDITIONAL_TAIL_STEPS)
+                .step(CheckerDiagnosticOperation::ConditionalTail)
+                .unwrap_err(),
             cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
             with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())
                 .unwrap_err(),

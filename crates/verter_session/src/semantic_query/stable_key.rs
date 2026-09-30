@@ -1961,7 +1961,9 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     };
     enc.u8(tag);
     match err {
-        QueryError::CheckerRecovery { diagnostic, .. } => {
+        QueryError::CheckerRecovery {
+            diagnostic, basis, ..
+        } => {
             enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
             enc.u8(match diagnostic.operation {
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
@@ -1975,6 +1977,11 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail => 9,
                 crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
+            });
+            // Frozen: a proven recovery and a budget recovery are distinct nodes.
+            enc.u8(match basis {
+                crate::semantic_query::RecoveryBasis::Certified => 1,
+                crate::semantic_query::RecoveryBasis::Budget => 2,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

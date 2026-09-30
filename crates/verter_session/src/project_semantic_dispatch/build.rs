@@ -5058,17 +5058,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .flatten();
             if let Some(next) = next {
                 use crate::semantic_query::{checker_policy, CheckerDiagnosticOperation};
-                // A run that comes back to arguments it already took can
-                // never end: its refusal is certain without spending the
-                // allowance.
-                let refused = if build.tail_arguments.contains(&next) {
-                    Err(checker_policy::non_terminating_instantiation(
-                        CheckerDiagnosticOperation::ConditionalTail,
-                    ))
-                } else {
+                // A run that comes back to arguments it already took is in
+                // the state it was in then, and each step is a function of
+                // that state: it repeats forever, a certified divergence.
+                if build.tail_arguments.contains(&next) {
+                    result = checker_policy::divergence_recovery(
+                        self.graph(),
+                        checker_policy::CertifiedDivergence::exact_recurrence(
+                            CheckerDiagnosticOperation::ConditionalTail,
+                        ),
+                        None,
+                    );
+                } else if let Err(refusal) =
                     build.tail.step(CheckerDiagnosticOperation::ConditionalTail)
-                };
-                if let Err(refusal) = refused {
+                {
                     result = self.recover_at_operation_budget(refusal, None);
                 } else if let Err(reasons) = self.charge_connected_work() {
                     self.fold_local_partial_completeness(reasons);
@@ -15264,17 +15267,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ([`Self::lib_awaited_node`]); this read is a root. When
     /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
     /// on this path, the conditional has come back to itself with the same
-    /// argument and can never reach a value: the checker stops at its limit,
-    /// reports TS2589 and continues with its error type, which dominates
-    /// each union and branch on the way. That recovery is the answer.
+    /// argument and can never reach a value — a certified divergence: the
+    /// checker reports TS2589 and continues with its error type, which
+    /// dominates each union and branch on the way. That recovery is the
+    /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self.graph().is_same_path_claim(&application) {
-            return Some(Some(self.lib_awaited_too_deep(
-                crate::semantic_query::checker_policy::non_terminating_instantiation(
-                    crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
-                ),
-            )));
+            return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {
             QueryResult::Value(body) => body,
@@ -15321,9 +15321,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ([`CONDITIONAL_TAIL_STEPS`](crate::semantic_query::checker_policy::CONDITIONAL_TAIL_STEPS))
     /// or a path reaching the instantiation depth
     /// ([`INSTANTIATION_DEPTH`](crate::semantic_query::checker_policy::INSTANTIATION_DEPTH))
-    /// is the TS2589 recovery. So is an application that recurs on its own
-    /// path: it can never reach a value, so the checker's count is certain
-    /// to run out there.
+    /// is the TS2589 recovery, a resource partial. So, complete, is an
+    /// application that recurs on its own path with the same argument: a
+    /// certified divergence.
     fn lib_awaited_node(&self, operand: SemanticNodeId) -> LibAwaited {
         let mut walk = LibAwaitedWalk {
             depth: crate::semantic_query::checker_policy::InstantiationDepth::entered(
@@ -15332,6 +15332,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             path: Vec::new(),
         };
         self.lib_awaited_run(operand, &mut walk, 0)
+    }
+
+    /// The TS2589 recovery of the lib conditional re-entering itself with
+    /// an argument it is still evaluating on this path: the same
+    /// application under the same context, so a certified divergence — a
+    /// complete answer, kept.
+    fn lib_awaited_recurs(&self) -> SemanticNodeId {
+        crate::semantic_query::checker_policy::divergence_recovery(
+            self.graph(),
+            crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+            ),
+            None,
+        )
     }
 
     /// The TS2589 recovery of the lib conditional after `refusal`.
@@ -15438,11 +15452,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.path.contains(&resolved) {
-            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep(
-                crate::semantic_query::checker_policy::non_terminating_instantiation(
-                    crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
-                ),
-            )));
+            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_recurs()));
         }
         walk.path.push(resolved);
         let Some(data) = self.graph().node_data(resolved) else {

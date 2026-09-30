@@ -19,8 +19,8 @@
 //! | [`UnsupportedSurface`] | `UnrepresentableSurface`, `UnrepresentableSurfaceMember` | Typed unsupported-surface / unsupported-member result, retaining its existing sentinel output semantics. |
 //! | [`Partial`] | `BudgetExceeded`, `Cancelled`, `UnstableState` | Typed partial — `ReturnOnly`, never shared, never warmed. |
 //! | [`Failure`] | `Other`, `UnsupportedIntrinsic`, `ValueDomainMismatch` | Genuine typed failure (the §22 error type). |
-//! | [`CheckerRecovery`] | `CheckerRecovery` (a diagnostic the types decide) | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. A complete answer. |
-//! | [`BudgetRecovery`] | `CheckerRecovery` (a resource diagnostic) | The checker's error type after an operation exhausted Verter's allowance for it: raised AS its recovery like [`CheckerRecovery`], but a resource partial — `ReturnOnly`, never shared, never warmed. |
+//! | [`CheckerRecovery`] | `CheckerRecovery` with a `Certified` basis | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. A complete answer. |
+//! | [`BudgetRecovery`] | `CheckerRecovery` with a `Budget` basis | The checker's error type after an operation exhausted Verter's allowance for it: raised AS its recovery like [`CheckerRecovery`], but a resource partial — `ReturnOnly`, never shared, never warmed. |
 //!
 //! The classification also carries the PRECISE typed unresolved reason a
 //! consumer publishes, because the disposition classes are deliberately
@@ -245,23 +245,21 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::Failure,
             ClosedLiteralDomainUnresolvedReason::Fault,
         ),
-        // The checker's recovered error type reads as `any`. After a
-        // diagnostic the types decide it is a complete answer, but not a
-        // closed literal domain; after an operation exhausted its allowance
-        // it is a resource partial, published as the budget it ran out of.
-        QueryError::CheckerRecovery { diagnostic, .. } => {
-            if diagnostic.code.is_resource_limit() {
-                (
-                    QueryErrorDisposition::BudgetRecovery,
-                    ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
-                )
-            } else {
-                (
-                    QueryErrorDisposition::CheckerRecovery,
-                    ClosedLiteralDomainUnresolvedReason::Unsupported,
-                )
-            }
-        }
+        // The checker's recovered error type reads as `any`. When the types
+        // decide it — or a certified divergence proves it — it is a complete
+        // answer, but not a closed literal domain; after an operation
+        // exhausted its allowance it is a resource partial, published as the
+        // budget it ran out of.
+        QueryError::CheckerRecovery { basis, .. } => match basis {
+            crate::semantic_query::RecoveryBasis::Certified => (
+                QueryErrorDisposition::CheckerRecovery,
+                ClosedLiteralDomainUnresolvedReason::Unsupported,
+            ),
+            crate::semantic_query::RecoveryBasis::Budget => (
+                QueryErrorDisposition::BudgetRecovery,
+                ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
+            ),
+        },
     };
     QueryErrorClass {
         disposition,
