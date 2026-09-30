@@ -447,6 +447,87 @@ export const UNCOVERED = [
 ];
 
 /** The scenarios whose id starts with one of `prefixes` (all when empty). */
+/**
+ * Each scenario's tier:
+ *
+ * - `quick`: one representative normal size per scenario series (the
+ *   default run; about five minutes);
+ * - `standard`: the other normal sizes and the sizes at tsc's own limits
+ *   (TS2589 / TS2590 / TS2859 onsets, elided prints) — the baseline;
+ * - `stress`: sizes at Verter's limits and pathological sizes (tsc
+ *   exhausting 8 GiB, multi-second Verter requests); opt-in, may take hours.
+ *
+ * Tiers nest: standard includes quick, stress includes both.
+ */
+export const SCENARIO_TIERS = {
+  "baseline-empty": "quick",
+  "relation-aligned-200": "quick",
+  "relation-reversed-200": "quick",
+  "template-4-spans": "quick",
+  "template-nested": "quick",
+  "template-absorption-400x250": "quick",
+  "alias-chain-50": "quick",
+  "conditional-chain-97": "quick",
+  "tail-recursive-parse-50": "quick",
+  "inference-deposits-1025": "quick",
+  "overloads-1025": "quick",
+  "contravariant-callbacks-10": "quick",
+  "infer-pattern-repeat-10": "quick",
+  "reference-infer-depth-10": "quick",
+  "reference-infer-aliases-100": "quick",
+  "base-signature-1": "quick",
+  "library-awaited": "quick",
+  "library-array-map": "quick",
+  "library-promise-then": "quick",
+  "library-map-entries": "quick",
+  "library-generic-call": "quick",
+  "relation-aligned-600": "standard",
+  "relation-aligned-1800": "standard",
+  "relation-aligned-3200": "standard",
+  "relation-reversed-600": "standard",
+  "relation-reversed-2100": "standard",
+  "spread-400x250": "standard",
+  "spread3-50x50x40": "standard",
+  "template-5-spans": "standard",
+  "template-400x250": "standard",
+  "template-369x271": "standard",
+  "alias-chain-200": "standard",
+  "alias-chain-500": "standard",
+  "alias-chain-1000": "standard",
+  "conditional-chain-98": "standard",
+  "conditional-chain-200": "standard",
+  "tail-recursive-parse-500": "standard",
+  "tail-recursive-parse-999": "standard",
+  "tail-recursive-parse-1000": "standard",
+  "inference-deposits-5000": "standard",
+  "contravariant-callbacks-100": "standard",
+  "contravariant-callbacks-500": "standard",
+  "infer-pattern-repeat-100": "standard",
+  "reference-infer-depth-100": "standard",
+  "reference-infer-depth-500": "standard",
+  "reference-infer-aliases-1000": "standard",
+  "base-signature-10": "standard",
+  "base-signature-50": "standard",
+  "relation-reversed-1800": "stress",
+  "relation-reversed-3200": "stress",
+  "spread-369x271": "stress",
+  "spread3-50x50x39": "stress",
+  "alias-chain-1000-1mib": "stress",
+  "conditional-chain-500": "stress",
+  "infer-pattern-repeat-1000": "stress",
+};
+
+export const TIERS = ["quick", "standard", "stress"];
+
+/** The scenarios a tier runs (its own and every lighter tier's). */
+export function scenariosForTier(tier) {
+  const rank = TIERS.indexOf(tier);
+  if (rank < 0) throw new Error(`unknown tier ${tier}; tiers: ${TIERS.join(", ")}`);
+  const all = allScenarios();
+  for (const s of all) if (!SCENARIO_TIERS[s.id]) throw new Error(`scenario ${s.id} has no tier`);
+  return all.filter((s) => TIERS.indexOf(SCENARIO_TIERS[s.id]) <= rank);
+}
+
 export function selectScenarios(prefixes) {
   const all = allScenarios();
   if (!prefixes.length) return all;

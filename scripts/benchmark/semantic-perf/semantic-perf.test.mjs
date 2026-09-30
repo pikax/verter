@@ -199,11 +199,19 @@ test("the schedule balances every pair of arms in every cell, for odd and even c
   );
   const firsts = plan.filter((_, i) => i % 2 === 0).map((p) => p.arm);
   assert.deepEqual(firsts.sort(), ["tsc-api", "tsc-api", "verter", "verter"]);
-  // An odd number of measured rounds cannot balance.
-  assert.notDeepEqual(
-    scheduleBalanceProblems(schedule(["a"], ["verter", "tsc-api"], 3, 0), ["verter", "tsc-api"]),
-    [],
-  );
+  // An odd number of measured rounds balances to within one per cell, and
+  // the cells alternate the extra lead, so the run is within one per pair.
+  for (const cells of [["a"], ["a", "b"], ["a", "b", "c"]])
+    assert.deepEqual(
+      scheduleBalanceProblems(schedule(cells, ["verter", "tsc-api"], 3, 1), ["verter", "tsc-api"]),
+      [],
+    );
+  // A plan with the same arm first in every round is unbalanced.
+  const lopsided = [0, 1, 2].flatMap((rep) => [
+    { key: "a", arm: "verter", rep, warmup: false },
+    { key: "a", arm: "tsc-api", rep, warmup: false },
+  ]);
+  assert.notDeepEqual(scheduleBalanceProblems(lopsided, ["verter", "tsc-api"]), []);
 });
 
 test("tuning variables and architecture names are recognised", () => {
@@ -642,6 +650,12 @@ function tscProbe(text) {
   };
 }
 
+/** Warm repeats are made only by each arm's first measured invocation (one live process). */
+function withWarm(probe, warm) {
+  if (!warm) probe.probes[0].warm = [];
+  return probe;
+}
+
 function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
   const options = {
     arms: ["verter", "tsc-api"],
@@ -655,6 +669,8 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     allowSampled: false,
     settings: "strict",
     libMode: "root-file",
+    tier: "quick",
+    only: ["synthetic"],
   };
   const plan = schedule(["synthetic/strict"], options.arms, options.repeat, options.warmup);
   const invocations = plan.map((p, index) => ({
@@ -675,7 +691,10 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
       { phase: p.arm === "tsc-api" ? "spawn" : "engine-start", atMs: 1010 },
       { phase: "done", atMs: 1020 },
     ],
-    probe: p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
+    probe: withWarm(
+      p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
+      !p.warmup && p.rep === 0,
+    ),
   }));
   const build = {
     rustcPath: "/rust/rustc",
@@ -878,7 +897,13 @@ test("records with a failed or different warm answer, a missing or invalid time,
     failsWith(resummarize(run), pattern);
   };
   mutate("tsc-api", (r) => (r.probes[0].warm[0].outcome = { kind: "fault", detail: "x" }), /warm/);
-  mutate("verter", (r) => (r.probes[0].warm[0].sameAnswerAsCold = false), /answered differently/);
+  // Verter's warm answer differing from its cold one is a finding, not a harness failure.
+  const differs = syntheticRun();
+  firstOf(differs, "verter").probe.probes[0].warm[0].sameAnswerAsCold = false;
+  resummarize(differs);
+  assert.equal(differs.summary.cells[0].arms.verter.class, "error");
+  assert.equal(differs.summary.cells[0].headline, null);
+  assert.deepEqual(validate(differs).failures, []);
   mutate("tsc-api", (r) => (r.probes[0].warm[0].sameAnswerAsCold = false), /answered differently/);
   mutate("verter", (r) => delete r.probes[0].cold.micros, /cold time/);
   mutate("tsc-api", (r) => (r.probes[0].cold.serverMs = -1), /cold time/);
@@ -915,10 +940,13 @@ test("a kill while observing leaves the measured demand, classed unverified", ()
     inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
     inv.supervisorExit = 137;
     inv.phase = "observe";
-    inv.probe = { ...tscProbe("1"), stage: "measured", serverAfterObserve: null };
+    inv.probe = withWarm(
+      { ...tscProbe("1"), stage: "measured", serverAfterObserve: null },
+      !inv.warmup && inv.rep === 0,
+    );
     inv.probe.probes[0].observation = null;
     inv.probe.probes[0].observeMs = null;
-    delete inv.probe.probes[0].warm[0].sameAnswerAsCold;
+    for (const w of inv.probe.probes[0].warm) delete w.sameAnswerAsCold;
   }
   resummarize(run);
   assert.equal(run.summary.cells[0].arms["tsc-api"].class, "unverified");
@@ -1096,10 +1124,24 @@ test("inconsistent statistics or duplicated times fail validation", () => {
   );
 });
 
-test("repetitions that disagree fail validation", () => {
+test("tsc repetitions that disagree fail validation; Verter's are a reported finding", () => {
   const run = syntheticRun();
-  run.invocations.filter((i) => i.arm === "verter").at(-1).probe = verterProbe("2", "verter");
-  failsWith(resummarize(run), /inconsistent repetitions/);
+  const lastTsc = run.invocations.filter((i) => i.arm === "tsc-api").at(-1);
+  lastTsc.probe = withWarm(tscProbe("2"), !lastTsc.warmup && lastTsc.rep === 0);
+  failsWith(resummarize(run), /inconsistent repetitions|wrong answer/);
+  const v = syntheticRun();
+  const lastVerter = v.invocations.filter((i) => i.arm === "verter").at(-1);
+  lastVerter.probe = withWarm(
+    verterProbe("2", "verter"),
+    !lastVerter.warmup && lastVerter.rep === 0,
+  );
+  resummarize(v);
+  const s = v.summary.cells[0].arms.verter;
+  assert.equal(s.class, "mismatch");
+  assert.equal(s.repetitionsDiffer, true);
+  assert.match(s.detail, /repetitions differ/);
+  assert.equal(v.summary.cells[0].headline, null);
+  assert.deepEqual(validate(v).failures, []);
 });
 
 test("a changed binary, build input or harness fails validation", () => {

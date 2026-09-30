@@ -70,6 +70,17 @@ export const ENGINE_PHASES = {
   tsc: ["spawn", "engine-start", "setup", "init", "cold", "warm"],
 };
 
+/**
+ * How many warm (in-process) repeats an invocation makes. Warm requests are
+ * measured in ONE live process per (cell, arm) — the first measured
+ * invocation — which answers them all in-process; every other invocation is
+ * a fresh process measuring the cold path only. Both tools get exactly the
+ * same treatment.
+ */
+export function warmRepeatsFor(inv, options = {}) {
+  return !inv.warmup && inv.rep === 0 ? (options.warmRepeats ?? 0) : 0;
+}
+
 /** The limits a run holds every invocation to, from its options. */
 export function runLimits(options = {}) {
   return {
@@ -310,10 +321,13 @@ export function probeRecordProblems(record, { tool, warmRepeats, stage = "comple
       warm.every((w) => w.outcome?.kind === "value"),
       "a warm repeat did not answer",
     );
-    need(
-      warm.every((w) => w.sameAnswerAsCold === true),
-      "a warm repeat answered differently from the cold request",
-    );
+    // tsc is the reference: a warm answer that differs is a harness problem.
+    // Verter's is a finding, classified (`error`), never a comparison.
+    if (tool === "tsc")
+      need(
+        warm.every((w) => w.sameAnswerAsCold === true),
+        "a warm repeat answered differently from the cold request",
+      );
   }
   return p;
 }
@@ -626,6 +640,7 @@ export function probeMetrics(inv) {
       coldMs: cold,
       firstTypeMs: sum(setup, init, cold),
       warmMs: stats((p.warm ?? []).map((w) => ms(w.micros)))?.median ?? null,
+      warmSamplesMs: (p.warm ?? []).map((w) => ms(w.micros)),
       observeMs: ms(p.observeMicros),
       teardownMs: ms(r.phases?.teardown),
       peakBytes: r.afterRequests?.peakBytes ?? null,
@@ -652,6 +667,7 @@ export function probeMetrics(inv) {
     coldRoundTripMs: p.cold?.roundTripMs ?? null,
     firstTypeMs: sum(setup, init, cold),
     warmMs: stats((p.warm ?? []).map(tscRequestMs))?.median ?? null,
+    warmSamplesMs: (p.warm ?? []).map(tscRequestMs),
     warmRoundTripMs: stats((p.warm ?? []).map((w) => w.roundTripMs))?.median ?? null,
     observeMs: p.observeMs ?? null,
     teardownMs: r.phases?.teardownMs ?? null,

@@ -35,6 +35,7 @@ import {
   runLimits,
   supervisorDeadlineMs,
   compactCliStdout,
+  warmRepeatsFor,
 } from "./analyze.mjs";
 import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import {
@@ -47,7 +48,14 @@ import {
   RUNTIME_ENV_NAMES,
   toolchainPin,
 } from "./provenance.mjs";
-import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import {
+  allScenarios,
+  cliSource,
+  SCENARIO_TIERS,
+  SETTINGS,
+  TIERS,
+  tsconfigText,
+} from "./scenarios.mjs";
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
 import { summarize } from "./summary.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
@@ -238,6 +246,19 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   // Records against the plan.
   const opts = meta.options ?? {};
   const cellKeys = Object.keys(meta.scenarios ?? {});
+  // The cells must be exactly the ones the tier (or --only) selects.
+  {
+    const rank = TIERS.indexOf(opts.tier ?? "stress");
+    const chosen = opts.only?.length
+      ? scenarios.filter((s) => opts.only.some((p) => s.id === p || s.id.startsWith(p)))
+      : scenarios.filter(
+          (s) => SCENARIO_TIERS[s.id] && TIERS.indexOf(SCENARIO_TIERS[s.id]) <= rank,
+        );
+    const settingIds = opts.settings === "all" ? SETTINGS.map((s) => s.id) : ["strict"];
+    const want = chosen.flatMap((s) => settingIds.map((st) => `${s.id}/${st}`));
+    if (stable([...want].sort()) !== stable([...cellKeys].sort()))
+      fail("the recorded scenarios are not the ones the tier (or --only) selects");
+  }
   const expectedPlan = schedule(cellKeys, opts.arms ?? [], opts.repeat ?? 0, opts.warmup ?? 0);
   const plan = meta.plan ?? [];
   if (
@@ -347,7 +368,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       // must hold every demand field.
       for (const p of probeRecordProblems(inv.probe, {
         tool: arm.tool,
-        warmRepeats: opts.warmRepeats,
+        warmRepeats: warmRepeatsFor(inv, opts),
         stage: "measured",
       }))
         fail(`${id}: ${p}`);
@@ -369,7 +390,10 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: failed child: no probe record (${inv.probeReadError})`);
       continue;
     }
-    for (const p of probeRecordProblems(r, { tool: arm.tool, warmRepeats: opts.warmRepeats }))
+    for (const p of probeRecordProblems(r, {
+      tool: arm.tool,
+      warmRepeats: warmRepeatsFor(inv, opts),
+    }))
       fail(`${id}: ${p}`);
     if (arm.tool === "verter") {
       if (r.instrumented !== (inv.arm === "verter-counted"))
@@ -401,7 +425,9 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     for (const [arm, s] of Object.entries(cell.arms)) {
       const id = `${cell.key}|${arm}`;
       if (ARMS[arm].kind === "probe") {
-        if (s.distinctAnswers > 1 || s.class === "inconsistent")
+        // tsc is the reference: repetitions must agree. Verter's that
+        // disagree are a finding (reported, never compared).
+        if (ARMS[arm].tool === "tsc" && (s.distinctAnswers > 1 || s.class === "inconsistent"))
           fail(
             `${id}: inconsistent repetitions (${s.distinctAnswers} distinct answers, classes ${JSON.stringify(s.classes ?? s.class)})`,
           );
@@ -429,12 +455,16 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     if (cell.headline) {
       for (const arm of ["verter", "tsc-api"]) {
         const s = cell.arms[arm];
-        for (const m of ["coldMs", "firstTypeMs", "warmMs", "peakBytes", "retainedBytes"]) {
+        for (const m of ["coldMs", "firstTypeMs", "peakBytes", "retainedBytes"]) {
           if (s.metrics[m]?.n !== s.measured)
             fail(
               `${cell.key}|${arm}: ${m} has ${s.metrics[m]?.n ?? 0} of ${s.measured} measured values`,
             );
         }
+        if (s.metrics.warmMs?.n !== (opts.warmRepeats ?? 0))
+          fail(
+            `${cell.key}|${arm}: warmMs has ${s.metrics.warmMs?.n ?? 0} of ${opts.warmRepeats} in-process repeats`,
+          );
       }
     }
   }

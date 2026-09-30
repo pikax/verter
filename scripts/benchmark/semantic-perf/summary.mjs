@@ -13,6 +13,7 @@ import {
   tscAnswerStatus,
   verdict,
   runLimits,
+  CLASSES,
 } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
 import { interpretMeasurement } from "./reference.mjs";
@@ -88,8 +89,15 @@ function probeArmSummary(arm, invs, ctx) {
   if (ARMS[arm].tool === "verter") {
     const classes = answers.map((a) => classifyVerterAnswer(a, ctx));
     out.classes = [...new Set(classes.map((c) => c.class))];
-    out.class = out.classes.length === 1 ? out.classes[0] : "inconsistent";
-    out.detail = classes[0]?.detail ?? "";
+    // Repetitions that disagree are a finding about Verter, reported as the
+    // worst class among them (never a comparison: only `matched` is).
+    const worst = CLASSES.find((c) => out.classes.includes(c)) ?? out.classes[0];
+    out.class = worst;
+    out.repetitionsDiffer = out.classes.length > 1 || digests.length > 1;
+    const worstDetail = classes.find((c) => c.class === worst)?.detail ?? "";
+    out.detail = out.repetitionsDiffer
+      ? `repetitions differ (${out.classes.join(", ")}; ${digests.length} distinct answers): ${worstDetail}`
+      : worstDetail;
   } else {
     const statuses = answers.map((a) =>
       tscAnswerStatus(a, ctx.reference, ctx.beyond, ctx.budgetBytes),
@@ -119,6 +127,8 @@ function probeArmSummary(arm, invs, ctx) {
   out.metrics = Object.fromEntries(
     PROBE_METRICS.map((m) => [m, stats(metrics.map((x) => x?.[m]))]),
   );
+  // Warm: every in-process repeat of the one live process that made them.
+  out.metrics.warmMs = stats(metrics.flatMap((x) => x?.warmSamplesMs ?? []));
   // Every completed measurement's memory metric (the validator requires one
   // metric across both headline arms).
   out.memoryMetrics = [...new Set(metrics.map((m) => m?.memoryMetric ?? "<none>"))];
@@ -249,8 +259,14 @@ function comparison(verterInvs, tscInvs, resolution) {
   const t = tscInvs.filter((i) => !i.warmup).map(probeMetrics);
   const pick = (xs, m) => xs.map((x) => x?.[m]);
   const out = {};
-  for (const m of ["coldMs", "warmMs", "setupMs", "initMs"])
+  for (const m of ["coldMs", "setupMs", "initMs"])
     out[m] = verdict(pick(v, m), pick(t, m), resolution.single);
+  // Warm: the in-process repeats of each arm's one live process.
+  out.warmMs = verdict(
+    v.flatMap((x) => x?.warmSamplesMs ?? []),
+    t.flatMap((x) => x?.warmSamplesMs ?? []),
+    resolution.single,
+  );
   out.firstTypeMs = verdict(pick(v, "firstTypeMs"), pick(t, "firstTypeMs"), resolution.sum);
   for (const m of ["peakBytes", "retainedBytes"]) out[m] = verdict(pick(v, m), pick(t, m), 0);
   return out;

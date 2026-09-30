@@ -17,6 +17,7 @@ import {
   runLimits,
   supervisorDeadlineMs,
   compactCliStdout,
+  warmRepeatsFor,
 } from "./analyze.mjs";
 import {
   BUILD_INPUTS,
@@ -35,7 +36,14 @@ import {
   sourceTree,
 } from "./provenance.mjs";
 import { renderMarkdown } from "./report.mjs";
-import { cliSource, SETTINGS, selectScenarios, tsconfigText } from "./scenarios.mjs";
+import {
+  cliSource,
+  scenariosForTier,
+  SETTINGS,
+  selectScenarios,
+  TIERS,
+  tsconfigText,
+} from "./scenarios.mjs";
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 import { validateRun } from "./validate.mjs";
@@ -46,15 +54,60 @@ export const LIB_FILE = join(HERE, "lib", "bench-globals.d.ts");
 export const EXPECTED_FILE = join(HERE, "expected.json");
 export const RESULTS_SCHEMA = 1;
 
+/**
+ * The tiers' defaults (any option given explicitly wins). Every tier keeps
+ * the fairness properties: fresh processes for every cold measurement, warm
+ * repeats in one live process per (cell, arm), counterbalanced order, one
+ * supervisor and budget for every arm. The whole-program `tsc -p` arms run
+ * in standard and stress only.
+ */
+export const TIER_DEFAULTS = {
+  quick: {
+    arms: ["verter", "tsc-api", "verter-obs", "verter-counted"],
+    repeat: 3,
+    warmup: 1,
+    warmRepeats: 3,
+    timeoutMs: 60_000,
+    startupAllowanceMs: 10_000,
+    estimate: "about 5 minutes on an Apple M3 or a recent desktop",
+  },
+  standard: {
+    arms: DEFAULT_ARMS,
+    repeat: 3,
+    warmup: 1,
+    warmRepeats: 3,
+    timeoutMs: 120_000,
+    startupAllowanceMs: 10_000,
+    estimate: "about 20-30 minutes",
+  },
+  stress: {
+    arms: DEFAULT_ARMS,
+    repeat: 3,
+    warmup: 1,
+    warmRepeats: 3,
+    timeoutMs: 600_000,
+    startupAllowanceMs: 30_000,
+    estimate: "hours (tsc runs to its 8 GiB cap; multi-second Verter requests)",
+  },
+};
+
 export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
 
+  --tier <t>              quick (default) | standard | stress:
+                            quick     one normal size per scenario series; Verter, tsc API, and the
+                                      labelled observability and counting arms; ${TIER_DEFAULTS.quick.estimate}
+                            standard  + the other normal sizes and tsc's limit sizes, + tsc -p in both
+                                      thread modes; the baseline; ${TIER_DEFAULTS.standard.estimate}
+                            stress    + Verter's limit and pathological sizes; ${TIER_DEFAULTS.stress.estimate}
+                          every tier: 1 warmup + 3 measured fresh processes per arm, 3 warm repeats in one
+                          live process per arm; deadline 60 s (quick), 120 s (standard), 600 s (stress)
   --out <dir>             output directory (default: target/semantic-perf/<timestamp>)
-  --only <a,b>            only scenarios whose id is or starts with one of these
+  --only <a,b>            only these scenarios (id or id prefix, from the whole catalog; overrides --tier)
   --settings <s>          strict (default) | all  (the four strictNullChecks x noImplicitAny settings)
   --arms <a,b>            arms to run (default: ${DEFAULT_ARMS.join(",")})
-  --repeat <n>            measured invocations per arm (default 4; at least 2, even keeps the order balanced)
-  --warmup <n>            warmup invocations per arm, run and validated but not measured (default 1)
-  --warm-repeats <n>      in-process repeats of the probe after its cold request (default 5)
+  --repeat <n>            measured invocations per arm (tier default 3; odd counts are balanced to within one)
+  --warmup <n>            warmup invocations per arm, run and validated but not measured (tier default 1)
+  --warm-repeats <n>      in-process repeats in each arm's one live process (tier default 3)
   --mem-mb <n>            the engine memory budget, equal for both tools (default 8192): an engine whose
                           own peak exceeds it counts as exhausting it
   --infra-mb <n>          containment allowance above the budget for the process tree's other members
@@ -76,17 +129,18 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
 
 function parseArgs(argv) {
   const opts = {
+    tier: "quick",
     out: null,
     only: [],
     settings: "strict",
     arms: DEFAULT_ARMS,
-    repeat: 4,
+    repeat: 3,
     warmup: 1,
-    warmRepeats: 5,
+    warmRepeats: 3,
     memMb: 8192,
     infraMb: 1024,
-    timeoutMs: 300_000,
-    startupAllowanceMs: 30_000,
+    timeoutMs: 60_000,
+    startupAllowanceMs: 10_000,
     allowTuning: false,
     supervisor: null,
     allowSampled: false,
@@ -100,13 +154,21 @@ function parseArgs(argv) {
       throw new Error(`${name} must be an integer >= ${min}, got ${value}`);
     return n;
   };
+  const given = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    given.add(a);
     const next = () => {
       if (i + 1 >= argv.length) throw new Error(`${a} needs a value`);
       return argv[++i];
     };
     switch (a) {
+      case "--tier": {
+        const v = next();
+        if (!TIERS.includes(v)) throw new Error(`--tier must be one of ${TIERS.join(", ")}`);
+        opts.tier = v;
+        break;
+      }
       case "--out":
         opts.out = resolve(next());
         break;
@@ -128,10 +190,6 @@ function parseArgs(argv) {
       }
       case "--repeat":
         opts.repeat = positive(a, next(), 2);
-        if (opts.repeat % 2)
-          throw new Error(
-            "--repeat must be even: each arm runs first in exactly half the measured rounds",
-          );
         break;
       case "--warmup":
         opts.warmup = positive(a, next(), 0);
@@ -180,6 +238,17 @@ function parseArgs(argv) {
         throw new Error(`unknown option ${a}\n${USAGE}`);
     }
   }
+  // The tier's defaults, for every option not given explicitly.
+  const defaults = TIER_DEFAULTS[opts.tier];
+  const flag = {
+    arms: "--arms",
+    repeat: "--repeat",
+    warmup: "--warmup",
+    warmRepeats: "--warm-repeats",
+    timeoutMs: "--timeout-ms",
+    startupAllowanceMs: "--startup-allowance-ms",
+  };
+  for (const [key, name] of Object.entries(flag)) if (!given.has(name)) opts[key] = defaults[key];
   return opts;
 }
 
@@ -212,19 +281,26 @@ export function schedule(scenarioKeys, arms, repeat, warmup) {
 }
 
 /**
- * Problems with a plan's balance: in every cell, over the measured rounds,
- * every pair of arms must run in each order equally often.
+ * Problems with a plan's balance. Over the measured rounds of a cell, every
+ * pair of arms must run in each order equally often — exactly, for an even
+ * number of rounds; with an odd number, off by at most one, and since cells
+ * alternate which arm leads the extra round, the whole run is off by at most
+ * one per pair.
  */
 export function scheduleBalanceProblems(plan, arms) {
   const problems = [];
   const byCellRound = new Map();
+  const rounds = new Map();
   for (const step of plan) {
     if (step.warmup) continue;
     const k = `${step.key}|${step.rep}`;
     if (!byCellRound.has(k)) byCellRound.set(k, []);
     byCellRound.get(k).push(step.arm);
+    if (!rounds.has(step.key)) rounds.set(step.key, new Set());
+    rounds.get(step.key).add(step.rep);
   }
   const counts = new Map();
+  const total = new Map();
   for (const [k, order] of byCellRound) {
     const key = k.slice(0, k.lastIndexOf("|"));
     for (let i = 0; i < arms.length; i++) {
@@ -232,15 +308,20 @@ export function scheduleBalanceProblems(plan, arms) {
         const a = arms[i];
         const b = arms[j];
         const c = `${key}|${a}|${b}`;
-        if (!counts.has(c)) counts.set(c, 0);
-        if (order.indexOf(a) < order.indexOf(b)) counts.set(c, counts.get(c) + 1);
-        else counts.set(c, counts.get(c) - 1);
+        const d = order.indexOf(a) < order.indexOf(b) ? 1 : -1;
+        counts.set(c, (counts.get(c) ?? 0) + d);
+        total.set(`${a}|${b}`, (total.get(`${a}|${b}`) ?? 0) + d);
       }
     }
   }
-  for (const [c, n] of counts)
-    if (n !== 0)
+  for (const [c, n] of counts) {
+    const key = c.split("|")[0];
+    const allowed = (rounds.get(key)?.size ?? 0) % 2;
+    if (Math.abs(n) > allowed)
       problems.push(`unbalanced order ${c} (${n > 0 ? "first" : "second"} by ${Math.abs(n)})`);
+  }
+  for (const [pair, n] of total)
+    if (Math.abs(n) > 1) problems.push(`unbalanced order over the run ${pair} (by ${Math.abs(n)})`);
   return problems;
 }
 
@@ -545,7 +626,8 @@ export async function main(argv) {
 
   const expected = loadExpected();
   const libText = readFileSync(LIB_FILE, "utf8");
-  const scenarios = selectScenarios(opts.only);
+  // --only picks from the whole catalog; otherwise the tier decides.
+  const scenarios = opts.only.length ? selectScenarios(opts.only) : scenariosForTier(opts.tier);
   const settings = opts.settings === "all" ? SETTINGS : SETTINGS.filter((s) => s.id === "strict");
   const cells = new Map();
   for (const scenario of scenarios) {
@@ -592,7 +674,12 @@ export async function main(argv) {
     const runBase = join(runDir, `${step.warmup ? "warmup" : "rep"}-${step.rep}`);
     const { argv: command, probeOut } = commandFor(
       step.arm,
-      { binaries, typescript, scenarioDir: cell.dir, baseJob: cell.baseJob },
+      {
+        binaries,
+        typescript,
+        scenarioDir: cell.dir,
+        baseJob: { ...cell.baseJob, warmRepeats: warmRepeatsFor(step, opts) },
+      },
       runBase,
     );
     const supOut = `${runBase}.sup.json`;
