@@ -5070,9 +5070,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None,
                 );
             } else if let Some(next) = next {
-                if build.tail_arguments.contains(&next)
-                    || !build.tail.step(self.connected_demand.tail_steps_budget())
-                {
+                let repeats = build.tail_arguments.contains(&next);
+                if repeats || !build.tail.step(self.connected_demand.tail_steps_budget()) {
+                    if !repeats {
+                        // Verter's tail budget stopped the run, not a proof:
+                        // whether it is reached depends on the budget, so
+                        // neither the recovery nor anything built from it
+                        // is kept in the memo.
+                        self.fold_into_top_build_local_taint(false, true);
+                    }
                     result = crate::semantic_query::checker_policy::checker_recovery(
                         self.graph(),
                         crate::semantic_query::CheckerDiagnostic {
