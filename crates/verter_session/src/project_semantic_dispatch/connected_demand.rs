@@ -569,10 +569,11 @@ impl ConnectedDemandLedger<'_> {
     /// charge, in one admission, the exclusive usage of every computation
     /// in its closure this demand has not paid, and mark them paid. The
     /// receipt's nesting is checked against the remaining query depth even
-    /// when it is paid. A refusal charges and marks nothing: the caller
-    /// computes the demand instead, so its refusal names the operation that
-    /// fails. Replayed charges belong to no open recording — the consumer
-    /// records the receipt as a prerequisite instead.
+    /// when it is paid. A refusal charges and marks nothing, and leaves the
+    /// stored result untouched: this caller receives plain resource
+    /// incompleteness, never a checker diagnostic, and another demand with
+    /// room may still serve it. Replayed charges belong to no open recording
+    /// — the consumer records the receipt as a prerequisite instead.
     pub(crate) fn replay_admit(
         &self,
         receipt: &Arc<DemandCostReceipt>,

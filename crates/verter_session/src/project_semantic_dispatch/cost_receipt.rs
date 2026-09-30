@@ -120,13 +120,18 @@ impl DemandCostReceipt {
         prerequisites: Vec<CostDependency>,
     ) -> Arc<Self> {
         let mut unique: Vec<CostDependency> = Vec::with_capacity(prerequisites.len());
+        let mut positions: rustc_hash::FxHashMap<CostIdentity, usize> =
+            rustc_hash::FxHashMap::default();
         for dependency in prerequisites {
-            match unique
-                .iter_mut()
-                .find(|kept| kept.receipt.identity == dependency.receipt.identity)
-            {
-                Some(kept) => kept.nesting = kept.nesting.max(dependency.nesting),
-                None => unique.push(dependency),
+            match positions.get(&dependency.receipt.identity) {
+                Some(&position) => {
+                    let kept = &mut unique[position];
+                    kept.nesting = kept.nesting.max(dependency.nesting);
+                }
+                None => {
+                    positions.insert(dependency.receipt.identity.clone(), unique.len());
+                    unique.push(dependency);
+                }
             }
         }
         let depth = unique

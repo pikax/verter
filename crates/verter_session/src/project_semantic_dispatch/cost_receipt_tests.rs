@@ -281,7 +281,8 @@ fn an_abandoned_computation_is_never_paid() {
 /// The rule a consumer follows for a delivered result: a result computed
 /// for this demand is recorded without being charged again; a result
 /// served from a store is admitted by replaying its receipt, then
-/// recorded. Either way the consumer's receipt owes it.
+/// recorded. Either way the consumer's receipt owes it. A refused replay is
+/// plain resource incompleteness for this consumer.
 fn consume(
     ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
     delivery: &CostDelivery,
@@ -333,4 +334,23 @@ fn a_fresh_delivery_is_not_charged_twice() {
         usage(1, 0),
         "a replay is not the consumer's own cost"
     );
+}
+
+/// A computation consuming 20,000 results, each twice, keeps each once:
+/// deduplication is by identity, not by scanning what is kept.
+#[test]
+fn a_wide_fan_out_keeps_each_prerequisite_once() {
+    let leaves: Vec<Arc<DemandCostReceipt>> = (0..20_000)
+        .map(|i| DemandCostReceipt::new(identity(&format!("L{i}")), usage(1, 0), Vec::new()))
+        .collect();
+    let prerequisites = leaves
+        .iter()
+        .chain(leaves.iter())
+        .map(|leaf| super::cost_receipt::CostDependency {
+            receipt: Arc::clone(leaf),
+            nesting: 0,
+        })
+        .collect();
+    let wide = DemandCostReceipt::new(identity("W"), usage(1, 0), prerequisites);
+    assert_eq!(wide.prerequisites().len(), 20_000);
 }
