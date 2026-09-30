@@ -4405,6 +4405,12 @@ pub(crate) mod foundations_guards {
             // workspace/semantic/overlay/VFS state, and no production crate may
             // depend on the crate. `D14_ALLOW_LIST` carries the full rationale.
             "crates/verter_supervise/src/disk.rs",
+            // dev/CI-only semantic-perf benchmark harness — the harness's SOLE
+            // disk boundary. Reads its own job file and scenario inputs,
+            // writes its own record (aside, then renamed), and samples
+            // `/proc/<pid>/status` on Linux; never workspace/semantic/
+            // overlay/VFS state. `D14_ALLOW_LIST` carries the full rationale.
+            "crates/verter_bench/src/semantic_perf/disk.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -5754,6 +5760,10 @@ pub(crate) mod foundations_guards {
     /// code change that routes the I/O through `NativeFs` /
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_bench/src/semantic_perf/disk.rs",
+            "Semantic-perf benchmark harness disk boundary (dev/CI-only bench crate, never published) — the SOLE module in the harness that touches the disk; its CLI, runner and process sampler all route through it. It reads the harness's own job file and generated scenario inputs, writes its own result record (written aside, then renamed over the target), and reads the kernel pseudo-file `/proc/<pid>/status` on Linux to sample the measured process. Benchmark tooling I/O on its own artifacts, never workspace, semantic, overlay or VFS state; routing it through the disk boundary would give a measurement harness a session it has no other use for and put a path cache in the measured path.",
+        ),
         (
             "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
             "Declaration generator, not a runtime path. It is a `[[bin]]` behind `required-features = [\"generate-host-request-ts\"]`, so it is absent from every default build including the published addon; a developer runs it to rewrite one committed file whose bytes a freshness guard then pins. The SOLE `std::fs::` call writes that generated declaration to a path derived from the manifest directory. It touches no workspace, semantic, overlay or VFS state, and routing a build-time source-tree write through the disk boundary would give a generator a session it has no other use for.",

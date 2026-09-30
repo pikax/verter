@@ -159,7 +159,7 @@ pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
 
 #[cfg(target_os = "linux")]
 pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+    let status = super::disk::read_to_string(format!("/proc/{pid}/status"))
         .map_err(|err| StatsError(format!("read /proc/{pid}/status: {err}")))?;
     let kib = |key: &str| {
         status

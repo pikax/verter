@@ -1023,6 +1023,7 @@
         ],
         "importers": [
           "crates/verter_bench/benches/fact_validation_hot_path.rs",
+          "crates/verter_bench/src/semantic_perf/mod.rs",
           "crates/verter_ffi/src/convert/component_meta.rs",
           "crates/verter_ffi/src/convert/tests.rs",
           "crates/verter_ffi/src/convert/typeinfo.rs",

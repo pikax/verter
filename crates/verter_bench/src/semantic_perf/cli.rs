@@ -58,7 +58,7 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             };
-            let job: Job = match std::fs::read_to_string(job_path)
+            let job: Job = match super::disk::read_to_string(job_path)
                 .map_err(|err| err.to_string())
                 .and_then(|text| serde_json::from_str(&text).map_err(|err| err.to_string()))
             {

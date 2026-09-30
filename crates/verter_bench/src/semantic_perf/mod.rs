@@ -31,6 +31,7 @@
 //! phase running, so an invocation stopped mid-way still says how far it got.
 
 pub mod cli;
+pub mod disk;
 pub mod process_stats;
 
 use std::path::{Path, PathBuf};
@@ -254,7 +255,7 @@ impl std::fmt::Display for JobError {
 }
 
 fn read(dir: &Path, name: &str) -> Result<String, JobError> {
-    std::fs::read_to_string(dir.join(name))
+    disk::read_to_string(dir.join(name))
         .map_err(|err| JobError(format!("read {}: {err}", dir.join(name).display())))
 }
 
@@ -291,8 +292,8 @@ impl<'a> Sink<'a> {
         let mut aside = path.as_os_str().to_owned();
         aside.push(".tmp");
         let aside = PathBuf::from(aside);
-        std::fs::write(&aside, text)?;
-        std::fs::rename(&aside, path)
+        disk::write(&aside, text)?;
+        disk::rename(&aside, path)
     }
 
     /// Mark the phase about to begin, with its wall-clock start and the
