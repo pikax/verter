@@ -252,3 +252,40 @@ fn an_awaited_tail_run_fails_at_verters_budget() {
 const THENABLES: &str = r#"
 type P<K extends number, N extends unknown[] = []> = N["length"] extends K ? "done" : { then(f: (v: P<K, [...N, 0]>) => any): any };
 "#;
+
+/// Whether a tail run reaches Verter's tail budget depends on the budget,
+/// so its TS2589 is never kept: on the same host, a read under the
+/// production budget runs the tail again and answers.
+///
+/// Measured: `Len<Rep<999>>` is `999`; `Rep<1000>` is `any` under TS2589,
+/// the checker's limit, where Verter's full answer has 1,000 elements.
+#[test]
+fn a_tail_budget_recovery_is_never_kept_in_the_memo() {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let is_ts2589 = |probe: &str| {
+        super::checker_probe_lane_tests::with_probe_on_host(
+            &host,
+            Default::default(),
+            FIXTURE,
+            probe,
+            |dispatch, node| {
+                matches!(
+                    dispatch.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
+                        if *diagnostic == TS2589
+                )
+            },
+        )
+    };
+    {
+        let _budget = super::connected_demand::TailBudgetForTests::install(200);
+        assert!(
+            is_ts2589("Rep<200>"),
+            "Rep<200> reaches the tail budget of 200"
+        );
+    }
+    assert!(
+        !is_ts2589("Rep<200>"),
+        "under the production budget Rep<200> answers, not the kept recovery"
+    );
+}
