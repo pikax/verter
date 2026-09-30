@@ -691,8 +691,8 @@ where
             },
         };
         match forwarded {
-            Ok(()) => {
-                if check_current(&self.state.shared, admission).is_ok() {
+            Ok(()) => match check_current(&self.state.shared, admission) {
+                Ok(()) => {
                     // The written path's content changed: lift its crash
                     // attribution, exactly as a queued mutation would.
                     let mut watch = self
@@ -703,15 +703,27 @@ where
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     watch.clear_path(path);
                     Ok(())
-                } else {
-                    // The engine may now hold a unit the CURRENT basis does
-                    // not admit, or it was replaced mid-write: either way it
-                    // must not keep serving this admission's state.
+                }
+                Err(AdmissionRefusal::StaleBasis) => {
+                    // A BASIS-ONLY drift (a content-generation bump while the
+                    // write was awaited): the engine itself is healthy, so
+                    // retiring it — or arming the crash monitor a lazy attach
+                    // answers to — would take a shared provider down for a
+                    // condition its own recovery cannot repair. Compensate the
+                    // ONE written path instead: the engine must not keep
+                    // serving this admission's state, and a fresh admission
+                    // re-writes it through the ordinary sync path.
+                    let _ = serving.provider.close_file(path).await;
+                    Err(AdmissionRefusal::StaleBasis)
+                }
+                Err(_) => {
+                    // The engine was replaced mid-write (or no longer serves):
+                    // it must not keep serving this admission's state.
                     self.disposition_after_admitted_write_failure(&serving)
                         .await;
                     Err(AdmissionRefusal::StaleProvider)
                 }
-            }
+            },
             Err(_) => {
                 // A partial provider write cannot be allowed to serve.
                 self.disposition_after_admitted_write_failure(&serving)

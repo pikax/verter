@@ -3945,6 +3945,53 @@ async fn lazy_attach_rearm_fails_closed_until_the_discriminant_advances() {
     );
 }
 
+/// A first failure at an UNOBSERVABLE discriminant arms the re-arm gate at
+/// `None`: a later demand at another `None` must make NO new attempt. The
+/// outer option distinguishes "gated at discriminant X" from "not gated" — a
+/// flat gate cannot tell a first failure at `None` (hold closed) from "no
+/// attempt yet" (any demand may establish), so every later demand re-runs the
+/// attach. Only a FRESH observable discriminant re-arms.
+#[tokio::test]
+async fn lazy_attach_failed_at_an_unobservable_discriminant_holds_the_gate() {
+    let backend = ScriptedLazyAttach::failing_until(1, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    // The shim never advertises a discriminant.
+    let observed = Arc::new(parking_lot::Mutex::new(None));
+
+    // First demand at `None`: one real attempt, which the script fails.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // Another demand at the SAME unobservable `None`: fail closed with NO
+    // new attempt — the gate holds.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a failed attach at an unobservable discriminant must not be retried on \
+         another unobservable demand (every query would re-run the attach)"
+    );
+
+    // A FRESH observable discriminant re-arms: the script succeeds from its
+    // second attempt on.
+    *observed.lock() = Some("nonce-a".to_string());
+    hub.establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-arms the lazy attach");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(hub.is_serving());
+}
+
 /// A death under the lazy-attach policy RETIRES the epoch fail-closed without
 /// the respawn loop: demands at the dead establishment's discriminant fail
 /// closed with zero new attempts, and a fresh discriminant re-establishes
@@ -4158,5 +4205,127 @@ async fn forward_admitted_file_refusals_write_nothing() {
             .count()
             == 1,
         "exactly one provider write for the admitted unit"
+    );
+}
+
+/// A BASIS-ONLY drift observed after a successful direct write (a
+/// content-generation bump while the write was awaited) must NOT take the
+/// shared lazy attachment down: the engine is healthy. The one written path
+/// is compensated with a close, the refusal is `StaleBasis`, and the hub
+/// keeps serving — the crash signal and `StaleProvider` stay reserved for
+/// provider-write failures and epoch/provider replacement.
+#[tokio::test]
+async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    let hub = ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    // The live basis drifts once the write has LANDED on the engine — every
+    // check before the write still sees the original basis — simulating a
+    // content-generation bump that lands while the write is awaited.
+    let drifted = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    let reader = {
+        let live_basis = basis.clone();
+        let unit_for_reader = unit.clone();
+        let engine_reader = engine.clone();
+        Arc::new(move || {
+            let written = engine_reader.calls().iter().any(|call| {
+                matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
+            });
+            if written {
+                Some(drifted.clone())
+            } else {
+                Some(live_basis.clone())
+            }
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    let refusal = hub
+        .forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "export const v = 1;",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await
+        .expect_err("a basis-only drift after the write must refuse settlement");
+    assert!(
+        matches!(refusal, AdmissionRefusal::StaleBasis),
+        "a basis-only drift is a StaleBasis refusal, not a provider replacement: {refusal:?}"
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::OpenFile { path, .. } if path == unit.as_str()))
+            .count(),
+        1,
+        "the write itself landed on the healthy engine"
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::CloseFile { path } if path == unit.as_str()))
+            .count(),
+        1,
+        "the drifted admission's written path is compensated with exactly one close"
+    );
+    assert!(
+        hub.is_serving(),
+        "a basis-only drift must not retire or crash-signal the shared lazy attachment"
     );
 }

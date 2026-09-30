@@ -304,12 +304,13 @@ struct Lifecycle {
     last_failure: Option<(Instant, String)>,
     /// The re-arm gate of a lazily-attached transport
     /// ([`HubPolicy::lazy_attach`]): the generation discriminant of the last
-    /// FAILED attempt — or of the establishment a death evicted. `None`
-    /// while an incarnation serves (or before the first attempt): every
-    /// demand may establish. While set, only a probe that ADVANCES past the
-    /// gate re-arms; an unchanged (or unobservable) discriminant fails
-    /// closed without a new attempt.
-    attach_gate: Option<String>,
+    /// FAILED attempt — or of the establishment a death evicted. `None` while
+    /// an incarnation serves (or before the first attempt): every demand may
+    /// establish. `Some(discriminant)` while gated: only a probe that ADVANCES
+    /// past it re-arms; an unchanged discriminant — or an unobservable one
+    /// (`None`, gated by a first failure at `None` itself) — fails closed
+    /// without a new attempt.
+    attach_gate: Option<Option<String>>,
     /// The discriminant the serving (or last evicted) incarnation
     /// established at — re-read AFTER a successful establishment, so an
     /// advertisement that advanced mid-handshake is carried as the
@@ -527,7 +528,8 @@ where
     /// incarnation returns its epoch without probing.
     ///
     /// `probe` reads the CURRENT discriminant (`None` when none is
-    /// observable — which never re-arms after a first failure). The
+    /// observable — a first failure AT `None` gates exactly like one at an
+    /// observable discriminant and never re-arms on another `None`). The
     /// discriminant is re-read AFTER a success and retained as the
     /// establishment's own, so a generation that advanced mid-establishment
     /// is what a later eviction compares against.
@@ -541,7 +543,7 @@ where
         let gate = self.state.shared.lifecycle().attach_gate.clone();
         let observed = probe();
         if let Some(failed_at) = gate {
-            if !generation_advanced(&Some(failed_at), &observed) {
+            if !generation_advanced(&failed_at, &observed) {
                 return Err(TypeProviderError::new(format!(
                     "{} attach failed at the current generation and re-arms only on a fresh one",
                     self.state.establisher.log_name()
@@ -557,7 +559,7 @@ where
                 Ok(epoch)
             }
             Err(error) => {
-                self.state.shared.lifecycle().attach_gate = observed;
+                self.state.shared.lifecycle().attach_gate = Some(observed);
                 Err(error)
             }
         }
@@ -972,8 +974,10 @@ where
             // discriminant the dead incarnation established at. The next
             // demand re-establishes only through a FRESH discriminant (a
             // reconnect); within the same one every query fails closed to
-            // its baseline. The instance is never declared exhausted.
-            lifecycle.attach_gate = lifecycle.established_discriminant.clone();
+            // its baseline — including an unobservable discriminant, which
+            // gates exactly like an observable one. The instance is never
+            // declared exhausted.
+            lifecycle.attach_gate = Some(lifecycle.established_discriminant.clone());
             lifecycle.phase = Phase::Idle;
         } else {
             lifecycle.phase = Phase::Recovering;
