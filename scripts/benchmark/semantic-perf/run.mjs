@@ -42,8 +42,13 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --repeat <n>            measured invocations per arm (default 4; at least 2, even keeps the order balanced)
   --warmup <n>            warmup invocations per arm, run and validated but not measured (default 1)
   --warm-repeats <n>      in-process repeats of the probe after its cold request (default 5)
-  --mem-mb <n>            per-invocation process-tree memory cap (default 8192)
+  --mem-mb <n>            the engine memory budget, equal for both tools (default 8192): an engine whose
+                          own peak exceeds it counts as exhausting it
+  --infra-mb <n>          containment allowance above the budget for the process tree's other members
+                          (tsc's node client, the statistics reader) (default 1024)
   --timeout-ms <n>        per-invocation deadline (default 300000)
+  --allow-tuning          run although runtime or build tuning variables (GOGC, GOMAXPROCS, NODE_OPTIONS,
+                          RUSTFLAGS, …) are set; the report is labelled tuned
   --supervisor <path>     verter-supervise executable (default: build crates/verter_supervise)
   --allow-sampled         consent to a sampled (not kernel-enforced) memory cap; required on macOS
   --typescript-from <dir> directory whose node_modules resolves typescript@7.0.2 (default: repository root)
@@ -62,7 +67,9 @@ function parseArgs(argv) {
     warmup: 1,
     warmRepeats: 5,
     memMb: 8192,
+    infraMb: 1024,
     timeoutMs: 300_000,
+    allowTuning: false,
     supervisor: null,
     allowSampled: false,
     typescriptFrom: ROOT,
@@ -101,6 +108,7 @@ function parseArgs(argv) {
       }
       case "--repeat":
         opts.repeat = positive(a, next(), 2);
+        if (opts.repeat % 2) throw new Error("--repeat must be even: each arm runs first in exactly half the measured rounds");
         break;
       case "--warmup":
         opts.warmup = positive(a, next(), 0);
@@ -111,8 +119,14 @@ function parseArgs(argv) {
       case "--mem-mb":
         opts.memMb = positive(a, next());
         break;
+      case "--infra-mb":
+        opts.infraMb = positive(a, next());
+        break;
       case "--timeout-ms":
         opts.timeoutMs = positive(a, next());
+        break;
+      case "--allow-tuning":
+        opts.allowTuning = true;
         break;
       case "--supervisor":
         opts.supervisor = resolve(next());
@@ -147,19 +161,90 @@ function loadExpected() {
   return JSON.parse(readFileSync(EXPECTED_FILE, "utf8"));
 }
 
-/** The counterbalanced schedule: warmup rounds, then measured rounds. */
+/**
+ * The counterbalanced schedule: warmup rounds, then measured rounds. The
+ * cell order reverses on alternate rounds; each cell's arm order alternates
+ * from one round to the next (by the cell's own catalog index, so the two
+ * reversals never cancel), so over an even number of measured rounds every
+ * pair of arms runs in each order equally often, in every cell.
+ */
 export function schedule(scenarioKeys, arms, repeat, warmup) {
   const out = [];
   const rounds = [...Array(warmup).keys()].map((i) => ({ rep: i, warmup: true }));
   for (let i = 0; i < repeat; i++) rounds.push({ rep: i, warmup: false });
   rounds.forEach((round, roundIndex) => {
     const keys = roundIndex % 2 === 0 ? scenarioKeys : [...scenarioKeys].reverse();
-    keys.forEach((key, keyIndex) => {
-      const order = (roundIndex + keyIndex) % 2 === 0 ? arms : [...arms].reverse();
+    for (const key of keys) {
+      const cellIndex = scenarioKeys.indexOf(key);
+      const order = (roundIndex + cellIndex) % 2 === 0 ? arms : [...arms].reverse();
       for (const arm of order) out.push({ key, arm, rep: round.rep, warmup: round.warmup });
-    });
+    }
   });
   return out;
+}
+
+/**
+ * Problems with a plan's balance: in every cell, over the measured rounds,
+ * every pair of arms must run in each order equally often.
+ */
+export function scheduleBalanceProblems(plan, arms) {
+  const problems = [];
+  const byCellRound = new Map();
+  for (const step of plan) {
+    if (step.warmup) continue;
+    const k = `${step.key}|${step.rep}`;
+    if (!byCellRound.has(k)) byCellRound.set(k, []);
+    byCellRound.get(k).push(step.arm);
+  }
+  const counts = new Map();
+  for (const [k, order] of byCellRound) {
+    const key = k.slice(0, k.lastIndexOf("|"));
+    for (let i = 0; i < arms.length; i++) {
+      for (let j = i + 1; j < arms.length; j++) {
+        const a = arms[i];
+        const b = arms[j];
+        const c = `${key}|${a}|${b}`;
+        if (!counts.has(c)) counts.set(c, 0);
+        if (order.indexOf(a) < order.indexOf(b)) counts.set(c, counts.get(c) + 1);
+        else counts.set(c, counts.get(c) - 1);
+      }
+    }
+  }
+  for (const [c, n] of counts) if (n !== 0) problems.push(`unbalanced order ${c} (${n > 0 ? "first" : "second"} by ${Math.abs(n)})`);
+  return problems;
+}
+
+/** Runtime and build variables that tune either tool away from its shipped defaults. */
+export const TUNING_VARIABLES = [
+  "GOGC",
+  "GOMEMLIMIT",
+  "GOMAXPROCS",
+  "GODEBUG",
+  "GOTRACEBACK",
+  "NODE_OPTIONS",
+  "UV_THREADPOOL_SIZE",
+  "RUSTFLAGS",
+  "CARGO_ENCODED_RUSTFLAGS",
+  "CARGO_BUILD_RUSTFLAGS",
+  "CARGO_BUILD_TARGET",
+  "RAYON_NUM_THREADS",
+  "MIMALLOC_OPTIONS",
+  "MALLOC_CONF",
+];
+
+/** The tuning variables set in `env` (and every CARGO_PROFILE_* / VERTER_* one). */
+export function tuningEnvironment(env) {
+  return Object.fromEntries(
+    Object.entries(env)
+      .filter(([k]) => TUNING_VARIABLES.includes(k) || /^CARGO_PROFILE_/.test(k) || /^VERTER_/.test(k) || /^CARGO_TARGET_.*_RUSTFLAGS$/.test(k))
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
+
+/** Rust's and Node's names for one architecture. */
+export function sameArchitecture(rustArch, nodeArch) {
+  const map = { x86_64: "x64", aarch64: "arm64", x86: "ia32", arm: "arm" };
+  return (map[rustArch] ?? rustArch) === nodeArch;
 }
 
 function materialize(outDir, scenario, setting, opts, libText) {
@@ -222,7 +307,7 @@ function commandFor(arm, ctx, runBase) {
       };
     case "tsc-api": {
       const { libMode: _unused, ...shared } = baseJob;
-      const job = { ...shared, tsPackageDir: typescript.packageDir, statsExe: binaries.probe.pinned };
+      const job = { ...shared, tsPackageDir: typescript.packageDir, tscExe: typescript.exe, statsExe: binaries.probe.pinned };
       return {
         argv: [process.execPath, join(HERE, "tsc-probe.mjs"), "--job", writeJob(`${runBase}.job.json`, job), "--out", probeOut],
         probeOut,
@@ -251,6 +336,12 @@ export async function main(argv) {
       "macOS has no kernel-enforced process-tree memory cap: the supervisor samples. Re-run with --allow-sampled to consent; every record will say `containment: sampled`.",
     );
   }
+  const tuning = tuningEnvironment(process.env);
+  if (Object.keys(tuning).length && !opts.allowTuning) {
+    throw new Error(
+      `tuning variables are set (${Object.keys(tuning).join(", ")}): the benchmark measures both tools as shipped. Unset them, or pass --allow-tuning to run a labelled tuned benchmark.`,
+    );
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = opts.out ?? join(ROOT, "target", "semantic-perf", stamp);
   mkdirSync(outDir, { recursive: true });
@@ -273,6 +364,14 @@ export async function main(argv) {
   };
   binaries.probe.identity = probeIdentity(binaries.probe.pinned);
   binaries.counted.identity = probeIdentity(binaries.counted.pinned);
+  for (const [name, bin] of [
+    ["the Verter probe", binaries.probe],
+    ["the counted probe", binaries.counted],
+  ]) {
+    if (!sameArchitecture(bin.identity.targetArch, process.arch) || !typescript.platformPackage.endsWith(`-${process.arch}`)) {
+      throw new Error(`${name} is built for ${bin.identity.targetArch}, node runs ${process.arch} and tsc is ${typescript.platformPackage}: the tools must run natively on one architecture`);
+    }
+  }
   const supervisorSource = resolveSupervisor(ROOT, opts.supervisor);
   binaries.supervisor = { ...pinBinary(supervisorSource.path, binDir, "verter-supervise"), origin: supervisorSource.origin };
   // The probe's build inputs, read again after the build: a change between
@@ -321,7 +420,9 @@ export async function main(argv) {
     const supOut = `${runBase}.sup.json`;
     const t0 = Date.now();
     const result = await runSupervised(binaries.supervisor.pinned, {
-      memMb: opts.memMb,
+      // The engine budget plus the allowance for the tree's other members;
+      // the engine's own peak is held to the budget when classifying.
+      memMb: opts.memMb + opts.infraMb,
       timeoutMs: opts.timeoutMs,
       out: supOut,
       cwd: cell.dir,
@@ -330,7 +431,13 @@ export async function main(argv) {
     });
     let probe = null;
     let probeReadError = null;
+    let phase = null;
     if (probeOut) {
+      try {
+        phase = readFileSync(`${probeOut}.phase`, "utf8").trim();
+      } catch {
+        phase = null;
+      }
       try {
         probe = compactProbeRecord(JSON.parse(readFileSync(probeOut, "utf8")));
       } catch (err) {
@@ -363,6 +470,7 @@ export async function main(argv) {
       supervisorReadError: result.readError ?? result.spawnError ?? null,
       supervisor: record,
       probeOut,
+      phase,
       probe,
       probeReadError,
       cliStdout,
@@ -380,6 +488,7 @@ export async function main(argv) {
     counted: sha256File(binaries.counted.pinned),
     supervisor: sha256File(binaries.supervisor.pinned),
     tsc: sha256File(typescript.exe),
+    tsApi: Object.fromEntries(Object.keys(typescript.apiSha256).map((f) => [f, sha256File(join(typescript.packageDir, f))])),
   };
 
   const run = {
@@ -395,6 +504,7 @@ export async function main(argv) {
       harness,
       harnessAfter: harnessFingerprint(ROOT),
       host: hostInfo(),
+      tuning,
       typescript,
       build,
       binaries,

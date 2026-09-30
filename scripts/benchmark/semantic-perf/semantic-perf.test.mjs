@@ -1,9 +1,11 @@
 // Self-tests of the semantic benchmark harness: the answer canonicaliser,
-// the counterbalanced schedule, the reference parser, the classifier, and the
-// validator's failure conditions on synthetic runs (a wrong answer, zero,
-// duplicate and missing records, a failed child, inconsistent repetitions, a
-// wrong binary, unconsented sampled containment, a tampered summary and a
-// tampered raw record). No cargo build and no tsc process is needed.
+// the counterbalanced schedule, the reference measurement and its
+// interpretation, the classifier, and the validator's failure conditions on
+// synthetic runs (a wrong answer, zero, duplicate and missing records, a
+// failed child, inconsistent repetitions, a failed or different warm answer,
+// missing or invalid times, a wrong binary, mixed architectures, tuning,
+// unconsented sampled containment, a tampered summary and a tampered raw
+// record). No cargo build and no tsc process is needed.
 //
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
@@ -16,24 +18,52 @@ import { test } from "node:test";
 import { classifyVerterAnswer, compactProbeRecord, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
-import { schedule } from "./run.mjs";
 import { sha256Text } from "./provenance.mjs";
+import { interpretMeasurement } from "./reference.mjs";
+import { sameArchitecture, schedule, scheduleBalanceProblems, tuningEnvironment } from "./run.mjs";
 import { allScenarios, cliSource, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
 
-test("the canonical form ignores quoting, union order and object member order, and keeps tuple order", () => {
-  assert.equal(canonicalType(`'a-2' | 'a-1'`), canonicalType(`"a-1" | "a-2"`));
-  assert.equal(canonicalType(`{ b: 2, a: 1 }`), canonicalType(`{ a: 1; b: 2; }`));
-  assert.equal(canonicalType(`boolean[]`), canonicalType(`Array<boolean>`));
-  assert.equal(canonicalType(`readonly string[]`), canonicalType(`ReadonlyArray<string>`));
-  assert.equal(canonicalType(`true | false | 1`), canonicalType(`1 | boolean`));
-  assert.notEqual(canonicalType(`[1, 2]`), canonicalType(`[2, 1]`));
-  assert.notEqual(canonicalType(`"ok" | undefined`), canonicalType(`"ok"`));
-  assert.notEqual(canonicalType(`any`), canonicalType(`unknown`));
+// ---------------------------------------------------------------- canonical form
+
+test("the canonical form ignores quoting, union and property order, and keeps what the type system observes", () => {
+  const same = [
+    [`'a-2' | 'a-1'`, `"a-1" | "a-2"`],
+    [`{ b: 2, a: 1 }`, `{ a: 1; b: 2; }`],
+    [`{ x: 1 | 2 }`, `{ x: 2 | 1 }`],
+    [`boolean[]`, `Array<boolean>`],
+    [`Array<number>[]`, `Array<Array<number>>`],
+    [`readonly string[]`, `ReadonlyArray<string>`],
+    [`(string | number)[]`, `Array<number | string>`],
+    [`true | false | 1`, `1 | boolean`],
+    [`(x: "a") => void`, `(y: 'a') => void`],
+    [`[a: string, b?: number]`, `[string, number?]`],
+    ["`a${number}-b0`", "`a${ number }-b0`"],
+    [`1.0`, `1`],
+  ];
+  for (const [a, b] of same) assert.equal(canonicalType(a), canonicalType(b), `${a} ≡ ${b}`);
+  const different = [
+    [`() => 1 | 2`, `(() => 1) | 2`],
+    [`{ f(x: 1): 1; f(x: 2): 2 }`, `{ f(x: 2): 2; f(x: 1): 1 }`],
+    [`{ (x: 1): 1; (x: 2): 2 }`, `{ (x: 2): 2; (x: 1): 1 }`],
+    [`[1, 2]`, `[2, 1]`],
+    [`A & B`, `B & A`],
+    [`"ok" | undefined`, `"ok"`],
+    [`any`, `unknown`],
+    [`{ readonly a: 1 }`, `{ a: 1 }`],
+    [`{ a?: 1 }`, `{ a: 1 }`],
+  ];
+  for (const [a, b] of different) assert.notEqual(canonicalType(a), canonicalType(b), `${a} ≢ ${b}`);
   assert.equal(canonicalDigest(`2 | 1`).sha256, canonicalDigest(`1 | 2`).sha256);
 });
+
+test("the canonical form fails closed on syntax it does not know", () => {
+  for (const bad of ["{ x: }", "foo bar", "=> 1", "", "a |"]) assert.throws(() => canonicalType(bad), `${JSON.stringify(bad)} must throw`);
+});
+
+// ---------------------------------------------------------------- catalog and schedule
 
 test("every scenario is one module declaring __BenchInit and __Probe once", () => {
   const ids = new Set();
@@ -46,81 +76,120 @@ test("every scenario is one module declaring __BenchInit and __Probe once", () =
   }
 });
 
-test("the schedule runs warmups first and puts each arm first in half of the measured rounds", () => {
-  const plan = schedule(["a", "b"], ["verter", "tsc-api"], 4, 1);
-  assert.equal(plan.length, (4 + 1) * 2 * 2);
-  assert.ok(plan.slice(0, 4).every((p) => p.warmup));
-  const firsts = { verter: 0, "tsc-api": 0 };
-  for (let i = 4; i < plan.length; i += 2) firsts[plan[i].arm]++;
-  assert.equal(firsts.verter, firsts["tsc-api"]);
-  // Scenario order reverses on alternate rounds.
-  assert.equal(plan[0].key, "a");
-  assert.equal(plan[4].key, "b");
+test("the schedule balances every pair of arms in every cell, for odd and even cell counts", () => {
+  const arms = ["verter", "tsc-api", "verter-obs", "tsc-cli"];
+  for (const cells of [["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d"]]) {
+    for (const warmup of [0, 1, 2]) {
+      const plan = schedule(cells, arms, 4, warmup);
+      assert.equal(plan.length, (4 + warmup) * cells.length * arms.length);
+      assert.ok(plan.slice(0, warmup * cells.length * arms.length).every((p) => p.warmup));
+      assert.deepEqual(scheduleBalanceProblems(plan, arms), [], `${cells.length} cells, ${warmup} warmups`);
+    }
+  }
+  // The earlier defect: with two cells, per-cell order must still alternate.
+  const plan = schedule(["a", "b"], ["verter", "tsc-api"], 4, 1).filter((p) => !p.warmup && p.key === "a");
+  const firsts = plan.filter((_, i) => i % 2 === 0).map((p) => p.arm);
+  assert.deepEqual(firsts.sort(), ["tsc-api", "tsc-api", "verter", "verter"]);
+  // An odd number of measured rounds cannot balance.
+  assert.notDeepEqual(scheduleBalanceProblems(schedule(["a"], ["verter", "tsc-api"], 3, 0), ["verter", "tsc-api"]), []);
 });
 
-test("the reference parser reads the probe's members, never, and error-any, and never guesses", () => {
+test("tuning variables and architecture names are recognised", () => {
+  assert.deepEqual(Object.keys(tuningEnvironment({ GOGC: "off", PATH: "x", CARGO_PROFILE_RELEASE_LTO: "false", VERTER_X: "1", HOME: "h" })), [
+    "CARGO_PROFILE_RELEASE_LTO",
+    "GOGC",
+    "VERTER_X",
+  ]);
+  assert.ok(sameArchitecture("aarch64", "arm64"));
+  assert.ok(sameArchitecture("x86_64", "x64"));
+  assert.ok(!sameArchitecture("x86_64", "arm64"));
+});
+
+// ---------------------------------------------------------------- reference
+
+test("the reference measurement records tsc's print and the interpretation reads it, and neither guesses", () => {
   const source = moduleText("", "1") + MEASURING_SUFFIX;
   const lines = source.split("\n");
   const line = lines.findIndex((l) => l.includes("const __bench_s")) + 1;
   const neverLine = lines.findIndex((l) => l.includes("const __bench_n")) + 1;
   const verdictLine = (answer) =>
     `scenario.ts(${neverLine},7): error TS2322: Type '"${answer}"' is not assignable to type '"never-check"'.\n`;
-  const union = parseMeasurement(
+  const read = (stdout) => interpretMeasurement(parseMeasurement(stdout, source));
+  const union = read(
     `scenario.ts(${line},7): error TS2322: Type '[["ok"] | [undefined]]' is not assignable to type '[never]'.\n` +
       `  Type '["ok"] | [undefined]' is not assignable to type 'never'.\n` +
       verdictLine("no"),
-    source,
   );
-  assert.equal(canonicalType(union.text), canonicalType(`"ok" | undefined`));
+  assert.equal(union.digest.sha256, canonicalDigest(`"ok" | undefined`).sha256);
   assert.equal(union.errorAny, false);
   assert.deepEqual(union.codes, []);
-  assert.equal(parseMeasurement(verdictLine("yes"), source).text, "never");
-  const errorAny = parseMeasurement(
+  assert.equal(read(verdictLine("yes")).digest.sha256, canonicalDigest("never").sha256);
+  const errorAny = read(
     `scenario.ts(3,20): error TS2589: Type instantiation is excessively deep and possibly infinite.\n` +
       `scenario.ts(${line},7): error TS2322: Type '[any]' is not assignable to type '[never]'.\n` +
       verdictLine("no"),
-    source,
   );
-  assert.equal(errorAny.text, "any");
   assert.equal(errorAny.errorAny, true);
   assert.deepEqual(errorAny.codes, [2589]);
+  // A member of the probe that is itself an object is kept (the wrapper filters nothing).
+  const objects = read(
+    `scenario.ts(${line},7): error TS2322: Type '[[{ readonly __benchNothing: 1; }] | [1]]' is not assignable to type '[never]'.\n` + verdictLine("no"),
+  );
+  assert.equal(objects.digest.sha256, canonicalDigest(`{ readonly __benchNothing: 1 } | 1`).sha256);
   // tsc's printer elides a very large type: bare `any` among the tuples is not an answer.
-  const elided = parseMeasurement(
-    `scenario.ts(${line},7): error TS2322: Type '[["a0-b0"] | ["a0-b1"] | [any] | any | [any]]' is not assignable to type '[never]'.\n` +
-      verdictLine("no"),
-    source,
+  const elided = read(
+    `scenario.ts(${line},7): error TS2322: Type '[["a0-b0"] | ["a0-b1"] | [any] | any | [any]]' is not assignable to type '[never]'.\n` + verdictLine("no"),
   );
   assert.equal(elided.truncated, true);
   // Output with neither assignment's verdict (a killed or truncated run) is never read as `never`.
   assert.throws(() => parseMeasurement("", source), /never check/);
   assert.throws(() => parseMeasurement(verdictLine("no"), source), /not never/);
+  assert.equal(interpretMeasurement({ killed: "memory", codes: [] }).killed, "memory");
 });
+
+// ---------------------------------------------------------------- classification
 
 const ANSWER = (text, extra = {}) => ({
   end: { kind: "exited", exitCode: 0 },
   outcome: { kind: "value" },
   warmKinds: ["value"],
+  warmSame: [true],
+  observed: true,
   digest: canonicalDigest(text),
   observeError: null,
   unknownLeaves: 0,
   unknownSamples: [],
   shape: "literal",
+  enginePeakBytes: 1000,
   ...extra,
 });
 const REF = (text, extra = {}) => ({ digest: canonicalDigest(text), errorAny: false, codes: [], ...extra });
 
 test("a Verter answer is classified, and only an equal answer is matched", () => {
-  assert.equal(classifyVerterAnswer(ANSWER("1"), REF("1")).class, "matched");
-  assert.equal(classifyVerterAnswer(ANSWER("2"), REF("1")).class, "mismatch");
-  assert.equal(classifyVerterAnswer(ANSWER("any"), REF("any", { errorAny: true, codes: [2589] })).class, "mismatch");
-  assert.equal(
-    classifyVerterAnswer(ANSWER(`"ok"`), REF("any", { errorAny: true, codes: [2589] }), canonicalDigest(`"ok"`)).class,
-    "beyond-tsc",
-  );
-  assert.equal(classifyVerterAnswer(ANSWER("1", { unknownLeaves: 1, unknownSamples: ["semanticMiss"] }), REF("1")).class, "partial");
-  assert.equal(classifyVerterAnswer(ANSWER("A<1>"), REF("1"), null, canonicalDigest("A<1>")).class, "partial");
-  assert.equal(classifyVerterAnswer({ ...ANSWER("1"), outcome: { kind: "fault", detail: "BudgetExceeded(..)" } }, REF("1")).class, "refusal");
-  assert.equal(classifyVerterAnswer({ ...ANSWER("1"), end: { kind: "killed", detail: "memory" } }, REF("1")).class, "killed");
+  const classify = (answer, ctx) => classifyVerterAnswer(answer, ctx).class;
+  assert.equal(classify(ANSWER("1"), { reference: REF("1") }), "matched");
+  assert.equal(classify(ANSWER("2"), { reference: REF("1") }), "mismatch");
+  assert.equal(classify(ANSWER("any"), { reference: REF("any", { errorAny: true, codes: [2589] }) }), "mismatch");
+  assert.equal(classify(ANSWER(`"ok"`), { reference: REF("any", { errorAny: true, codes: [2589] }), beyond: canonicalDigest(`"ok"`) }), "beyond-tsc");
+  assert.equal(classify(ANSWER("1", { unknownLeaves: 1, unknownSamples: ["semanticMiss"] }), { reference: REF("1") }), "partial");
+  assert.equal(classify(ANSWER("A<1>"), { reference: REF("1"), probe: canonicalDigest("A<1>") }), "partial");
+  assert.equal(classify({ ...ANSWER("1"), outcome: { kind: "fault", detail: "BudgetExceeded(..)" } }, { reference: REF("1") }), "refusal");
+  assert.equal(classify({ ...ANSWER("1"), end: { kind: "killed", detail: "memory" } }, { reference: REF("1") }), "killed");
+  assert.equal(classify(ANSWER("1", { warmSame: [false] }), { reference: REF("1") }), "error");
+  assert.equal(classify(ANSWER("1", { warmKinds: ["fault"] }), { reference: REF("1") }), "error");
+  assert.equal(classify(ANSWER("1", { enginePeakBytes: 2048 }), { reference: REF("1"), budgetBytes: 1024 }), "killed");
+  assert.equal(classify({ ...ANSWER("1"), end: { kind: "observe-killed", detail: "memory during observe" } }, { reference: REF("1") }), "unverified");
+});
+
+test("beyond tsc is reserved for an established resource limit", () => {
+  const beyond = canonicalDigest(`"ok"`);
+  const classify = (reference, tscKilled) => classifyVerterAnswer(ANSWER(`"ok"`), { reference, beyond, tscKilled }).class;
+  // A truncated or unmeasurable reference is no evidence of exhaustion.
+  assert.equal(classify({ gap: "tsc prints the answer elided", truncated: true, codes: [] }, false), "no-reference");
+  assert.equal(classify({ gap: "unmeasurable: x", unmeasurable: "x", codes: [] }, true), "no-reference");
+  // A measuring program killed at the cap counts only if the demand itself was killed too.
+  assert.equal(classify({ gap: "tsc -p exhausts resources (memory)", killed: "memory", codes: [] }, false), "no-reference");
+  assert.equal(classify({ gap: "tsc -p exhausts resources (memory)", killed: "memory", codes: [] }, true), "beyond-tsc");
 });
 
 test("an elided long answer classifies exactly as its raw text", () => {
@@ -130,7 +199,6 @@ test("an elided long answer classifies exactly as its raw text", () => {
   assert.equal(compact.probes[0].observation.text, null);
   assert.equal(compact.probes[0].observation.textElided, true);
   assert.equal(compact.probes[0].observation.canonical.sha256, canonicalDigest(long).sha256);
-  // A short answer is embedded unchanged.
   const short = { tool: "verter", probes: [{ alias: "__Probe", observation: { text: "1" } }] };
   assert.deepEqual(compactProbeRecord(short), short);
 });
@@ -145,10 +213,11 @@ test("a verdict names a winner only when the repetitions do not overlap", () => 
 // ---------------------------------------------------------------- synthetic runs
 
 const SCENARIO = { id: "synthetic", family: "test", note: "", probe: "1", source: moduleText("", "1") };
+const RAW_ONE = { never: false, printed: "[1]", codes: [], receipt: { exit: 1, stdoutSha256: "r", stdoutBytes: 1 } };
 const EXPECTED = {
-  schema: 1,
-  libSha256: "lib-digest",
-  scenarios: { synthetic: { sourceSha256: sha256Text(SCENARIO.source), settings: { strict: { digest: canonicalDigest("1"), errorAny: false, codes: [] } } } },
+  schema: 2,
+  method: { measuringSuffixSha256: sha256Text(MEASURING_SUFFIX), libSha256: "lib-digest" },
+  scenarios: { synthetic: { sourceSha256: sha256Text(SCENARIO.source), settings: { strict: RAW_ONE } } },
 };
 const INPUTS = {
   "lib.bench.d.ts": "lib-digest",
@@ -157,6 +226,8 @@ const INPUTS = {
   "cli/scenario.ts": sha256Text(cliSource(SCENARIO)),
 };
 const PACKAGES = ["verter_bench", "verter_session", "verter_semantic", "verter_workspace", "verter_audit", "verter_type_expr", "verter_scheduler", "verter_compiler"];
+const MEM_MB = 64;
+const INFRA_MB = 16;
 
 function supervisorRecord(overrides = {}) {
   return {
@@ -166,7 +237,7 @@ function supervisorRecord(overrides = {}) {
     exitCode: 0,
     signal: null,
     killedBy: null,
-    memLimitBytes: 64 * 1024 * 1024,
+    memLimitBytes: (MEM_MB + INFRA_MB) * 1024 * 1024,
     timeoutMs: 1000,
     peakBytes: 1000,
     peakMetric: "job-peak-committed-bytes",
@@ -181,22 +252,24 @@ function supervisorRecord(overrides = {}) {
 
 function verterProbe(text, arm) {
   return {
-    schema: 1,
+    schema: 2,
     tool: "verter",
     instrumented: arm === "verter-counted",
     observability: arm === "verter-obs",
-    phases: { setup: 1000, init: 100, teardown: 10 },
+    stage: "complete",
+    phases: { engineStart: 500, setup: 1000, init: 100, teardown: 10 },
     init: { micros: 100, outcome: { kind: "value" } },
     probes: [
       {
         alias: "__Probe",
         cold: { micros: 50, outcome: { kind: "value" } },
-        warm: [{ micros: 1, outcome: { kind: "value" } }],
+        warm: [{ micros: 1, outcome: { kind: "value" }, sameAnswerAsCold: true }],
         observeMicros: 5,
         observation: { text, error: null, shape: "literal", unionMembers: null, unknownLeaves: 0, unknownSamples: [], conditionalNodes: 0 },
       },
     ],
     afterRequests: { pid: 1, metric: "private-commit", peakBytes: 2000, currentBytes: 1500, cpuMicros: 1000 },
+    afterObserve: { pid: 1, metric: "private-commit", peakBytes: 2100, currentBytes: 1600, cpuMicros: 1100 },
     afterTeardown: null,
     statsErrors: [],
     retention: {},
@@ -205,29 +278,42 @@ function verterProbe(text, arm) {
 
 function tscProbe(text) {
   return {
-    schema: 1,
+    schema: 2,
     tool: "tsc",
+    stage: "complete",
+    tscExe: "/tsc/tsc",
     serverPid: 2,
     rootFiles: ["/x/synthetic/strict/lib.bench.d.ts", "/x/synthetic/strict/scenario.ts"],
-    phases: { spawnMs: 40, setupMs: 5, initMs: 1, teardownMs: 1 },
+    phases: { spawnMs: 40, engineStartMs: 0.5, engineStartRoundTripMs: 0.8, setupMs: 5, setupRoundTripMs: 6, initMs: 0.5, teardownMs: 1 },
     init: { roundTripMs: 1, serverMs: 0.5, outcome: { kind: "value" } },
     probes: [
       {
         alias: "__Probe",
         cold: { roundTripMs: 2, serverMs: 1, outcome: { kind: "value" } },
-        warm: [{ roundTripMs: 0.2, serverMs: 0, outcome: { kind: "value" } }],
+        warm: [{ roundTripMs: 0.2, serverMs: 0, outcome: { kind: "value" }, sameAnswerAsCold: true }],
         observeMs: 1,
         observation: { text, error: null, errorType: false, typeFlags: 2048, unionMembers: null },
       },
     ],
     serverAfterRequests: { pid: 2, metric: "private-commit", peakBytes: 3000, currentBytes: 2500, cpuMicros: 1000 },
-    diagnostics: [],
+    serverAfterObserve: { pid: 2, metric: "private-commit", peakBytes: 3100, currentBytes: 2600, cpuMicros: 1100 },
     statsErrors: [],
   };
 }
 
 function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
-  const options = { arms: ["verter", "tsc-api"], repeat: 2, warmup: 1, warmRepeats: 1, memMb: 64, timeoutMs: 1000, allowSampled: false, settings: "strict", libMode: "root-file" };
+  const options = {
+    arms: ["verter", "tsc-api"],
+    repeat: 2,
+    warmup: 1,
+    warmRepeats: 1,
+    memMb: MEM_MB,
+    infraMb: INFRA_MB,
+    timeoutMs: 1000,
+    allowSampled: false,
+    settings: "strict",
+    libMode: "root-file",
+  };
   const plan = schedule(["synthetic/strict"], options.arms, options.repeat, options.warmup);
   const invocations = plan.map((p, index) => ({
     index,
@@ -241,6 +327,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     supervisorExit: 0,
     supervisor: supervisorRecord(),
     probeOut: "/nonexistent",
+    phase: "done",
     probe: p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
   }));
   const build = {
@@ -251,19 +338,29 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     meta: {
       options,
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
+      host: { arch: "x64" },
+      tuning: {},
       tree: { head: "h", diffSha256: "d", untrackedSha256: "u" },
       buildInputs: { head: "h", diffSha256: "d", untrackedSha256: "u" },
       buildInputsAfterBuild: { head: "h", diffSha256: "d", untrackedSha256: "u" },
       harness: { "scripts/benchmark/semantic-perf.mjs": "x" },
       harnessAfter: { "scripts/benchmark/semantic-perf.mjs": "x" },
-      typescript: { version: "7.0.2", platformVersion: "7.0.2", versionText: "Version 7.0.2", exeSha256: "t" },
+      typescript: {
+        version: "7.0.2",
+        platformVersion: "7.0.2",
+        versionText: "Version 7.0.2",
+        exe: "/tsc/tsc",
+        exeSha256: "t",
+        platformPackage: "@typescript/typescript-test-x64",
+        apiSha256: { "dist/api/sync/api.js": "a" },
+      },
       build,
       binaries: {
-        probe: { sha256: "p", pinned: "/bin/probe", identity: { debugAssertions: false, instrumented: false } },
-        counted: { sha256: "c", pinned: "/bin/counted", identity: { debugAssertions: false, instrumented: true } },
+        probe: { sha256: "p", pinned: "/bin/probe", identity: { debugAssertions: false, instrumented: false, targetArch: "x86_64" } },
+        counted: { sha256: "c", pinned: "/bin/counted", identity: { debugAssertions: false, instrumented: true, targetArch: "x86_64" } },
         supervisor: { sha256: "s", pinned: "/bin/sup" },
       },
-      binariesAfter: { probe: "p", counted: "c", supervisor: "s", tsc: "t" },
+      binariesAfter: { probe: "p", counted: "c", supervisor: "s", tsc: "t", tsApi: { "dist/api/sync/api.js": "a" } },
       scenarios: { "synthetic/strict": { id: "synthetic", family: "test", note: "", setting: "strict", dir: "/x/synthetic/strict", inputs: { ...INPUTS } } },
     },
     invocations,
@@ -276,23 +373,22 @@ const validate = (run, opts) => validateRun(run, EXPECTED, [SCENARIO], opts);
 const failsWith = (run, pattern, opts) => {
   const result = validate(run, opts);
   assert.equal(result.ok, false, "validation must fail");
-  assert.ok(
-    result.failures.some((f) => pattern.test(f)),
-    `expected a failure matching ${pattern}, got:\n  ${result.failures.join("\n  ")}`,
-  );
+  assert.ok(result.failures.some((f) => pattern.test(f)), `expected a failure matching ${pattern}, got:\n  ${result.failures.join("\n  ")}`);
 };
 const resummarize = (run) => {
   run.summary = summarize(run, EXPECTED, [SCENARIO]);
   return run;
 };
+const firstOf = (run, arm, measured = true) => run.invocations.find((i) => i.arm === arm && i.warmup !== measured);
 
 test("a well-formed synthetic run passes and compares the matched row", () => {
   const run = syntheticRun();
-  const result = validate(run);
-  assert.deepEqual(result.failures, []);
+  assert.deepEqual(validate(run).failures, []);
   const cell = run.summary.cells[0];
   assert.equal(cell.arms.verter.class, "matched");
   assert.ok(cell.headline, "a matched row is compared");
+  // tsc's request time is its server time bounded by the round trip.
+  assert.equal(cell.arms["tsc-api"].metrics.coldMs.median, 1);
 });
 
 test("a wrong tsc answer against the measured reference fails validation", () => {
@@ -305,18 +401,16 @@ test("a tsc error-type flag that disagrees with the reference fails validation",
   failsWith(resummarize(run), /error-type flag/);
 });
 
-test("when the measuring tsc -p exhausts resources, an API answer equal to the constructed one becomes the reference", () => {
+test("when the measurement holds no answer, an API answer equal to the constructed one becomes the reference", () => {
   const scenario = { ...SCENARIO, beyond: "1" };
   const killedRef = structuredClone(EXPECTED);
-  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [] };
+  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [], receipt: {} };
   const run = syntheticRun();
   run.summary = summarize(run, killedRef, [scenario]);
-  const cell = run.summary.cells[0];
-  assert.equal(cell.arms["tsc-api"].class, "reference-by-construction");
-  assert.equal(cell.arms.verter.class, "matched");
-  assert.ok(cell.headline);
+  assert.equal(run.summary.cells[0].arms["tsc-api"].class, "reference-by-construction");
+  assert.equal(run.summary.cells[0].arms.verter.class, "matched");
+  assert.ok(run.summary.cells[0].headline);
   assert.deepEqual(validateRun(run, killedRef, [scenario]).failures, []);
-  // Without a constructed answer the API's answer cannot be checked: never compared, not a failure.
   const run2 = syntheticRun();
   run2.summary = summarize(run2, killedRef, [SCENARIO]);
   assert.equal(run2.summary.cells[0].arms["tsc-api"].class, "unverified");
@@ -335,53 +429,83 @@ test("a wrong Verter answer is a finding, never a comparison, and fails --requir
 test("a summary claiming a match the raw answers do not support fails validation", () => {
   const run = syntheticRun();
   for (const inv of run.invocations) if (inv.arm === "verter") inv.probe.probes[0].observation.text = "2";
-  // The stored summary still says matched.
   failsWith(run, /disagrees with its raw records/);
 });
 
-test("zero records for a planned arm fail validation", () => {
-  const run = syntheticRun();
-  run.invocations = run.invocations.filter((i) => i.arm !== "tsc-api").map((inv, index) => ({ ...inv, index }));
-  failsWith(resummarize(run), /zero records/);
+test("zero, duplicate and missing records fail validation", () => {
+  const zero = syntheticRun();
+  zero.invocations = zero.invocations.filter((i) => i.arm !== "tsc-api").map((inv, index) => ({ ...inv, index }));
+  failsWith(resummarize(zero), /zero records/);
+  const none = syntheticRun();
+  none.invocations = [];
+  failsWith(resummarize(none), /zero records/);
+  const duplicate = syntheticRun();
+  duplicate.invocations.push({ ...duplicate.invocations[1], index: duplicate.invocations.length });
+  failsWith(resummarize(duplicate), /duplicate record/);
+  const missing = syntheticRun();
+  missing.invocations = missing.invocations.slice(0, -1);
+  failsWith(resummarize(missing), /missing record/);
 });
 
-test("a run with no invocation at all fails validation", () => {
-  const run = syntheticRun();
-  run.invocations = [];
-  failsWith(resummarize(run), /zero records/);
-});
-
-test("a duplicate record fails validation", () => {
-  const run = syntheticRun();
-  run.invocations.push({ ...run.invocations[1], index: run.invocations.length });
-  failsWith(resummarize(run), /duplicate record/);
-});
-
-test("a missing record fails validation", () => {
-  const run = syntheticRun();
-  run.invocations = run.invocations.slice(0, -1);
-  failsWith(resummarize(run), /missing record/);
-});
-
-test("a failed child fails validation", () => {
+test("a failed child or a supervisor that lost containment fails validation", () => {
   const run = syntheticRun();
   run.invocations[2].supervisor = supervisorRecord({ exitCode: 101 });
   run.invocations[2].supervisorExit = 101;
   failsWith(resummarize(run), /failed child/);
+  const run2 = syntheticRun();
+  run2.invocations[2].supervisor = supervisorRecord({ killedBy: "supervisor-error", exitCode: null });
+  run2.invocations[2].supervisorExit = 125;
+  failsWith(resummarize(run2), /failed child/);
 });
 
-test("a supervisor that lost containment fails validation", () => {
-  const run = syntheticRun();
-  run.invocations[2].supervisor = supervisorRecord({ killedBy: "supervisor-error", exitCode: null });
-  run.invocations[2].supervisorExit = 125;
-  failsWith(resummarize(run), /failed child/);
+test("records with a failed or different warm answer, a missing or invalid time, or a statistics error fail validation", () => {
+  const mutate = (arm, fn, pattern) => {
+    const run = syntheticRun();
+    fn(firstOf(run, arm).probe);
+    failsWith(resummarize(run), pattern);
+  };
+  mutate("tsc-api", (r) => (r.probes[0].warm[0].outcome = { kind: "fault", detail: "x" }), /warm/);
+  mutate("verter", (r) => (r.probes[0].warm[0].sameAnswerAsCold = false), /answered differently/);
+  mutate("tsc-api", (r) => (r.probes[0].warm[0].sameAnswerAsCold = false), /answered differently/);
+  mutate("verter", (r) => delete r.probes[0].cold.micros, /cold time/);
+  mutate("tsc-api", (r) => (r.probes[0].cold.serverMs = -1), /cold time/);
+  mutate("tsc-api", (r) => (r.init.outcome = { kind: "miss" }), /init request/);
+  mutate("verter", (r) => (r.phases.engineStart = Number.NaN), /phase time/);
+  mutate("verter", (r) => (r.afterRequests = null), /engine statistics/);
+  mutate("tsc-api", (r) => r.statsErrors.push("stats failed"), /statistics errors/);
+  mutate("tsc-api", (r) => (r.tscExe = "/elsewhere/tsc"), /not the verified tsc/);
 });
 
-test("a probe record without process statistics fails validation", () => {
+test("the arms' memory must come from one metric", () => {
   const run = syntheticRun();
-  const inv = run.invocations.find((i) => i.arm === "verter");
-  inv.probe.afterRequests = null;
-  failsWith(resummarize(run), /no process statistics/);
+  for (const inv of run.invocations) if (inv.arm === "tsc-api") inv.probe.serverAfterRequests.metric = "resident";
+  failsWith(resummarize(run), /memory metrics differ/);
+});
+
+test("an engine over the budget is exhausted, not compared", () => {
+  const run = syntheticRun();
+  for (const inv of run.invocations) if (inv.arm === "verter") inv.probe.afterRequests.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+  resummarize(run);
+  assert.equal(run.summary.cells[0].arms.verter.class, "killed");
+  assert.equal(run.summary.cells[0].headline, null);
+  assert.deepEqual(validate(run).failures, []);
+});
+
+test("a kill while observing leaves the measured demand, classed unverified", () => {
+  const run = syntheticRun();
+  for (const inv of run.invocations.filter((i) => i.arm === "tsc-api")) {
+    inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+    inv.supervisorExit = 137;
+    inv.phase = "observe";
+    inv.probe = { ...tscProbe("1"), stage: "measured", serverAfterObserve: null };
+    inv.probe.probes[0].observation = null;
+    inv.probe.probes[0].observeMs = null;
+    delete inv.probe.probes[0].warm[0].sameAnswerAsCold;
+  }
+  resummarize(run);
+  assert.equal(run.summary.cells[0].arms["tsc-api"].class, "unverified");
+  assert.equal(run.summary.cells[0].headline, null);
+  assert.deepEqual(validate(run).failures, []);
 });
 
 test("repetitions that disagree fail validation", () => {
@@ -390,45 +514,43 @@ test("repetitions that disagree fail validation", () => {
   failsWith(resummarize(run), /inconsistent repetitions/);
 });
 
-test("a binary that changed during the run fails validation", () => {
-  const run = syntheticRun();
-  run.meta.binariesAfter.probe = "other";
-  failsWith(run, /the Verter probe changed/);
+test("a changed binary, build input or harness fails validation", () => {
+  const a = syntheticRun();
+  a.meta.binariesAfter.probe = "other";
+  failsWith(a, /the Verter probe changed/);
+  const b = syntheticRun();
+  b.meta.buildInputsAfterBuild.diffSha256 = "other";
+  failsWith(b, /build inputs changed/);
+  const c = syntheticRun();
+  c.meta.harnessAfter = { "scripts/benchmark/semantic-perf.mjs": "y" };
+  failsWith(c, /harness changed/);
+  const d = syntheticRun();
+  d.meta.binariesAfter.tsApi = { "dist/api/sync/api.js": "b" };
+  failsWith(d, /tsc API client/);
 });
 
-test("a build input or the harness changing during the run fails validation", () => {
-  const run = syntheticRun();
-  run.meta.buildInputsAfterBuild.diffSha256 = "other";
-  failsWith(run, /build inputs changed/);
-  const run2 = syntheticRun();
-  run2.meta.harnessAfter = { "scripts/benchmark/semantic-perf.mjs": "y" };
-  failsWith(run2, /harness changed/);
-});
-
-test("TypeScript other than 7.0.2 fails validation", () => {
+test("TypeScript other than 7.0.2, or a non-production probe, fails validation", () => {
   const run = syntheticRun();
   run.meta.typescript.version = "7.0.1";
   failsWith(run, /wrong binary: TypeScript/);
+  const run2 = syntheticRun();
+  run2.meta.build.packages.verter_session.features = ["test-support"];
+  failsWith(run2, /non-production feature test-support/);
+  const run3 = syntheticRun();
+  run3.meta.build.packages.verter_session.profile.opt_level = "0";
+  failsWith(run3, /opt-level 0/);
 });
 
-test("a probe built with a test-only feature or without optimisation fails validation", () => {
-  const run = syntheticRun();
-  run.meta.build.packages.verter_session.features = ["test-support"];
-  failsWith(run, /non-production feature test-support/);
-  const run2 = syntheticRun();
-  run2.meta.build.packages.verter_session.profile.opt_level = "0";
-  failsWith(run2, /opt-level 0/);
-});
-
-test("a reference measured on another source, or inputs that are not the catalog's, fail validation", () => {
-  const stale = structuredClone(EXPECTED);
-  stale.scenarios.synthetic.sourceSha256 = "other";
-  const run = syntheticRun();
-  const result = validateRun(run, stale, [SCENARIO]);
-  assert.ok(result.failures.some((f) => /reference is stale/.test(f)), result.failures.join("; "));
-  const run2 = syntheticRun();
-  run2.meta.scenarios["synthetic/strict"].inputs["tsconfig.json"] = "other";
-  failsWith(run2, /tsconfig.json is not the catalog/);
+test("mixed architectures, undeclared tuning and an unbalanced plan fail validation", () => {
+  const arch = syntheticRun();
+  arch.meta.binaries.probe.identity.targetArch = "aarch64";
+  failsWith(arch, /one native architecture/);
+  const tuned = syntheticRun();
+  tuned.meta.tuning = { GOMAXPROCS: "1" };
+  failsWith(tuned, /tuning variables/);
+  const odd = syntheticRun();
+  odd.meta.options.repeat = 3;
+  failsWith(odd, /odd|plan/);
 });
 
 test("a probe run that is not the pinned binary fails validation", () => {
@@ -437,10 +559,25 @@ test("a probe run that is not the pinned binary fails validation", () => {
   failsWith(run, /not the pinned probe/);
 });
 
-test("sampled containment without consent fails validation", () => {
+test("sampled containment without consent, or a wrong containment cap, fails validation", () => {
   const run = syntheticRun();
   run.invocations[0].supervisor.containment = "sampled";
   failsWith(run, /without consent/);
+  const run2 = syntheticRun();
+  run2.invocations[0].supervisor.memLimitBytes = MEM_MB * 1024 * 1024;
+  failsWith(run2, /containment cap/);
+});
+
+test("a reference measured on another source or by another method, or inputs that are not the catalog's, fail validation", () => {
+  const stale = structuredClone(EXPECTED);
+  stale.scenarios.synthetic.sourceSha256 = "other";
+  assert.ok(validateRun(syntheticRun(), stale, [SCENARIO]).failures.some((f) => /reference is stale/.test(f)));
+  const method = structuredClone(EXPECTED);
+  method.method.measuringSuffixSha256 = "other";
+  assert.ok(validateRun(syntheticRun(), method, [SCENARIO]).failures.some((f) => /different measuring method/.test(f)));
+  const run = syntheticRun();
+  run.meta.scenarios["synthetic/strict"].inputs["tsconfig.json"] = "other";
+  failsWith(run, /tsconfig.json is not the catalog/);
 });
 
 test("after a warmup killed at the memory cap the rest of that arm may be skipped, and only then", () => {
@@ -449,10 +586,11 @@ test("after a warmup killed at the memory cap the rest of that arm may be skippe
   const warmup = run.invocations.find((i) => i.arm === "tsc-api" && i.warmup);
   warmup.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
   warmup.supervisorExit = 137;
+  warmup.phase = "cold";
   warmup.probe = null;
   for (const inv of run.invocations) {
     if (inv.arm === "tsc-api" && !inv.warmup) {
-      for (const key of ["command", "supervisorOut", "supervisorExit", "supervisor", "probeOut", "probe"]) delete inv[key];
+      for (const key of ["command", "supervisorOut", "supervisorExit", "supervisor", "probeOut", "probe", "phase"]) delete inv[key];
       inv.skipped = { after: warmup.index, reason: "a warmup of this scenario and arm was killed at the memory cap" };
     }
   }
@@ -460,11 +598,9 @@ test("after a warmup killed at the memory cap the rest of that arm may be skippe
   assert.deepEqual(validate(run).failures, []);
   assert.equal(run.summary.cells[0].arms["tsc-api"].class, "killed");
   assert.equal(run.summary.cells[0].headline, null);
-  // A skip that no memory-killed warmup justifies fails validation.
   const run2 = syntheticRun();
   run2.meta.options.skipAfterKill = true;
-  const inv = run2.invocations.find((i) => i.arm === "tsc-api" && !i.warmup);
-  inv.skipped = { after: 0, reason: "made up" };
+  run2.invocations.find((i) => i.arm === "tsc-api" && !i.warmup).skipped = { after: 0, reason: "made up" };
   failsWith(resummarize(run2), /skipped without a warmup/);
 });
 

@@ -6,7 +6,8 @@
 //! semantic_perf_probe identity
 //! ```
 //!
-//! `run` answers one job and writes its record; the record file is the
+//! `run` answers one job and writes its record (and a `<out>.phase` marker
+//! naming the phase running); the record file is the
 //! only result channel (stdout carries nothing the harness parses). `stats`
 //! prints one [`super::process_stats::ProcessStats`] reading of another
 //! process as JSON — the tsc driver reads the tsc API server through it, so
@@ -17,7 +18,7 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 
-use super::{process_stats, run_job, AllocHooks, Job};
+use super::{process_stats, run_job, AllocHooks, Job, Sink};
 
 const USAGE: &str = "usage:
   semantic_perf_probe run --job <job.json> --out <result.json>
@@ -65,19 +66,16 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let result = match run_job(&job, alloc) {
-                Ok(result) => result,
+            let sink = Sink {
+                out: std::path::Path::new(out_path),
+            };
+            match run_job(&job, alloc, &sink) {
+                Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("semantic_perf_probe: {err}");
-                    return ExitCode::from(3);
+                    ExitCode::from(3)
                 }
-            };
-            let text = serde_json::to_string_pretty(&result).expect("a record serialises");
-            if let Err(err) = std::fs::write(out_path, text) {
-                eprintln!("semantic_perf_probe: write {out_path}: {err}");
-                return ExitCode::from(4);
             }
-            ExitCode::SUCCESS
         }
         Some("stats") => {
             let Some(pid) = flag(&args, "--pid").and_then(|pid| pid.parse::<u32>().ok()) else {

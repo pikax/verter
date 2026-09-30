@@ -6,35 +6,43 @@
 //   node tsc-probe.mjs --job <job.json> --out <result.json>
 //
 // The job is the SAME job the Verter probe reads (same directory, files,
-// aliases, warm repetitions) plus the resolved TypeScript package directory
-// and the Verter probe executable used to read the tsc server's OS
-// statistics (so both tools' memory comes from the same reader).
+// aliases, warm repetitions) plus the verified TypeScript package directory,
+// the verified native tsc executable (passed to the API explicitly), and the
+// Verter probe executable used to read the tsc server's OS statistics (so
+// both tools' memory comes from the same reader).
 //
-// Phases, each timed separately and never overlapping:
-//   spawn     start the native server and connect (`new API`);
-//   setup     open the project (`updateSnapshot`): read, parse, program
-//             (server-side time; the round trip is recorded beside it);
-//   init      getTypeAtPosition on `__BenchInit`'s name (absorbs one-time
-//             lazy checker initialisation);
-//   cold      getTypeAtPosition on `__Probe`'s name: the declared type of
-//             the alias, exactly what the Verter arm resolves;
-//   observe   typeToString / error-type / union members (outside the timer);
-//   warm      the same request repeated;
-//   stats     the server process's OS statistics, read with the server alive;
-//   diagnostics  the scenario file's semantic diagnostics (after the stats,
-//             so the whole-file check inflates neither timing nor retained
-//             memory);
-//   teardown  close the API (terminates the server).
-// A request's time is recorded both as the client's round trip and as the
-// server's own processing time (`collectTiming`); the report uses the server
-// time, which excludes the IPC a native in-process engine does not pay.
+// Phases, timed separately and never overlapping, in this order (the same
+// order as the Verter probe):
+//   spawn        start the native server and connect (client-side time,
+//                process start included; reported, never compared);
+//   engineStart  the API session's `initialize` request (server time): an
+//                empty engine, ready;
+//   setup        open the project (`updateSnapshot`, server time);
+//   init         getTypeAtPosition on `__BenchInit`'s name (server time);
+//   cold         getTypeAtPosition on `__Probe`'s name — the declared type of
+//                the alias, exactly what the Verter arm resolves;
+//   warm         the same request repeated;
+//   stats        the server process's OS statistics, read with the server
+//                alive and before anything is observed;
+//   observe      typeToString (a union member by member: tsc's printer
+//                elides very large types) and the error-type flag, outside
+//                every timer; then the server's statistics again
+//                (observation-inclusive, reported apart);
+//   teardown     close the API (terminates the server).
+// Request times are the server's own processing time (`collectTiming`),
+// which excludes the IPC an in-process engine does not pay; the client's
+// round trip is recorded beside each. The record is written as soon as the
+// statistics are read and rewritten after observation, and `<out>.phase`
+// names the phase running, so a stopped invocation still says how far it
+// got. No whole-file diagnostics run here: the demand's success never
+// depends on work the Verter arm does not do.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const RESULT_SCHEMA = 1;
+const RESULT_SCHEMA = 2;
 // TypeFormatFlags.NoTruncation | TypeFormatFlags.InTypeAlias.
 const PRINT_FLAGS = 1 | (1 << 23);
 
@@ -57,6 +65,7 @@ async function main() {
     console.error("usage: tsc-probe.mjs --job <job.json> --out <result.json>");
     process.exit(2);
   }
+  const phase = (name) => writeFileSync(`${outPath}.phase`, name);
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`job schema ${job.schema} is not 1`);
   if (job.probes.length < 1) throw new Error("a job demands at least one probe");
@@ -65,23 +74,29 @@ async function main() {
   const dir = job.dir.replace(/\\/g, "/");
   const scenarioFile = `${dir}/${job.scenario}`;
   const text = readFileSync(scenarioFile, "utf8");
+  const serverTime = (method) => api.getTimingInfo().recentRequests.filter((r) => r.method === method).at(-1)?.serverTimeMs ?? null;
 
+  phase("spawn");
   let t = performance.now();
-  const api = new API({ cwd: dir, collectTiming: true });
+  const api = new API({ cwd: dir, collectTiming: true, tsserverPath: job.tscExe });
   const spawnMs = performance.now() - t;
   const serverPid = api.client?.channel?.child?.pid;
   if (typeof serverPid !== "number") throw new Error("the tsc API server pid is not reachable");
 
+  phase("engine-start");
+  t = performance.now();
+  api.ensureInitialized();
+  const engineStartRoundTripMs = performance.now() - t;
+  const engineStartMs = serverTime("initialize");
+
+  phase("setup");
   t = performance.now();
   const snapshot = api.updateSnapshot({ openProjects: [`${dir}/${job.tsconfig}`] });
+  const setupRoundTripMs = performance.now() - t;
+  const setupMs = serverTime("updateSnapshot");
   const projects = snapshot.getProjects();
   if (projects.length !== 1) throw new Error(`expected one project, got ${projects.length}`);
   const project = projects[0];
-  const setupRoundTripMs = performance.now() - t;
-  // The snapshot's server-side time, like every request's: it excludes the
-  // IPC an in-process engine does not pay.
-  const setupServerMs =
-    api.getTimingInfo().recentRequests.filter((r) => r.method === "updateSnapshot").at(-1)?.serverTimeMs ?? null;
   const rootFiles = project.rootFiles.map((f) => f.replace(/\\/g, "/"));
 
   const request = (alias) => {
@@ -95,82 +110,106 @@ async function main() {
       error = String(err?.message ?? err);
     }
     const roundTripMs = performance.now() - start;
-    const timing = api.getTimingInfo();
-    const server = timing.recentRequests.filter((r) => r.method === "getTypeAtPosition").at(-1);
+    const serverMs = serverTime("getTypeAtPosition");
     const outcome = error ? { kind: "fault", detail: error } : type ? { kind: "value" } : { kind: "miss" };
-    return { record: { roundTripMs, serverMs: server?.serverTimeMs ?? null, outcome }, type };
+    return { record: { roundTripMs, serverMs, outcome }, type };
   };
 
+  phase("init");
   const init = request(job.initAlias).record;
   const probes = [];
+  const types = [];
   for (const alias of job.probes) {
+    phase("cold");
     const cold = request(alias);
-    t = performance.now();
-    let observation;
-    if (cold.type) {
-      try {
-        // tsc's printer elides a very large type even with NoTruncation, so
-        // a union is printed member by member (one set, whatever the order).
-        const members = cold.type.isUnionType() ? cold.type.getTypes() : null;
-        const printed = members
-          ? members.map((member) => project.checker.typeToString(member, undefined, PRINT_FLAGS)).join(" | ")
-          : project.checker.typeToString(cold.type, undefined, PRINT_FLAGS);
-        observation = {
-          text: printed,
-          error: null,
-          errorType: cold.type.isErrorType(),
-          typeFlags: cold.type.flags,
-          unionMembers: members ? members.length : null,
-        };
-      } catch (err) {
-        observation = { text: null, error: String(err?.message ?? err), errorType: null, typeFlags: null, unionMembers: null };
-      }
-    } else {
-      observation = { text: null, error: "no value to observe", errorType: null, typeFlags: null, unionMembers: null };
-    }
-    const observeMs = performance.now() - t;
+    phase("warm");
     const warm = [];
-    for (let i = 0; i < job.warmRepeats; i++) warm.push(request(alias).record);
-    probes.push({ alias, cold: cold.record, warm, observeMs, observation });
+    const warmTypes = [];
+    for (let i = 0; i < job.warmRepeats; i++) {
+      const w = request(alias);
+      warm.push(w.record);
+      warmTypes.push(w.type);
+    }
+    probes.push({ alias, cold: cold.record, warm, observeMs: null, observation: null });
+    types.push({ cold: cold.type, warm: warmTypes });
   }
 
+  phase("stats");
   const statsErrors = [];
-  const readStats = (pid) => {
+  const readStats = (pid, label) => {
     const r = spawnSync(job.statsExe, ["stats", "--pid", String(pid)], { encoding: "utf8", timeout: 30_000 });
     if (r.status !== 0) {
-      statsErrors.push(`stats --pid ${pid}: exit ${r.status} ${r.stderr?.trim() ?? ""}`);
+      statsErrors.push(`${label}: stats --pid ${pid}: exit ${r.status} ${r.stderr?.trim() ?? ""}`);
       return null;
     }
     return JSON.parse(r.stdout);
   };
-  const serverAfterRequests = readStats(serverPid);
-  const clientUsage = process.resourceUsage();
-
-  let diagnostics = null;
-  try {
-    diagnostics = project.program.getSemanticDiagnostics(scenarioFile).map((d) => ({ code: d.code, text: d.text }));
-  } catch (err) {
-    statsErrors.push(`diagnostics: ${err?.message ?? err}`);
-  }
-
-  t = performance.now();
-  api.close();
-  const teardownMs = performance.now() - t;
-
   const result = {
     schema: RESULT_SCHEMA,
     tool: "tsc",
+    stage: "measured",
+    tscExe: job.tscExe,
     serverPid,
     rootFiles,
-    phases: { spawnMs, setupMs: setupServerMs, setupRoundTripMs, initMs: init.serverMs, teardownMs },
+    phases: { spawnMs, engineStartMs, engineStartRoundTripMs, setupMs, setupRoundTripMs, initMs: init.serverMs, teardownMs: null },
     init,
     probes,
-    serverAfterRequests,
-    client: { maxRssBytes: clientUsage.maxRSS * 1024, note: "the node client driving the API; not tsc's memory" },
-    diagnostics,
+    serverAfterRequests: readStats(serverPid, "after requests"),
+    serverAfterObserve: null,
+    client: null,
     statsErrors,
   };
   writeFileSync(outPath, JSON.stringify(result, null, 2));
+
+  phase("observe");
+  const print = (type) => {
+    // tsc's printer elides a very large type even with NoTruncation, so a
+    // union is printed member by member (one set, whatever the order).
+    const members = type.isUnionType() ? type.getTypes() : null;
+    const printed = members
+      ? members.map((member) => project.checker.typeToString(member, undefined, PRINT_FLAGS)).join(" | ")
+      : project.checker.typeToString(type, undefined, PRINT_FLAGS);
+    return { printed, members: members ? members.length : null };
+  };
+  probes.forEach((probe, index) => {
+    const start = performance.now();
+    const { cold, warm } = types[index];
+    let coldPrint = null;
+    if (cold) {
+      try {
+        const { printed, members } = print(cold);
+        coldPrint = printed;
+        probe.observation = { text: printed, error: null, errorType: cold.isErrorType(), typeFlags: cold.flags, unionMembers: members };
+      } catch (err) {
+        probe.observation = { text: null, error: String(err?.message ?? err), errorType: null, typeFlags: null, unionMembers: null };
+      }
+    } else {
+      probe.observation = { text: null, error: "no value to observe", errorType: null, typeFlags: null, unionMembers: null };
+    }
+    probe.warm.forEach((record, i) => {
+      const w = warm[i];
+      if (!cold || !w) record.sameAnswerAsCold = false;
+      else if (w.id === cold.id) record.sameAnswerAsCold = true;
+      else {
+        try {
+          record.sameAnswerAsCold = coldPrint !== null && print(w).printed === coldPrint && w.isErrorType() === cold.isErrorType();
+        } catch {
+          record.sameAnswerAsCold = false;
+        }
+      }
+    });
+    probe.observeMs = performance.now() - start;
+  });
+  result.serverAfterObserve = readStats(serverPid, "after observe");
+  result.client = { maxRssBytes: process.resourceUsage().maxRSS * 1024, note: "the node client driving the API; not tsc's memory" };
+
+  phase("teardown");
+  t = performance.now();
+  api.close();
+  result.phases.teardownMs = performance.now() - t;
+  result.stage = "complete";
+  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  phase("done");
 }
 
 main().catch((err) => {

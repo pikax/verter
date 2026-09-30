@@ -4,27 +4,30 @@
 // reference both benchmark arms are classified against.
 //
 //   node scripts/benchmark/semantic-perf/measure-expected.mjs
-//       [--only a,b] [--supervisor <exe> | --via-tsc-capped <tsc-capped.mjs>]
+//       [--only a,b] [--resume] [--supervisor <exe> | --via-tsc-capped <tsc-capped.mjs>]
 //       [--mem-mb 8192] [--timeout-ms 300000] [--allow-sampled] [--typescript-from <dir>] [--work <dir>]
 //
 // Method (the CLI, independent of the API the benchmark's tsc arm uses): the
-// scenario module plus
-//     type __BenchExpand<T> = T extends __BenchNothing ? never : [T];
-//     interface __BenchNothing { readonly __benchNothing: 1 }
+// scenario module plus MEASURING_SUFFIX,
+//     type __BenchExpand<T> = T extends unknown ? [T] : never;
 //     declare const __bench_v: [__BenchExpand<__Probe>];
 //     const __bench_s: [never] = __bench_v;
 //     type __BenchIsNever = [__Probe] extends [never] ? "yes" : "no";
 //     const __bench_n: "never-check" = null! as __BenchIsNever;
 // checked by `tsc -p` over the benchmark's own tsconfig (noLib, the library
-// as a root file, noErrorTruncation). The head line of the TS2322 message
-// prints the one-element tuple (a union source would be elaborated member by
-// member instead) of the probe's type rebuilt by a distributive conditional
-// that wraps each member in a one-element tuple (a fresh union, so tsc prints
-// the members rather than an alias or union origin naming them); the wrappers
-// are removed again. An `any` beside TS2589 / TS2590 is recorded as tsc's
-// error-any. Every other diagnostic's code is recorded. A run that exhausts
-// the cap or the deadline
-// is recorded as `killed`, never retried with more.
+// as a root file, noErrorTruncation). The distributive conditional rebuilds
+// the probe's type as a fresh union of one-element tuples, one per member
+// and filtering none (every type extends `unknown`), so tsc prints the
+// members rather than an alias or union origin naming them; the outer tuple
+// makes the head line of the TS2322 message print the whole type (a union
+// source would be elaborated member by member). The second assignment prints
+// whether the probe is `never`, the one answer the first cannot print.
+//
+// This script records only what tsc printed — the raw text inside the outer
+// tuple, the never verdict, every other diagnostic's code and a digest of the
+// whole output — so the interpretation (reference.mjs) can be re-derived and
+// audited without measuring again. A run past the cap or the deadline is
+// recorded as `killed`, never retried with more.
 //
 // Every tsc process runs contained: under verter-supervise, or under the
 // capped wrapper named by --via-tsc-capped.
@@ -35,9 +38,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { RESOURCE_CODES } from "./analyze.mjs";
-import { canonicalDigest, canonicalType, canonicalUnionMembers, singleTupleElement } from "./canonical.mjs";
 import { resolveTypeScript, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
+import { interpretMeasurement } from "./reference.mjs";
 import { SETTINGS, selectScenarios, tsconfigText } from "./scenarios.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 
@@ -45,14 +47,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..", "..");
 const EXPECTED = join(HERE, "expected.json");
 const MARKER = "const __bench_s: [never] = __bench_v;";
-const NEVER_MARKER = "const __bench_n: \"never-check\" = null! as __BenchIsNever;";
-export const MEASURING_SUFFIX = `type __BenchExpand<T> = T extends __BenchNothing ? never : [T];
-interface __BenchNothing { readonly __benchNothing: 1 }
+const NEVER_MARKER = 'const __bench_n: "never-check" = null! as __BenchIsNever;';
+export const MEASURING_SUFFIX = `type __BenchExpand<T> = T extends unknown ? [T] : never;
 declare const __bench_v: [__BenchExpand<__Probe>];
 ${MARKER}
 type __BenchIsNever = [__Probe] extends [never] ? "yes" : "no";
 ${NEVER_MARKER}
 `;
+/** A printed answer larger than this is recorded by digest only. */
+const MAX_STORED_PRINT = 1 << 20;
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -74,9 +77,16 @@ function runCapped(wrapper, tscArgs, cwd, memMb, timeoutMs) {
   });
 }
 
-/** Parse the answer out of a checked measuring module's output. */
+/**
+ * What tsc printed for a checked measuring module: the raw text inside the
+ * outer tuple of the TS2322 head line (null when there is none), the never
+ * verdict, and every other diagnostic's code. Throws on output it cannot
+ * read as a measurement; never guesses.
+ */
 export function parseMeasurement(stdout, source) {
-  const markerLine = source.split("\n").findIndex((l) => l.includes(MARKER)) + 1;
+  const lines = source.split("\n");
+  const markerLine = lines.findIndex((l) => l.includes(MARKER)) + 1;
+  const neverLine = lines.findIndex((l) => l.includes(NEVER_MARKER)) + 1;
   const diagnostics = [];
   for (const line of stdout.split(/\r?\n/)) {
     const m = /^(.+?)\((\d+),(\d+)\): error TS(\d+): (.*)$/.exec(line);
@@ -85,51 +95,32 @@ export function parseMeasurement(stdout, source) {
     if (m) diagnostics.push({ file: m[1], line: Number(m[2]), code: Number(m[4]), message: m[5] });
     else if (/^error TS(\d+):/.test(line)) diagnostics.push({ file: "", line: 0, code: Number(/TS(\d+)/.exec(line)[1]), message: line });
   }
-  const onMarker = diagnostics.filter((d) => d.file.endsWith("scenario.ts") && d.line === markerLine && d.code === 2322);
-  // Only `[never]` is assignable to `[never]` (`any` is not assignable to
-  // `never`), so no TS2322 on the measuring line means `never` — accepted
-  // only when the positive check on the next line agrees.
-  const neverLine = source.split("\n").findIndex((l) => l.includes(NEVER_MARKER)) + 1;
-  const neverCheck = diagnostics.find((d) => d.file.endsWith("scenario.ts") && d.line === neverLine && d.code === 2322);
-  const isNever = /^Type '"yes"' is not assignable/.test(neverCheck?.message ?? "")
+  const inScenario = (d, line) => d.file.endsWith("scenario.ts") && d.line === line && d.code === 2322;
+  const onMarker = diagnostics.filter((d) => inScenario(d, markerLine));
+  const neverCheck = diagnostics.find((d) => inScenario(d, neverLine));
+  const verdict = /^Type '"yes"' is not assignable/.test(neverCheck?.message ?? "")
     ? true
     : /^Type '"no"' is not assignable/.test(neverCheck?.message ?? "")
       ? false
       : null;
-  if (isNever === null) throw new Error(`the never check printed no verdict: ${(neverCheck?.message ?? "<no diagnostic>").slice(0, 200)}`);
-  if (!onMarker.length && !isNever) throw new Error("the measuring assignment reported no TS2322 but the probe is not never");
-  if (onMarker.length && isNever) throw new Error("the measuring assignment failed but the probe is never");
-  let printed = "never";
+  if (verdict === null) throw new Error(`the never check printed no verdict: ${(neverCheck?.message ?? "<no diagnostic>").slice(0, 200)}`);
+  // Only `[never]` is assignable to `[never]` (`any` is not assignable to
+  // `never`), so the two assignments must agree.
+  if (!onMarker.length && !verdict) throw new Error("the measuring assignment reported no TS2322 but the probe is not never");
+  if (onMarker.length && verdict) throw new Error("the measuring assignment failed but the probe is never");
+  let printed = null;
   if (onMarker.length) {
     const message = onMarker[0].message;
-    const start = message.indexOf("Type '");
     const end = message.lastIndexOf("' is not assignable to type '[never]'");
-    if (start !== 0 || end < 0) throw new Error(`unexpected TS2322 message: ${message.slice(0, 200)}`);
+    if (!message.startsWith("Type '") || end < 0) throw new Error(`unexpected TS2322 message: ${message.slice(0, 200)}`);
     const tuple = message.slice("Type '".length, end).trim();
     if (!tuple.startsWith("[") || !tuple.endsWith("]")) throw new Error(`the measuring tuple did not print: ${tuple.slice(0, 200)}`);
     printed = tuple.slice(1, -1);
   }
-  const codes = [...new Set(diagnostics.filter((d) => !onMarker.includes(d) && d !== neverCheck).map((d) => d.code))].sort((a, b) => a - b);
-  // `printed` is `never`, `any` (an `any` or error-any probe makes the
-  // conditional itself `any`) or a union of one-element tuples `[X]`. tsc's
-  // printer elides a very large type even under noErrorTruncation, leaving
-  // bare `any` members among the tuples: such a print is not the answer.
-  const bare = canonicalType(printed);
-  let text = bare;
-  if (bare !== "never" && bare !== "any") {
-    const members = canonicalUnionMembers(printed);
-    const elements = [];
-    for (const member of members) {
-      try {
-        elements.push(singleTupleElement(member));
-      } catch {
-        return { truncated: true, codes };
-      }
-    }
-    text = elements.join(" | ");
-  }
-  const errorAny = canonicalType(text) === "any" && codes.some((c) => RESOURCE_CODES.includes(c));
-  return { text, codes, errorAny };
+  const codes = [...new Set(diagnostics.filter((d) => !onMarker.includes(d) && d !== neverCheck).map((d) => d.code))].sort(
+    (a, b) => a - b,
+  );
+  return { never: verdict, printed, codes };
 }
 
 async function main() {
@@ -141,6 +132,16 @@ async function main() {
   const supervisor = viaCapped ? null : resolveSupervisor(ROOT, arg("--supervisor", null)).path;
   const work = resolve(arg("--work", join(tmpdir(), `semantic-perf-expected-${Date.now()}`)));
   const lib = readFileSync(join(HERE, "lib", "bench-globals.d.ts"), "utf8");
+  const method = {
+    measuringSuffixSha256: sha256Text(MEASURING_SUFFIX),
+    libSha256: sha256Text(lib),
+    tscExeSha256: typescript.exeSha256,
+    tscVersion: typescript.versionText,
+    platform: `${process.platform}-${process.arch}`,
+    memMb,
+    timeoutMs,
+    launcher: viaCapped ? "capped tsc wrapper" : "verter-supervise",
+  };
   const previous = (() => {
     try {
       return JSON.parse(readFileSync(EXPECTED, "utf8"));
@@ -148,25 +149,24 @@ async function main() {
       return null;
     }
   })();
+  const sameMethod =
+    previous?.method?.measuringSuffixSha256 === method.measuringSuffixSha256 && previous?.method?.libSha256 === method.libSha256;
   const resume = process.argv.includes("--resume");
-  const out = previous && (only.length || resume) ? previous : { scenarios: {} };
-  if (previous && previous.libSha256 !== sha256Text(lib)) out.scenarios = {};
-  out.schema = 1;
+  const out = previous && sameMethod && (only.length || resume) ? previous : { scenarios: {} };
+  out.schema = 2;
   out.typescript = TYPESCRIPT_VERSION;
-  out.libSha256 = sha256Text(lib);
+  out.method = method;
   out.measuredWith =
-    "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus " +
-    "`type __BenchExpand<T> = T extends __BenchNothing ? never : [T]; declare const __bench_v: [__BenchExpand<__Probe>]; const __bench_s: [never] = __bench_v;` " +
-    "and a never check, read off the head of the TS2322 messages; a print tsc elides (bare `any` among the tuples) is recorded as truncated, a run past the cap or deadline as killed; " +
-    (viaCapped ? "run under the capped tsc wrapper" : "run under verter-supervise");
+    "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus the measuring suffix " +
+    "(a distributive one-element-tuple wrapper that filters no member, and a never check); the raw print inside the outer tuple of the TS2322 head line is recorded";
   const save = () => {
     out.scenarios = Object.fromEntries(Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync(EXPECTED, JSON.stringify(out, null, 2) + "\n");
+    writeFileSync(EXPECTED, JSON.stringify(out, null, 1) + "\n");
   };
   for (const scenario of selectScenarios(only)) {
     const entry = { sourceSha256: sha256Text(scenario.source), settings: {} };
     if (resume && out.scenarios[scenario.id]?.sourceSha256 === entry.sourceSha256) {
-      console.log(`${scenario.id}: kept (already measured on this source)`);
+      console.log(`${scenario.id}: kept (already measured on this source by this method)`);
       continue;
     }
     for (const setting of SETTINGS) {
@@ -178,7 +178,7 @@ async function main() {
       writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
       const tscArgs = ["-p", join(dir, "tsconfig.json")];
       let exit;
-      let stdout;
+      let stdout = "";
       if (viaCapped) {
         const r = await runCapped(viaCapped, tscArgs, dir, memMb, timeoutMs);
         exit = r.exit;
@@ -192,36 +192,34 @@ async function main() {
           argv: [typescript.exe, ...tscArgs],
           allowSampled: process.argv.includes("--allow-sampled"),
         });
-        exit = r.record?.killedBy === "timeout" ? 124 : r.record?.killedBy === "memory" ? 137 : r.record?.exitCode;
         if (r.supervisorExit === 125 || !r.record?.launched) throw new Error(`supervisor failed for ${scenario.id}/${setting.id}: ${r.stderr}`);
+        exit = r.record.killedBy === "timeout" ? 124 : r.record.killedBy === "memory" ? 137 : r.record.exitCode;
         stdout = readFileSync(r.record.stdoutPath, "utf8");
       }
+      const receipt = { exit, stdoutSha256: sha256Text(stdout), stdoutBytes: stdout.length };
       let result;
-      if (exit === 124 || exit === 137) result = { killed: exit === 124 ? "timeout" : "memory", codes: [] };
-      else if (![0, 1, 2].includes(exit)) result = { unmeasurable: `tsc exited ${exit}`, codes: [] };
+      if (exit === 124 || exit === 137) result = { killed: exit === 124 ? "timeout" : "memory", codes: [], receipt };
+      else if (![0, 1, 2].includes(exit)) result = { unmeasurable: `tsc exited ${exit}`, codes: [], receipt };
       else {
         try {
           const parsed = parseMeasurement(stdout, source);
-          if (parsed.truncated) result = { truncated: true, codes: parsed.codes };
-          else {
-            const digest = canonicalDigest(parsed.text);
-            result = { digest, errorAny: parsed.errorAny, codes: parsed.codes };
-            if (digest.length <= 4000) result.text = parsed.text;
+          result = { never: parsed.never, codes: parsed.codes, receipt };
+          if (parsed.printed !== null) {
+            if (parsed.printed.length <= MAX_STORED_PRINT) result.printed = parsed.printed;
+            else result.printedOversize = { sha256: sha256Text(parsed.printed), length: parsed.printed.length };
           }
         } catch (err) {
-          result = { unmeasurable: String(err.message ?? err).slice(0, 300), codes: [] };
+          result = { unmeasurable: String(err.message ?? err).slice(0, 300), codes: [], receipt };
         }
       }
       entry.settings[setting.id] = result;
-      const shown = result.killed
-        ? `killed (${result.killed})`
-        : result.truncated
-          ? "truncated print"
-          : result.unmeasurable
-            ? `unmeasurable: ${result.unmeasurable}`
-            : result.errorAny
-              ? "error-any"
-              : result.digest.preview.slice(0, 80);
+      let shown;
+      try {
+        const answer = interpretMeasurement(result);
+        shown = answer.gap ?? (answer.errorAny ? "error-any" : answer.digest.preview.slice(0, 80));
+      } catch (err) {
+        shown = `uninterpretable: ${err.message}`;
+      }
       console.log(`${scenario.id}/${setting.id}: ${shown} ${result.codes.map((c) => `TS${c}`).join(",")}`);
     }
     out.scenarios[scenario.id] = entry;

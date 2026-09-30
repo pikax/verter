@@ -225,7 +225,18 @@ export function buildVerterProbes(root) {
   for (const name of ["semantic_perf_probe", "semantic_perf_probe_counted"]) {
     if (!executables[name]) throw new Error(`cargo reported no executable for ${name}`);
   }
-  return { cargoArgs: args, executables, packages, cargoIncremental: env.CARGO_INCREMENTAL };
+  const tool = (cmd, toolArgs) => {
+    const out = spawnSync(cmd, toolArgs, { cwd: root, encoding: "utf8", env });
+    return out.status === 0 ? out.stdout.trim() : null;
+  };
+  return {
+    cargoArgs: args,
+    executables,
+    packages,
+    cargoIncremental: env.CARGO_INCREMENTAL,
+    rustc: tool("rustc", ["-vV"]),
+    cargo: tool("cargo", ["-V"]),
+  };
 }
 
 /** Check a cargo build record against the production-library requirements; returns problems. */

@@ -2,62 +2,79 @@
 // records and the measured reference. The validator recomputes it and fails
 // a run whose stored summary differs.
 
-import { ARMS, classifyVerterAnswer, invocationEnd, parseCli, probeAnswer, probeMetrics, referenceGap, stats, tscAnswerStatus, verdict } from "./analyze.mjs";
+import { ARMS, classifyVerterAnswer, invocationEnd, parseCli, probeAnswer, probeMetrics, stats, tscAnswerStatus, verdict } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
+import { interpretMeasurement } from "./reference.mjs";
 
-/** The reference entry of one (scenario, setting), or null. */
+const referenceCache = new Map();
+/** The interpreted reference of one (scenario, setting), or null. */
 export function referenceFor(expected, scenarioId, settingId) {
-  return expected.scenarios?.[scenarioId]?.settings?.[settingId] ?? null;
+  const raw = expected.scenarios?.[scenarioId]?.settings?.[settingId];
+  if (!raw) return null;
+  const key = `${expected.method?.measuringSuffixSha256}|${scenarioId}|${settingId}`;
+  if (!referenceCache.has(key) || referenceCache.get(key).raw !== raw) {
+    let answer;
+    try {
+      answer = interpretMeasurement(raw);
+    } catch (err) {
+      answer = { gap: `uninterpretable reference: ${err.message}`, unmeasurable: "uninterpretable", codes: raw.codes ?? [] };
+    }
+    referenceCache.set(key, { raw, answer });
+  }
+  return referenceCache.get(key).answer;
 }
 
-const beyondCache = new Map();
-const probeCache = new Map();
-/** The digest of a scenario's probe expression itself (an unevaluated answer). */
-export function probeDigest(scenario) {
-  if (!scenario?.probe) return null;
-  if (!probeCache.has(scenario.id)) {
+const digestCache = new Map();
+function digestOf(text) {
+  if (!digestCache.has(text)) {
     let digest = null;
     try {
-      digest = canonicalDigest(scenario.probe);
+      digest = canonicalDigest(text);
     } catch {
       digest = null;
     }
-    probeCache.set(scenario.id, digest);
+    digestCache.set(text, digest);
   }
-  return probeCache.get(scenario.id);
+  return digestCache.get(text);
 }
+/** The digest of a scenario's probe expression itself (an unevaluated answer). */
+export const probeDigest = (scenario) => (scenario?.probe ? digestOf(scenario.probe) : null);
+/** The digest of a scenario's constructed answer past tsc's limit, or null. */
+export const beyondDigest = (scenario) => (scenario?.beyond ? digestOf(scenario.beyond) : null);
 
-/** The digest of a scenario's constructed beyond-limit answer, or null. */
-export function beyondDigest(scenario) {
-  if (!scenario?.beyond) return null;
-  if (!beyondCache.has(scenario.id)) beyondCache.set(scenario.id, canonicalDigest(scenario.beyond));
-  return beyondCache.get(scenario.id);
-}
+const PROBE_METRICS = [
+  "engineStartMs",
+  "setupMs",
+  "initMs",
+  "coldMs",
+  "firstTypeMs",
+  "warmMs",
+  "observeMs",
+  "teardownMs",
+  "peakBytes",
+  "retainedBytes",
+  "observePeakBytes",
+  "cpuMs",
+];
 
-function metricStats(invs, pick) {
-  return stats(invs.map(pick));
-}
-
-const PROBE_METRICS = ["setupMs", "initMs", "coldMs", "firstAnswerMs", "warmMs", "observeMs", "teardownMs", "peakBytes", "retainedBytes", "cpuMs"];
-
-function probeArmSummary(arm, invs, reference, scenario) {
+function probeArmSummary(arm, invs, ctx) {
   const measured = invs.filter((i) => !i.warmup);
   const answers = invs.map(probeAnswer);
   const digests = [...new Set(answers.map((a) => a.digest?.sha256 ?? `<${a.end.kind}:${a.outcome?.kind ?? ""}>`))];
   const out = {
     invocations: invs.length,
     measured: measured.length,
-    answerDigest: answers[0]?.digest ?? null,
+    answerDigest: answers.find((a) => a.digest)?.digest ?? null,
     distinctAnswers: digests.length,
     ends: [...new Set(answers.map((a) => a.end.kind))],
   };
   if (ARMS[arm].tool === "verter") {
-    const classes = answers.map((a) => classifyVerterAnswer(a, reference, beyondDigest(scenario), probeDigest(scenario)));
+    const classes = answers.map((a) => classifyVerterAnswer(a, ctx));
     out.classes = [...new Set(classes.map((c) => c.class))];
     out.class = out.classes.length === 1 ? out.classes[0] : "inconsistent";
     out.detail = classes[0]?.detail ?? "";
   } else {
-    const statuses = answers.map((a) => tscAnswerStatus(a, reference, beyondDigest(scenario)));
+    const statuses = answers.map((a) => tscAnswerStatus(a, ctx.reference, ctx.beyond, ctx.budgetBytes));
     out.referenceProblems = [...new Set(statuses.filter((s) => s.problem).map((s) => s.problem))];
     const kinds = [...new Set(statuses.map((s) => s.status))];
     out.class = out.referenceProblems.length
@@ -65,21 +82,22 @@ function probeArmSummary(arm, invs, reference, scenario) {
       : kinds.length === 1
         ? { killed: "killed", reference: "reference", "by-construction": "reference-by-construction", unverified: "unverified" }[kinds[0]]
         : "inconsistent";
-    out.errorType = answers[0]?.errorType ?? null;
+    out.detail = statuses.find((s) => s.detail)?.detail ?? "";
+    out.errorType = answers.find((a) => a.digest)?.errorType ?? null;
   }
-  const metrics = measured.map(probeMetrics);
-  out.metrics = Object.fromEntries(PROBE_METRICS.map((m) => [m, metricStats(metrics, (x) => x?.[m])]));
+  // Statistics only over invocations whose demand completed; the validator
+  // fails a run where a completed invocation lacks any of them.
+  const completed = measured.filter((i) => ["exited", "observe-killed"].includes(probeAnswer(i).end.kind));
+  const metrics = completed.map(probeMetrics);
+  out.completedMeasured = completed.length;
+  out.metrics = Object.fromEntries(PROBE_METRICS.map((m) => [m, stats(metrics.map((x) => x?.[m]))]));
   out.memoryMetric = metrics.find((m) => m?.memoryMetric)?.memoryMetric ?? null;
   if (ARMS[arm].tool === "tsc") {
-    out.metrics.spawnMs = metricStats(metrics, (x) => x?.spawnMs);
-    out.metrics.setupRoundTripMs = metricStats(metrics, (x) => x?.setupRoundTripMs);
-    out.metrics.coldRoundTripMs = metricStats(metrics, (x) => x?.coldRoundTripMs);
-    out.metrics.warmRoundTripMs = metricStats(metrics, (x) => x?.warmRoundTripMs);
-    out.diagnosticCodes = metrics[0]?.diagnosticCodes ?? null;
+    for (const m of ["spawnMs", "setupRoundTripMs", "coldRoundTripMs", "warmRoundTripMs"]) out.metrics[m] = stats(metrics.map((x) => x?.[m]));
   }
   if (arm === "verter-counted") {
-    out.coldAllocations = metricStats(metrics, (x) => x?.allocations?.[0]);
-    out.coldAllocatedBytes = metricStats(metrics, (x) => x?.allocations?.[1]);
+    out.coldAllocations = stats(metrics.map((x) => x?.allocations?.[0]));
+    out.coldAllocatedBytes = stats(metrics.map((x) => x?.allocations?.[1]));
   }
   if (arm === "verter") out.retention = metrics[0]?.retention ?? null;
   out.invocationWallMs = stats(measured.map((i) => i.supervisor?.wallMs));
@@ -87,39 +105,48 @@ function probeArmSummary(arm, invs, reference, scenario) {
   return out;
 }
 
-function cliArmSummary(invs) {
+function cliArmSummary(invs, budgetBytes) {
   const measured = invs.filter((i) => !i.warmup);
-  const parsed = invs.map((i) => (invocationEnd(i).kind === "exited" ? parseCli(i.cliStdout ?? "") : null));
-  const codes = [...new Set(parsed.map((p) => (p ? p.codes.join(",") : "<none>")))];
-  const measuredParsed = measured.map((i) => (invocationEnd(i).kind === "exited" ? parseCli(i.cliStdout ?? "") : null));
+  const ends = invs.map(invocationEnd);
+  const parsed = invs.map((i, k) => (ends[k].kind === "exited" ? parseCli(i.cliStdout ?? "") : null));
+  const codeSets = [...new Set(parsed.map((p, k) => (p ? p.codes.join(",") : `<${ends[k].kind}>`)))];
+  const completed = measured.filter((i) => invocationEnd(i).kind === "exited");
+  const measuredParsed = completed.map((i) => parseCli(i.cliStdout ?? ""));
+  const overBudget = completed.filter((i) => typeof i.supervisor?.peakBytes === "number" && i.supervisor.peakBytes > budgetBytes).length;
+  const killed = invs.filter((i) => invocationEnd(i).kind === "killed");
   return {
     invocations: invs.length,
     measured: measured.length,
-    ends: [...new Set(invs.map((i) => invocationEnd(i).kind))],
-    codes: parsed[0]?.codes ?? null,
-    distinctCodeSets: codes.length,
-    wallMs: stats(measured.map((i) => i.supervisor?.wallMs)),
-    peakBytes: stats(measured.map((i) => i.supervisor?.peakBytes)),
-    peakMetric: measured[0]?.supervisor?.peakMetric ?? null,
-    cpuMs: stats(measured.map((i) => (i.supervisor?.cpuUserMs ?? NaN) + (i.supervisor?.cpuKernelMs ?? NaN))),
-    tscMemoryUsedBytes: stats(measuredParsed.map((p) => p?.memoryUsedBytes)),
-    tscCheckMs: stats(measuredParsed.map((p) => p?.checkMs)),
-    tscTotalMs: stats(measuredParsed.map((p) => p?.totalMs)),
+    status: killed.length === invs.length ? `killed (${invocationEnd(killed[0]).detail})` : killed.length ? "inconsistent" : overBudget ? "over the engine budget" : "completed",
+    ends: [...new Set(ends.map((e) => e.kind))],
+    codes: parsed.find(Boolean)?.codes ?? null,
+    distinctCodeSets: codeSets.length,
+    wallMs: stats(completed.map((i) => i.supervisor?.wallMs)),
+    terminationMs: stats(measured.filter((i) => invocationEnd(i).kind === "killed" && !i.skipped).map((i) => i.supervisor?.wallMs)),
+    peakBytes: stats(completed.map((i) => i.supervisor?.peakBytes)),
+    peakMetric: completed[0]?.supervisor?.peakMetric ?? null,
+    cpuMs: stats(completed.map((i) => (i.supervisor?.cpuUserMs ?? NaN) + (i.supervisor?.cpuKernelMs ?? NaN))),
+    tscMemoryUsedBytes: stats(measuredParsed.map((p) => p.memoryUsedBytes)),
+    tscCheckMs: stats(measuredParsed.map((p) => p.checkMs)),
+    tscTotalMs: stats(measuredParsed.map((p) => p.totalMs)),
   };
 }
 
-// The resolution below which a timing difference is not claimed: Verter's
-// timer is in microseconds; tsc's server-side timer is coarse on Windows.
-const TIME_RESOLUTION_MS = 1;
+/**
+ * The resolution below which a timing difference is not claimed. Verter's
+ * timer is in microseconds; tsc's server-side clock is coarse on Windows
+ * (about half a millisecond). One request: 1 ms. A sum of three
+ * separately timed requests (first type): 2 ms.
+ */
+export const TIME_RESOLUTION_MS = { single: 1, sum: 2 };
 
 function comparison(verterInvs, tscInvs) {
   const v = verterInvs.filter((i) => !i.warmup).map(probeMetrics);
   const t = tscInvs.filter((i) => !i.warmup).map(probeMetrics);
   const pick = (xs, m) => xs.map((x) => x?.[m]);
   const out = {};
-  for (const m of ["coldMs", "warmMs", "firstAnswerMs", "setupMs", "initMs"]) {
-    out[m] = verdict(pick(v, m), pick(t, m), TIME_RESOLUTION_MS);
-  }
+  for (const m of ["coldMs", "warmMs", "setupMs", "initMs", "engineStartMs"]) out[m] = verdict(pick(v, m), pick(t, m), TIME_RESOLUTION_MS.single);
+  out.firstTypeMs = verdict(pick(v, "firstTypeMs"), pick(t, "firstTypeMs"), TIME_RESOLUTION_MS.sum);
   for (const m of ["peakBytes", "retainedBytes"]) out[m] = verdict(pick(v, m), pick(t, m), 0);
   return out;
 }
@@ -127,6 +154,7 @@ function comparison(verterInvs, tscInvs) {
 /** Summarise a run against the measured reference. */
 export function summarize(run, expected, scenarios) {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
+  const budgetBytes = (run.meta?.options?.memMb ?? 0) * 1024 * 1024;
   const groups = new Map();
   for (const inv of run.invocations) {
     const key = `${inv.scenario}/${inv.setting}`;
@@ -140,31 +168,31 @@ export function summarize(run, expected, scenarios) {
     const scenario = byId.get(meta.id);
     const measured = referenceFor(expected, meta.id, meta.setting);
     const armInvs = groups.get(key) ?? {};
+    const base = { beyond: beyondDigest(scenario), probe: probeDigest(scenario), budgetBytes };
     const arms = {};
-    // The tsc arm first: when the CLI measurement exhausted resources but
-    // the API answered with the constructed answer, that answer is the
-    // reference the Verter arms are classified against.
-    if (armInvs["tsc-api"]) arms["tsc-api"] = probeArmSummary("tsc-api", armInvs["tsc-api"], measured, scenario);
+    // The tsc arm first: when the measurement holds no answer but the API
+    // answered with the constructed one, that is the reference the Verter
+    // arms are classified against; and a Verter answer past tsc's limit
+    // counts as beyond tsc only where the tsc arm was killed on the demand.
+    if (armInvs["tsc-api"]) arms["tsc-api"] = probeArmSummary("tsc-api", armInvs["tsc-api"], { ...base, reference: measured });
     const reference =
       arms["tsc-api"]?.class === "reference-by-construction"
-        ? { digest: beyondDigest(scenario), errorAny: false, codes: [], byConstruction: true }
+        ? { digest: beyondDigest(scenario), errorAny: false, codes: measured?.codes ?? [], byConstruction: true, measuredGap: measured?.gap ?? null }
         : measured;
+    const ctx = { ...base, reference, tscKilled: arms["tsc-api"]?.class === "killed" };
     for (const [arm, invs] of Object.entries(armInvs)) {
       if (arm === "tsc-api") continue;
-      arms[arm] = ARMS[arm].kind === "cli" ? cliArmSummary(invs) : probeArmSummary(arm, invs, reference, scenario);
+      arms[arm] = ARMS[arm].kind === "cli" ? cliArmSummary(invs, budgetBytes) : probeArmSummary(arm, invs, ctx);
     }
     const comparableTsc = ["reference", "reference-by-construction"].includes(arms["tsc-api"]?.class);
-    const headline =
-      arms.verter?.class === "matched" && comparableTsc
-        ? comparison(groups.get(key).verter, groups.get(key)["tsc-api"])
-        : null;
+    const headline = arms.verter?.class === "matched" && comparableTsc ? comparison(armInvs.verter, armInvs["tsc-api"]) : null;
     const obsCost =
-      arms.verter && arms["verter-obs"]
+      armInvs.verter && armInvs["verter-obs"]
         ? {
             coldMs: verdict(
-              groups.get(key).verter.filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
-              groups.get(key)["verter-obs"].filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
-              TIME_RESOLUTION_MS,
+              armInvs.verter.filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
+              armInvs["verter-obs"].filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
+              TIME_RESOLUTION_MS.single,
             ),
           }
         : null;
@@ -179,10 +207,10 @@ export function summarize(run, expected, scenarios) {
             digest: reference.digest ?? null,
             errorAny: reference.errorAny ?? null,
             codes: reference.codes ?? [],
+            gap: reference.gap ?? null,
             killed: reference.killed ?? null,
-            gap: referenceGap(reference),
             byConstruction: reference.byConstruction ?? false,
-            measuredKilled: referenceGap(measured),
+            measuredGap: reference.measuredGap ?? null,
           }
         : null,
       arms,

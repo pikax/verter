@@ -9,21 +9,26 @@
 //! `project_node_to_type_expr_json_bytes` for the answer), on a host built
 //! with the production [`HostConfig`] defaults, and writes one JSON record.
 //!
-//! Phases are timed separately and never overlap:
+//! Phases, timed separately and never overlapping, in this order:
 //!
-//! - `setup`: read the job's files, build the workspace and host, configure
-//!   the project, register the library and upsert the scenario;
+//! - `engineStart`: an empty engine, ready — the workspace and the host;
+//! - `setup`: open the project — read the job's files, configure the
+//!   project from its tsconfig, add the library and the scenario;
 //! - `init`: the first request, for the trivial alias every scenario
 //!   declares, which absorbs one-time lazy initialisation for both tools;
-//! - per probe `cold` (its first request), `observe` (materialising and
-//!   rendering the answer — outside the request timer) and `warm` (the same
-//!   request repeated on the same host);
-//! - `teardown`: dropping the host and workspace.
+//! - per probe `cold` (its first request) and `warm` (the same request
+//!   repeated on the same host);
+//! - engine statistics: the host's retention counters and the process's OS
+//!   memory, read with the host alive and before anything is observed, so
+//!   the benchmark's own observation machinery is not charged to the engine;
+//! - `observe`: materialising and rendering the answers (outside every
+//!   timer), then the OS memory again (observation-inclusive, reported
+//!   apart);
+//! - `teardown`: dropping the host.
 //!
-//! Memory is read from the operating system ([`process_stats`]) after the
-//! requests with the host still alive (what the process retains) and after
-//! teardown. The host's own retention counters are read after the requests,
-//! outside every timer.
+//! The record is written as soon as the engine statistics are read and
+//! rewritten after observation, and a phase marker (`<out>.phase`) names the
+//! phase running, so an invocation stopped mid-way still says how far it got.
 
 pub mod cli;
 pub mod process_stats;
@@ -33,6 +38,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use verter_session::semantic_query::SemanticNodeId;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 use verter_workspace::{AmbientLibSpec, MemoryOptions, MemoryWorkspace, WorkspaceAccess};
@@ -51,9 +57,7 @@ pub struct AllocHooks {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum LibMode {
-    /// Registered as the project's ambient library — the channel through
-    /// which a Verter project reads the declarations TypeScript reads from
-    /// its lib files.
+    /// Registered as the project's ambient library.
     Ambient,
     /// Upserted as an ordinary `.d.ts` file of the project — the channel
     /// through which tsc reads it (a root file under `noLib`).
@@ -94,7 +98,7 @@ pub struct Job {
 /// The job schema this runner reads.
 pub const JOB_SCHEMA: u32 = 1;
 /// The result schema this runner writes.
-pub const RESULT_SCHEMA: u32 = 1;
+pub const RESULT_SCHEMA: u32 = 2;
 
 /// The canonical root the scenario project lives at inside the host.
 const PROJECT_ROOT: &str = "/bench";
@@ -155,8 +159,11 @@ pub struct ProbeRecord {
     pub alias: String,
     pub cold: RequestRecord,
     pub warm: Vec<RequestRecord>,
-    pub observe_micros: u64,
-    pub observation: Observation,
+    /// Microseconds spent observing the answers (outside every timer);
+    /// absent until observation ran.
+    pub observe_micros: Option<u64>,
+    /// The cold answer; absent until observation ran.
+    pub observation: Option<Observation>,
     /// Allocations during the cold request (instrumented binary only).
     pub cold_allocations: Option<(u64, u64)>,
 }
@@ -167,6 +174,11 @@ pub struct ProbeRecord {
 pub struct RequestRecord {
     pub micros: u64,
     pub outcome: RequestOutcome,
+    /// For a warm request: whether it answered the cold request's answer —
+    /// the same interned node, or (observed after the measurement) the same
+    /// wire answer. Absent on a cold request and until observation ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_answer_as_cold: Option<bool>,
     /// The production audit record of the request (work counts: hops,
     /// expansions, projection operations, …), kept only on the
     /// observability-on arm, where the host produces it.
@@ -178,9 +190,10 @@ pub struct RequestRecord {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhaseTimes {
+    pub engine_start: u64,
     pub setup: u64,
     pub init: u64,
-    pub teardown: u64,
+    pub teardown: Option<u64>,
 }
 
 /// The job's full record.
@@ -191,11 +204,17 @@ pub struct JobResult {
     pub tool: &'static str,
     pub instrumented: bool,
     pub observability: bool,
+    /// `measured` once the requests and the engine statistics are recorded,
+    /// `complete` once observation and teardown ran too.
+    pub stage: &'static str,
     pub phases: PhaseTimes,
     pub init: RequestRecord,
     pub probes: Vec<ProbeRecord>,
-    /// OS statistics after the requests, with the host alive.
+    /// OS statistics after the requests, with the host alive and nothing
+    /// observed yet: the engine's own figures.
     pub after_requests: Option<process_stats::ProcessStats>,
+    /// OS statistics after observation (observation-inclusive).
+    pub after_observe: Option<process_stats::ProcessStats>,
     /// OS statistics after teardown.
     pub after_teardown: Option<process_stats::ProcessStats>,
     pub stats_errors: Vec<String>,
@@ -241,26 +260,31 @@ fn micros(start: Instant) -> u64 {
     start.elapsed().as_micros() as u64
 }
 
-/// The host one job is answered on, with the workspace it reads.
-struct ScenarioHost {
-    host: Arc<VerterHost>,
-    scenario_id: String,
+/// Where the record and the phase marker are written.
+pub struct Sink<'a> {
+    /// The record file.
+    pub out: &'a Path,
 }
 
-fn build_host(job: &Job) -> Result<ScenarioHost, JobError> {
-    let tsconfig = read(&job.dir, &job.tsconfig)?;
-    let lib = read(&job.dir, &job.lib)?;
-    let scenario = read(&job.dir, &job.scenario)?;
+impl Sink<'_> {
+    fn phase(&self, phase: &str) {
+        let mut path = self.out.as_os_str().to_owned();
+        path.push(".phase");
+        // A lost marker only loses attribution of a later kill; the record
+        // itself is written separately and checked.
+        let _ = std::fs::write(PathBuf::from(path), phase);
+    }
 
+    fn record(&self, result: &JobResult) -> Result<(), JobError> {
+        let text = serde_json::to_string_pretty(result).expect("a record serialises");
+        std::fs::write(self.out, text)
+            .map_err(|err| JobError(format!("write {}: {err}", self.out.display())))
+    }
+}
+
+/// An empty engine, ready: the workspace and the host.
+fn start_engine(job: &Job) -> (Arc<MemoryWorkspace>, Arc<VerterHost>) {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
-    let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
-    workspace.inject_file(tsconfig_path.clone(), Arc::from(tsconfig.as_str()));
-    let mut project = verter_workspace::ide_project_config(
-        PROJECT_ROOT.to_string(),
-        PROJECT_ROOT.to_string(),
-        Some(tsconfig_path.clone()),
-    );
-    project.compiler_options = verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
     let access: Arc<dyn WorkspaceAccess> = workspace.clone();
     let config = if job.observability {
         HostConfig {
@@ -274,7 +298,26 @@ fn build_host(job: &Job) -> Result<ScenarioHost, JobError> {
         // The shipped defaults, untouched.
         HostConfig::default()
     };
-    let host = Arc::new(VerterHost::new(config, access));
+    (workspace, Arc::new(VerterHost::new(config, access)))
+}
+
+/// Open the project on the engine; returns the scenario's canonical id.
+fn open_project(
+    job: &Job,
+    workspace: &MemoryWorkspace,
+    host: &VerterHost,
+) -> Result<String, JobError> {
+    let tsconfig = read(&job.dir, &job.tsconfig)?;
+    let lib = read(&job.dir, &job.lib)?;
+    let scenario = read(&job.dir, &job.scenario)?;
+    let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
+    workspace.inject_file(tsconfig_path.clone(), Arc::from(tsconfig.as_str()));
+    let mut project = verter_workspace::ide_project_config(
+        PROJECT_ROOT.to_string(),
+        PROJECT_ROOT.to_string(),
+        Some(tsconfig_path.clone()),
+    );
+    project.compiler_options = verter_workspace::load_compiler_options(workspace, &tsconfig_path);
     host.configure_projects(vec![project]);
     match job.lib_mode {
         LibMode::Ambient => workspace
@@ -310,21 +353,17 @@ fn build_host(job: &Job) -> Result<ScenarioHost, JobError> {
             aliases: Vec::new(),
         })
         .map_err(|err| JobError(format!("upsert the scenario: {err:?}")))?;
-    Ok(ScenarioHost { host, scenario_id })
+    Ok(scenario_id)
 }
 
 fn request(
-    scenario: &ScenarioHost,
+    host: &VerterHost,
+    scenario_id: &str,
     alias: &str,
     keep_audit: bool,
-) -> (
-    RequestRecord,
-    Option<verter_session::semantic_query::SemanticNodeId>,
-) {
+) -> (RequestRecord, Option<SemanticNodeId>) {
     let start = Instant::now();
-    let carrier = scenario
-        .host
-        .resolve_named_symbol_with_audit(&scenario.scenario_id, alias, None);
+    let carrier = host.resolve_named_symbol_with_audit(scenario_id, alias, None);
     let micros = micros(start);
     // Everything below is outside the timer, including dropping the audit
     // record the carrier holds.
@@ -346,6 +385,7 @@ fn request(
         RequestRecord {
             micros,
             outcome,
+            same_answer_as_cold: None,
             audit,
         },
         node,
@@ -409,23 +449,24 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
     (unknown, samples, conditional)
 }
 
-fn observe(
-    scenario: &ScenarioHost,
-    node: Option<verter_session::semantic_query::SemanticNodeId>,
-) -> Observation {
-    let Some(node) = node else {
-        return Observation {
-            error: Some("no value to observe".into()),
-            ..Observation::empty()
-        };
+/// The wire bytes of `node`'s answer, or why there are none.
+fn wire_bytes(host: &VerterHost, node: Option<SemanticNodeId>) -> Result<Vec<u8>, String> {
+    let node = node.ok_or_else(|| "no value to observe".to_string())?;
+    host.project_node_to_type_expr_json_bytes(node)
+        .ok_or_else(|| "the answer did not materialise".to_string())
+}
+
+fn observe(bytes: Result<&[u8], String>) -> Observation {
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Observation {
+                error: Some(error),
+                ..Observation::empty()
+            }
+        }
     };
-    let Some(bytes) = scenario.host.project_node_to_type_expr_json_bytes(node) else {
-        return Observation {
-            error: Some("the answer did not materialise".into()),
-            ..Observation::empty()
-        };
-    };
-    let decoded = serde_json::from_slice::<serde_json::Value>(&bytes)
+    let decoded = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|err| err.to_string())
         .and_then(|value| {
             let expr =
@@ -484,9 +525,13 @@ fn retention(host: &VerterHost) -> RetentionCounts {
     }
 }
 
-/// Answer `job` and return its record. `alloc` is present only in the
-/// instrumented binary.
-pub fn run_job(job: &Job, alloc: Option<AllocHooks>) -> Result<JobResult, JobError> {
+/// Answer `job`, writing its record through `sink`, and return the record.
+/// `alloc` is present only in the instrumented binary.
+pub fn run_job(
+    job: &Job,
+    alloc: Option<AllocHooks>,
+    sink: &Sink<'_>,
+) -> Result<JobResult, JobError> {
     if job.schema != JOB_SCHEMA {
         return Err(JobError(format!(
             "job schema {} is not the supported {JOB_SCHEMA}",
@@ -498,62 +543,104 @@ pub fn run_job(job: &Job, alloc: Option<AllocHooks>) -> Result<JobResult, JobErr
     }
     let mut stats_errors = Vec::new();
 
+    sink.phase("engine-start");
     let start = Instant::now();
-    let scenario = build_host(job)?;
-    let setup = micros(start);
+    let (workspace, host) = start_engine(job);
+    let engine_start = micros(start);
 
-    let (init, _) = request(&scenario, &job.init_alias, false);
+    sink.phase("setup");
+    let start = Instant::now();
+    let scenario_id = open_project(job, &workspace, &host)?;
+    let setup = micros(start);
+    drop(workspace);
+
+    sink.phase("init");
+    let (init, _) = request(&host, &scenario_id, &job.init_alias, false);
 
     let mut probes = Vec::with_capacity(job.probes.len());
+    let mut nodes = Vec::with_capacity(job.probes.len());
     for alias in &job.probes {
+        sink.phase("cold");
         if let Some(hooks) = alloc {
             (hooks.reset)();
         }
-        let (cold, node) = request(&scenario, alias, job.observability);
+        let (cold, node) = request(&host, &scenario_id, alias, job.observability);
         let cold_allocations = alloc.map(|hooks| (hooks.read)());
-        let observe_start = Instant::now();
-        let observation = observe(&scenario, node);
-        let observe_micros = micros(observe_start);
-        let warm = (0..job.warm_repeats)
-            .map(|_| request(&scenario, alias, false).0)
-            .collect();
+        sink.phase("warm");
+        let mut warm = Vec::with_capacity(job.warm_repeats as usize);
+        let mut warm_nodes = Vec::with_capacity(job.warm_repeats as usize);
+        for _ in 0..job.warm_repeats {
+            let (record, warm_node) = request(&host, &scenario_id, alias, false);
+            warm.push(record);
+            warm_nodes.push(warm_node);
+        }
         probes.push(ProbeRecord {
             alias: alias.clone(),
             cold,
             warm,
-            observe_micros,
-            observation,
+            observe_micros: None,
+            observation: None,
             cold_allocations,
         });
+        nodes.push((node, warm_nodes));
     }
 
-    let retention = retention(&scenario.host);
+    sink.phase("stats");
+    let retention = retention(&host);
     let after_requests = process_stats::current_process()
         .map_err(|err| stats_errors.push(format!("after requests: {err}")))
         .ok();
-
-    let start = Instant::now();
-    drop(scenario);
-    let teardown = micros(start);
-    let after_teardown = process_stats::current_process()
-        .map_err(|err| stats_errors.push(format!("after teardown: {err}")))
-        .ok();
-
-    Ok(JobResult {
+    let mut result = JobResult {
         schema: RESULT_SCHEMA,
         tool: "verter",
         instrumented: alloc.is_some(),
         observability: job.observability,
+        stage: "measured",
         phases: PhaseTimes {
+            engine_start,
             setup,
             init: init.micros,
-            teardown,
+            teardown: None,
         },
         init,
         probes,
         after_requests,
-        after_teardown,
+        after_observe: None,
+        after_teardown: None,
         stats_errors,
         retention,
-    })
+    };
+    sink.record(&result)?;
+
+    sink.phase("observe");
+    for (probe, (node, warm_nodes)) in result.probes.iter_mut().zip(&nodes) {
+        let start = Instant::now();
+        let cold_bytes = wire_bytes(&host, *node);
+        probe.observation = Some(observe(cold_bytes.as_deref().map_err(Clone::clone)));
+        for (record, warm_node) in probe.warm.iter_mut().zip(warm_nodes) {
+            record.same_answer_as_cold = Some(match (node, warm_node) {
+                (Some(cold), Some(warm)) if cold == warm => true,
+                (Some(_), Some(_)) => {
+                    matches!((&cold_bytes, wire_bytes(&host, *warm_node)), (Ok(a), Ok(b)) if *a == b)
+                }
+                _ => false,
+            });
+        }
+        probe.observe_micros = Some(micros(start));
+    }
+    result.after_observe = process_stats::current_process()
+        .map_err(|err| result.stats_errors.push(format!("after observe: {err}")))
+        .ok();
+
+    sink.phase("teardown");
+    let start = Instant::now();
+    drop(host);
+    result.phases.teardown = Some(micros(start));
+    result.after_teardown = process_stats::current_process()
+        .map_err(|err| result.stats_errors.push(format!("after teardown: {err}")))
+        .ok();
+    result.stage = "complete";
+    sink.record(&result)?;
+    sink.phase("done");
+    Ok(result)
 }

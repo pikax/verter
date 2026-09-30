@@ -3,6 +3,7 @@
 
 import { ARMS } from "./analyze.mjs";
 import { UNCOVERED } from "./scenarios.mjs";
+import { TIME_RESOLUTION_MS } from "./summary.mjs";
 
 const fmtMs = (s) => {
   if (!s) return "—";
@@ -25,9 +26,7 @@ const esc = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 function referenceText(ref) {
   if (!ref) return "no reference";
   if (ref.gap) return ref.gap;
-  if (ref.byConstruction) {
-    return `\`${esc(ref.digest?.preview)}\` (measurement: ${ref.measuredKilled}; the API's answer is the constructed one)`;
-  }
+  if (ref.byConstruction) return `\`${esc(ref.digest?.preview)}\` (measurement: ${ref.measuredGap}; the API's answer is the constructed one)`;
   const answer = ref.errorAny ? "error any" : `\`${esc(ref.digest?.preview)}\``;
   const codes = ref.codes.filter((c) => c !== 2322);
   return codes.length ? `${answer} + TS${codes.join("/TS")}` : answer;
@@ -40,35 +39,38 @@ export function renderMarkdown(run) {
   const push = (...l) => lines.push(...l);
   push("# Semantic benchmark: Verter vs tsc 7.0.2 on equivalent demands", "");
   push(`Validation: **${validation?.ok ? "PASSED" : "FAILED"}**${validation?.ok ? "" : ` (${validation.failures.length} failure(s); see the end)`}`, "");
+  if (Object.keys(meta.tuning ?? {}).length) push(`**Tuned run** (not a baseline): ${Object.entries(meta.tuning).map(([k, v]) => `\`${k}=${v}\``).join(", ")}`, "");
   push("## Run", "");
+  const containment = [
+    ...new Set(
+      run.invocations
+        .filter((i) => i.supervisor)
+        .map(
+          (i) =>
+            `**${i.supervisor.containment ?? "unknown"}** (${i.supervisor.backend ?? "?"}${i.supervisor.containment === "sampled" ? ", no guaranteed overshoot bound" : ""})`,
+        ),
+    ),
+  ].join(", ");
   push(
     `- Source: \`${meta.tree.head.slice(0, 12)}\` on \`${meta.tree.branch}\`${meta.tree.dirty ? ` — **dirty** (${meta.tree.changedPaths} paths, diff sha256 \`${meta.tree.diffSha256.slice(0, 12)}\`)` : " (clean)"}`,
     `- Host: ${meta.host.platform}-${meta.host.arch}, ${meta.host.cpuModel} (${meta.host.logicalCpus} logical CPUs), ${(meta.host.totalMemoryBytes / 2 ** 30).toFixed(1)} GiB, node ${meta.host.node}`,
-    `- tsc: ${meta.typescript.versionText}, ${meta.typescript.platformPackage} (exe sha256 \`${meta.typescript.exeSha256.slice(0, 12)}\`)`,
-    `- Verter probe: release, sha256 \`${meta.binaries.probe.sha256.slice(0, 12)}\` (counted twin \`${meta.binaries.counted.sha256.slice(0, 12)}\`)`,
-    `- Supervisor: \`${meta.binaries.supervisor.sha256.slice(0, 12)}\` (${meta.binaries.supervisor.origin}); cap ${o.memMb} MiB, deadline ${o.timeoutMs} ms; containment ${[
-      ...new Set(
-        run.invocations
-          .filter((i) => i.supervisor)
-          .map(
-            (i) =>
-              `**${i.supervisor.containment ?? "unknown"}** (${i.supervisor.backend ?? "?"}${i.supervisor.containment === "sampled" ? ", no guaranteed overshoot bound" : ""})`,
-          ),
-      ),
-    ].join(", ")}`,
+    `- tsc: ${meta.typescript.versionText}, ${meta.typescript.platformPackage} (exe sha256 \`${meta.typescript.exeSha256.slice(0, 12)}\`, passed to the API explicitly)`,
+    `- Verter probe: release (${meta.binaries.probe.identity?.targetArch}), sha256 \`${meta.binaries.probe.sha256.slice(0, 12)}\` (counted twin \`${meta.binaries.counted.sha256.slice(0, 12)}\`); ${(meta.build.rustc ?? "").split("\n")[0]}`,
+    `- Engine memory budget ${o.memMb} MiB for both tools; each process tree is contained at ${o.memMb + o.infraMb} MiB (the budget plus ${o.infraMb} MiB for the tree's other members); deadline ${o.timeoutMs} ms`,
+    `- Supervisor: \`${meta.binaries.supervisor.sha256.slice(0, 12)}\` (${meta.binaries.supervisor.origin}); containment ${containment}`,
     `- Invocations: ${run.invocations.length} (${run.invocations.filter((i) => i.skipped).length} skipped after a warmup killed at the memory cap)`,
-    `- Schedule: ${o.warmup} warmup + ${o.repeat} measured invocations per arm, counterbalanced (scenario order and arm order reverse on alternate rounds); ${o.warmRepeats} in-process warm repeats; settings ${o.settings}; Verter library channel ${o.libMode}`,
+    `- Schedule: ${o.warmup} warmup + ${o.repeat} measured invocations per arm, counterbalanced (scenario order reverses on alternate rounds; each cell's arm order alternates round by round, so every pair of arms runs in each order equally often in every cell); ${o.warmRepeats} in-process warm repeats; settings ${o.settings}; Verter library channel ${o.libMode}`,
     `- Arms: ${o.arms.map((a) => `\`${a}\``).join(", ")}`,
     "",
   );
   push("## How to read this", "");
   push(
     "- Both arms answer the same demand: the declared type of the alias `__Probe` in the same module, library and compiler options. Times are milliseconds, the median of the measured invocations with [min–max].",
-    "- **cold**: the probe's first request in a fresh process (after the `__BenchInit` request absorbed one-time initialisation). tsc's figure is its server-side processing time (excludes IPC). **first answer** = setup + init + cold: the robust cross-tool figure, since each tool defers different work to its first request. **warm**: the same request repeated in the same process.",
-    "- **peak / retained**: the engine process's own OS accounting, read by one reader for both tools while the process is alive after the requests (Windows: private commit; macOS: physical footprint). tsc's figure is the native API server, not the node client that drives it.",
-    "- **observe** (materialising and printing the answer) is outside every timer for both tools and shown in the answers table, so work either tool defers to printing stays visible.",
-    "- A verdict names a winner only when every measured repetition of one arm beats every repetition of the other (and by more than 1 ms for times); otherwise **overlap**. ×N is tsc's median over Verter's (above 1 favours Verter).",
-    "- Only rows where Verter's answer **matched** tsc's measured answer enter the comparison. A wrong, partial, refused or killed answer is never a win; a beyond-tsc answer is reported separately and never counted as a speed win.",
+    "- **engine start** (an empty engine, ready: Verter's host; tsc's API session `initialize`) is reported apart and not part of any headline. **setup** opens the project. **cold**: the probe's first request (after the `__BenchInit` request absorbed one-time initialisation). **first type** = setup + init + cold: from opening the project to the demanded type, the robust cross-tool figure, since each tool splits its work between opening a project and its first request differently. Both arms return the evaluated type's handle; printing it is **observe**, outside every timer. **warm**: the same request repeated in the same process.",
+    "- tsc's request times are its server-side processing time (excluding IPC), bounded above by the client's round trip (the server clock is coarse on Windows); the round trip is shown beside it.",
+    "- **peak / retained**: each engine process's own OS accounting (Windows: private commit; macOS: physical footprint), read by one reader for both tools with the engine alive after the requests and **before** anything is observed; tsc's figure is the native API server, never its node client. Figures after observation are reported apart. An engine whose own peak exceeds the budget counts as exhausting it.",
+    `- A verdict is a descriptive rule, not a statistical test: it names a winner only when every measured repetition of one arm beats every repetition of the other by more than the timer resolution (${TIME_RESOLUTION_MS.single} ms for one request, ${TIME_RESOLUTION_MS.sum} ms for first type, a sum of three); otherwise **overlap**. ×N is tsc's median over Verter's (above 1 favours Verter).`,
+    "- Only rows where Verter's answer **matched** tsc's measured answer enter the comparison. A wrong, partial, refused, unverified or killed answer is never a win; a beyond-tsc answer is reported separately and never counted as a speed win.",
     "",
   );
 
@@ -78,32 +80,50 @@ export function renderMarkdown(run) {
   if (!matched.length) push("_No row has a matched answer from both headline arms._", "");
   else {
     push(
-      "| scenario | setting | answer | Verter cold | tsc cold | cold | Verter first answer | tsc first answer | first answer | Verter warm | tsc warm | Verter peak MB | tsc peak MB | peak | Verter retained MB | tsc retained MB |",
+      "| scenario | setting | answer | Verter cold | tsc cold | cold | Verter first type | tsc first type | first type | Verter warm | tsc warm | Verter peak MB | tsc peak MB | peak | Verter retained MB | tsc retained MB |",
       "|---|---|---|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---|---:|---:|",
     );
     for (const c of matched) {
       const v = c.arms.verter.metrics;
       const t = c.arms["tsc-api"].metrics;
       push(
-        `| ${c.scenario} | ${c.setting} | \`${esc(c.reference?.digest?.preview?.slice(0, 40))}\` | ${fmtMs(v.coldMs)} | ${fmtMs(t.coldMs)} | ${fmtRatio(c.headline.coldMs)} | ${fmtMs(v.firstAnswerMs)} | ${fmtMs(t.firstAnswerMs)} | ${fmtRatio(c.headline.firstAnswerMs)} | ${fmtMs(v.warmMs)} | ${fmtMs(t.warmMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t.peakBytes)} | ${fmtRatio(c.headline.peakBytes)} | ${fmtMb(v.retainedBytes)} | ${fmtMb(t.retainedBytes)} |`,
+        `| ${c.scenario} | ${c.setting} | \`${esc(c.reference?.digest?.preview?.slice(0, 40))}\` | ${fmtMs(v.coldMs)} | ${fmtMs(t.coldMs)} | ${fmtRatio(c.headline.coldMs)} | ${fmtMs(v.firstTypeMs)} | ${fmtMs(t.firstTypeMs)} | ${fmtRatio(c.headline.firstTypeMs)} | ${fmtMs(v.warmMs)} | ${fmtMs(t.warmMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t.peakBytes)} | ${fmtRatio(c.headline.peakBytes)} | ${fmtMb(v.retainedBytes)} | ${fmtMb(t.retainedBytes)} |`,
       );
     }
     push("");
-    const tally = { verter: 0, tsc: 0, overlap: 0 };
-    for (const c of matched) tally[c.headline.firstAnswerMs.verdict] = (tally[c.headline.firstAnswerMs.verdict] ?? 0) + 1;
-    push(`First-answer verdicts over ${matched.length} matched row(s): Verter ${tally.verter}, tsc ${tally.tsc}, overlap ${tally.overlap}.`, "");
+    const tally = (metric) => {
+      const t = { verter: 0, tsc: 0, overlap: 0 };
+      for (const c of matched) t[c.headline[metric].verdict] = (t[c.headline[metric].verdict] ?? 0) + 1;
+      return `Verter ${t.verter}, tsc ${t.tsc}, overlap ${t.overlap}`;
+    };
+    push(`Over ${matched.length} matched row(s) — first type: ${tally("firstTypeMs")}; cold: ${tally("coldMs")}; peak memory: ${tally("peakBytes")}.`, "");
   }
+
+  push("## Phases and engine start (every row both headline arms completed)", "");
+  push(
+    "| scenario | setting | Verter engine start | tsc engine start | tsc spawn (client, process start) | Verter setup | tsc setup | Verter init | tsc init | Verter peak after observe MB | tsc peak after observe MB |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+  );
+  for (const c of cells) {
+    const v = c.arms.verter?.metrics;
+    const t = c.arms["tsc-api"]?.metrics;
+    if (!v?.setupMs || !t?.setupMs) continue;
+    push(
+      `| ${c.scenario} | ${c.setting} | ${fmtMs(v.engineStartMs)} | ${fmtMs(t.engineStartMs)} | ${fmtMs(t.spawnMs)} | ${fmtMs(v.setupMs)} | ${fmtMs(t.setupMs)} | ${fmtMs(v.initMs)} | ${fmtMs(t.initMs)} | ${fmtMb(v.observePeakBytes)} | ${fmtMb(t.observePeakBytes)} |`,
+    );
+  }
+  push("");
 
   push("## Answers (every row)", "");
   push(
-    "| scenario | setting | tsc 7.0.2 (measured) | Verter | detail | Verter cold | tsc cold | tsc round trip | Verter observe | tsc observe |",
-    "|---|---|---|---|---|---:|---:|---:|---:|---:|",
+    "| scenario | setting | tsc 7.0.2 (measured) | tsc arm | Verter | detail | Verter cold | tsc cold | tsc round trip | Verter observe | tsc observe |",
+    "|---|---|---|---|---|---|---:|---:|---:|---:|---:|",
   );
   for (const c of cells) {
     const v = c.arms.verter;
     const t = c.arms["tsc-api"];
     push(
-      `| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | **${v?.class ?? "not run"}** | ${esc(v?.detail).slice(0, 120)} | ${fmtMs(v?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldRoundTripMs)} | ${fmtMs(v?.metrics?.observeMs)} | ${fmtMs(t?.metrics?.observeMs)} |`,
+      `| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${t?.class ?? "not run"}${t?.detail ? ` (${esc(t.detail).slice(0, 60)})` : ""} | **${v?.class ?? "not run"}** | ${esc(v?.detail).slice(0, 120)} | ${fmtMs(v?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldRoundTripMs)} | ${fmtMs(v?.metrics?.observeMs)} | ${fmtMs(t?.metrics?.observeMs)} |`,
     );
   }
   push("", `Verter classes: ${Object.entries(summary.verterClassCounts).map(([k, n]) => `${k} ${n}`).join(", ")}.`, "");
@@ -111,11 +131,11 @@ export function renderMarkdown(run) {
   const beyond = cells.filter((c) => c.arms.verter?.class === "beyond-tsc");
   if (beyond.length) {
     push("## Beyond tsc's limits (reported separately, never a speed win)", "");
-    push("| scenario | setting | tsc stops with | Verter first answer | tsc time to its fallback (first answer) | Verter peak MB | tsc peak MB |", "|---|---|---|---:|---:|---:|---:|");
+    push("| scenario | setting | tsc stops with | Verter first type | tsc time to its fallback (first type) | Verter peak MB | tsc peak MB |", "|---|---|---|---:|---:|---:|---:|");
     for (const c of beyond) {
       const v = c.arms.verter.metrics;
       const t = c.arms["tsc-api"]?.metrics;
-      push(`| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${fmtMs(v.firstAnswerMs)} | ${fmtMs(t?.firstAnswerMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t?.peakBytes)} |`);
+      push(`| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${fmtMs(v.firstTypeMs)} | ${fmtMs(t?.firstTypeMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t?.peakBytes)} |`);
     }
     push("");
   }
@@ -126,8 +146,9 @@ export function renderMarkdown(run) {
     for (const c of cells) {
       if (!c.arms["verter-obs"] || !c.arms.verter) continue;
       const cost = c.obsCost?.coldMs;
+      const word = cost?.verdict === "verter" ? "slower" : cost?.verdict === "tsc" ? "faster" : "overlap";
       push(
-        `| ${c.scenario} | ${c.setting} | ${fmtMs(c.arms.verter.metrics.coldMs)} | ${fmtMs(c.arms["verter-obs"].metrics.coldMs)} | ${cost?.ratio != null ? `×${cost.ratio.toFixed(2)} (${cost.verdict === "verter" ? "slower" : cost.verdict === "tsc" ? "faster" : "overlap"})` : "—"} | ${fmtMb(c.arms.verter.metrics.peakBytes)} | ${fmtMb(c.arms["verter-obs"].metrics.peakBytes)} |`,
+        `| ${c.scenario} | ${c.setting} | ${fmtMs(c.arms.verter.metrics.coldMs)} | ${fmtMs(c.arms["verter-obs"].metrics.coldMs)} | ${cost?.ratio != null && cost.ratioMeaningful !== false ? `×${cost.ratio.toFixed(2)} (${word})` : word} | ${fmtMb(c.arms.verter.metrics.peakBytes)} | ${fmtMb(c.arms["verter-obs"].metrics.peakBytes)} |`,
       );
     }
     push("");
@@ -151,17 +172,18 @@ export function renderMarkdown(run) {
   if (cli.length) {
     push("## Whole program: tsc -p (reference only)", "");
     push(
-      "Verter exposes no whole-program diagnostic pass, so there is no Verter arm here: these rows show what tsc's full check costs, in both thread modes, for the scenario plus `declare const __bench_use: __Probe;` (a use, so the full check computes the probe's answer; tsc resolves an unused alias lazily). Wall times include process start. `Memory used` is tsc's own counter, reported apart from the OS peak.",
+      "Verter exposes no whole-program diagnostic pass, so there is no Verter arm here: these rows show what tsc's full check costs, in both thread modes, for the scenario plus `declare const __bench_use: __Probe;` (a use, so the full check computes the probe's answer; tsc resolves an unused alias lazily). Wall times include process start; a killed run shows its time to termination instead. `Memory used` is tsc's own counter, reported apart from the OS peak.",
       "",
     );
-    push("| scenario | setting | diagnostics | parallel wall | parallel check | parallel OS peak MB | parallel Memory used MB | single wall | single check | single OS peak MB | single Memory used MB |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
-    for (const c of cli) {
-      const p = c.arms["tsc-cli"];
-      const s = c.arms["tsc-cli-1"];
-      push(
-        `| ${c.scenario} | ${c.setting} | ${(p?.codes ?? s?.codes ?? []).map((x) => `TS${x}`).join(", ") || "none"} | ${fmtMs(p?.wallMs)} | ${fmtMs(p?.tscCheckMs)} | ${fmtMb(p?.peakBytes)} | ${fmtMb(p?.tscMemoryUsedBytes)} | ${fmtMs(s?.wallMs)} | ${fmtMs(s?.tscCheckMs)} | ${fmtMb(s?.peakBytes)} | ${fmtMb(s?.tscMemoryUsedBytes)} |`,
-      );
-    }
+    push(
+      "| scenario | setting | parallel: status | diagnostics | wall | check | OS peak MB | Memory used MB | single: status | diagnostics | wall | check | OS peak MB | Memory used MB |",
+      "|---|---|---|---|---:|---:|---:|---:|---|---|---:|---:|---:|---:|",
+    );
+    const armCells = (s) =>
+      s
+        ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
+        : "not run | — | — | — | — | —";
+    for (const c of cli) push(`| ${c.scenario} | ${c.setting} | ${armCells(c.arms["tsc-cli"])} | ${armCells(c.arms["tsc-cli-1"])} |`);
     push("");
   }
 

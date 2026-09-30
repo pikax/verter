@@ -25,17 +25,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARMS, compactProbeRecord, invocationEnd, parseCli, probeAnswer } from "./analyze.mjs";
+import { ARMS, compactProbeRecord, invocationEnd, parseCli, probeAnswer, probeRecordProblems } from "./analyze.mjs";
+import { sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import { buildProblems, RECORDED_PACKAGES, sha256File, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
 import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import { MEASURING_SUFFIX } from "./measure-expected.mjs";
 import { summarize } from "./summary.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-function scheduleFromMeta(meta) {
-  return meta.plan;
-}
 
 /** Plan string for an invocation. */
 function planEntry(inv) {
@@ -82,6 +81,21 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     fail("the harness changed during the run, so its invocations did not all run one method");
   }
   for (const name of RECORDED_PACKAGES) if (!meta.build?.packages?.[name]) fail(`wrong binary: no build record for ${name}`);
+  for (const [f, sha] of Object.entries(ts.apiSha256 ?? {})) {
+    if (after.tsApi?.[f] !== sha) fail(`wrong binary: the tsc API client ${f} changed during the run`);
+  }
+  const host = meta.host ?? {};
+  for (const [name, bin] of [
+    ["the Verter probe", bins.probe],
+    ["the counted probe", bins.counted],
+  ]) {
+    if (!bin?.identity || !sameArchitecture(bin.identity.targetArch, host.arch) || !String(ts.platformPackage ?? "").endsWith(`-${host.arch}`)) {
+      fail(`wrong binary: ${name} (${bin?.identity?.targetArch}), node (${host.arch}) and tsc (${ts.platformPackage}) are not one native architecture`);
+    }
+  }
+  if (Object.keys(meta.tuning ?? {}).length && !meta.options?.allowTuning) {
+    fail(`tuning variables were set without --allow-tuning: ${Object.keys(meta.tuning).join(", ")}`);
+  }
 
   // The reference and the inputs: every cell's files are the catalog's, and
   // the reference was measured on exactly those sources and that library.
@@ -100,13 +114,21 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {
       if (measured.sourceSha256 !== sha256Text(scenario.source)) fail(`${key}: the measured reference is stale (measured on a different source)`);
-      if (expected.libSha256 !== cell.inputs?.["lib.bench.d.ts"]) fail(`${key}: the measured reference used a different library`);
+      if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"]) fail(`${key}: the measured reference used a different library`);
+      if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX)) fail(`${key}: the measured reference used a different measuring method`);
     }
   }
 
   // Records against the plan.
   const opts = meta.options ?? {};
-  const plan = scheduleFromMeta(meta) ?? [];
+  const cellKeys = Object.keys(meta.scenarios ?? {});
+  const expectedPlan = schedule(cellKeys, opts.arms ?? [], opts.repeat ?? 0, opts.warmup ?? 0);
+  const plan = meta.plan ?? [];
+  if (stable(plan) !== stable(expectedPlan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`))) {
+    fail("the recorded plan is not the counterbalanced schedule for the run's cells, arms and rounds");
+  }
+  if ((opts.repeat ?? 0) % 2) fail(`--repeat ${opts.repeat} is odd: the arm order cannot balance`);
+  for (const p of scheduleBalanceProblems(expectedPlan, opts.arms ?? [])) fail(`schedule: ${p}`);
   const invs = run.invocations ?? [];
   if (!invs.length) fail("zero records: the run holds no invocation");
   const seen = new Map();
@@ -155,17 +177,24 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     if (sup.containment !== "hard" && !(sup.containment === "sampled" && opts.allowSampled)) {
       fail(`${id}: containment ${sup.containment} without consent (--allow-sampled)`);
     }
-    if (sup.memLimitBytes !== opts.memMb * 1024 * 1024) fail(`${id}: memory cap ${sup.memLimitBytes} is not the run's ${opts.memMb} MiB`);
+    const cap = ((opts.memMb ?? 0) + (opts.infraMb ?? 0)) * 1024 * 1024;
+    if (sup.memLimitBytes !== cap) fail(`${id}: containment cap ${sup.memLimitBytes} is not the run's budget plus allowance (${cap})`);
     if (sup.timeoutMs !== opts.timeoutMs) fail(`${id}: deadline ${sup.timeoutMs} is not the run's ${opts.timeoutMs} ms`);
     const end = invocationEnd(inv);
-    const expectedExit = end.kind === "killed" ? (sup.killedBy === "timeout" ? 124 : 137) : end.kind === "exited" ? sup.exitCode : 125;
+    const expectedExit = ["killed", "observe-killed"].includes(end.kind) ? (sup.killedBy === "timeout" ? 124 : 137) : end.kind === "exited" ? sup.exitCode : 125;
     if (inv.supervisorExit !== expectedExit) fail(`${id}: supervisor exit ${inv.supervisorExit} disagrees with its record (${expectedExit})`);
     if (end.kind === "harness-failure") {
       fail(`${id}: failed child: ${end.detail}`);
       continue;
     }
-    if (end.kind === "killed") continue;
     const arm = ARMS[inv.arm];
+    if (end.kind === "killed") continue;
+    if (end.kind === "observe-killed") {
+      // The demand was measured and recorded before the kill: its record
+      // must hold every demand field.
+      for (const p of probeRecordProblems(inv.probe, { tool: arm.tool, warmRepeats: opts.warmRepeats, stage: "measured" })) fail(`${id}: ${p}`);
+      continue;
+    }
     if (arm.kind === "cli") {
       if (![0, 1, 2].includes(sup.exitCode)) fail(`${id}: failed child: tsc exited ${sup.exitCode}`);
       else if (!parseCli(inv.cliStdout ?? "").complete) fail(`${id}: failed child: tsc printed no extended diagnostics`);
@@ -180,23 +209,14 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: failed child: no probe record (${inv.probeReadError})`);
       continue;
     }
-    if (r.schema !== 1) fail(`${id}: probe record schema ${r.schema}`);
-    if (r.tool !== arm.tool) fail(`${id}: probe record from ${r.tool}, arm is ${arm.tool}`);
-    if (!Array.isArray(r.probes) || r.probes.length !== 1 || r.probes[0].alias !== "__Probe") {
-      fail(`${id}: expected exactly one __Probe record, got ${r.probes?.length ?? 0}`);
-    }
-    const warm = r.probes?.[0]?.warm ?? [];
-    if (warm.length !== opts.warmRepeats) fail(`${id}: ${warm.length} warm repeats, not ${opts.warmRepeats}`);
+    for (const p of probeRecordProblems(r, { tool: arm.tool, warmRepeats: opts.warmRepeats })) fail(`${id}: ${p}`);
     if (arm.tool === "verter") {
       if (r.instrumented !== (inv.arm === "verter-counted")) fail(`${id}: instrumentation flag ${r.instrumented} is wrong for ${inv.arm}`);
       if (r.observability !== (inv.arm === "verter-obs")) fail(`${id}: observability flag ${r.observability} is wrong for ${inv.arm}`);
-      if (!r.afterRequests || r.afterRequests.peakBytes == null) fail(`${id}: failed child: no process statistics (${(r.statsErrors ?? []).join("; ")})`);
       const exe = inv.arm === "verter-counted" ? bins.counted?.pinned : bins.probe?.pinned;
       if (inv.command?.[0] !== exe) fail(`${id}: ran ${inv.command?.[0]}, not the pinned probe ${exe}`);
     } else {
-      if (!r.serverAfterRequests || r.serverAfterRequests.peakBytes == null) {
-        fail(`${id}: failed child: no tsc server statistics (${(r.statsErrors ?? []).join("; ")})`);
-      }
+      if (r.tscExe !== ts.exe) fail(`${id}: the API ran ${r.tscExe}, not the verified tsc ${ts.exe}`);
       const dir = String(meta.scenarios?.[`${inv.scenario}/${inv.setting}`]?.dir ?? "").replace(/\\/g, "/");
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase());
       const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
@@ -216,7 +236,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         if (arm === "tsc-api" && s.class === "inconsistent-with-reference") {
           for (const p of s.referenceProblems) fail(`${id}: wrong answer against the measured reference: ${p}`);
         }
-        if (requireAllMatched && ARMS[arm].tool === "verter" && !["matched", "beyond-tsc"].includes(s.class)) {
+        if (requireAllMatched && ARMS[arm].tool === "verter" && s.class !== "matched") {
           fail(`${id}: Verter's answer is ${s.class} (${s.detail}); --require-all-matched`);
         }
       } else if (s.distinctCodeSets > 1) {
@@ -224,6 +244,18 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       }
     }
     if (!cell.reference) warnings.push(`${cell.key}: no measured reference`);
+    // Both headline arms' memory must come from one metric.
+    const vm = cell.arms.verter?.memoryMetric;
+    const tm = cell.arms["tsc-api"]?.memoryMetric;
+    if (vm && tm && vm !== tm) fail(`${cell.key}: the arms' memory metrics differ (${vm} vs ${tm})`);
+    if (cell.headline) {
+      for (const arm of ["verter", "tsc-api"]) {
+        const s = cell.arms[arm];
+        for (const m of ["coldMs", "firstTypeMs", "warmMs", "peakBytes", "retainedBytes"]) {
+          if (s.metrics[m]?.n !== s.measured) fail(`${cell.key}|${arm}: ${m} has ${s.metrics[m]?.n ?? 0} of ${s.measured} measured values`);
+        }
+      }
+    }
   }
   if (!run.summary) fail("the run holds no summary");
   else if (stable(run.summary) !== stable(recomputed)) {
