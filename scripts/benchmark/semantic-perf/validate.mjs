@@ -269,7 +269,6 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       "the recorded plan is not the counterbalanced schedule for the run's cells, arms and rounds",
     );
   }
-  if ((opts.repeat ?? 0) % 2) fail(`--repeat ${opts.repeat} is odd: the arm order cannot balance`);
   for (const p of scheduleBalanceProblems(expectedPlan, opts.arms ?? [])) fail(`schedule: ${p}`);
   const invs = run.invocations ?? [];
   if (!invs.length) fail("zero records: the run holds no invocation");
