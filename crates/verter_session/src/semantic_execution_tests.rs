@@ -478,3 +478,175 @@ fn spawned_children_are_private_frames_that_never_touch_the_native_stack() {
     assert_eq!(execution.counters().reuses, 0);
     assert_eq!(execution.live_frames(), 0);
 }
+
+/// A program whose root needs `joins` demands in turn, each owned by a
+/// producer outside the execution: every one is joined, and a join may
+/// first find its producer gone `restarts` times, restarting the demand.
+struct Joins {
+    joins: u64,
+    restarts: u32,
+    left: std::collections::HashMap<u64, u32>,
+    /// Stop the drive once this many subscriptions have been started.
+    stop_after_subscribes: Option<u64>,
+    subscribes: u64,
+    /// Held by every live subscription.
+    alive: Rc<()>,
+}
+
+impl Joins {
+    fn new(joins: u64, restarts: u32) -> Self {
+        Self {
+            joins,
+            restarts,
+            left: Default::default(),
+            stop_after_subscribes: None,
+            subscribes: 0,
+            alive: Rc::new(()),
+        }
+    }
+}
+
+struct JoinFrame {
+    next: u64,
+    total: u64,
+}
+
+impl Program for Joins {
+    type Demand = u64;
+    type Frame = JoinFrame;
+    type Value = u64;
+    type Failure = ();
+    type Role = ();
+    type Subscription = (u64, Rc<()>);
+
+    fn start(&mut self, demand: &u64) -> Start<Self> {
+        if demand.is_multiple_of(1_000_000) {
+            return Start::Produce(JoinFrame {
+                next: *demand + 1,
+                total: 0,
+            });
+        }
+        self.subscribes += 1;
+        Start::Subscribe((*demand, Rc::clone(&self.alive)))
+    }
+
+    fn step(&mut self, frame: &mut JoinFrame, delivery: Option<Outcome<Self>>) -> EvalStep<Self> {
+        if let Some(value) = delivery {
+            frame.total += value.expect("a join completes");
+        }
+        if frame.next % 1_000_000 <= self.joins {
+            let demand = frame.next;
+            frame.next += 1;
+            return EvalStep::Need { demand, role: () };
+        }
+        EvalStep::Complete(frame.total)
+    }
+
+    fn close_cycle(&mut self, _: &u64, _: ()) -> Outcome<Self> {
+        unreachable!("joins never close a cycle")
+    }
+
+    fn reusable(&self, _: &u64, _: &u64) -> bool {
+        true
+    }
+
+    fn wait(&mut self, (subscription, _alive): (u64, Rc<()>)) -> External<Self> {
+        let left = self.left.entry(subscription).or_insert(self.restarts);
+        if *left > 0 {
+            *left -= 1;
+            return External::Restart;
+        }
+        External::Complete(Ok(1))
+    }
+
+    fn stop(&self) -> Option<()> {
+        self.stop_after_subscribes
+            .is_some_and(|limit| self.subscribes >= limit)
+            .then_some(())
+    }
+}
+
+/// Joining outside producers in turn inspects one subscription per wait,
+/// however many joins came before: at most one subscription is live (the
+/// chain's tip waits on it), and a finished one leaves nothing to skip. So
+/// do restarted joins within one execution, and drives after the first on
+/// the same execution.
+#[test]
+fn each_join_of_an_outside_producer_inspects_one_subscription() {
+    for joins in [128, 256, 512, 1_024] {
+        // Successive joins within one execution.
+        let mut program = Joins::new(joins, 0);
+        let mut execution = SemanticExecution::new();
+        assert_eq!(execution.drive(&mut program, 0), Ok(joins));
+        let counters = execution.counters();
+        assert_eq!(counters.external_waits, joins);
+        assert_eq!(
+            counters.subscription_inspections, joins,
+            "{joins} joins in one execution"
+        );
+
+        // Each join first restarted twice: repeated waits on one demand.
+        let mut program = Joins::new(joins, 2);
+        let mut execution = SemanticExecution::new();
+        assert_eq!(execution.drive(&mut program, 0), Ok(joins));
+        let counters = execution.counters();
+        assert_eq!(counters.external_waits, 3 * joins);
+        assert_eq!(
+            counters.subscription_inspections,
+            3 * joins,
+            "{joins} restarted joins in one execution"
+        );
+
+        // Four drives on one execution, each joining its own producers.
+        let mut program = Joins::new(joins, 0);
+        let mut execution = SemanticExecution::new();
+        for drive in 0..4 {
+            assert_eq!(execution.drive(&mut program, drive * 1_000_000), Ok(joins));
+        }
+        let counters = execution.counters();
+        assert_eq!(counters.external_waits, 4 * joins);
+        assert_eq!(
+            counters.subscription_inspections,
+            4 * joins,
+            "{joins} joins in each of four drives on one execution"
+        );
+
+        // A fresh execution per drive is reset: the same count each time.
+        for drive in 0..4 {
+            let mut execution = SemanticExecution::new();
+            assert_eq!(execution.drive(&mut program, drive * 1_000_000), Ok(joins));
+            assert_eq!(execution.counters().subscription_inspections, joins);
+        }
+    }
+}
+
+/// A stop while the chain waits on an outside producer drops that
+/// subscription with every frame; the next drive on the execution joins
+/// its own producers from a clean slate, and the demand the stop abandoned
+/// is started again, not answered from a stale subscription.
+#[test]
+fn a_stop_while_joining_drops_the_subscription() {
+    let mut program = Joins::new(8, 0);
+    // Stop with the fourth join subscribed and not yet waited on.
+    program.stop_after_subscribes = Some(4);
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Err(()));
+    assert_eq!(execution.live_frames(), 0);
+    assert_eq!(
+        Rc::strong_count(&program.alive),
+        1,
+        "no subscription outlives the stop"
+    );
+    assert_eq!(
+        execution.demand_state(&4),
+        None,
+        "the subscribed demand is abandoned"
+    );
+    assert_eq!(execution.demand_state(&3), Some(DemandState::Complete));
+
+    program.stop_after_subscribes = None;
+    assert_eq!(execution.drive(&mut program, 0), Ok(8));
+    let counters = execution.counters();
+    assert_eq!(counters.external_waits, 3 + 5);
+    assert_eq!(counters.subscription_inspections, counters.external_waits);
+}

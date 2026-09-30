@@ -84,10 +84,6 @@ pub(crate) struct ContinuationId {
     generation: u32,
 }
 
-/// Identity of one subscription to a producer outside the execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SuspensionId(u32);
-
 /// What one step of a frame asks of the runtime.
 pub(crate) enum EvalStep<P: Program + ?Sized> {
     /// Park this frame until `demand` completes; its outcome is the frame's
@@ -143,8 +139,8 @@ pub(crate) enum DemandState {
     Running(ContinuationId),
     /// Its producing frame is parked on a demand it needs.
     Waiting(ContinuationId),
-    /// A producer outside the execution owns it.
-    Subscribed(SuspensionId),
+    /// A producer outside the execution owns it; the drive waits on it.
+    Subscribed,
     /// It completed with a reusable value, held in the table.
     Complete,
 }
@@ -229,6 +225,9 @@ pub(crate) struct ExecutionCounters {
     pub(crate) external_waits: u64,
     /// Most frames alive at once.
     pub(crate) peak_frames: usize,
+    /// Subscription slots inspected to find the one to wait on. Test-only.
+    #[cfg(test)]
+    pub(crate) subscription_inspections: u64,
 }
 
 thread_local! {
@@ -290,8 +289,8 @@ pub(crate) fn step_running() -> bool {
 }
 
 /// One request-scoped execution: its demand table (which holds the
-/// transaction's completed results), frame arena, ready queue and outside
-/// subscriptions.
+/// transaction's completed results), frame arena, ready queue and the
+/// outside subscription its chain waits on.
 pub(crate) struct SemanticExecution<P: Program> {
     demands: Vec<DemandRecord<P>>,
     index: FxHashMap<P::Demand, DemandId>,
@@ -299,7 +298,10 @@ pub(crate) struct SemanticExecution<P: Program> {
     free_frames: Vec<u32>,
     live_frames: usize,
     ready: VecDeque<ContinuationId>,
-    subscriptions: Vec<Option<(DemandId, P::Subscription)>>,
+    /// The subscription to an outside producer the chain's tip waits on. A
+    /// drive runs one chain, and a demand is subscribed only when that
+    /// chain's tip needs it, so at most one is live; a wait takes it.
+    subscription: Option<(DemandId, P::Subscription)>,
     /// The drive root's outcome once it completes.
     root_outcome: Option<Outcome<P>>,
     counters: ExecutionCounters,
@@ -320,7 +322,7 @@ impl<P: Program> SemanticExecution<P> {
             free_frames: Vec::new(),
             live_frames: 0,
             ready: VecDeque::new(),
-            subscriptions: Vec::new(),
+            subscription: None,
             root_outcome: None,
             counters: ExecutionCounters::default(),
         }
@@ -381,12 +383,13 @@ impl<P: Program> SemanticExecution<P> {
                 continue;
             }
             // Nothing can run: the chain's tip waits on an outside producer.
-            let Some(position) = self.subscriptions.iter().position(Option::is_some) else {
+            #[cfg(test)]
+            {
+                self.counters.subscription_inspections += 1;
+            }
+            let Some((demand, subscription)) = self.subscription.take() else {
                 unreachable!("an open drive always has a runnable frame or a subscription");
             };
-            let (demand, subscription) = self.subscriptions[position]
-                .take()
-                .expect("position names a live subscription");
             self.counters.external_waits += 1;
             match program.wait(subscription) {
                 External::Complete(outcome) => self.complete(program, demand, outcome, root),
@@ -413,11 +416,12 @@ impl<P: Program> SemanticExecution<P> {
                 self.ready.push_back(frame);
             }
             Start::Subscribe(subscription) => {
-                let suspension = SuspensionId(
-                    u32::try_from(self.subscriptions.len()).expect("subscription table exhausted"),
+                verter_debug_assert!(
+                    self.subscription.is_none(),
+                    "a drive runs one chain; a second live subscription breaks it"
                 );
-                self.subscriptions.push(Some((id, subscription)));
-                self.demands[id.0 as usize].state = DemandState::Subscribed(suspension);
+                self.subscription = Some((id, subscription));
+                self.demands[id.0 as usize].state = DemandState::Subscribed;
             }
         }
     }
@@ -496,7 +500,7 @@ impl<P: Program> SemanticExecution<P> {
                     .expect("a complete demand holds its value");
                 self.deliver(waiter, Ok(value));
             }
-            DemandState::Subscribed(_) => self.demands[id.0 as usize].waiters.push(waiter),
+            DemandState::Subscribed => self.demands[id.0 as usize].waiters.push(waiter),
             DemandState::Starting
             | DemandState::Runnable(_)
             | DemandState::Running(_)
@@ -616,7 +620,7 @@ impl<P: Program> SemanticExecution<P> {
         self.frames.clear();
         self.free_frames.clear();
         self.live_frames = 0;
-        self.subscriptions.clear();
+        self.subscription = None;
         let demands = &mut self.demands;
         self.index.retain(|_, id| {
             let record = &mut demands[id.0 as usize];
