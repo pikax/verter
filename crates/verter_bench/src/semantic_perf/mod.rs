@@ -265,10 +265,20 @@ fn micros(start: Instant) -> u64 {
 /// Where the record and the phase marker are written.
 pub struct Sink<'a> {
     /// The record file.
-    pub out: &'a Path,
+    out: &'a Path,
+    /// Every phase begun so far, with its wall-clock start (epoch ms).
+    history: std::cell::RefCell<Vec<serde_json::Value>>,
 }
 
-impl Sink<'_> {
+impl<'a> Sink<'a> {
+    /// A sink writing the record to `out` (and the marker beside it).
+    pub fn new(out: &'a Path) -> Self {
+        Sink {
+            out,
+            history: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
     fn sibling(&self, suffix: &str) -> PathBuf {
         let mut path = self.out.as_os_str().to_owned();
         path.push(suffix);
@@ -285,12 +295,21 @@ impl Sink<'_> {
         std::fs::rename(&aside, path)
     }
 
+    /// Mark the phase about to begin, with its wall-clock start and the
+    /// history so far: the evidence for how long the engine had worked when
+    /// a deadline expired.
     fn phase(&self, phase: &str) {
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut history = self.history.borrow_mut();
+        history.push(serde_json::json!({ "phase": phase, "atMs": at_ms }));
         // A lost marker only loses attribution of a later kill; the record
         // itself is written separately and checked.
         let _ = Self::replace(
             &self.sibling(".phase"),
-            &serde_json::json!({ "phase": phase }).to_string(),
+            &serde_json::json!({ "phase": phase, "atMs": at_ms, "history": *history }).to_string(),
         );
     }
 

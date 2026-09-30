@@ -715,6 +715,7 @@ const keyOf = (node) => JSON.stringify(node);
 const scope = (entries) => ({
   types: new Map(entries.types ?? []),
   values: new Map(entries.values ?? []),
+  infers: new Map(entries.infers ?? []),
 });
 
 function lookup(env, space, name) {
@@ -783,6 +784,14 @@ function normalizeSignature(typeParams, params, ret, env) {
   return { typeParams: typeParamsOut, params: paramsOut, ret: retOut };
 }
 
+/** A member key: a computed key's leading name resolves like any value reference. */
+function normalizeKey(name, env) {
+  if (name.kind !== "computed") return name;
+  const [head, ...path] = name.text.split(".");
+  const bound = lookup(env, "values", head);
+  return bound ? { kind: "computed", bound, path } : name;
+}
+
 function normalizeMember(m, env) {
   switch (m.m) {
     case "call":
@@ -791,7 +800,7 @@ function normalizeMember(m, env) {
     case "method":
       return {
         m: "method",
-        name: m.name,
+        name: normalizeKey(m.name, env),
         optional: m.optional,
         ...normalizeSignature(m.typeParams, m.params, m.ret, env),
       };
@@ -807,7 +816,7 @@ function normalizeMember(m, env) {
       return {
         m: "accessor",
         accessor: m.accessor,
-        name: m.name,
+        name: normalizeKey(m.name, env),
         params: sig.params,
         type: m.type ? sig.ret : null,
       };
@@ -815,7 +824,7 @@ function normalizeMember(m, env) {
     case "property":
       return {
         m: "property",
-        name: m.name,
+        name: normalizeKey(m.name, env),
         optional: m.optional,
         readonly: m.readonly,
         type: normalize(m.type, env),
@@ -923,18 +932,24 @@ export function normalize(node, env = []) {
       return { k: "predicate", asserts: node.asserts, target, type: node.type && n(node.type) };
     }
     case "conditional": {
-      const inner = [...env, scope({ types: inferNames(node.ext).map((name, i) => [name, i]) })];
+      // TypeScript's visibility: an `infer` name is a type only in the true
+      // branch. In the extends clause it only DECLARES (its declaration takes
+      // its position there); an ordinary reference to that name in the
+      // extends clause, and anything in the false branch, resolves outside.
+      const names = inferNames(node.ext).map((name, i) => [name, i]);
       return {
         k: "conditional",
         check: n(node.check),
-        ext: normalize(node.ext, inner),
-        whenTrue: normalize(node.whenTrue, inner),
+        ext: normalize(node.ext, [...env, scope({ infers: names })]),
+        whenTrue: normalize(node.whenTrue, [...env, scope({ types: names })]),
         whenFalse: n(node.whenFalse),
       };
     }
     case "infer": {
-      // Declared by the innermost conditional's scope (the name is a binder).
-      const bound = lookup(env, "types", node.name);
+      // A declaration: its position among the innermost conditional's
+      // declarations. Its constraint resolves where the declaration stands.
+      const bound = lookup(env, "infers", node.name);
+      if (!bound) throw new Error("infer " + node.name + " outside a conditional's extends clause");
       return { k: "infer", bound, constraint: node.constraint && n(node.constraint) };
     }
     case "keyof":
@@ -978,7 +993,7 @@ const paramsText = (ps) =>
   `(${ps.map((p, i) => `${p.this ? "this" : `$${i}`}${p.optional ? "?" : ""}: ${p.rest ? "..." : ""}${display(p.type)}`).join(", ")})`;
 const keyText = (name) =>
   name.kind === "computed"
-    ? `[${name.text}]`
+    ? `[${name.bound ? boundText(name.bound) + name.path.map((p) => "." + p).join("") : name.text}]`
     : /^[A-Za-z_$][\w$]*$/.test(name.text)
       ? name.text
       : JSON.stringify(name.text);

@@ -17,10 +17,52 @@ export const RESOURCE_CODES = [2589, 2590, 2799, 2859];
  * `killed` is tsc exhausting the cap or the deadline; `truncated` and
  * `unmeasurable` are failures of the measurement, not of tsc.
  */
+/**
+ * Whether a measuring run's kill is established as tsc exhausting the
+ * resource, by the same rule as a benchmark arm (analyze.mjs killAttributed):
+ * `tsc -p` is one process that is the engine; a memory kill counts only
+ * when the supervisor's actual threshold reached the measuring budget in an
+ * accounting of the process's own memory (not a Linux cgroup's), a deadline
+ * only when the process ran for the whole measuring deadline.
+ */
+export function measurementKillAttributed(result) {
+  const t = result.receipt?.termination;
+  let method = null;
+  try {
+    method = JSON.parse(result.receipt?.method ?? "null");
+  } catch {
+    method = null;
+  }
+  if (!t || !method || t.killedBy !== result.killed) return false;
+  if (result.killed === "memory") {
+    if (String(t.backend ?? "").startsWith("linux")) return false;
+    const trigger = typeof t.killTriggerBytes === "number" ? t.killTriggerBytes : t.memLimitBytes;
+    return (
+      typeof trigger === "number" &&
+      typeof method.memMb === "number" &&
+      trigger >= method.memMb * 1024 * 1024
+    );
+  }
+  if (result.killed === "timeout")
+    return (
+      typeof t.wallMs === "number" &&
+      typeof method.timeoutMs === "number" &&
+      t.wallMs >= method.timeoutMs
+    );
+  return false;
+}
+
 export function interpretMeasurement(result) {
   const codes = result.codes ?? [];
-  if (result.killed)
+  if (result.killed) {
+    if (!measurementKillAttributed(result))
+      return {
+        gap: `tsc -p was killed (${result.killed}) without evidence that tsc exhausted it`,
+        unmeasurable: "unattributed kill",
+        codes,
+      };
     return { gap: `tsc -p exhausts resources (${result.killed})`, killed: result.killed, codes };
+  }
   if (result.unmeasurable)
     return {
       gap: `unmeasurable: ${result.unmeasurable}`,

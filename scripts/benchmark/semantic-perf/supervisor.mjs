@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { BUILD_ENV_NAMES, constructedEnv, RUNTIME_ENV_NAMES } from "./provenance.mjs";
 
 export const SUPERVISOR_SCHEMA = 1;
 export const EXIT_TIMEOUT = 124;
@@ -49,8 +50,7 @@ export function resolveSupervisor(root, explicitPath) {
         "The benchmark never runs a probe without hard (or explicitly consented sampled) containment.",
     );
   }
-  const env = { ...process.env };
-  if (!env.CARGO_INCREMENTAL) env.CARGO_INCREMENTAL = "0";
+  const env = constructedEnv(BUILD_ENV_NAMES, { CARGO_INCREMENTAL: "0" });
   const r = spawnSync(
     "cargo",
     ["build", "--release", "-p", "verter_supervise", "--bin", "verter-supervise"],
@@ -88,15 +88,16 @@ export function supervisorRecordProblems(record) {
  */
 export function runSupervised(
   supervisor,
-  { memMb, timeoutMs, out, cwd, env = {}, argv, allowSampled },
+  { memMb, timeoutMs, out, cwd, env = constructedEnv(RUNTIME_ENV_NAMES), argv, allowSampled },
 ) {
   const args = ["run", "--mem-mb", String(memMb), "--timeout-ms", String(timeoutMs), "--out", out];
   if (cwd) args.push("--cwd", cwd);
-  for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
   if (allowSampled) args.push("--allow-sampled");
   args.push("--", ...argv);
   return new Promise((resolve) => {
-    const child = spawn(supervisor, args, { stdio: ["ignore", "ignore", "pipe"] });
+    // The supervisor passes its own environment to the child, so the
+    // constructed environment replaces inheritance for the whole tree.
+    const child = spawn(supervisor, args, { stdio: ["ignore", "ignore", "pipe"], env });
     let stderr = "";
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", (err) =>

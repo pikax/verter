@@ -56,47 +56,98 @@ export const CLASSES = [
   "matched",
 ];
 
-/** The phases a probe's demand runs in. */
-export const DEMAND_PHASES = ["spawn", "engine-start", "setup", "init", "cold", "warm", "stats"];
 /** A finite, non-negative number. */
 const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
 
-/** tsc phases in which its server is computing the demand (the driver waits). */
-const TSC_ENGINE_PHASES = ["engine-start", "setup", "init", "cold", "warm"];
-
 /**
- * Whether a kill of an invocation is established as its ENGINE exhausting
- * the resource. `limits` = { budgetBytes }.
- *
- * Memory: only a tree that is the engine alone (a Verter probe; a `tsc -p`
- * process) proves it, and only when the supervisor's actual kill threshold
- * (`killTriggerBytes`: below the cap on a sampled backend) is at least the
- * engine budget, in an accounting of the engine's own memory (a Linux cgroup
- * also counts page cache and kernel memory, so it proves nothing). A tsc API
- * tree holds the node driver too, whose memory is not bounded during a
- * request: a memory kill there is never attributed.
- *
- * Deadline: the engine was computing when the whole-invocation deadline
- * expired — any time for a single-process tree, a server phase for tsc.
+ * The phases in which each tool's ENGINE is working on the demand: from its
+ * own start (Verter's host construction; tsc's server spawn) to the last warm
+ * request. Statistics, observation, calibration and teardown are the
+ * harness's work, never the engine's.
  */
-export function killAttributed(inv, limits = {}) {
-  const rec = inv.supervisor ?? {};
-  const singleProcess = ARMS[inv.arm]?.kind === "cli" || ARMS[inv.arm]?.tool === "verter";
-  if (rec.killedBy === "timeout") return singleProcess || TSC_ENGINE_PHASES.includes(inv.phase);
-  if (rec.killedBy !== "memory" || !singleProcess) return false;
-  if (String(rec.backend ?? "").startsWith("linux")) return false;
-  const trigger =
-    typeof rec.killTriggerBytes === "number" ? rec.killTriggerBytes : rec.memLimitBytes;
-  return (
-    typeof trigger === "number" &&
-    typeof limits.budgetBytes === "number" &&
-    trigger >= limits.budgetBytes
-  );
+export const ENGINE_PHASES = {
+  verter: ["engine-start", "setup", "init", "cold", "warm"],
+  tsc: ["spawn", "engine-start", "setup", "init", "cold", "warm"],
+};
+
+/** The limits a run holds every invocation to, from its options. */
+export function runLimits(options = {}) {
+  return {
+    budgetBytes: (options.memMb ?? 0) * 1024 * 1024,
+    timeoutMs: options.timeoutMs ?? null,
+    startupAllowanceMs: options.startupAllowanceMs ?? 0,
+  };
+}
+
+/** The supervisor's deadline for one invocation: the engine's deadline plus the startup allowance. */
+export function supervisorDeadlineMs(options = {}) {
+  return (options.timeoutMs ?? 0) + (options.startupAllowanceMs ?? 0);
 }
 
 /**
- * How an invocation ended. `limits` = { budgetBytes } (the engine budget,
- * needed to attribute a kill).
+ * How long, at least, the engine had worked on the demand when the
+ * supervisor killed the invocation: from the start of its first engine phase
+ * (the marker's wall-clock history) to the kill. The kill came no earlier
+ * than the supervisor's spawn plus the child's wall time, so this is a lower
+ * bound. Null without the evidence.
+ */
+export function engineWorkMs(inv) {
+  const tool = ARMS[inv.arm]?.tool;
+  const first = (inv.phaseHistory ?? []).find((h) => ENGINE_PHASES[tool]?.includes(h.phase));
+  const wall = inv.supervisor?.wallMs;
+  if (!first || !finite(first.atMs) || !finite(inv.spawnedAtMs) || !finite(wall)) return null;
+  return inv.spawnedAtMs + wall - first.atMs;
+}
+
+/**
+ * Whether a kill of an invocation is established as its ENGINE exhausting
+ * the resource. `limits` = runLimits(options).
+ *
+ * A whole-program arm (`tsc -p`) is one process that is the engine: its
+ * deadline and its memory are its own. A probe arm must have been in an
+ * engine phase (the marker) when it was killed, and:
+ *
+ * - memory: only a tree that is the engine alone proves it (a Verter probe;
+ *   a tsc API tree also holds the node driver, whose memory during a request
+ *   is not bounded, so a memory kill there is never attributed), and only
+ *   when the supervisor's actual kill threshold (`killTriggerBytes`: below
+ *   the cap on a sampled backend) is at least the engine budget, in an
+ *   accounting of the engine's own memory (a Linux cgroup also counts page
+ *   cache and kernel memory, so it proves nothing);
+ * - deadline: the engine itself had worked for at least the deadline
+ *   (engineWorkMs); the supervisor's deadline adds a startup allowance for
+ *   the process start before the engine's first phase.
+ */
+export function killAttributed(inv, limits = {}) {
+  const rec = inv.supervisor ?? {};
+  const arm = ARMS[inv.arm];
+  const memoryAttributable = (singleProcess) => {
+    if (!singleProcess) return false;
+    if (String(rec.backend ?? "").startsWith("linux")) return false;
+    const trigger =
+      typeof rec.killTriggerBytes === "number" ? rec.killTriggerBytes : rec.memLimitBytes;
+    return (
+      typeof trigger === "number" &&
+      typeof limits.budgetBytes === "number" &&
+      trigger >= limits.budgetBytes
+    );
+  };
+  if (arm?.kind === "cli") {
+    if (rec.killedBy === "timeout")
+      return finite(rec.wallMs) && finite(limits.timeoutMs) && rec.wallMs >= limits.timeoutMs;
+    return rec.killedBy === "memory" && memoryAttributable(true);
+  }
+  if (!ENGINE_PHASES[arm?.tool]?.includes(inv.phase)) return false;
+  if (rec.killedBy === "timeout") {
+    const work = engineWorkMs(inv);
+    return work !== null && finite(limits.timeoutMs) && work >= limits.timeoutMs;
+  }
+  return rec.killedBy === "memory" && memoryAttributable(arm.tool === "verter");
+}
+
+/**
+ * How an invocation ended. `limits` = runLimits(options) (needed to
+ * attribute a kill).
  */
 export function invocationEnd(inv, limits = {}) {
   if (inv.skipped)
@@ -109,6 +160,9 @@ export function invocationEnd(inv, limits = {}) {
     return { kind: "harness-failure", detail: inv.supervisorReadError ?? "no supervisor record" };
   if (!rec.launched)
     return { kind: "harness-failure", detail: `not launched: ${(rec.errors ?? []).join("; ")}` };
+  // A supervisor error (containment lost, a tree that would not empty, …)
+  // invalidates the invocation whatever else happened.
+  if ((rec.errors ?? []).length) return { kind: "harness-failure", detail: rec.errors.join("; ") };
   if (rec.killedBy === "memory" || rec.killedBy === "timeout") {
     const phase = inv.phase ?? null;
     const detail = phase ? `${rec.killedBy} during ${phase}` : rec.killedBy;
@@ -122,7 +176,6 @@ export function invocationEnd(inv, limits = {}) {
     return { kind: "killed", detail };
   }
   if (rec.killedBy) return { kind: "harness-failure", detail: `killed by ${rec.killedBy}` };
-  if ((rec.errors ?? []).length) return { kind: "harness-failure", detail: rec.errors.join("; ") };
   return { kind: "exited", exitCode: rec.exitCode };
 }
 
@@ -299,10 +352,13 @@ function statsInvariants(afterRequests, afterObserve, stage, need) {
 /** Whether an observation carries the evidence its tool must supply. */
 export function observationEvidence(tool, obs) {
   if (!obs || typeof obs !== "object") return false;
-  const textual =
-    typeof obs.text === "string" || obs.textElided === true || typeof obs.error === "string";
+  // Two variants: a FAILED observation (an error, never a comparable answer,
+  // whatever text it carries) and a SUCCESSFUL one, which must carry its
+  // answer and every piece of evidence its tool supplies.
+  if (obs.error !== undefined && obs.error !== null) return typeof obs.error === "string";
+  const textual = typeof obs.text === "string" || obs.textElided === true;
   if (!textual) return false;
-  if (tool === "tsc") return typeof obs.errorType === "boolean" || typeof obs.error === "string";
+  if (tool === "tsc") return typeof obs.errorType === "boolean";
   return (
     Number.isInteger(obs.unknownLeaves) &&
     obs.unknownLeaves >= 0 &&
@@ -333,7 +389,10 @@ export function probeAnswer(inv, limits = {}) {
   const obs = probe.observation ?? {};
   let digest = null;
   let canonicalError = null;
-  if (obs.textElided) {
+  // A failed observation supplies no answer, whatever text it carries.
+  if (typeof obs.error === "string") {
+    // no digest
+  } else if (obs.textElided) {
     digest = obs.canonical ?? null;
     canonicalError = obs.canonicalError ?? null;
   } else if (typeof obs.text === "string") {
@@ -498,6 +557,11 @@ export function tscAnswerStatus(answer, reference, beyond, budgetBytes = null) {
     return { status: "problem", problem: "a warm tsc request answered differently" };
   if (!answer.evidence)
     return { status: "problem", problem: "the tsc observation lacks its error-type evidence" };
+  if (answer.observeError)
+    return {
+      status: "problem",
+      problem: `the tsc answer could not be observed: ${answer.observeError}`,
+    };
   if (!reference)
     return { status: "problem", problem: "no measured reference for this scenario and setting" };
   if (!answer.digest)

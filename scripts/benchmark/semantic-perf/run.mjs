@@ -9,12 +9,22 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARMS, compactProbeRecord, DEFAULT_ARMS, invocationEnd } from "./analyze.mjs";
+import {
+  ARMS,
+  compactProbeRecord,
+  DEFAULT_ARMS,
+  invocationEnd,
+  runLimits,
+  supervisorDeadlineMs,
+} from "./analyze.mjs";
 import {
   BUILD_INPUTS,
   buildProblems,
   harnessFingerprint,
   buildVerterProbes,
+  constructedEnv,
+  envReceipt,
+  RUNTIME_ENV_NAMES,
   hostInfo,
   pinBinary,
   probeIdentity,
@@ -48,9 +58,13 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           own peak exceeds it counts as exhausting it
   --infra-mb <n>          containment allowance above the budget for the process tree's other members
                           (tsc's node client, the statistics reader) (default 1024)
-  --timeout-ms <n>        per-invocation deadline (default 300000)
-  --allow-tuning          run although runtime or build tuning variables (GOGC, GOMAXPROCS, NODE_OPTIONS,
-                          RUSTFLAGS, …) are set; the report is labelled tuned
+  --timeout-ms <n>        the engine's deadline (default 300000): a kill counts as the engine exhausting
+                          it only when the engine itself worked that long
+  --startup-allowance-ms <n>  added to the supervisor's deadline for the process start before the
+                          engine's first phase (default 30000)
+  --allow-tuning          pass the caller's whole environment to the build and the probes (by default
+                          both get a constructed one) and run despite Cargo configuration outside the
+                          repository; the report is labelled tuned
   --supervisor <path>     verter-supervise executable (default: build crates/verter_supervise)
   --allow-sampled         consent to a sampled (not kernel-enforced) memory cap; required on macOS
   --typescript-from <dir> directory whose node_modules resolves typescript@7.0.2 (default: repository root)
@@ -71,6 +85,7 @@ function parseArgs(argv) {
     memMb: 8192,
     infraMb: 1024,
     timeoutMs: 300_000,
+    startupAllowanceMs: 30_000,
     allowTuning: false,
     supervisor: null,
     allowSampled: false,
@@ -131,6 +146,9 @@ function parseArgs(argv) {
         break;
       case "--timeout-ms":
         opts.timeoutMs = positive(a, next());
+        break;
+      case "--startup-allowance-ms":
+        opts.startupAllowanceMs = positive(a, next());
         break;
       case "--allow-tuning":
         opts.allowTuning = true;
@@ -266,7 +284,9 @@ export function tuningEnvironment(env) {
         return (
           TUNING_VARIABLES.includes(name) ||
           /^CARGO_(PROFILE|TARGET|BUILD)_/.test(name) ||
-          /^VERTER_/.test(name)
+          /^VERTER_/.test(name) ||
+          // allocator and loader controls (glibc, macOS libmalloc, dyld, ld.so)
+          /^(MALLOC|GLIBC_TUNABLES|LD_|DYLD_|MIMALLOC_|JEMALLOC|_RJEM_)/.test(name)
         );
       })
       .sort(([a], [b]) => a.localeCompare(b)),
@@ -455,12 +475,20 @@ export async function main(argv) {
       "macOS has no kernel-enforced process-tree memory cap: the supervisor samples. Re-run with --allow-sampled to consent; every record will say `containment: sampled`.",
     );
   }
-  const tuning = { ...tuningEnvironment(process.env), ...outsideCargoConfig(ROOT) };
-  if (Object.keys(tuning).length && !opts.allowTuning) {
+  // Children get a constructed environment, so the caller's tuning
+  // variables cannot reach them; they are recorded as ignored. Only a tuned
+  // run (--allow-tuning) inherits them, and is labelled with them. Cargo
+  // configuration outside the repository is read by cargo whatever the
+  // environment, so it always needs --allow-tuning.
+  const callerTuning = tuningEnvironment(process.env);
+  const cargoConfig = outsideCargoConfig(ROOT);
+  if (Object.keys(cargoConfig).length && !opts.allowTuning) {
     throw new Error(
-      `tuning variables are set (${Object.keys(tuning).join(", ")}): the benchmark measures both tools as shipped. Unset them, or pass --allow-tuning to run a labelled tuned benchmark.`,
+      `Cargo configuration outside the repository would tune the build (${Object.keys(cargoConfig).join(", ")}): the benchmark measures both tools as shipped. Remove it, or pass --allow-tuning to run a labelled tuned benchmark.`,
     );
   }
+  const tuning = { ...(opts.allowTuning ? callerTuning : {}), ...cargoConfig };
+  const ignoredTuning = opts.allowTuning ? [] : Object.keys(callerTuning);
   const powerAtStart = powerReceipt();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = opts.out ?? join(ROOT, "target", "semantic-perf", stamp);
@@ -474,7 +502,9 @@ export async function main(argv) {
   const typescript = resolveTypeScript(opts.typescriptFrom);
   log(`semantic-perf: ${typescript.versionText} at ${typescript.exe}`);
   log("semantic-perf: building the release Verter probe binaries");
-  const build = buildVerterProbes(ROOT);
+  const build = buildVerterProbes(ROOT, { inherit: opts.allowTuning });
+  // Every probe runs in a constructed environment (a tuned run inherits the caller's).
+  const runtimeEnv = constructedEnv(RUNTIME_ENV_NAMES, {}, { inherit: opts.allowTuning });
   const problems = buildProblems(build);
   if (problems.length)
     throw new Error(`the Verter probe is not a production build:\n  ${problems.join("\n  ")}`);
@@ -566,12 +596,16 @@ export async function main(argv) {
     );
     const supOut = `${runBase}.sup.json`;
     const t0 = Date.now();
+    const spawnedAtMs = Date.now();
     const result = await runSupervised(binaries.supervisor.pinned, {
       // The engine budget plus the allowance for the tree's other members;
       // the engine's own peak is held to the budget when classifying.
       memMb: opts.memMb + opts.infraMb,
-      timeoutMs: opts.timeoutMs,
+      // The engine's deadline plus an allowance for the process start
+      // before the engine's first phase (see killAttributed).
+      timeoutMs: supervisorDeadlineMs(opts),
       out: supOut,
+      env: runtimeEnv,
       cwd: cell.dir,
       argv: command,
       allowSampled: opts.allowSampled,
@@ -579,10 +613,12 @@ export async function main(argv) {
     let probe = null;
     let probeReadError = null;
     let phase = null;
+    let phaseHistory = null;
     if (probeOut) {
       try {
         const marker = JSON.parse(readFileSync(`${probeOut}.phase`, "utf8"));
         phase = marker.phase ?? null;
+        phaseHistory = marker.history ?? null;
       } catch {
         phase = null;
       }
@@ -621,7 +657,9 @@ export async function main(argv) {
       supervisorReadError: result.readError ?? result.spawnError ?? null,
       supervisor: record,
       probeOut,
+      spawnedAtMs,
       phase,
+      phaseHistory,
       probe,
       probeReadError,
       cliStdout,
@@ -631,7 +669,7 @@ export async function main(argv) {
     if (
       step.warmup &&
       record?.killedBy === "memory" &&
-      invocationEnd(last, { budgetBytes: opts.memMb * 1024 * 1024 }).kind === "killed"
+      invocationEnd(last, runLimits(opts)).kind === "killed"
     )
       memoryKilled.set(cellArm, index);
     const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
@@ -665,6 +703,7 @@ export async function main(argv) {
       harnessAfter: harnessFingerprint(ROOT),
       host: { ...hostInfo(), power: { atStart: powerAtStart, atEnd: powerReceipt() } },
       tuning,
+      environment: { runtime: envReceipt(runtimeEnv), inherited: opts.allowTuning, ignoredTuning },
       typescript,
       build,
       binaries,

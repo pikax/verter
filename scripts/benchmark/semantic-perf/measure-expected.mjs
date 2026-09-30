@@ -200,6 +200,7 @@ async function main() {
       const tscArgs = ["-p", join(dir, "tsconfig.json")];
       let exit;
       let stdout = "";
+      let termination = null;
       if (viaCapped) {
         const r = await runCapped(viaCapped, tscArgs, dir, memMb, timeoutMs);
         exit = r.exit;
@@ -213,8 +214,21 @@ async function main() {
           argv: [typescript.exe, ...tscArgs],
           allowSampled: process.argv.includes("--allow-sampled"),
         });
-        if (r.supervisorExit === 125 || !r.record?.launched)
-          throw new Error(`supervisor failed for ${scenario.id}/${setting.id}: ${r.stderr}`);
+        if (r.supervisorExit === 125 || !r.record?.launched || (r.record.errors ?? []).length)
+          throw new Error(
+            `supervisor failed for ${scenario.id}/${setting.id}: ${(r.record?.errors ?? []).join("; ")} ${r.stderr}`,
+          );
+        // The evidence a kill is read against (see reference.mjs).
+        termination = {
+          killedBy: r.record.killedBy ?? null,
+          backend: r.record.backend ?? null,
+          containment: r.record.containment ?? null,
+          memLimitBytes: r.record.memLimitBytes ?? null,
+          killTriggerBytes: r.record.killTriggerBytes ?? null,
+          timeoutMs: r.record.timeoutMs ?? null,
+          wallMs: r.record.wallMs ?? null,
+          peakBytes: r.record.peakBytes ?? null,
+        };
         exit =
           r.record.killedBy === "timeout"
             ? 124
@@ -230,6 +244,7 @@ async function main() {
         tsconfigSha256: sha256Text(tsconfigText(setting)),
         sourceSha256: sha256Text(source),
         method: methodKey,
+        termination,
       };
       let result;
       if (exit === 124 || exit === 137)

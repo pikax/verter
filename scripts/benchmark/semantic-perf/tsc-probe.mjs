@@ -71,9 +71,15 @@ async function main() {
     writeFileSync(`${path}.tmp`, text);
     renameSync(`${path}.tmp`, path);
   };
-  // The phase marker names the phase running (replaced atomically before
-  // the phase starts).
-  const phase = (name) => replace(`${outPath}.phase`, JSON.stringify({ phase: name }));
+  // The phase marker names the phase running, with its wall-clock start and
+  // the history so far (replaced atomically before the phase starts): the
+  // evidence for how long the engine had worked when a deadline expired.
+  const history = [];
+  const phase = (name) => {
+    const atMs = Date.now();
+    history.push({ phase: name, atMs });
+    replace(`${outPath}.phase`, JSON.stringify({ phase: name, atMs, history }));
+  };
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`job schema ${job.schema} is not 1`);
   if (job.probes.length < 1) throw new Error("a job demands at least one probe");

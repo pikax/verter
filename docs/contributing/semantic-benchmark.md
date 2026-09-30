@@ -107,7 +107,13 @@ validator requires both arms' figures to be the same metric.
 exhausting it, whether or not it survived. Each process tree is contained at
 the budget plus an allowance (`--infra-mb`, 1024 by default) for the tree's
 other members — tsc's node client and the statistics reader. A kill counts
-as the **engine** exhausting a resource only with evidence:
+as the **engine** exhausting a resource only with evidence. A whole-program
+arm (`tsc -p`) is one process that is the engine. A probe arm must have been
+in one of its **engine phases** when it was killed — Verter: host
+construction, setup, init, cold, warm; tsc: server spawn, initialize, setup,
+init, cold, warm — never statistics, observation, calibration or teardown,
+which are the harness's work. A supervisor error (containment lost, a tree
+that would not empty) invalidates the invocation whatever else happened.
 
 - **Memory.** Only a tree that is the engine alone — a Verter probe, a
   `tsc -p` process — proves it, and only when the supervisor's actual kill
@@ -119,9 +125,16 @@ as the **engine** exhausting a resource only with evidence:
   harness can prove, so a memory kill of that tree is **never** attributed:
   tsc exhausting memory on a demand is established by the measuring
   `tsc -p` run (see Correctness), not by the API arm.
-- **Deadline.** The engine was computing when the whole-invocation deadline
-  expired: any time for a single-process tree, a server phase (engine start,
-  setup, init, cold, warm) for `tsc-api`.
+- **Deadline.** The engine itself must have worked for the whole deadline
+  (`--timeout-ms`). Every phase marker records its wall-clock start, and the
+  harness records when it spawned the supervisor; the kill came no earlier
+  than that spawn plus the supervisor's wall time, so the engine's work is
+  at least that instant minus the start of its first engine phase. The
+  supervisor's deadline is the engine's deadline plus a startup allowance
+  (`--startup-allowance-ms`, 30000 by default) for the process start before
+  the engine's first phase; an engine that started late, and so did not work
+  for the whole deadline, is not attributed. A `tsc -p` process is
+  attributed when it ran for the whole deadline.
 - Anything killed after the probe wrote its measured record (observing,
   calibrating, tearing down) is never the engine's demand.
 
@@ -199,18 +212,24 @@ Why each probe demands the same work of both tools:
 8. **Same containment, budget and schedule.** Every invocation, of every arm,
    runs in a fresh process under the same supervisor with the same engine
    budget, allowance and deadline, in counterbalanced order (see Schedule).
-9. **Same shipped defaults.** The harness refuses to run while runtime or
-   build tuning is present — variables such as `GOGC`, `GOMEMLIMIT`,
-   `GOMAXPROCS`, `GODEBUG`, `NODE_OPTIONS`, `RUSTFLAGS`,
-   `RUSTC_WRAPPER`, `CARGO_PROFILE_*` / `CARGO_TARGET_*` / `CARGO_BUILD_*`
-   (except `CARGO_BUILD_JOBS`, which only sets build parallelism),
-   `CC` / `CFLAGS`, `RAYON_NUM_THREADS`, `VERTER_*`, or a Cargo configuration
-   file outside the repository (in an ancestor directory or `CARGO_HOME`) —
-   unless `--allow-tuning` labels the run tuned. Names are compared
-   case-insensitively (as Windows does). The build environment is controlled,
-   not inherited: the harness sets `CARGO_INCREMENTAL=0` and binds `RUSTC` to
-   the toolchain's own compiler (`rustup which rustc`), removing any other
-   spelling of either, and records both with the compiler's sha256. The probe, node and
+9. **Same shipped defaults.** Every environment the harness gives a child —
+   the build, the supervisor and through it every probe and `tsc` process —
+   is **constructed**, not inherited: only the variables a process needs to
+   start and find its files (`PATH`, `HOME`, temporary directories, and on
+   Windows the system and profile locations; the build adds `CARGO_HOME`
+   and `RUSTUP_HOME`), compared case-insensitively. So no allocator, runtime
+   or compiler setting of the caller's shell (`GOGC`, `GOMAXPROCS`,
+   `NODE_OPTIONS`, `MALLOC_*`, `GLIBC_TUNABLES`, `LD_PRELOAD`, `DYLD_*`,
+   `RUSTFLAGS`, `CARGO_PROFILE_*`, `VERTER_*`, …) reaches a measurement;
+   those present in the caller's environment are recorded as ignored. The
+   build additionally sets `CARGO_INCREMENTAL=0` and binds `RUSTC` to the
+   toolchain's own compiler (`rustup which rustc`). Both environments are
+   recorded (names, and a digest of the values) and the validator requires
+   them to be the constructed ones. A Cargo configuration file outside the
+   repository (in an ancestor directory or `CARGO_HOME`), which cargo reads
+   whatever the environment, makes the harness refuse to run. `--allow-tuning`
+   instead passes the caller's whole environment through and labels the run
+   tuned, with the tuning it found. The probe, node and
    the tsc package must be one architecture and that must be the hardware's
    native one (read by the probe independently of node: `IsWow64Process2` on
    Windows, `hw.optional.arm64` on macOS), so nothing runs translated.
@@ -262,7 +281,12 @@ output with neither verdict is an error, never an answer; a print tsc elided
 (bare `any` members among the tuples) is recorded as elided; an `any` beside
 TS2589 / TS2590 is tsc's error-any; a measurement tsc cannot finish inside the
 cap or the deadline is recorded as `killed` ("tsc exhausts resources"), never
-retried with more. Every measured tsc process is contained.
+retried with more. Every measured tsc process is contained, and its receipt
+keeps the supervisor's termination evidence (backend, containment, cap,
+actual kill threshold, deadline, wall time): a kill is read as tsc exhausting
+the resource by the same rule as a benchmark arm (a memory threshold at least
+the measuring budget outside a Linux cgroup; the whole deadline), and
+otherwise as unmeasurable. A supervisor error fails the measurement.
 
 The benchmark's tsc arm must then reproduce the reference exactly — same
 canonical answer, same error-type flag — or the run fails validation: either
@@ -284,9 +308,12 @@ equal to a string); same-named overloads, call and construct signatures keep
 their order; tuple labels are dropped. Binders are positions in a lexical
 environment: a signature binds its type parameters and parameters (a
 `typeof` of a parameter and a type predicate's target refer to it), a
-conditional binds its `infer` names in its extends clause and true branch,
-a mapped type binds its key; a reference resolves to the innermost binding
-of its name. So consistent renaming is one type, while swapped binders, or a
+conditional's `infer` declarations take their positions in its extends
+clause but are types only in its true branch (as TypeScript resolves them:
+a plain reference to the same name in the extends clause, or in the false
+branch, resolves outside), a mapped type binds its key; a reference —
+including a computed member key's leading name — resolves to the innermost
+binding of its name. So consistent renaming is one type, while swapped binders, or a
 bound name against the free name it shadows, are two. Intersection order,
 tuple order, argument order and modifiers are kept.
 
@@ -298,7 +325,7 @@ Each Verter answer is classified against the reference:
 | `beyond-tsc` | tsc stops at an established resource limit — TS2589 / TS2590 / TS2799 / TS2859 beside its answer, or both the measuring program and the demand itself exhaust the cap — and Verter's answer equals the answer the scenario constructs; reported separately, **never counted as a speed win** |
 | `mismatch` | a different answer |
 | `partial` | the answer is incomplete: an unmaterialised leaf in the production wire form (the terminal projection's `unknown`), an unevaluated top-level conditional, the probe expression handed back unevaluated, or no printable answer |
-| `unverified` | the demand completed but its answer was not observed (stopped while observing), the observation lacks its completeness evidence, or the invocation was killed without evidence that its engine exhausted the resource |
+| `unverified` | the demand completed but its answer was not observed (stopped while observing), the observation lacks its completeness evidence, or the invocation was killed without evidence that its engine exhausted the resource. An observation is either successful (the answer and all its tool's evidence: tsc's error-type flag; Verter's completeness counts) or failed (an error); a failed observation never supplies a comparable answer, whatever text it carries |
 | `refusal` | a typed budget fault (Verter's own budget) |
 | `error` | any other fault, a miss, or a warm repeat that failed or answered differently |
 | `killed` | the engine exhausted the containment cap or the deadline during the demand (Verter's tree is its engine alone), or its own peak exceeded the budget |
@@ -362,11 +389,14 @@ winner only when every measured repetition of one arm beats every repetition
 of the other by more than the timer resolution; otherwise the verdict is
 **overlap**. The resolution is calibrated: after its measurement, every tsc
 probe times 20 trivial warm requests (`getTypeAtPosition` on
-`__BenchInit`). If any of them reads 0 ms the server clock is **coarse** (a
-request cannot take no time), so every reading is a whole number of quanta
-and the quantum is the smallest positive tsc server time in the run, from
-whichever request (about half a millisecond on Windows). Otherwise the clock
-is **fine** and the quantum is at most the smallest calibration time. The
+`__BenchInit`). If none reads 0 ms the clock is **fine** and the quantum is
+at most the smallest calibration time (basis: calibration). If any reads
+0 ms the clock is **coarse** (on Windows, readings are 0 or roughly half a
+millisecond and up), and the calibration cannot bound its granularity: the
+quantum is then estimated as the smallest positive tsc server time the run
+produced, and the report labels that basis a **workload heuristic** — it
+depends on which requests the run timed and is not a measured property of
+the clock. The
 resolution is at least 1 ms and two quanta (a difference of two readings)
 for one request, and at least 2 ms and four quanta for first type handle (a
 sum of three separately timed requests). The ratio shown is tsc's median over Verter's (above 1 favours
@@ -467,8 +497,11 @@ Results land in `target/semantic-perf/<timestamp>/`:
 - `bin/` — the pinned binaries that ran.
 
 The command exits 0 only when validation passes. Standalone validation
-re-reads every raw record — the supervisor's, the probe's and the phase
-marker — and fails on any that differs from `results.json`. Re-validate any
+re-reads every raw record — the supervisor's, and for every probe invocation
+its own probe record and phase marker at the path derived from the
+invocation, whether or not `results.json` embeds them — and fails on any
+that differs from `results.json` (a record on disk that `results.json`
+omits included). Re-validate any
 run with
 
 ```bash
@@ -478,7 +511,8 @@ node scripts/benchmark/semantic-perf/validate.mjs target/semantic-perf/<timestam
 Useful options (`--help` lists all): `--only relation,spread` (scenario id
 prefixes), `--repeat 6`, `--warmup 1`, `--settings all` (all four
 `strictNullChecks` × `noImplicitAny` settings), `--arms verter,tsc-api`,
-`--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 300000`, `--out <dir>`.
+`--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 300000`,
+`--startup-allowance-ms 30000`, `--out <dir>`.
 
 ### Re-measuring the reference
 

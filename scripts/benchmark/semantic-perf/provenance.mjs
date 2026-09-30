@@ -195,7 +195,74 @@ export function resolveTypeScript(fromDir) {
  * return what cargo reports about them: executables, and the profile and
  * features of every recorded package.
  */
-export function buildVerterProbes(root) {
+/**
+ * The variables a child process needs to start and find its files, and
+ * nothing else: every environment the harness gives a child (the build, the
+ * supervisor and through it every probe) is constructed from this list, not
+ * inherited, so no allocator, runtime or compiler setting of the caller's
+ * shell reaches a measurement. Names are compared case-insensitively (as
+ * Windows does).
+ */
+export const RUNTIME_ENV_NAMES = [
+  // every platform
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "USER",
+  "LOGNAME",
+  // Windows
+  "PATHEXT",
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "COMSPEC",
+  "USERPROFILE",
+  "USERNAME",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "COMMONPROGRAMFILES",
+  "COMMONPROGRAMFILES(X86)",
+  "COMMONPROGRAMW6432",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "OS",
+];
+/** The build's additions: where the toolchain lives. */
+export const BUILD_ENV_NAMES = [...RUNTIME_ENV_NAMES, "CARGO_HOME", "RUSTUP_HOME"];
+
+/**
+ * An environment built from `names` (taken from `source`) plus `set`.
+ * With `inherit` (a labelled tuned run) the whole source is passed on.
+ */
+export function constructedEnv(names, set = {}, { source = process.env, inherit = false } = {}) {
+  const wanted = new Set(names.map((n) => n.toUpperCase()));
+  const setNames = new Set(Object.keys(set).map((n) => n.toUpperCase()));
+  const env = Object.fromEntries(
+    Object.entries(source).filter(
+      ([k, v]) =>
+        v !== undefined &&
+        !setNames.has(k.toUpperCase()) &&
+        (inherit || wanted.has(k.toUpperCase())),
+    ),
+  );
+  return { ...env, ...set };
+}
+
+/** What an environment holds, for the record: its names and a digest of its values. */
+export function envReceipt(env) {
+  const names = Object.keys(env).sort((a, b) => a.localeCompare(b));
+  return { names, valuesSha256: sha256Text(JSON.stringify(names.map((n) => [n, env[n]]))) };
+}
+
+export function buildVerterProbes(root, { inherit = false } = {}) {
   const args = [
     "build",
     "--release",
@@ -216,10 +283,7 @@ export function buildVerterProbes(root) {
       spawnSync("rustup", ["which", "rustc"], { cwd: root, encoding: "utf8" }).stdout ?? ""
     ).trim() || null;
   const controlled = { CARGO_INCREMENTAL: "0", ...(rustcPath ? { RUSTC: rustcPath } : {}) };
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !(k.toUpperCase() in controlled)),
-  );
-  Object.assign(env, controlled);
+  const env = constructedEnv(BUILD_ENV_NAMES, controlled, { inherit });
   const r = spawnSync("cargo", args, {
     cwd: root,
     encoding: "utf8",
@@ -263,6 +327,7 @@ export function buildVerterProbes(root) {
     executables,
     packages,
     env: controlled,
+    environment: envReceipt(env),
     rustc: rustcPath ? tool(rustcPath, ["-vV"]) : null,
     // The compiler cargo was bound to (RUSTC), identified by content.
     rustcPath,

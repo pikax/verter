@@ -92,6 +92,29 @@ test("binders are positions: consistent renaming is one type, swapped or free na
   ];
   for (const [a, b] of different)
     assert.notEqual(canonicalType(a), canonicalType(b), `${a} ≢ ${b}`);
+  // An infer name is a type only in the true branch: in the extends clause a
+  // plain reference resolves outside, and so does one in the false branch.
+  assert.notEqual(
+    canonicalType(`<A, B, C>() => C extends [infer A, A] ? A : never`),
+    canonicalType(`<A, B, C>() => C extends [infer B, B] ? B : never`),
+  );
+  assert.notEqual(
+    canonicalType(`T extends [infer A] ? 1 : A`),
+    canonicalType(`T extends [infer B] ? 1 : B`),
+  );
+  assert.equal(
+    canonicalType(`T extends [infer A] ? 1 : A`),
+    canonicalType(`T extends [infer B] ? 1 : A`),
+  );
+  // A computed key's name is a value reference like any other.
+  assert.notEqual(
+    canonicalType(`(x: symbol, y: symbol) => { [x]: 1 }`),
+    canonicalType(`(x: symbol, y: symbol) => { [y]: 1 }`),
+  );
+  assert.equal(
+    canonicalType(`(x: symbol) => { [x]: 1 }`),
+    canonicalType(`(y: symbol) => { [y]: 1 }`),
+  );
   // Shadowing: the inner binder wins.
   assert.equal(
     canonicalType(`<T>(x: T) => <T>(y: T) => T`),
@@ -231,7 +254,23 @@ test("the reference measurement records tsc's print and the interpretation reads
   // Output with neither assignment's verdict (a killed or truncated run) is never read as `never`.
   assert.throws(() => parseMeasurement("", source), /never check/);
   assert.throws(() => parseMeasurement(verdictLine("no"), source), /not never/);
-  assert.equal(interpretMeasurement({ killed: "memory", codes: [] }).killed, "memory");
+  // A measuring run's kill counts as tsc exhausting the resource only with the supervisor's evidence.
+  assert.equal(interpretMeasurement({ killed: "memory", codes: [] }).killed, undefined);
+  const receipt = { method: JSON.stringify(METHOD), termination: MEASURED_KILL };
+  assert.equal(interpretMeasurement({ killed: "memory", codes: [], receipt }).killed, "memory");
+  const sampled = {
+    ...receipt,
+    termination: { ...MEASURED_KILL, killTriggerBytes: 7680 * 1024 * 1024 },
+  };
+  assert.equal(
+    interpretMeasurement({ killed: "memory", codes: [], receipt: sampled }).killed,
+    undefined,
+  );
+  const cgroup = { ...receipt, termination: { ...MEASURED_KILL, backend: "linux-cgroup-v2" } };
+  assert.equal(
+    interpretMeasurement({ killed: "memory", codes: [], receipt: cgroup }).killed,
+    undefined,
+  );
 });
 
 // ---------------------------------------------------------------- classification
@@ -371,6 +410,19 @@ const METHOD = {
   libSha256: "lib-digest",
   tscExeSha256: "t",
   tscVersion: "Version 7.0.2",
+  memMb: 8192,
+  timeoutMs: 300000,
+};
+/** The supervisor's evidence for a measuring run killed at the reference cap. */
+const MEASURED_KILL = {
+  killedBy: "memory",
+  backend: "windows-job-object",
+  containment: "hard",
+  memLimitBytes: 8192 * 1024 * 1024,
+  killTriggerBytes: 8192 * 1024 * 1024,
+  timeoutMs: 300000,
+  wallMs: 5000,
+  peakBytes: 8192 * 1024 * 1024,
 };
 const RAW_ONE = {
   never: false,
@@ -420,7 +472,7 @@ function supervisorRecord(overrides = {}) {
     signal: null,
     killedBy: null,
     memLimitBytes: (MEM_MB + INFRA_MB) * 1024 * 1024,
-    timeoutMs: 1000,
+    timeoutMs: 1500,
     peakBytes: 1000,
     peakMetric: "job-peak-committed-bytes",
     containment: "hard",
@@ -539,6 +591,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     memMb: MEM_MB,
     infraMb: INFRA_MB,
     timeoutMs: 1000,
+    startupAllowanceMs: 500,
     allowSampled: false,
     settings: "strict",
     libMode: "root-file",
@@ -552,17 +605,23 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     rep: p.rep,
     warmup: p.warmup,
     command: [p.arm === "verter" ? "/bin/probe" : "node"],
-    supervisorOut: "/nonexistent",
+    supervisorOut: `/nonexistent/${index}.sup.json`,
     supervisorExit: 0,
     supervisor: supervisorRecord(),
-    probeOut: "/nonexistent",
+    probeOut: `/nonexistent/${index}.probe.json`,
+    spawnedAtMs: 1000,
     phase: "done",
+    phaseHistory: [
+      { phase: p.arm === "tsc-api" ? "spawn" : "engine-start", atMs: 1010 },
+      { phase: "done", atMs: 1020 },
+    ],
     probe: p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
   }));
   const build = {
     rustcPath: "/rust/rustc",
     rustcSha256: "rs",
     env: { CARGO_INCREMENTAL: "0", RUSTC: "/rust/rustc" },
+    environment: { names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"], valuesSha256: "b" },
     packages: Object.fromEntries(
       PACKAGES.map((p) => [
         p,
@@ -577,6 +636,10 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
       host: { arch: "x64" },
       tuning: {},
+      environment: {
+        runtime: { names: ["PATH", "SystemRoot"], valuesSha256: "e" },
+        inherited: false,
+      },
       tree: { head: "h", diffSha256: "d", untrackedSha256: "u" },
       buildInputs: { head: "h", diffSha256: "d", untrackedSha256: "u" },
       buildInputsAfterBuild: { head: "h", diffSha256: "d", untrackedSha256: "u" },
@@ -685,7 +748,7 @@ test("when the measurement holds no answer, an API answer equal to the construct
   killedRef.scenarios.synthetic.settings.strict = {
     killed: "memory",
     codes: [],
-    receipt: RAW_ONE.receipt,
+    receipt: { ...RAW_ONE.receipt, termination: MEASURED_KILL },
   };
   const run = syntheticRun();
   run.summary = summarize(run, killedRef, [scenario]);
@@ -805,7 +868,11 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
   const kill = (arm, overrides, phase = "cold", probe = null) => {
     const run = syntheticRun();
     for (const inv of run.invocations.filter((i) => i.arm === arm)) {
-      inv.supervisor = supervisorRecord({ exitCode: null, ...overrides });
+      inv.supervisor = supervisorRecord({
+        exitCode: null,
+        ...(overrides.killedBy === "timeout" ? { wallMs: 1500 } : {}),
+        ...overrides,
+      });
       inv.supervisorExit = overrides.killedBy === "timeout" ? 124 : 137;
       inv.phase = phase;
       if (probe === null) inv.probe = null;
@@ -850,19 +917,35 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
   const slow = kill("tsc-api", { killedBy: "timeout" }, "cold");
   assert.equal(classOf(slow, "tsc-api"), "killed");
   assert.deepEqual(validate(slow).failures, []);
-  for (const phase of ["spawn", "stats", "observe", "calibrate"])
+  for (const phase of ["stats", "observe", "calibrate"])
     assert.equal(
       classOf(kill("tsc-api", { killedBy: "timeout" }, phase), "tsc-api"),
       "unverified",
       phase,
     );
+  // Verter's statistics phase is the harness's work, not the demand's.
+  assert.equal(classOf(kill("verter", { killedBy: "timeout" }, "stats"), "verter"), "unverified");
+  assert.equal(classOf(kill("verter", { killedBy: "timeout" }, "warm"), "verter"), "killed");
+  // The engine must itself have worked for the whole deadline: a late start
+  // (startup ate the allowance and more) is not the engine's exhaustion.
+  const lateStart = kill("tsc-api", { killedBy: "timeout" }, "cold");
+  for (const inv of lateStart.invocations.filter((i) => i.arm === "tsc-api"))
+    inv.phaseHistory = [{ phase: "spawn", atMs: 1600 }];
+  resummarize(lateStart);
+  assert.equal(classOf(lateStart, "tsc-api"), "unverified");
+  // A supervisor error invalidates the invocation whatever the kill.
+  const dirty = kill("verter", {
+    killedBy: "memory",
+    errors: ["job did not empty within the teardown limit"],
+  });
+  assert.ok(validate(dirty).failures.length > 0);
   // An unattributed tsc kill never makes a Verter answer beyond tsc.
   const scenario = { ...SCENARIO, beyond: "1" };
   const killedRef = structuredClone(EXPECTED);
   killedRef.scenarios.synthetic.settings.strict = {
     killed: "memory",
     codes: [],
-    receipt: RAW_ONE.receipt,
+    receipt: { ...RAW_ONE.receipt, termination: MEASURED_KILL },
   };
   const run = kill("tsc-api", { killedBy: "memory" }, "cold");
   run.summary = summarize(run, killedRef, [scenario]);
@@ -877,6 +960,16 @@ test("an observation without its evidence is never a match, and statistics must 
   for (const inv of noFlag.invocations.filter((i) => i.arm === "tsc-api"))
     delete inv.probe.probes[0].observation.errorType;
   failsWith(resummarize(noFlag), /lacks the evidence/);
+  // A failed observation supplies no answer, whatever text it still carries.
+  const failed = syntheticRun();
+  for (const inv of failed.invocations.filter((i) => i.arm === "tsc-api")) {
+    delete inv.probe.probes[0].observation.errorType;
+    inv.probe.probes[0].observation.error = "printer failed";
+  }
+  resummarize(failed);
+  assert.notEqual(failed.summary.cells[0].arms["tsc-api"].class, "reference");
+  assert.equal(failed.summary.cells[0].headline ?? null, null);
+  assert.equal(validate(failed).ok, false);
   const noLeaves = syntheticRun();
   for (const inv of noLeaves.invocations.filter((i) => i.arm === "verter"))
     delete inv.probe.probes[0].observation.unknownLeaves;
@@ -1088,16 +1181,29 @@ test("a raw record on disk that differs from results.json is reported", () => {
   const dir = mkdtempSync(join(tmpdir(), "semantic-perf-test-"));
   const run = syntheticRun();
   const inv = run.invocations[0];
-  inv.supervisorOut = join(dir, "sup.json");
-  inv.probeOut = join(dir, "probe.json");
+  inv.supervisorOut = join(dir, "rep-0.sup.json");
+  inv.probeOut = join(dir, "rep-0.probe.json");
   writeFileSync(inv.supervisorOut, JSON.stringify(inv.supervisor));
   writeFileSync(inv.probeOut, JSON.stringify(inv.probe));
-  writeFileSync(`${inv.probeOut}.phase`, JSON.stringify({ phase: inv.phase }));
+  writeFileSync(
+    `${inv.probeOut}.phase`,
+    JSON.stringify({ phase: inv.phase, history: inv.phaseHistory }),
+  );
   run.invocations = [inv];
   assert.deepEqual(rawFileProblems(run), []);
-  writeFileSync(`${inv.probeOut}.phase`, JSON.stringify({ phase: "cold" }));
+  writeFileSync(
+    `${inv.probeOut}.phase`,
+    JSON.stringify({ phase: "cold", history: inv.phaseHistory }),
+  );
   assert.ok(rawFileProblems(run).some((p) => /phase marker/.test(p)));
-  writeFileSync(`${inv.probeOut}.phase`, JSON.stringify({ phase: inv.phase }));
+  writeFileSync(
+    `${inv.probeOut}.phase`,
+    JSON.stringify({ phase: inv.phase, history: inv.phaseHistory }),
+  );
+  // A record on disk that results.json omits is a disagreement too.
+  const omitted = structuredClone(run);
+  omitted.invocations[0].probe = null;
+  assert.ok(rawFileProblems(omitted).some((p) => /probe record on disk/.test(p)));
   writeFileSync(inv.probeOut, JSON.stringify({ ...inv.probe, tool: "tsc" }));
   assert.ok(rawFileProblems(run).some((p) => /differs from results.json/.test(p)));
 });

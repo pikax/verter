@@ -68,9 +68,7 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let sink = Sink {
-                out: std::path::Path::new(out_path),
-            };
+            let sink = Sink::new(std::path::Path::new(out_path));
             match run_job(&job, alloc, &sink) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {

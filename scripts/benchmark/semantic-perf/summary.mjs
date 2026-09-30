@@ -12,6 +12,7 @@ import {
   stats,
   tscAnswerStatus,
   verdict,
+  runLimits,
 } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
 import { interpretMeasurement } from "./reference.mjs";
@@ -73,7 +74,7 @@ const PROBE_METRICS = [
 
 function probeArmSummary(arm, invs, ctx) {
   const measured = invs.filter((i) => !i.warmup);
-  const answers = invs.map((i) => probeAnswer(i, { budgetBytes: ctx.budgetBytes }));
+  const answers = invs.map((i) => probeAnswer(i, ctx.limits));
   const digests = [
     ...new Set(answers.map((a) => a.digest?.sha256 ?? `<${a.end.kind}:${a.outcome?.kind ?? ""}>`)),
   ];
@@ -111,9 +112,7 @@ function probeArmSummary(arm, invs, ctx) {
   // Statistics only over invocations whose demand completed; the validator
   // fails a run where a completed invocation lacks any of them.
   const completed = measured.filter((i) =>
-    ["exited", "observe-killed"].includes(
-      probeAnswer(i, { budgetBytes: ctx.budgetBytes }).end.kind,
-    ),
+    ["exited", "observe-killed"].includes(probeAnswer(i, ctx.limits).end.kind),
   );
   const metrics = completed.map(probeMetrics);
   out.completedMeasured = completed.length;
@@ -138,29 +137,30 @@ function probeArmSummary(arm, invs, ctx) {
   return out;
 }
 
-function cliArmSummary(invs, budgetBytes) {
+function cliArmSummary(invs, limits) {
+  const budgetBytes = limits.budgetBytes;
   const measured = invs.filter((i) => !i.warmup);
-  const ends = invs.map((i) => invocationEnd(i, { budgetBytes }));
+  const ends = invs.map((i) => invocationEnd(i, limits));
   const parsed = invs.map((i, k) =>
     ends[k].kind === "exited" ? parseCli(i.cliStdout ?? "") : null,
   );
   const codeSets = [
     ...new Set(parsed.map((p, k) => (p ? p.codes.join(",") : `<${ends[k].kind}>`))),
   ];
-  const completed = measured.filter((i) => invocationEnd(i, { budgetBytes }).kind === "exited");
+  const completed = measured.filter((i) => invocationEnd(i, limits).kind === "exited");
   const measuredParsed = completed.map((i) => parseCli(i.cliStdout ?? ""));
   const overBudget = completed.filter(
     (i) => typeof i.supervisor?.peakBytes === "number" && i.supervisor.peakBytes > budgetBytes,
   ).length;
   const killed = invs.filter((i) =>
-    ["killed", "unattributed-kill"].includes(invocationEnd(i, { budgetBytes }).kind),
+    ["killed", "unattributed-kill"].includes(invocationEnd(i, limits).kind),
   );
   return {
     invocations: invs.length,
     measured: measured.length,
     status:
       killed.length === invs.length
-        ? `killed (${invocationEnd(killed[0], { budgetBytes }).detail})`
+        ? `killed (${invocationEnd(killed[0], limits).detail})`
         : killed.length
           ? "inconsistent"
           : overBudget
@@ -172,7 +172,7 @@ function cliArmSummary(invs, budgetBytes) {
     wallMs: stats(completed.map((i) => i.supervisor?.wallMs)),
     terminationMs: stats(
       measured
-        .filter((i) => invocationEnd(i, { budgetBytes }).kind === "killed" && !i.skipped)
+        .filter((i) => invocationEnd(i, limits).kind === "killed" && !i.skipped)
         .map((i) => i.supervisor?.wallMs),
     ),
     peakBytes: stats(completed.map((i) => i.supervisor?.peakBytes)),
@@ -187,16 +187,17 @@ function cliArmSummary(invs, budgetBytes) {
 }
 
 /**
- * The resolution below which a timing difference is not claimed, from a
- * calibration rather than the workload: every tsc probe times a dedicated
- * series of 20 trivial warm requests after its measurement.
+ * The resolution below which a timing difference is not claimed. Every tsc
+ * probe times a dedicated series of 20 trivial warm requests after its
+ * measurement.
  *
- * - If any calibration request reads 0 ms, the server clock is coarse (a
- *   request cannot take no time): every reading is a whole number of clock
- *   quanta, so the quantum is the smallest positive tsc server time of the
- *   run, whichever request produced it (about half a millisecond on Windows).
- * - Otherwise the clock resolves the trivial request, and the quantum is at
- *   most the smallest calibration time.
+ * - If none reads 0 ms the clock resolves the trivial request: the quantum
+ *   is at most the smallest calibration time (basis "calibration").
+ * - If any reads 0 ms the clock is coarse, and the calibration only shows
+ *   that the quantum exceeds the trivial request; it cannot bound it. The
+ *   quantum is then ESTIMATED as the smallest positive tsc server time of the
+ *   run (basis "workload heuristic", labelled so in the report): it depends
+ *   on which requests the run happened to time.
  *
  * Verter's timer is in microseconds. One request: at least 1 ms and two
  * quanta (a difference of two readings); a sum of three separately timed
@@ -232,6 +233,7 @@ export function timerResolution(run) {
   return {
     tscQuantumMs: quantum,
     clock: calibration.length === 0 ? "uncalibrated" : coarse ? "coarse" : "fine",
+    basis: calibration.length === 0 ? "none" : coarse ? "workload heuristic" : "calibration",
     calibrationSamples: calibration.length,
     calibrationZeroShare: zeroShare,
     single: Math.max(1, 2 * (quantum ?? 0)),
@@ -257,7 +259,8 @@ function comparison(verterInvs, tscInvs, resolution) {
 /** Summarise a run against the measured reference. */
 export function summarize(run, expected, scenarios) {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
-  const budgetBytes = (run.meta?.options?.memMb ?? 0) * 1024 * 1024;
+  const limits = runLimits(run.meta?.options ?? {});
+  const budgetBytes = limits.budgetBytes;
   const resolution = timerResolution(run);
   const groups = new Map();
   for (const inv of run.invocations) {
@@ -272,7 +275,12 @@ export function summarize(run, expected, scenarios) {
     const scenario = byId.get(meta.id);
     const measured = referenceFor(expected, meta.id, meta.setting);
     const armInvs = groups.get(key) ?? {};
-    const base = { beyond: beyondDigest(scenario), probe: probeDigest(scenario), budgetBytes };
+    const base = {
+      beyond: beyondDigest(scenario),
+      probe: probeDigest(scenario),
+      budgetBytes,
+      limits,
+    };
     const arms = {};
     // The tsc arm first: when the measurement holds no answer but the API
     // answered with the constructed one, that is the reference the Verter
@@ -297,9 +305,7 @@ export function summarize(run, expected, scenarios) {
     for (const [arm, invs] of Object.entries(armInvs)) {
       if (arm === "tsc-api") continue;
       arms[arm] =
-        ARMS[arm].kind === "cli"
-          ? cliArmSummary(invs, budgetBytes)
-          : probeArmSummary(arm, invs, ctx);
+        ARMS[arm].kind === "cli" ? cliArmSummary(invs, limits) : probeArmSummary(arm, invs, ctx);
     }
     const comparableTsc = ["reference", "reference-by-construction"].includes(
       arms["tsc-api"]?.class,

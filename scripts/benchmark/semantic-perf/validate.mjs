@@ -32,6 +32,8 @@ import {
   parseCli,
   probeAnswer,
   probeRecordProblems,
+  runLimits,
+  supervisorDeadlineMs,
 } from "./analyze.mjs";
 import { sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import {
@@ -40,6 +42,8 @@ import {
   sha256File,
   sha256Text,
   TYPESCRIPT_VERSION,
+  BUILD_ENV_NAMES,
+  RUNTIME_ENV_NAMES,
 } from "./provenance.mjs";
 import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
@@ -63,6 +67,8 @@ function stable(value) {
  * Validate a run object. `expected` is the measured reference the run was
  * summarised against; `scenarios` the catalog it ran.
  */
+const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
+
 export function validateRun(run, expected, scenarios, { requireAllMatched = false } = {}) {
   const failures = [];
   const warnings = [];
@@ -146,6 +152,19 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     fail(
       "wrong binary: the build does not record the controlled compiler (RUSTC bound to the fingerprinted toolchain rustc, CARGO_INCREMENTAL=0)",
     );
+  }
+  if (!meta.options?.allowTuning) {
+    // Untuned runs give every child a constructed environment: nothing
+    // outside the start-up variables may reach the build or a probe.
+    const allowed = (names) => new Set(names.map((n) => n.toUpperCase()));
+    const runtimeAllowed = allowed(RUNTIME_ENV_NAMES);
+    const buildAllowed = allowed([...BUILD_ENV_NAMES, "CARGO_INCREMENTAL", "RUSTC"]);
+    const runtime = meta.environment?.runtime?.names;
+    const built = meta.build?.environment?.names;
+    if (!Array.isArray(runtime) || runtime.some((n) => !runtimeAllowed.has(n.toUpperCase())))
+      fail("tuning: the probes' environment is not the constructed one");
+    if (!Array.isArray(built) || built.some((n) => !buildAllowed.has(n.toUpperCase())))
+      fail("tuning: the build environment is not the constructed one");
   }
   if (Object.keys(meta.tuning ?? {}).length && !meta.options?.allowTuning) {
     fail(
@@ -253,7 +272,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         source.setting === inv.setting &&
         source.arm === inv.arm &&
         source.supervisor?.killedBy === "memory" &&
-        invocationEnd(source, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 }).kind === "killed";
+        invocationEnd(source, runLimits(opts)).kind === "killed";
       if (!valid)
         fail(
           `${id}: skipped without a warmup of the same scenario and arm whose engine exhausted the memory cap`,
@@ -271,9 +290,21 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(
         `${id}: containment cap ${sup.memLimitBytes} is not the run's budget plus allowance (${cap})`,
       );
-    if (sup.timeoutMs !== opts.timeoutMs)
-      fail(`${id}: deadline ${sup.timeoutMs} is not the run's ${opts.timeoutMs} ms`);
-    const end = invocationEnd(inv, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 });
+    if (sup.timeoutMs !== supervisorDeadlineMs(opts))
+      fail(
+        `${id}: deadline ${sup.timeoutMs} is not the run's ${supervisorDeadlineMs(opts)} ms (deadline plus startup allowance)`,
+      );
+    if (
+      ARMS[inv.arm]?.kind === "probe" &&
+      inv.probeOut !== inv.supervisorOut.replace(/\.sup\.json$/, ".probe.json")
+    )
+      fail(`${id}: the probe record path is not the invocation's own`);
+    if (
+      ARMS[inv.arm]?.kind === "probe" &&
+      (!finite(inv.spawnedAtMs) || (inv.phase != null && !Array.isArray(inv.phaseHistory)))
+    )
+      fail(`${id}: no spawn time or phase history (the evidence for a deadline)`);
+    const end = invocationEnd(inv, runLimits(opts));
     const expectedExit = ["killed", "observe-killed", "unattributed-kill"].includes(end.kind)
       ? sup.killedBy === "timeout"
         ? 124
@@ -340,7 +371,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
-    const answer = probeAnswer(inv, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 });
+    const answer = probeAnswer(inv, runLimits(opts));
     if (answer.alias && answer.alias !== "__Probe") fail(`${id}: answered ${answer.alias}`);
   }
 
@@ -430,24 +461,33 @@ export function rawFileProblems(run) {
     } catch (err) {
       problems.push(`${id}: cannot read ${inv.supervisorOut}: ${err.message}`);
     }
-    if (inv.probeOut) {
+    // Every probe invocation's own files are re-read, whether or not
+    // results.json embeds them: a record on disk that results.json omits is
+    // as much a disagreement as one that differs.
+    const probePath =
+      ARMS[inv.arm]?.kind === "probe"
+        ? String(inv.supervisorOut ?? "").replace(/\.sup\.json$/, ".probe.json")
+        : null;
+    if (probePath) {
       let marker = null;
       try {
-        marker = JSON.parse(readFileSync(`${inv.probeOut}.phase`, "utf8"));
+        marker = JSON.parse(readFileSync(`${probePath}.phase`, "utf8"));
       } catch {
         marker = null;
       }
-      if ((marker?.phase ?? null) !== (inv.phase ?? null))
+      if (
+        (marker?.phase ?? null) !== (inv.phase ?? null) ||
+        stable(marker?.history ?? null) !== stable(inv.phaseHistory ?? null)
+      )
         problems.push(`${id}: the phase marker on disk differs from results.json`);
-    }
-    if (inv.probeOut && inv.probe) {
+      let onDisk;
       try {
-        const probe = compactProbeRecord(JSON.parse(readFileSync(inv.probeOut, "utf8")));
-        if (stable(probe) !== stable(inv.probe))
-          problems.push(`${id}: the probe record on disk differs from results.json`);
-      } catch (err) {
-        problems.push(`${id}: cannot read ${inv.probeOut}: ${err.message}`);
+        onDisk = compactProbeRecord(JSON.parse(readFileSync(probePath, "utf8")));
+      } catch {
+        onDisk = null;
       }
+      if (stable(onDisk) !== stable(inv.probe ?? null))
+        problems.push(`${id}: the probe record on disk differs from results.json`);
     }
   }
   return problems;
