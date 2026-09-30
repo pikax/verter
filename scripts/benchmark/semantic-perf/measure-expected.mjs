@@ -132,16 +132,21 @@ async function main() {
   const supervisor = viaCapped ? null : resolveSupervisor(ROOT, arg("--supervisor", null)).path;
   const work = resolve(arg("--work", join(tmpdir(), `semantic-perf-expected-${Date.now()}`)));
   const lib = readFileSync(join(HERE, "lib", "bench-globals.d.ts"), "utf8");
+  // The method identity every cell is measured by; a cell measured by any
+  // other is re-measured, never relabelled. A capped wrapper runs its own
+  // tsc, which this script cannot verify, so its cells carry no verified
+  // executable.
   const method = {
     measuringSuffixSha256: sha256Text(MEASURING_SUFFIX),
     libSha256: sha256Text(lib),
-    tscExeSha256: typescript.exeSha256,
+    tscExeSha256: viaCapped ? null : typescript.exeSha256,
     tscVersion: typescript.versionText,
     platform: `${process.platform}-${process.arch}`,
     memMb,
     timeoutMs,
     launcher: viaCapped ? "capped tsc wrapper" : "verter-supervise",
   };
+  const methodKey = JSON.stringify(method);
   const previous = (() => {
     try {
       return JSON.parse(readFileSync(EXPECTED, "utf8"));
@@ -149,11 +154,10 @@ async function main() {
       return null;
     }
   })();
-  const sameMethod =
-    previous?.method?.measuringSuffixSha256 === method.measuringSuffixSha256 && previous?.method?.libSha256 === method.libSha256;
+  const sameMethod = previous?.schema === 3 && JSON.stringify(previous.method) === methodKey;
   const resume = process.argv.includes("--resume");
   const out = previous && sameMethod && (only.length || resume) ? previous : { scenarios: {} };
-  out.schema = 2;
+  out.schema = 3;
   out.typescript = TYPESCRIPT_VERSION;
   out.method = method;
   out.measuredWith =
@@ -196,7 +200,14 @@ async function main() {
         exit = r.record.killedBy === "timeout" ? 124 : r.record.killedBy === "memory" ? 137 : r.record.exitCode;
         stdout = readFileSync(r.record.stdoutPath, "utf8");
       }
-      const receipt = { exit, stdoutSha256: sha256Text(stdout), stdoutBytes: stdout.length };
+      const receipt = {
+        exit,
+        stdoutSha256: sha256Text(stdout),
+        stdoutBytes: stdout.length,
+        tsconfigSha256: sha256Text(tsconfigText(setting)),
+        sourceSha256: sha256Text(source),
+        method: methodKey,
+      };
       let result;
       if (exit === 124 || exit === 137) result = { killed: exit === 124 ? "timeout" : "memory", codes: [], receipt };
       else if (![0, 1, 2].includes(exit)) result = { unmeasurable: `tsc exited ${exit}`, codes: [], receipt };

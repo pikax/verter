@@ -116,6 +116,14 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       if (measured.sourceSha256 !== sha256Text(scenario.source)) fail(`${key}: the measured reference is stale (measured on a different source)`);
       if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"]) fail(`${key}: the measured reference used a different library`);
       if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX)) fail(`${key}: the measured reference used a different measuring method`);
+      // Every cell carries its own immutable provenance: measured by the
+      // file's one method, by a verified tsc 7.0.2 executable, on exactly
+      // this source (plus the measuring suffix) and this tsconfig.
+      const receipt = measured.settings?.[cell.setting]?.receipt;
+      if (receipt?.method !== JSON.stringify(expected.method)) fail(`${key}: the reference cell was measured by another method than the file states`);
+      if (!expected.method?.tscExeSha256 || expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`) fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
+      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting))) fail(`${key}: the reference cell was measured with another tsconfig`);
+      if (receipt?.sourceSha256 !== sha256Text(scenario.source + MEASURING_SUFFIX)) fail(`${key}: the reference cell was measured on another source`);
     }
   }
 
@@ -167,8 +175,9 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         source.scenario === inv.scenario &&
         source.setting === inv.setting &&
         source.arm === inv.arm &&
-        source.supervisor?.killedBy === "memory";
-      if (!valid) fail(`${id}: skipped without a warmup of the same scenario and arm killed at the memory cap`);
+        source.supervisor?.killedBy === "memory" &&
+        invocationEnd(source, (opts.infraMb ?? 0) * 1024 * 1024).kind === "killed";
+      if (!valid) fail(`${id}: skipped without a warmup of the same scenario and arm whose engine exhausted the memory cap`);
       continue;
     }
     const sup = inv.supervisor;
@@ -180,15 +189,21 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     const cap = ((opts.memMb ?? 0) + (opts.infraMb ?? 0)) * 1024 * 1024;
     if (sup.memLimitBytes !== cap) fail(`${id}: containment cap ${sup.memLimitBytes} is not the run's budget plus allowance (${cap})`);
     if (sup.timeoutMs !== opts.timeoutMs) fail(`${id}: deadline ${sup.timeoutMs} is not the run's ${opts.timeoutMs} ms`);
-    const end = invocationEnd(inv);
-    const expectedExit = ["killed", "observe-killed"].includes(end.kind) ? (sup.killedBy === "timeout" ? 124 : 137) : end.kind === "exited" ? sup.exitCode : 125;
+    const end = invocationEnd(inv, (opts.infraMb ?? 0) * 1024 * 1024);
+    const expectedExit = ["killed", "observe-killed", "unattributed-kill"].includes(end.kind)
+      ? sup.killedBy === "timeout"
+        ? 124
+        : 137
+      : end.kind === "exited"
+        ? sup.exitCode
+        : 125;
     if (inv.supervisorExit !== expectedExit) fail(`${id}: supervisor exit ${inv.supervisorExit} disagrees with its record (${expectedExit})`);
     if (end.kind === "harness-failure") {
       fail(`${id}: failed child: ${end.detail}`);
       continue;
     }
     const arm = ARMS[inv.arm];
-    if (end.kind === "killed") continue;
+    if (end.kind === "killed" || end.kind === "unattributed-kill") continue;
     if (end.kind === "observe-killed") {
       // The demand was measured and recorded before the kill: its record
       // must hold every demand field.
@@ -222,7 +237,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
       if (roots.length !== 2 || want.some((w) => !roots.includes(w))) fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
-    const answer = probeAnswer(inv);
+    const answer = probeAnswer(inv, (opts.infraMb ?? 0) * 1024 * 1024);
     if (answer.alias && answer.alias !== "__Probe") fail(`${id}: answered ${answer.alias}`);
   }
 
@@ -244,10 +259,9 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       }
     }
     if (!cell.reference) warnings.push(`${cell.key}: no measured reference`);
-    // Both headline arms' memory must come from one metric.
-    const vm = cell.arms.verter?.memoryMetric;
-    const tm = cell.arms["tsc-api"]?.memoryMetric;
-    if (vm && tm && vm !== tm) fail(`${cell.key}: the arms' memory metrics differ (${vm} vs ${tm})`);
+    // Every completed measurement of both headline arms must read one metric.
+    const metricSet = new Set([...(cell.arms.verter?.memoryMetrics ?? []), ...(cell.arms["tsc-api"]?.memoryMetrics ?? [])]);
+    if (metricSet.size > 1) fail(`${cell.key}: the measurements' memory metrics differ (${[...metricSet].join(", ")})`);
     if (cell.headline) {
       for (const arm of ["verter", "tsc-api"]) {
         const s = cell.arms[arm];

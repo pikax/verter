@@ -54,7 +54,13 @@ test("the canonical form ignores quoting, union and property order, and keeps wh
     [`any`, `unknown`],
     [`{ readonly a: 1 }`, `{ a: 1 }`],
     [`{ a?: 1 }`, `{ a: 1 }`],
+    [`(x: unknown, y: unknown) => x is string`, `(y: unknown, x: unknown) => x is string`],
+    [`{ [s]: 1 }`, `{ "[s]": 1 }`],
   ];
+  // Renaming a parameter everywhere, a predicate's target included, is the same type.
+  assert.equal(canonicalType(`(x: unknown) => x is string`), canonicalType(`(y: unknown) => y is string`));
+  // A numeric key and its string spelling are one property.
+  assert.equal(canonicalType(`{ 0: 1 }`), canonicalType(`{ "0": 1 }`));
   for (const [a, b] of different) assert.notEqual(canonicalType(a), canonicalType(b), `${a} ≢ ${b}`);
   assert.equal(canonicalDigest(`2 | 1`).sha256, canonicalDigest(`1 | 2`).sha256);
 });
@@ -131,6 +137,12 @@ test("the reference measurement records tsc's print and the interpretation reads
   );
   assert.equal(errorAny.errorAny, true);
   assert.deepEqual(errorAny.codes, [2589]);
+  // A function member keeps its parameter types and its extent.
+  const fn = read(`scenario.ts(${line},7): error TS2322: Type '[[(x: number) => string]]' is not assignable to type '[never]'.\n` + verdictLine("no"));
+  assert.equal(fn.digest.sha256, canonicalDigest(`(y: number) => string`).sha256);
+  const fnOrTwo = read(`scenario.ts(${line},7): error TS2322: Type '[[() => 1] | [2]]' is not assignable to type '[never]'.\n` + verdictLine("no"));
+  assert.equal(fnOrTwo.digest.sha256, canonicalDigest(`(() => 1) | 2`).sha256);
+  assert.notEqual(fnOrTwo.digest.sha256, canonicalDigest(`() => 1 | 2`).sha256);
   // A member of the probe that is itself an object is kept (the wrapper filters nothing).
   const objects = read(
     `scenario.ts(${line},7): error TS2322: Type '[[{ readonly __benchNothing: 1; }] | [1]]' is not assignable to type '[never]'.\n` + verdictLine("no"),
@@ -213,10 +225,23 @@ test("a verdict names a winner only when the repetitions do not overlap", () => 
 // ---------------------------------------------------------------- synthetic runs
 
 const SCENARIO = { id: "synthetic", family: "test", note: "", probe: "1", source: moduleText("", "1") };
-const RAW_ONE = { never: false, printed: "[1]", codes: [], receipt: { exit: 1, stdoutSha256: "r", stdoutBytes: 1 } };
+const METHOD = { measuringSuffixSha256: sha256Text(MEASURING_SUFFIX), libSha256: "lib-digest", tscExeSha256: "t", tscVersion: "Version 7.0.2" };
+const RAW_ONE = {
+  never: false,
+  printed: "[1]",
+  codes: [],
+  receipt: {
+    exit: 1,
+    stdoutSha256: "r",
+    stdoutBytes: 1,
+    tsconfigSha256: sha256Text(tsconfigText(SETTINGS[0])),
+    sourceSha256: sha256Text(SCENARIO.source + MEASURING_SUFFIX),
+    method: JSON.stringify(METHOD),
+  },
+};
 const EXPECTED = {
-  schema: 2,
-  method: { measuringSuffixSha256: sha256Text(MEASURING_SUFFIX), libSha256: "lib-digest" },
+  schema: 3,
+  method: METHOD,
   scenarios: { synthetic: { sourceSha256: sha256Text(SCENARIO.source), settings: { strict: RAW_ONE } } },
 };
 const INPUTS = {
@@ -227,7 +252,7 @@ const INPUTS = {
 };
 const PACKAGES = ["verter_bench", "verter_session", "verter_semantic", "verter_workspace", "verter_audit", "verter_type_expr", "verter_scheduler", "verter_compiler"];
 const MEM_MB = 64;
-const INFRA_MB = 16;
+const INFRA_MB = 1024;
 
 function supervisorRecord(overrides = {}) {
   return {
@@ -257,6 +282,7 @@ function verterProbe(text, arm) {
     instrumented: arm === "verter-counted",
     observability: arm === "verter-obs",
     stage: "complete",
+    pid: 1,
     phases: { engineStart: 500, setup: 1000, init: 100, teardown: 10 },
     init: { micros: 100, outcome: { kind: "value" } },
     probes: [
@@ -404,7 +430,7 @@ test("a tsc error-type flag that disagrees with the reference fails validation",
 test("when the measurement holds no answer, an API answer equal to the constructed one becomes the reference", () => {
   const scenario = { ...SCENARIO, beyond: "1" };
   const killedRef = structuredClone(EXPECTED);
-  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [], receipt: {} };
+  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [], receipt: RAW_ONE.receipt };
   const run = syntheticRun();
   run.summary = summarize(run, killedRef, [scenario]);
   assert.equal(run.summary.cells[0].arms["tsc-api"].class, "reference-by-construction");
@@ -484,7 +510,11 @@ test("the arms' memory must come from one metric", () => {
 
 test("an engine over the budget is exhausted, not compared", () => {
   const run = syntheticRun();
-  for (const inv of run.invocations) if (inv.arm === "verter") inv.probe.afterRequests.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+  for (const inv of run.invocations) {
+    if (inv.arm !== "verter") continue;
+    inv.probe.afterRequests.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+    inv.probe.afterObserve.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+  }
   resummarize(run);
   assert.equal(run.summary.cells[0].arms.verter.class, "killed");
   assert.equal(run.summary.cells[0].headline, null);
@@ -506,6 +536,62 @@ test("a kill while observing leaves the measured demand, classed unverified", ()
   assert.equal(run.summary.cells[0].arms["tsc-api"].class, "unverified");
   assert.equal(run.summary.cells[0].headline, null);
   assert.deepEqual(validate(run).failures, []);
+});
+
+test("a tsc kill is the engine's only with evidence: while the driver is blocked and within the allowance", () => {
+  const killTsc = (phase, clientBytes) => {
+    const run = syntheticRun();
+    for (const inv of run.invocations.filter((i) => i.arm === "tsc-api")) {
+      inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+      inv.supervisorExit = 137;
+      inv.phase = phase;
+      inv.phaseClientBytes = clientBytes;
+      inv.probe = null;
+    }
+    return resummarize(run);
+  };
+  const attributed = killTsc("cold", 50 * 1024 * 1024);
+  assert.equal(attributed.summary.cells[0].arms["tsc-api"].class, "killed");
+  assert.deepEqual(validate(attributed).failures, []);
+  for (const [phase, bytes] of [
+    ["stats", 50 * 1024 * 1024],
+    ["spawn", null],
+    ["cold", 2000 * 1024 * 1024],
+    ["observe", 50 * 1024 * 1024],
+  ]) {
+    const run = killTsc(phase, bytes);
+    assert.equal(run.summary.cells[0].arms["tsc-api"].class, "unverified", `${phase} ${bytes}`);
+    assert.deepEqual(validate(run).failures, []);
+  }
+  // An unattributed tsc kill never makes a Verter answer beyond tsc.
+  const scenario = { ...SCENARIO, beyond: "1" };
+  const killedRef = structuredClone(EXPECTED);
+  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [], receipt: RAW_ONE.receipt };
+  const run = killTsc("spawn", null);
+  run.summary = summarize(run, killedRef, [scenario]);
+  assert.equal(run.summary.cells[0].arms.verter.class, "no-reference");
+  const run2 = killTsc("cold", 50 * 1024 * 1024);
+  run2.summary = summarize(run2, killedRef, [scenario]);
+  assert.equal(run2.summary.cells[0].arms.verter.class, "beyond-tsc");
+});
+
+test("inconsistent statistics or duplicated times fail validation", () => {
+  const mutate = (fn, pattern) => {
+    const run = syntheticRun();
+    fn(run);
+    failsWith(resummarize(run), pattern);
+  };
+  mutate((run) => (firstOf(run, "tsc-api").probe.serverAfterRequests.pid = 99), /not of the tsc server process/);
+  mutate((run) => (firstOf(run, "verter").probe.afterRequests.pid = 99), /not of the probe's own process/);
+  mutate((run) => {
+    const later = run.invocations.filter((i) => i.arm === "tsc-api" && !i.warmup).at(-1);
+    later.probe.serverAfterRequests.metric = "resident";
+    later.probe.serverAfterObserve.metric = "resident";
+  }, /memory metrics differ/);
+  mutate((run) => (firstOf(run, "tsc-api").probe.serverAfterRequests.metric = ""), /name no metric/);
+  mutate((run) => (firstOf(run, "verter").probe.afterRequests.currentBytes = 999999), /current above peak/);
+  mutate((run) => (firstOf(run, "verter").probe.phases.init = 0), /init time disagrees/);
+  mutate((run) => delete firstOf(run, "tsc-api").probe.phases.engineStartRoundTripMs, /engine-start round trip/);
 });
 
 test("repetitions that disagree fail validation", () => {
@@ -575,6 +661,14 @@ test("a reference measured on another source or by another method, or inputs tha
   const method = structuredClone(EXPECTED);
   method.method.measuringSuffixSha256 = "other";
   assert.ok(validateRun(syntheticRun(), method, [SCENARIO]).failures.some((f) => /different measuring method/.test(f)));
+  // A cell measured by another method cannot be relabelled by the file's header.
+  const relabelled = structuredClone(EXPECTED);
+  relabelled.scenarios.synthetic.settings.strict.receipt.method = JSON.stringify({ ...METHOD, launcher: "capped tsc wrapper", tscExeSha256: null });
+  assert.ok(validateRun(syntheticRun(), relabelled, [SCENARIO]).failures.some((f) => /measured by another method/.test(f)));
+  const unverified = structuredClone(EXPECTED);
+  unverified.method.tscExeSha256 = null;
+  unverified.scenarios.synthetic.settings.strict.receipt.method = JSON.stringify(unverified.method);
+  assert.ok(validateRun(syntheticRun(), unverified, [SCENARIO]).failures.some((f) => /verified tsc/.test(f)));
   const run = syntheticRun();
   run.meta.scenarios["synthetic/strict"].inputs["tsconfig.json"] = "other";
   failsWith(run, /tsconfig.json is not the catalog/);
@@ -587,6 +681,7 @@ test("after a warmup killed at the memory cap the rest of that arm may be skippe
   warmup.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
   warmup.supervisorExit = 137;
   warmup.phase = "cold";
+  warmup.phaseClientBytes = 50 * 1024 * 1024;
   warmup.probe = null;
   for (const inv of run.invocations) {
     if (inv.arm === "tsc-api" && !inv.warmup) {
@@ -602,6 +697,10 @@ test("after a warmup killed at the memory cap the rest of that arm may be skippe
   run2.meta.options.skipAfterKill = true;
   run2.invocations.find((i) => i.arm === "tsc-api" && !i.warmup).skipped = { after: 0, reason: "made up" };
   failsWith(resummarize(run2), /skipped without a warmup/);
+  // A warmup killed without evidence that its engine exhausted the cap does not justify a skip.
+  const run3 = structuredClone(run);
+  run3.invocations.find((i) => i.arm === "tsc-api" && i.warmup).phase = "stats";
+  failsWith(resummarize(run3), /skipped without a warmup/);
 });
 
 test("a raw record on disk that differs from results.json is reported", () => {

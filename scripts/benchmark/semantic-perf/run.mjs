@@ -3,11 +3,13 @@
 // under the supervisor, keep every record, then summarise, validate and
 // report. See docs/contributing/semantic-benchmark.md.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARMS, compactProbeRecord, DEFAULT_ARMS } from "./analyze.mjs";
+import { ARMS, compactProbeRecord, DEFAULT_ARMS, invocationEnd } from "./analyze.mjs";
 import {
   BUILD_INPUTS,
   buildProblems,
@@ -216,6 +218,14 @@ export function scheduleBalanceProblems(plan, arms) {
 
 /** Runtime and build variables that tune either tool away from its shipped defaults. */
 export const TUNING_VARIABLES = [
+  "RUSTC",
+  "RUSTC_WRAPPER",
+  "RUSTC_WORKSPACE_WRAPPER",
+  "RUSTC_BOOTSTRAP",
+  "CC",
+  "CXX",
+  "CFLAGS",
+  "CXXFLAGS",
   "GOGC",
   "GOMEMLIMIT",
   "GOMAXPROCS",
@@ -236,9 +246,48 @@ export const TUNING_VARIABLES = [
 export function tuningEnvironment(env) {
   return Object.fromEntries(
     Object.entries(env)
-      .filter(([k]) => TUNING_VARIABLES.includes(k) || /^CARGO_PROFILE_/.test(k) || /^VERTER_/.test(k) || /^CARGO_TARGET_.*_RUSTFLAGS$/.test(k))
+      .filter(([k]) => TUNING_VARIABLES.includes(k) || /^CARGO_(PROFILE|TARGET|BUILD)_/.test(k) || /^VERTER_/.test(k))
       .sort(([a], [b]) => a.localeCompare(b)),
   );
+}
+
+/**
+ * Cargo configuration files outside the repository (in its ancestors or in
+ * CARGO_HOME) that the build would read: each can override flags, the
+ * compiler or profiles, so each counts as tuning.
+ */
+export function outsideCargoConfig(root) {
+  const found = {};
+  const check = (dir) => {
+    for (const name of ["config.toml", "config"]) {
+      const file = join(dir, ".cargo", name);
+      if (existsSync(file)) found[`cargo config ${file}`] = sha256File(file).slice(0, 16);
+    }
+  };
+  let dir = dirname(root);
+  for (;;) {
+    check(dir);
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
+  for (const name of ["config.toml", "config"]) {
+    const file = join(cargoHome, name);
+    if (existsSync(file)) found[`cargo config ${file}`] = sha256File(file).slice(0, 16);
+  }
+  return found;
+}
+
+/** Power and thermal state, recorded for the report (never enforced). */
+export function powerReceipt() {
+  const run = (cmd, args) => {
+    const out = spawnSync(cmd, args, { encoding: "utf8", timeout: 10_000 });
+    return out.status === 0 ? out.stdout.trim().split("\n").slice(0, 4).join(" / ") : null;
+  };
+  if (process.platform === "darwin") return { battery: run("pmset", ["-g", "batt"]), thermal: run("pmset", ["-g", "therm"]) };
+  if (process.platform === "win32") return { scheme: run("powercfg", ["/getactivescheme"]) };
+  return {};
 }
 
 /** Rust's and Node's names for one architecture. */
@@ -336,7 +385,7 @@ export async function main(argv) {
       "macOS has no kernel-enforced process-tree memory cap: the supervisor samples. Re-run with --allow-sampled to consent; every record will say `containment: sampled`.",
     );
   }
-  const tuning = tuningEnvironment(process.env);
+  const tuning = { ...tuningEnvironment(process.env), ...outsideCargoConfig(ROOT) };
   if (Object.keys(tuning).length && !opts.allowTuning) {
     throw new Error(
       `tuning variables are set (${Object.keys(tuning).join(", ")}): the benchmark measures both tools as shipped. Unset them, or pass --allow-tuning to run a labelled tuned benchmark.`,
@@ -368,8 +417,14 @@ export async function main(argv) {
     ["the Verter probe", binaries.probe],
     ["the counted probe", binaries.counted],
   ]) {
-    if (!sameArchitecture(bin.identity.targetArch, process.arch) || !typescript.platformPackage.endsWith(`-${process.arch}`)) {
-      throw new Error(`${name} is built for ${bin.identity.targetArch}, node runs ${process.arch} and tsc is ${typescript.platformPackage}: the tools must run natively on one architecture`);
+    if (
+      bin.identity.nativeArch !== bin.identity.targetArch ||
+      !sameArchitecture(bin.identity.targetArch, process.arch) ||
+      !typescript.platformPackage.endsWith(`-${process.arch}`)
+    ) {
+      throw new Error(
+        `${name} is built for ${bin.identity.targetArch} on ${bin.identity.nativeArch} hardware, node runs ${process.arch} and tsc is ${typescript.platformPackage}: the tools must run natively on one architecture`,
+      );
     }
   }
   const supervisorSource = resolveSupervisor(ROOT, opts.supervisor);
@@ -432,9 +487,12 @@ export async function main(argv) {
     let probe = null;
     let probeReadError = null;
     let phase = null;
+    let phaseClientBytes = null;
     if (probeOut) {
       try {
-        phase = readFileSync(`${probeOut}.phase`, "utf8").trim();
+        const marker = JSON.parse(readFileSync(`${probeOut}.phase`, "utf8"));
+        phase = marker.phase ?? null;
+        phaseClientBytes = marker.clientBytes ?? null;
       } catch {
         phase = null;
       }
@@ -471,11 +529,14 @@ export async function main(argv) {
       supervisor: record,
       probeOut,
       phase,
+      phaseClientBytes,
       probe,
       probeReadError,
       cliStdout,
     });
-    if (step.warmup && record?.killedBy === "memory") memoryKilled.set(cellArm, index);
+    // Skip the rest of an arm only after its ENGINE exhausted the cap.
+    const last = invocations.at(-1);
+    if (step.warmup && record?.killedBy === "memory" && invocationEnd(last, opts.infraMb * 1024 * 1024).kind === "killed") memoryKilled.set(cellArm, index);
     const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
     log(
       `[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: ${end} ` +
@@ -503,7 +564,7 @@ export async function main(argv) {
       buildInputsAfterBuild,
       harness,
       harnessAfter: harnessFingerprint(ROOT),
-      host: hostInfo(),
+      host: { ...hostInfo(), power: powerReceipt() },
       tuning,
       typescript,
       build,

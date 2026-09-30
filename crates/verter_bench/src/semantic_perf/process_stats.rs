@@ -192,9 +192,86 @@ pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
     )))
 }
 
+/// The machine's native architecture (Rust's name for it), independent of
+/// the architecture this process runs as: a process translated or emulated
+/// on another architecture reports the hardware's, not its own.
+#[cfg(windows)]
+pub fn native_arch() -> Option<&'static str> {
+    use windows_sys::Win32::System::SystemInformation::{
+        IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+    let (mut process, mut native) = (0u16, 0u16);
+    // SAFETY: both out-parameters are local and correctly typed; the
+    // pseudo-handle of the current process needs no closing.
+    let ok = unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, &mut native) } != 0;
+    match (ok, native) {
+        (true, IMAGE_FILE_MACHINE_AMD64) => Some("x86_64"),
+        (true, IMAGE_FILE_MACHINE_ARM64) => Some("aarch64"),
+        (true, IMAGE_FILE_MACHINE_I386) => Some("x86"),
+        _ => None,
+    }
+}
+
+/// See the Windows variant.
+#[cfg(target_os = "macos")]
+pub fn native_arch() -> Option<&'static str> {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated and the out-buffer is a local of the
+    // size passed in.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.optional.arm64".as_ptr(),
+            (&mut value as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // The key exists only on Apple silicon; its absence means an Intel Mac.
+    Some(if rc == 0 && value == 1 {
+        "aarch64"
+    } else {
+        "x86_64"
+    })
+}
+
+/// See the Windows variant.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn native_arch() -> Option<&'static str> {
+    // SAFETY: `uname` fills the caller-owned struct.
+    let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut name) } != 0 {
+        return None;
+    }
+    let machine: Vec<u8> = name
+        .machine
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| *c as u8)
+        .collect();
+    match machine.as_slice() {
+        b"x86_64" => Some("x86_64"),
+        b"aarch64" | b"arm64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn native_arch() -> Option<&'static str> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_native_architecture_is_known_and_runs_this_build_natively_or_translated() {
+        let native = native_arch().expect("the native architecture is readable");
+        assert!(["x86_64", "aarch64", "x86"].contains(&native), "{native}");
+    }
 
     #[test]
     fn the_current_process_reports_a_positive_peak_at_least_its_current_use() {

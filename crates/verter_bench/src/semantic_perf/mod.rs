@@ -207,6 +207,8 @@ pub struct JobResult {
     /// `measured` once the requests and the engine statistics are recorded,
     /// `complete` once observation and teardown ran too.
     pub stage: &'static str,
+    /// This process: every statistics reading must be of it.
+    pub pid: u32,
     pub phases: PhaseTimes,
     pub init: RequestRecord,
     pub probes: Vec<ProbeRecord>,
@@ -267,17 +269,34 @@ pub struct Sink<'a> {
 }
 
 impl Sink<'_> {
-    fn phase(&self, phase: &str) {
+    fn sibling(&self, suffix: &str) -> PathBuf {
         let mut path = self.out.as_os_str().to_owned();
-        path.push(".phase");
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    /// Replace `path` with `text` atomically (write aside, then rename), so
+    /// a reader never sees a torn file.
+    fn replace(path: &Path, text: &str) -> std::io::Result<()> {
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(".tmp");
+        let aside = PathBuf::from(aside);
+        std::fs::write(&aside, text)?;
+        std::fs::rename(&aside, path)
+    }
+
+    fn phase(&self, phase: &str) {
         // A lost marker only loses attribution of a later kill; the record
         // itself is written separately and checked.
-        let _ = std::fs::write(PathBuf::from(path), phase);
+        let _ = Self::replace(
+            &self.sibling(".phase"),
+            &serde_json::json!({ "phase": phase }).to_string(),
+        );
     }
 
     fn record(&self, result: &JobResult) -> Result<(), JobError> {
         let text = serde_json::to_string_pretty(result).expect("a record serialises");
-        std::fs::write(self.out, text)
+        Self::replace(self.out, &text)
             .map_err(|err| JobError(format!("write {}: {err}", self.out.display())))
     }
 }
@@ -596,6 +615,7 @@ pub fn run_job(
         instrumented: alloc.is_some(),
         observability: job.observability,
         stage: "measured",
+        pid: std::process::id(),
         phases: PhaseTimes {
             engine_start,
             setup,

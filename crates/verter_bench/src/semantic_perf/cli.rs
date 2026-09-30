@@ -42,6 +42,8 @@ struct Identity {
     debug_assertions: bool,
     target_os: &'static str,
     target_arch: &'static str,
+    /// The hardware's architecture, whatever this process runs as.
+    native_arch: Option<&'static str>,
     job_schema: u32,
     result_schema: u32,
 }
@@ -104,6 +106,7 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                 debug_assertions: cfg!(debug_assertions),
                 target_os: std::env::consts::OS,
                 target_arch: std::env::consts::ARCH,
+                native_arch: process_stats::native_arch(),
                 job_schema: super::JOB_SCHEMA,
                 result_schema: super::RESULT_SCHEMA,
             };

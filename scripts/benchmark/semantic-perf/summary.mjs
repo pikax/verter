@@ -59,7 +59,7 @@ const PROBE_METRICS = [
 
 function probeArmSummary(arm, invs, ctx) {
   const measured = invs.filter((i) => !i.warmup);
-  const answers = invs.map(probeAnswer);
+  const answers = invs.map((i) => probeAnswer(i, ctx.infraBytes));
   const digests = [...new Set(answers.map((a) => a.digest?.sha256 ?? `<${a.end.kind}:${a.outcome?.kind ?? ""}>`))];
   const out = {
     invocations: invs.length,
@@ -87,11 +87,14 @@ function probeArmSummary(arm, invs, ctx) {
   }
   // Statistics only over invocations whose demand completed; the validator
   // fails a run where a completed invocation lacks any of them.
-  const completed = measured.filter((i) => ["exited", "observe-killed"].includes(probeAnswer(i).end.kind));
+  const completed = measured.filter((i) => ["exited", "observe-killed"].includes(probeAnswer(i, ctx.infraBytes).end.kind));
   const metrics = completed.map(probeMetrics);
   out.completedMeasured = completed.length;
   out.metrics = Object.fromEntries(PROBE_METRICS.map((m) => [m, stats(metrics.map((x) => x?.[m]))]));
-  out.memoryMetric = metrics.find((m) => m?.memoryMetric)?.memoryMetric ?? null;
+  // Every completed measurement's memory metric (the validator requires one
+  // metric across both headline arms).
+  out.memoryMetrics = [...new Set(metrics.map((m) => m?.memoryMetric ?? "<none>"))];
+  out.memoryMetric = out.memoryMetrics.length === 1 ? out.memoryMetrics[0] : null;
   if (ARMS[arm].tool === "tsc") {
     for (const m of ["spawnMs", "setupRoundTripMs", "coldRoundTripMs", "warmRoundTripMs"]) out.metrics[m] = stats(metrics.map((x) => x?.[m]));
   }
@@ -107,7 +110,7 @@ function probeArmSummary(arm, invs, ctx) {
 
 function cliArmSummary(invs, budgetBytes) {
   const measured = invs.filter((i) => !i.warmup);
-  const ends = invs.map(invocationEnd);
+  const ends = invs.map((i) => invocationEnd(i));
   const parsed = invs.map((i, k) => (ends[k].kind === "exited" ? parseCli(i.cliStdout ?? "") : null));
   const codeSets = [...new Set(parsed.map((p, k) => (p ? p.codes.join(",") : `<${ends[k].kind}>`)))];
   const completed = measured.filter((i) => invocationEnd(i).kind === "exited");
@@ -133,20 +136,35 @@ function cliArmSummary(invs, budgetBytes) {
 }
 
 /**
- * The resolution below which a timing difference is not claimed. Verter's
- * timer is in microseconds; tsc's server-side clock is coarse on Windows
- * (about half a millisecond). One request: 1 ms. A sum of three
- * separately timed requests (first type): 2 ms.
+ * The resolution below which a timing difference is not claimed, from the
+ * run's own evidence: tsc's server clock quantum is the smallest positive
+ * server time the run observed (about half a millisecond on Windows,
+ * microseconds elsewhere); Verter's timer is in microseconds. One request:
+ * at least 1 ms and the quantum; a sum of three separately timed requests
+ * (first type): at least 2 ms and three quanta.
  */
+export function timerResolution(run) {
+  let quantum = null;
+  for (const inv of run.invocations ?? []) {
+    const r = inv.probe;
+    if (inv.arm !== "tsc-api" || r?.tool !== "tsc") continue;
+    const p = r.probes?.[0];
+    const times = [r.phases?.engineStartMs, r.phases?.setupMs, r.init?.serverMs, p?.cold?.serverMs, ...(p?.warm ?? []).map((w) => w.serverMs)];
+    for (const t of times) if (typeof t === "number" && t > 0 && (quantum === null || t < quantum)) quantum = t;
+  }
+  return { tscQuantumMs: quantum, single: Math.max(1, quantum ?? 0), sum: Math.max(2, 3 * (quantum ?? 0)) };
+}
+
+/** The fixed floors of the resolution (the report states them). */
 export const TIME_RESOLUTION_MS = { single: 1, sum: 2 };
 
-function comparison(verterInvs, tscInvs) {
+function comparison(verterInvs, tscInvs, resolution) {
   const v = verterInvs.filter((i) => !i.warmup).map(probeMetrics);
   const t = tscInvs.filter((i) => !i.warmup).map(probeMetrics);
   const pick = (xs, m) => xs.map((x) => x?.[m]);
   const out = {};
-  for (const m of ["coldMs", "warmMs", "setupMs", "initMs", "engineStartMs"]) out[m] = verdict(pick(v, m), pick(t, m), TIME_RESOLUTION_MS.single);
-  out.firstTypeMs = verdict(pick(v, "firstTypeMs"), pick(t, "firstTypeMs"), TIME_RESOLUTION_MS.sum);
+  for (const m of ["coldMs", "warmMs", "setupMs", "initMs"]) out[m] = verdict(pick(v, m), pick(t, m), resolution.single);
+  out.firstTypeMs = verdict(pick(v, "firstTypeMs"), pick(t, "firstTypeMs"), resolution.sum);
   for (const m of ["peakBytes", "retainedBytes"]) out[m] = verdict(pick(v, m), pick(t, m), 0);
   return out;
 }
@@ -155,6 +173,8 @@ function comparison(verterInvs, tscInvs) {
 export function summarize(run, expected, scenarios) {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   const budgetBytes = (run.meta?.options?.memMb ?? 0) * 1024 * 1024;
+  const infraBytes = (run.meta?.options?.infraMb ?? 0) * 1024 * 1024;
+  const resolution = timerResolution(run);
   const groups = new Map();
   for (const inv of run.invocations) {
     const key = `${inv.scenario}/${inv.setting}`;
@@ -168,7 +188,7 @@ export function summarize(run, expected, scenarios) {
     const scenario = byId.get(meta.id);
     const measured = referenceFor(expected, meta.id, meta.setting);
     const armInvs = groups.get(key) ?? {};
-    const base = { beyond: beyondDigest(scenario), probe: probeDigest(scenario), budgetBytes };
+    const base = { beyond: beyondDigest(scenario), probe: probeDigest(scenario), budgetBytes, infraBytes };
     const arms = {};
     // The tsc arm first: when the measurement holds no answer but the API
     // answered with the constructed one, that is the reference the Verter
@@ -185,14 +205,14 @@ export function summarize(run, expected, scenarios) {
       arms[arm] = ARMS[arm].kind === "cli" ? cliArmSummary(invs, budgetBytes) : probeArmSummary(arm, invs, ctx);
     }
     const comparableTsc = ["reference", "reference-by-construction"].includes(arms["tsc-api"]?.class);
-    const headline = arms.verter?.class === "matched" && comparableTsc ? comparison(armInvs.verter, armInvs["tsc-api"]) : null;
+    const headline = arms.verter?.class === "matched" && comparableTsc ? comparison(armInvs.verter, armInvs["tsc-api"], resolution) : null;
     const obsCost =
       armInvs.verter && armInvs["verter-obs"]
         ? {
             coldMs: verdict(
               armInvs.verter.filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
               armInvs["verter-obs"].filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
-              TIME_RESOLUTION_MS.single,
+              resolution.single,
             ),
           }
         : null;
@@ -223,5 +243,5 @@ export function summarize(run, expected, scenarios) {
     const c = cell.arms.verter?.class ?? "not-run";
     counts[c] = (counts[c] ?? 0) + 1;
   }
-  return { cells, verterClassCounts: counts };
+  return { cells, verterClassCounts: counts, resolution };
 }

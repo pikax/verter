@@ -235,6 +235,17 @@ export function buildVerterProbes(root) {
     packages,
     cargoIncremental: env.CARGO_INCREMENTAL,
     rustc: tool("rustc", ["-vV"]),
+    // The toolchain's own compiler (RUSTC and wrappers are refused as tuning,
+    // so this is the one cargo invokes), identified by content.
+    rustcPath: tool("rustup", ["which", "rustc"]),
+    rustcSha256: (() => {
+      const path = tool("rustup", ["which", "rustc"]);
+      try {
+        return path ? sha256File(path) : null;
+      } catch {
+        return null;
+      }
+    })(),
     cargo: tool("cargo", ["-V"]),
   };
 }

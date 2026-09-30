@@ -38,7 +38,7 @@
 // depends on work the Verter arm does not do.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -65,7 +65,24 @@ async function main() {
     console.error("usage: tsc-probe.mjs --job <job.json> --out <result.json>");
     process.exit(2);
   }
-  const phase = (name) => writeFileSync(`${outPath}.phase`, name);
+  // Replace a file atomically, so a reader never sees a torn record.
+  const replace = (path, text) => {
+    writeFileSync(`${path}.tmp`, text);
+    renameSync(`${path}.tmp`, path);
+  };
+  // The phase marker. While a demand phase runs, this client is blocked in a
+  // synchronous request and holds only what it held when the phase began:
+  // its own memory then (read by the same reader, outside every timer) is
+  // the evidence that attributes a containment kill to the server.
+  const DEMAND_PHASES = ["spawn", "engine-start", "setup", "init", "cold", "warm"];
+  const phase = (name) => {
+    let clientBytes = null;
+    if (DEMAND_PHASES.includes(name)) {
+      const r = spawnSync(job.statsExe, ["stats", "--pid", String(process.pid)], { encoding: "utf8", timeout: 30_000 });
+      if (r.status === 0) clientBytes = JSON.parse(r.stdout).currentBytes ?? null;
+    }
+    replace(`${outPath}.phase`, JSON.stringify({ phase: name, clientBytes }));
+  };
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`job schema ${job.schema} is not 1`);
   if (job.probes.length < 1) throw new Error("a job demands at least one probe");
@@ -159,15 +176,16 @@ async function main() {
     client: null,
     statsErrors,
   };
-  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  replace(outPath, JSON.stringify(result, null, 2));
 
   phase("observe");
   const print = (type) => {
     // tsc's printer elides a very large type even with NoTruncation, so a
-    // union is printed member by member (one set, whatever the order).
+    // union is printed member by member (one set, whatever the order), each
+    // member parenthesised so a function member keeps its extent.
     const members = type.isUnionType() ? type.getTypes() : null;
     const printed = members
-      ? members.map((member) => project.checker.typeToString(member, undefined, PRINT_FLAGS)).join(" | ")
+      ? members.map((member) => `(${project.checker.typeToString(member, undefined, PRINT_FLAGS)})`).join(" | ")
       : project.checker.typeToString(type, undefined, PRINT_FLAGS);
     return { printed, members: members ? members.length : null };
   };
@@ -208,7 +226,7 @@ async function main() {
   api.close();
   result.phases.teardownMs = performance.now() - t;
   result.stage = "complete";
-  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  replace(outPath, JSON.stringify(result, null, 2));
   phase("done");
 }
 

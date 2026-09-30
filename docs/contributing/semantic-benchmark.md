@@ -47,8 +47,8 @@ never overlapping:
 
 | Phase | Verter | tsc |
 |---|---|---|
-| spawn | (process start is outside the probe; the supervisor's wall time covers it) | `new API()`: start the server, connect (client-side; reported, never compared) |
-| engine start | an empty engine, ready: the workspace and the host | the API session's `initialize` request (server time) |
+| spawn | (process start is outside the probe; the supervisor's wall time covers it) | `new API()`: start the server, which constructs its sessions, and connect (client-side; reported, never compared) |
+| engine start | host construction: an empty engine, ready | the API's `initialize` handshake (server time) — not comparable work: tsc constructs its engine at process start |
 | setup | open the project: read the files, configure it from its tsconfig, add the library and the scenario | `updateSnapshot` (server time) |
 | init | `resolve_named_symbol_with_audit(scenario, "__BenchInit")` | `getTypeAtPosition` on `__BenchInit`'s name |
 | cold | the same call for `__Probe` | the same request for `__Probe` |
@@ -57,27 +57,32 @@ never overlapping:
 | observe | materialise and render every answer (outside every timer); memory again | `typeToString` (a union member by member), the error-type flag; memory again |
 | teardown | drop the host | close the API (terminates the server): reported, not compared |
 
-**first type** = setup + init + cold: from opening the project to the demanded
-type. Each tool splits its work between opening a project and answering its
-first request in its own way (what is parsed, bound or indexed eagerly and
-what lazily), so the split is not comparable across tools, but the sum is.
-Engine start is reported apart: it starts each tool's empty engine, not work
-on the demand. Both arms end the timed region holding the evaluated type's
-handle (Verter's interned node, tsc's type); printing it is **observe**.
+**first type handle** = setup + init + cold: from opening the project to
+holding the demanded type's handle. Each tool splits its work between opening
+a project and answering its first request in its own way (what is parsed,
+bound or indexed eagerly and what lazily), so the split is not comparable
+across tools, but the sum is. Engine start is reported apart and in no
+headline. Both arms end the timed region holding the type's handle
+(Verter's interned node in its default projection, tsc's type); printing it
+is **observe**. The figure claims no fully printed answer, and equal
+structural completeness before observation is not proven, only that the
+observed answers are equal.
 
-tsc's request times are its **server-side processing time** (the API's own
-`collectTiming` measurement), which excludes the IPC an in-process engine does
-not pay, bounded above by the client's round trip: on Windows the server's
-clock is coarse (about half a millisecond) and can report more than the whole
-round trip took. The round trip is recorded beside every figure.
+tsc's request times are its **server-side processing time** as it reports it
+(the API's own `collectTiming` measurement, a timer around request handling
+that excludes transport), which excludes the IPC an in-process engine does not
+pay. On Windows the server's clock is coarse (it reports 0 or about half a
+millisecond for short requests); the verdict's resolution is derived from the
+run's own smallest observed server time rather than correcting either side.
+The round trip is recorded beside every figure.
 
 Every warm request must return the cold request's answer (the same interned
 node or type, or, compared after the measurement, the same printed answer).
 
-Each probe writes its record as soon as the engine statistics are read and a
-phase marker naming the phase running, so an invocation stopped during
-observation keeps its measured demand (classified `unverified`, never
-compared) and a kill is attributed to its phase.
+Each probe writes its record (atomically) as soon as the engine statistics
+are read, and a phase marker naming the phase running, so an invocation
+stopped during observation keeps its measured demand (classified
+`unverified`, never compared).
 
 ### Memory
 
@@ -99,10 +104,16 @@ validator requires both arms' figures to be the same metric.
 (`--mem-mb`, 8192 by default): an engine whose own peak exceeds it counts as
 exhausting it, whether or not it survived. Each process tree is contained at
 the budget plus an allowance (`--infra-mb`, 1024 by default) for the tree's
-other members — tsc's node client and the statistics reader — so that
-infrastructure cannot spend the engine's budget. A tree killed at the
-containment cap during the demand (engine start to statistics) counts as the
-engine exhausting it; killed while observing, it does not.
+other members — tsc's node client and the statistics reader. A kill counts
+as the **engine** exhausting a resource only with evidence: Verter's tree is
+its engine alone; for tsc, the kill must fall in a phase where the node driver
+is blocked in one synchronous request (so it holds what it held when the
+phase began — the phase marker records that, read by the same reader) and
+that memory must fit the allowance with a 64 MiB margin, so the server alone
+passed the budget. Any other kill is **unattributed** (the tsc arm is then
+`unverified`, never "tsc exhausts resources"), and a kill while observing is
+never the engine's. After a warmup whose engine exhausted the cap, the rest of
+that arm is recorded as skipped (see Schedule).
 
 The supervisor independently reports each invocation's whole-process-tree
 peak and wall time (for `tsc-api` that tree includes the node client); those
@@ -164,19 +175,26 @@ Why each probe demands the same work of both tools:
    point (after the requests, before observation).
 7. **Same answer, compared by structure.** Each tool prints its answer
    (Verter: the production TypeExpr wire bytes, rendered; tsc: `typeToString`
-   with no truncation, a union member by member because tsc's printer elides
-   very large types). A syntax-aware canonicaliser parses both prints and
-   compares them after normalisations that are identities of the type system
-   (see Correctness). tsc's error type is detected with `isErrorType()`, so
-   tsc's error-`any` is never mistaken for an `any` answer.
+   with no truncation, a union member by member — each member parenthesised
+   — because tsc's printer elides very large types). A parser reads both
+   prints into trees, normalises them by identities of the type system, and
+   compares the normalised trees themselves (see Correctness). tsc's error
+   type is detected with `isErrorType()`, so tsc's error-`any` is never
+   mistaken for an `any` answer.
 8. **Same containment, budget and schedule.** Every invocation, of every arm,
    runs in a fresh process under the same supervisor with the same engine
    budget, allowance and deadline, in counterbalanced order (see Schedule).
 9. **Same shipped defaults.** The harness refuses to run while runtime or
-   build tuning variables are set (`GOGC`, `GOMEMLIMIT`, `GOMAXPROCS`,
-   `GODEBUG`, `NODE_OPTIONS`, `RUSTFLAGS`, `CARGO_PROFILE_*`,
-   `RAYON_NUM_THREADS`, `VERTER_*`, …) unless `--allow-tuning` labels the run
-   tuned; the probe, node and the tsc package must be one native architecture.
+   build tuning is present — variables such as `GOGC`, `GOMEMLIMIT`,
+   `GOMAXPROCS`, `GODEBUG`, `NODE_OPTIONS`, `RUSTFLAGS`, `RUSTC`,
+   `RUSTC_WRAPPER`, `CARGO_PROFILE_*` / `CARGO_TARGET_*` / `CARGO_BUILD_*`,
+   `CC` / `CFLAGS`, `RAYON_NUM_THREADS`, `VERTER_*`, or a Cargo configuration
+   file outside the repository (in an ancestor directory or `CARGO_HOME`) —
+   unless `--allow-tuning` labels the run tuned. The compiler is the
+   toolchain's own (`rustup which rustc`, fingerprinted). The probe, node and
+   the tsc package must be one architecture and that must be the hardware's
+   native one (read by the probe independently of node: `IsWow64Process2` on
+   Windows, `hw.optional.arm64` on macOS), so nothing runs translated.
 
 What is deliberately **not** equal, and how it is reported:
 
@@ -199,9 +217,12 @@ What is deliberately **not** equal, and how it is reported:
 Expected answers are **measured** on tsc 7.0.2, independently of the
 benchmark's tsc arm, by `scripts/benchmark/semantic-perf/measure-expected.mjs`
 in all four `strictNullChecks` × `noImplicitAny` settings, and committed as
-`scripts/benchmark/semantic-perf/expected.json` with the method's identity
-(measuring suffix, library, tsc executable, platform, limits) and a receipt per
-cell. The measurement uses the CLI: the scenario plus
+`scripts/benchmark/semantic-perf/expected.json`. Every cell carries its own
+immutable provenance (the method — measuring suffix, library, verified tsc
+executable, platform, limits, launcher — plus the tsconfig and source digests
+and a digest of tsc's output); a cell measured by any other method is
+re-measured, never relabelled, and the validator rejects a cell whose
+provenance disagrees with the file's method. The measurement uses the CLI: the scenario plus
 
 ```ts
 type __BenchExpand<T> = T extends unknown ? [T] : never;
@@ -233,13 +254,17 @@ construction"); any other API answer is `unverified` and its row is never
 compared.
 
 The canonical form parses each print with a recursive-descent parser for the
-type syntax either tool prints and fails closed on anything else. It
-normalises only identities of the type system: whitespace, separators and
-redundant parentheses; string literals by value and numbers by value; union
-members as a set (with `true | false` as `boolean`); `T[]` as `Array<T>`;
-object properties and methods keyed by name (same-named overloads, call and
-construct signatures keep their order); parameter names and tuple labels.
-Intersection order, tuple order, argument order and modifiers are kept.
+type syntax either tool prints (failing closed on anything else) and compares
+the normalised trees by their serialisation — never by re-parsing rendered
+text. It normalises only identities of the type system: whitespace,
+separators and redundant parentheses; string literals by value and numbers by
+value; union members as a set (with `true | false` as `boolean`); `T[]` as
+`Array<T>`; object properties and methods keyed by their tagged name (a
+written name — `0` and `"0"` are one property — or a computed key, never
+equal to a string); same-named overloads, call and construct signatures keep
+their order; parameter names and tuple labels are dropped, with a type
+predicate's target bound to its parameter's position. Intersection order,
+tuple order, argument order and modifiers are kept.
 
 Each Verter answer is classified against the reference:
 
@@ -252,7 +277,7 @@ Each Verter answer is classified against the reference:
 | `unverified` | the demand completed but its answer was not observed (stopped while observing) |
 | `refusal` | a typed budget fault (Verter's own budget) |
 | `error` | any other fault, a miss, or a warm repeat that failed or answered differently |
-| `killed` | killed at the containment cap or the deadline during the demand, or the engine's own peak exceeded the budget |
+| `killed` | the engine exhausted the containment cap or the deadline during the demand (Verter's tree is its engine alone), or its own peak exceeded the budget |
 | `no-reference` | tsc gives no answer to compare with |
 
 Only `matched` rows enter the head-to-head. A fast wrong, partial or refused
@@ -279,14 +304,17 @@ answer is never a win.
 - a child failed (non-zero exit, a supervisor error, sampled containment
   without consent, the wrong containment cap), or a completed probe record
   lacks any required field: every phase and request time present, finite and
-  non-negative, a successful init request, every warm repeat answering the
-  cold answer, the statistics present and free of errors;
-- the two headline arms' memory figures are different metrics, or a compared
-  metric has fewer values than measured invocations;
+  non-negative, one authoritative init time, a successful init request, every
+  warm repeat answering the cold answer, statistics present, free of errors,
+  of the engine's own process (by pid), naming a metric, current within peak,
+  and peaks never decreasing;
+- any measurement of either headline arm reads another memory metric, or a
+  compared metric has fewer values than measured invocations;
+- an arm was skipped without a warmup whose engine exhausted the cap;
 - repetitions of one arm disagree on the answer or its class;
 - the tsc arm's answer or error-type flag differs from the measured
-  reference, or the reference was measured on another source, library or
-  method;
+  reference, or a reference cell was measured on another source, tsconfig,
+  library or method, or not by a verified tsc 7.0.2;
 - the stored summary differs from the summary recomputed from the raw
   records (a claimed match or verdict the raw answers do not support), or a
   raw record on disk differs from its copy in `results.json`.
@@ -304,9 +332,12 @@ counterexamples and the schedule's balance for odd and even cell counts.
 
 A verdict is a descriptive rule, not a statistical test. A metric names a
 winner only when every measured repetition of one arm beats every repetition
-of the other by more than the timer resolution (1 ms for one request, 2 ms for
-first type, a sum of three separately timed requests); otherwise the verdict
-is **overlap**. The ratio shown is tsc's median over Verter's (above 1 favours
+of the other by more than the timer resolution; otherwise the verdict is
+**overlap**. The resolution comes from the run's own evidence: tsc's server
+clock quantum is the smallest positive server time the run observed, and the
+resolution is at least 1 ms and that quantum for one request, and at least
+2 ms and three quanta for first type handle (a sum of three separately timed
+requests). The ratio shown is tsc's median over Verter's (above 1 favours
 Verter), omitted when a median is below the resolution. Absolute numbers of
 both arms are always shown; nothing is baseline-subtracted.
 `baseline-empty` (a trivial module and probe) is its own row, reported alone.
@@ -323,14 +354,15 @@ checks this. Warmups are run, recorded and validated like any other
 invocation, then excluded from the statistics. Fresh processes mean cold
 semantic caches, not cold filesystem caches. For a baseline, keep the machine
 otherwise idle and on stable power (on a laptop: plugged in, not in a
-low-power mode).
+low-power mode); the report records the power state (`pmset` on macOS,
+`powercfg` on Windows) but does not enforce it.
 
-When a warmup is killed at the memory cap, the remaining invocations of that
-(scenario, setting, arm) are recorded as `skipped` rather than driving the
-machine to the cap again (a memory kill is deterministic; a timeout is not,
-and is always re-run). The validator accepts a skipped record only after such
-a kill, and the row is classified `killed`. `--no-skip-after-kill` runs every
-invocation.
+When a warmup's engine exhausted the memory cap (an attributed kill), the
+remaining invocations of that (scenario, setting, arm) are recorded as
+`skipped` rather than driving the machine to the cap again (a memory kill is
+deterministic; a timeout is not, and is always re-run). The validator accepts
+a skipped record only after such a kill, and the row is classified `killed`.
+`--no-skip-after-kill` runs every invocation.
 
 ## Process supervision
 
@@ -360,7 +392,9 @@ labels every record `containment: sampled`.
    any version other than 7.0.2.
 4. The supervisor: the harness builds `crates/verter_supervise` itself; on a
    checkout without it, pass `--supervisor <path-to-verter-supervise>`.
-5. No tuning variables in the environment (see Workload equivalence, 9).
+5. No tuning variables in the environment and no Cargo configuration outside
+   the repository (see Workload equivalence, 9); `--allow-tuning` runs anyway,
+   labelled tuned.
 
 ### Build (the harness also does this itself)
 
