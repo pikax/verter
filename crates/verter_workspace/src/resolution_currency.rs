@@ -2741,8 +2741,12 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.transaction.lock().population()
     }
 
+    /// The world this transaction was captured in, never a live recapture:
+    /// every attempt the input driver runs for one transaction reads one
+    /// snapshot, so another writer's publication cannot move its basis,
+    /// discard the inputs it loaded, and spend its churn budget.
     fn capture_resolution_world(&self) -> Option<Arc<CapturedResolutionWorld>> {
-        self.inner.capture_resolution_world()
+        Some(Arc::clone(&self.transaction.lock().root))
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {

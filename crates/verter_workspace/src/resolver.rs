@@ -959,6 +959,10 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
     let mut last_load_set: Option<LoadSet> = None;
 
     loop {
+        #[cfg(test)]
+        crate::engine::resolution_test_hooks::fire(
+            crate::engine::resolution_test_hooks::ResolutionPhase::DriverRound,
+        );
         let basis = crate::resolution_currency::resolution_basis_for_reader(reader)
             .unwrap_or_else(ResolutionBasis::unbound_placeholder);
         if active_basis != Some(basis) {

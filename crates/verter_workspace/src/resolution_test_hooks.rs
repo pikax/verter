@@ -17,6 +17,8 @@ pub(crate) enum ResolutionPhase {
     WorldWriteHeld,
     /// An importer resolution attempt begins, before its world capture.
     AttemptStart,
+    /// The input driver begins one round of an attempt.
+    DriverRound,
 }
 
 struct InstalledHook {

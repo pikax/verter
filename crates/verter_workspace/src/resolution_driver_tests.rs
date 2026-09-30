@@ -1969,3 +1969,61 @@ fn unrelated_content_churn_before_admission_is_compatible() {
     );
     assert_eq!(crate::resolver::take_outer_restarts_for_test(), 0);
 }
+
+/// Another writer publishing between the input driver's rounds of one
+/// attempt moves nothing that attempt reads: its rounds read the world the
+/// transaction was captured in, so the inputs it loaded stay loaded, no
+/// churn is charged, and the route is admitted. A live recapture per round
+/// discarded the loaded inputs on every publication and refused the route
+/// once the churn budget was spent.
+#[test]
+fn a_publication_between_driver_rounds_charges_no_churn() {
+    let workspace = Arc::new(
+        crate::memory::MemoryWorkspace::new_with_input_resolution_budgets(
+            Default::default(),
+            tightened_budgets(32, 128, 32_768, 16, 1),
+        ),
+    );
+    let importer = "/proj/src/main.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import 'pkg';"));
+    workspace.inject_file(
+        "/proj/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{"types":"./index.d.ts"}"#),
+    );
+    workspace.inject_file(
+        "/proj/node_modules/pkg/index.d.ts".to_string(),
+        Arc::from("export {};"),
+    );
+    WorkspaceAccess::configure_resolver(
+        workspace.as_ref(),
+        vec![project("/proj", "/proj/tsconfig.json")],
+    );
+    let rounds = Arc::new(AtomicUsize::new(0));
+    let hook_rounds = Arc::clone(&rounds);
+    let mutate_workspace = Arc::clone(&workspace);
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::DriverRound,
+        move || {
+            hook_rounds.fetch_add(1, Ordering::AcqRel);
+            mutate_workspace
+                .engine
+                .bump_content_generation_for("/proj/unrelated.ts");
+        },
+        || WorkspaceRead::resolve_import_outcome(workspace.as_ref(), importer, "pkg", CONTEXT),
+    );
+    assert!(
+        rounds.load(Ordering::Acquire) >= 2,
+        "precondition: the attempt loads inputs over more than one round"
+    );
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("/proj/node_modules/pkg/index.d.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+}
