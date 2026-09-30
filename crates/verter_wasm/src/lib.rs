@@ -2202,6 +2202,28 @@ defineProps<{ value: Unsafe }>()
                 "sourceRange": { "start": 31, "end": 37 },
             })
         );
+
+        let source_failure = public_api_to_wasm_value(&FfiPublicApiResult {
+            value: None,
+            error: Some(FfiPublicApiProjectionError {
+                code: "tsc-generation".to_string(),
+                detail_code: "stack-unavailable".to_string(),
+                subject: PublicApiProjectionSubject::Source,
+                declaration_shape_reason: None,
+                member_ordinal: None,
+                outcome_kind: None,
+                outcome_reason: None,
+                outcome_diagnostic: None,
+            }),
+        })
+        .expect("serialize source failure");
+        let source_failure: serde_json::Value =
+            serde_wasm_bindgen::from_value(source_failure).expect("decode source failure");
+        assert_eq!(
+            source_failure["error"]["subject"],
+            serde_json::json!({ "kind": "source" })
+        );
+        assert_eq!(source_failure["error"]["detailCode"], "stack-unavailable");
     }
 
     /// Compile-time pin: the `#[wasm_bindgen]` `getPublicApi` export

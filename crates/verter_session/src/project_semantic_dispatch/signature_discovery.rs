@@ -1452,11 +1452,18 @@ enum RawPosition {
 /// One element of the rest of a parameter list.
 enum RawRestElement {
     /// A rest: its array (`array`, over the element `node`) or its
-    /// still-generic type.
-    Whole { node: SemanticNodeId, array: bool },
+    /// still-generic type, named as the rest parameter is.
+    Whole {
+        node: SemanticNodeId,
+        array: bool,
+        label: Option<Arc<str>>,
+    },
+    /// One parameter, labelled with its name (the checker's
+    /// `getRestTypeAtPosition` names each element after its parameter).
     Element {
         node: SemanticNodeId,
         optional: bool,
+        label: Option<Arc<str>>,
     },
 }
 
@@ -1906,7 +1913,7 @@ impl ProjectSemanticDispatch<'_> {
                         }
                     };
                     Some(match elements.as_slice() {
-                        [RawRestElement::Whole { node, array }] => {
+                        [RawRestElement::Whole { node, array, .. }] => {
                             rest_or_any(whole(*node, *array))
                         }
                         _ => rest_or_any(
@@ -1914,22 +1921,24 @@ impl ProjectSemanticDispatch<'_> {
                                 elements: elements
                                     .iter()
                                     .map(|element| match element {
-                                        RawRestElement::Whole { node, array } => {
+                                        RawRestElement::Whole { node, array, label } => {
                                             crate::semantic_query::TupleElement {
-                                                label: None,
+                                                label: label.clone(),
                                                 value: whole(*node, *array),
                                                 optional: false,
                                                 rest: true,
                                             }
                                         }
-                                        RawRestElement::Element { node, optional } => {
-                                            crate::semantic_query::TupleElement {
-                                                label: None,
-                                                value: *node,
-                                                optional: *optional,
-                                                rest: false,
-                                            }
-                                        }
+                                        RawRestElement::Element {
+                                            node,
+                                            optional,
+                                            label,
+                                        } => crate::semantic_query::TupleElement {
+                                            label: label.clone(),
+                                            value: *node,
+                                            optional: *optional,
+                                            rest: false,
+                                        },
                                     })
                                     .collect(),
                                 readonly: false,
@@ -2061,10 +2070,15 @@ impl ProjectSemanticDispatch<'_> {
         let remaining = |shape: &PositionalShape<'_>,
                          pos: usize|
          -> Result<RawPosition, SignatureSetReadFailure> {
+            let label = |name: Option<crate::signature_kernel::SpellingId>| -> Result<Option<Arc<str>>, SignatureSetReadFailure> {
+                name.map(|id| view.spelling(id).map(Arc::from).map_err(|_| unsettled))
+                    .transpose()
+            };
             let rest_node = |rest: &crate::signature_kernel::RestSlot| -> Result<RawRestElement, SignatureSetReadFailure> {
                 Ok(RawRestElement::Whole {
                     node: node(rest.slot.ty)?,
                     array: rest.kind == RestKind::Array,
+                    label: label(rest.slot.name)?,
                 })
             };
             Ok(RawPosition::Remaining(
@@ -2082,6 +2096,7 @@ impl ProjectSemanticDispatch<'_> {
                         vec![RawRestElement::Whole {
                             node: element,
                             array: true,
+                            label: label(rest.slot.name)?,
                         }]
                     }
                     ProjectedTuple::Elements(elements) => {
@@ -2095,6 +2110,7 @@ impl ProjectSemanticDispatch<'_> {
                                 kind => RawRestElement::Element {
                                     node: node(element.ty)?,
                                     optional: kind == ProjectedKind::Optional,
+                                    label: label(element.name)?,
                                 },
                             });
                         }

@@ -43,6 +43,11 @@ impl VerterHost {
     /// configured extension list across LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
+        workspace.install_resolution_retention(Arc::new(
+            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
+                self.project_type_store.retention_account(),
+            )),
+        ));
         *self.workspace.write() = workspace;
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
         // before the swap would be unsound: a concurrent reader could
@@ -275,6 +280,20 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
+        self.resolve_for_persistent_state_in(None, parent_canonical_id, import_source, ctx)
+    }
+
+    /// [`Self::resolve_for_persistent_state`] against one resolution
+    /// snapshot: the workspace's own view (`None`), or a request overlay's
+    /// effective view. ONE entry, so the importer mapping, the witness and
+    /// the admission contract cannot differ between the two.
+    pub(crate) fn resolve_for_persistent_state_in(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> verter_workspace::ResolutionPublication {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
         // context. The request context supplies the actual published-project
@@ -288,9 +307,17 @@ impl VerterHost {
             } else {
                 Arc::from(parent_canonical_id)
             };
-        let outcome = self
-            .ws()
-            .resolve_import_outcome(importer.as_ref(), import_source, ctx);
+        let outcome = match overlay {
+            None => self
+                .ws()
+                .resolve_import_outcome(importer.as_ref(), import_source, ctx),
+            Some(overlay) => self.ws().resolve_import_outcome_with_overlay(
+                overlay,
+                importer.as_ref(),
+                import_source,
+                ctx,
+            ),
+        };
         #[cfg(test)]
         self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
         let publication = outcome.into_publication();
@@ -317,79 +344,11 @@ impl VerterHost {
             .overlay_canonicals()
             .into_iter()
             .filter_map(|canonical| view.source(&canonical).map(|source| (canonical, source)));
-        verter_workspace::ResolutionOverlaySnapshot::new(upserts, view.tombstoned_canonicals())
-    }
-
-    pub(crate) fn resolve_for_persistent_state_with_overlay(
-        &self,
-        overlay: &verter_workspace::ResolutionOverlaySnapshot,
-        parent_canonical_id: &str,
-        import_source: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> verter_workspace::ResolutionPublication {
-        let importer =
-            if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
-                crate::request_context::current_request_context()
-                    .map(|request| Arc::clone(&request.canonical_id))
-                    .unwrap_or_else(|| Arc::from(parent_canonical_id))
-            } else {
-                Arc::from(parent_canonical_id)
-            };
-        let outcome = self.ws().resolve_import_outcome_with_overlay(
-            overlay,
-            importer.as_ref(),
-            import_source,
-            ctx,
-        );
-        #[cfg(test)]
-        self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
-        let publication = outcome.into_publication();
-        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
-        publication
-    }
-
-    /// The overlay-aware sibling of
-    /// [`crate::VerterHost::resolve_type_dependency_canonical`]: the shared
-    /// TS-first type-route policy (TypeImport → ESM fallback →
-    /// re-normalise) resolved against a session's overlay.
-    pub(crate) fn resolve_type_dependency_canonical_with_overlay(
-        &self,
-        overlay: &verter_workspace::ResolutionOverlaySnapshot,
-        owner_canonical: &str,
-        import_source: &str,
-    ) -> Option<String> {
-        let type_lane = self.resolve_for_persistent_state_with_overlay(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-            },
-        );
-        let type_lane = match type_lane {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => return None,
-        };
-        if let Some(resolved) = type_lane {
-            return Some(resolved);
-        }
-        match self.resolve_for_persistent_state_with_overlay(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
-            },
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => None,
-        }
+        verter_workspace::ResolutionOverlaySnapshot::new_under(
+            view.resolution_authority().cloned(),
+            upserts,
+            view.tombstoned_canonicals(),
+        )
     }
 
     /// Compute the preferred alias-based import specifier for a target file.
@@ -849,7 +808,11 @@ impl VerterHost {
     pub fn retention_snapshot(&self) -> HostRetentionSnapshot {
         let indexed = self.project_type_store.indexed();
         let account = self.project_type_store.retention_account().snapshot();
+        let workspace = self.ws().resource_snapshot();
         HostRetentionSnapshot {
+            overlay_resolution_slots: workspace.overlay_resolution_slots,
+            overlay_value_versions: workspace.overlay_value_versions,
+            fallthrough_nodes: self.resolver.runtime.fallthrough.retained_node_count(),
             live_artifacts: indexed.live_artifact_count(),
             retained_retired_versions: indexed.retained_retired_version_count(),
             live_roots: indexed.live_root_count(),
@@ -878,6 +841,10 @@ impl VerterHost {
                 .relation_proof_count(),
             relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
             union_views: self.project_type_store.semantic_graph().union_view_count(),
+            stable_key_classes: self
+                .project_type_store
+                .semantic_graph()
+                .stable_key_class_count(),
             deferred_releases: self.project_type_store.deferred_release_count(),
             resolved_import_facts: self
                 .project_type_store
@@ -1052,9 +1019,10 @@ impl VerterHost {
         }
         // What the document's own content keyed: its resolved-import facts
         // (one key per content hash), the resolver's component-meta states
-        // (one key per view fingerprint) and its overlay source registrations
-        // (one per view fingerprint). Each already follows the current content
-        // on an edit; the close drops the last one.
+        // (one key per view fingerprint), its overlay source registrations
+        // (one per view fingerprint) and its fallthrough nodes (keyed by the
+        // component; an edit adds a candidate under the same key, bounded per
+        // key). The close drops what is left.
         let import_facts_released = self
             .project_type_store
             .resolved_import_facts()
@@ -1063,6 +1031,11 @@ impl VerterHost {
             .resolver
             .runtime
             .release_component_meta_states(canonical_id);
+        let fallthrough_nodes_released = self
+            .resolver
+            .runtime
+            .fallthrough
+            .release_owner(canonical_id);
         let overlay_sources_retracted = self
             .carrier_publication
             .source_authority
@@ -1078,6 +1051,7 @@ impl VerterHost {
             canonical_id,
             import_facts_released,
             meta_states_released,
+            fallthrough_nodes_released,
             overlay_sources_retracted,
             "evict released the document's content-keyed caches"
         );

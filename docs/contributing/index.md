@@ -50,6 +50,9 @@ cargo test -p verter_compiler test_name    # Targeted iteration
 
 See the [Testing Guide](./testing.md) for detailed testing patterns and requirements.
 
+Performance against TypeScript 7.0.2 on equivalent demands is measured by the
+[Semantic Benchmark](./semantic-benchmark.md) (`node scripts/benchmark/semantic-perf.mjs`).
+
 ## Architecture and Ownership
 
 Before changing hot paths or adding surfaces, read the ratified contracts

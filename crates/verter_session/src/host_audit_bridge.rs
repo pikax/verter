@@ -54,6 +54,7 @@ fn map_kind(diag: &ExpansionDiagnostic) -> AuditDiagnosticKind {
         ExpansionStopReason::BudgetExceeded
         | ExpansionStopReason::ProjectionWorkLimit
         | ExpansionStopReason::ConnectedQueryDepthLimit
+        | ExpansionStopReason::ConnectedMemoryLimit
         | ExpansionStopReason::MappedDepthExceeded => AuditDiagnosticKind::BudgetExceeded,
         ExpansionStopReason::IndeterminateConditional
         | ExpansionStopReason::ConditionalContextTruncated => AuditDiagnosticKind::OpenConditional,

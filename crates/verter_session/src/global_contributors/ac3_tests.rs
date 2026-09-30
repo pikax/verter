@@ -289,6 +289,10 @@ fn source_has_ambient_contribution_matches_declare_module_and_global() {
     assert!(!source_has_ambient_contribution(
         "// declare module \"nope\" { }\nexport const x = 1;\n"
     ));
+    // A byte-order mark opens no token.
+    assert!(source_has_ambient_contribution(
+        "\u{FEFF}declare module \"m\" { const v: 1; }\n"
+    ));
 }
 
 #[test]
@@ -319,6 +323,16 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
         // A `var` in a nested block hoists to the top level.
         "if (ok) { var nested = 1; }\n",
         "for (var i = 0; i < 1; i++) {}\n",
+        // Every opening of a file-scope declaration keeps a script in: a
+        // decorator, a byte-order mark, a comment before `declare`, a type
+        // alias and the legacy `module` keyword.
+        "@dec class C { x = 1 }\n",
+        "@dec()\nabstract class A {}\n",
+        "\u{FEFF}class Bom {}\n",
+        "/* c */ declare class Dc {}\n",
+        "type TT = { q: 1 };\n",
+        "declare type DT = { r: 2 };\n",
+        "module Mo { export type MT = 3; }\n",
     ] {
         assert!(
             source_may_have_file_scope_global_contribution(source),
@@ -330,6 +344,7 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
         "constant(1);\n",
         "x.var = 1;\n",
         "export {};\nvar sv = 1;\n",
+        "declare module \"m\" { const v: 1; }\n",
     ] {
         assert!(
             !source_may_have_file_scope_global_contribution(source),
@@ -547,4 +562,67 @@ fn snapshot_replacement_discovers_new_globals_without_membership_change() {
         )
         .entries
         .is_empty());
+}
+
+/// A script's class, type alias and enum enter the type-space population as
+/// file-scope type contributors, and leave it with their artifact: an edit
+/// that supersedes the script's version drops the old version's records,
+/// and removing the script drops every record it held.
+#[test]
+fn script_file_scope_types_are_released_on_supersession_and_removal() {
+    use super::ContributorOrigin;
+    let host = VerterHost::new(
+        HostConfig::default(),
+        Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        )),
+    );
+    let upsert = |source: &str| {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/script.ts".to_owned()),
+                input_id: "/script.ts".to_owned(),
+                source: Arc::from(source),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert");
+        host.ingest_program_ambient_roots();
+    };
+    let index = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index();
+    let types = |name: &str| {
+        index
+            .snapshot()
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                name,
+                None,
+                true,
+            )
+            .entries
+            .iter()
+            .map(|entry| entry.origin)
+            .collect::<Vec<_>>()
+    };
+    upsert("class Pc { x = 1 }\ntype TT = { q: 1 };\nenum GE { A }\n");
+    for name in ["Pc", "TT", "GE"] {
+        assert_eq!(types(name), [ContributorOrigin::FileScopeType], "{name}");
+    }
+    upsert("class Other {}\n");
+    for name in ["Pc", "TT", "GE"] {
+        assert!(types(name).is_empty(), "a superseded {name} is released");
+    }
+    assert_eq!(types("Other"), [ContributorOrigin::FileScopeType]);
+    host.remove("/script.ts");
+    assert!(
+        types("Other").is_empty(),
+        "a removed script's type is released"
+    );
+    assert!(
+        !index.record_canonicals().contains("/script.ts"),
+        "a removed script keeps no contribution record"
+    );
 }

@@ -102,8 +102,9 @@ call stack, which the module cannot see or grow: past it V8 throws
 `RangeError: Maximum call stack size exceeded`. Either unwinds out of the
 module without restoring its shadow stack pointer, so the instance is not
 fit for another call. The deepest depth that parses and walks, by
-bisection, on the optimized wasm32-unknown-unknown module under Node.js
-26 (the shadow stack grown per parse, so the engine stack binds), at V8's
+bisection, on the optimized wasm32-unknown-unknown module (oxc_parser 0.151.0,
+release profile) under Node.js 26.5.0 (V8 14.6.202.34-node.24)
+(the shadow stack grown per parse, so the engine stack binds), at V8's
 default engine stack (984 KiB) and at `--stack-size=4000`:
 
 | form (per level) | parse, 984 | parse, 4000 | clone, 984 | visit, 984 | semantic, 984 | bytes a level |
@@ -137,7 +138,7 @@ runs the parse on a stack the source cannot exhaust: a linear scan
 parse gets 9 KiB per level of that bound (twice the costliest measured
 level, `clone_in`'s) plus 512 KiB. It runs in place when the thread has
 that much left (every source of ordinary depth, and every source short
-enough that each byte could be a level) and on a stack segment reserved
+enough that each byte could be a level) and on a stack region reserved
 for it otherwise (`oxc_parse/stack.rs`). Where a stack can grow no depth
 is imposed. The scan costs about a third of the parse (1.8 ms against
 5.8 ms for `lib.dom.d.ts`'s 2.3 MB, 22 ms against 60 ms for
@@ -164,21 +165,41 @@ decide between a division and a regular expression (`await`, `yield` and
 expression's may be a declaration's), the rest of the source is bounded
 by its length, a level per byte.
 
-A segment reserves its size and commits only what the work on it
+A region reserves its size and commits only what the work on it
 touches: on Windows a fiber made with `CreateFiberEx`, committing 64 KiB
 and reserving the rest (`CreateFiber`, which `stacker` used, commits the
 whole size: a 1,000,000-level bound committed 9,234,591,744 bytes for a
 walk a few frames deep, 86–94 KB now,
 `a_grown_stack_commits_what_the_walk_touches_not_what_it_reserves`); on
 Unix an anonymous `MAP_NORESERVE` mapping; on wasm32 a heap allocation for
-the module's shadow stack. A segment that cannot be reserved is
-`StackUnavailable`, never a panic: the parse returns an empty program and
-the `verter(stack-unavailable)` diagnostic
-(`stack_unavailable_diagnostic`, `is_stack_unavailable`), operational
-incompleteness rather than a syntax error. A walk runs over a program
-whose parse had the same stack or more, so a walk that cannot reserve its
-segment meets an exhausted address space and ends the process as any
-failed allocation does.
+the module's shadow stack (`oxc_parse/stack.rs`).
+
+Reserving is the only step that can fail, and it fails as
+`StackUnavailable`, never a panic. A parse whose region cannot be
+reserved returns an empty program marked `fatal_error` whose one
+diagnostic is `verter(stack-unavailable)` (`stack_unavailable_diagnostic`,
+`is_stack_unavailable`): typed operational incompleteness, not a syntax
+error and not a program to read. An operation pays for its walks' stack
+once, at its boundary: `with_program_walk_stack_lease` reserves the region
+the program's walks can need before any begins and returns
+`StackUnavailable` without running the operation when it cannot; every
+walk inside the lease that needs no more runs on the lease's region,
+switched to without reserving (a Windows fiber serves each walk in turn),
+or in place when it already runs there. Leases, regions and the thread's
+stack limit are restored on return and on unwind. `oxc_parse::faults`
+(`cfg(test)` or the `stack-fault-injection` feature) fails and counts
+reservations, and `oxc_parse/tests.rs` proves on it: a refused parse is
+typed and a retry parses; a refused lease starts no walk and a retry
+walks; a lease covers a whole-program walk, a statement walk, a walk by
+text and nested walks with one reservation (five without it); a panic
+on a lease region restores the stack and the lease; a covered walk reached
+on a region reserved past the lease does not re-enter the lease's region
+under its own suspended work.
+
+A walk no lease covers reserves a region of its own and, when that
+reservation fails, ends the process as a failed allocation does. That
+stays so until each operation that starts oxc walks holds a lease, and it
+cannot yet: see "Operations without a typed incompleteness" below.
 
 Every walk of oxc's over a parsed tree runs under the same containment
 (`with_program_stack`, `ProgramWalkStack`, `with_node_stack`,
@@ -186,18 +207,162 @@ Every walk of oxc's over a parsed tree runs under the same containment
 `no_crate_walks_oxc_syntax_around_the_containment` fails on a walk entry
 outside one.
 
-On wasm32 the shadow stack grows like any other segment, but the
-engine's call stack does not, and nothing in the module can read how much
-of it is left. There the parse is bounded by the stack the host provides:
-`WASM_ENGINE_NESTING` = (984 KiB, V8's default stack, less 256 KiB kept
-for the host's frames and the module's callers) / 2,376 bytes (twice the
-costliest measured level, an object literal's 1,188) = 313 levels of the
-scan's bound. A deeper source returns `StackUnavailable` before oxc runs,
-where it trapped the instance before; oxc itself reaches 782 to 9,568
-levels there, so the bound is the engine stack's, not a language limit.
-The bound holds for oxc's parse and walks; the module's own analysis
-over the parsed program is contained by its explicit stacks
-(`performance-gates.md`).
+### The WebAssembly engine-stack profile
+
+On wasm32 the shadow stack grows like any other region, but the engine's
+call stack does not, and nothing in the module can read how much of it is
+left. There the parse runs under a measured runtime safety profile of the
+engine it runs on, `EngineStackProfile`, and a source whose nesting bound
+passes it is not parsed: `StackUnavailable` before oxc runs, where the
+instance trapped before. The profile is a property of the engine, the
+oxc version and the build, not of the language: every host whose stack
+can grow carries no profile (`HOST_ENGINE_STACK_PROFILE` is `None`) and
+parses any depth (`a_host_whose_stack_grows_refuses_no_depth` parses
+200,000 nested brackets on a 1 MiB thread), and oxc itself parses 782 to
+9,568 levels on V8's default stack.
+
+`V8_DEFAULT_STACK_PROFILE` is the only profile, and it is scoped to the
+runtime contract of V8 at its default stack: Node.js and Chromium. It
+records its measurement: V8 14.6 (Node.js 26.5.0) at `--stack-size` 984
+KiB, `oxc_parser` 0.151.0, `wasm32-unknown-unknown` release profile
+(opt-level 3, lto, one codegen unit); 256 KiB kept for the host's frames
+and the module's callers of the parse (under 16 KiB measured from
+`VerterHost.upsert` down), and 2,376 bytes a level, twice the costliest
+measured level (an object literal's 1,188, table above). Its nesting,
+(984 KiB − 256 KiB) / 2,376 bytes, is 313 levels of the scan's bound.
+SpiderMonkey, JavaScriptCore and wasmtime are not measured and carry no
+profile; another host adds its own profile from its own measurement,
+never from probing the stack inside the module.
+
+A stale profile fails a test rather than holding silently:
+`the_engine_stack_profile_was_measured_against_the_locked_oxc` fails when
+the locked `oxc_parser` differs from the version the profile records, and
+`packages/wasm/src/deep-source.spec.ts` analyzes a script at the profile's
+nesting on the engine the suite runs on, so an engine whose frames cost
+more fails there. `the_engine_stack_profile_admits_its_nesting_and_refuses_one_more`
+holds the boundary (313 admitted, 314 and 31,300 refused, oxc never run
+for them); the spec holds it through the shipped module (a script at the
+profile's nesting yields its binding; one level past it and 100 times
+past it neither throw nor trap), and serves a shallow script, and the
+refused file made shallow, on the same instance afterwards. With the
+refusal removed the module throws `RangeError: Maximum call stack size
+exceeded` at 31,300 levels, and the same instance then fails the shallow
+script too.
+
+### Typed incompleteness of a refused parse
+
+A parse or a walk-stack lease refused its stack returns `StackUnavailable`,
+and the refused parse's program is empty and marked fatal. Nothing is
+read off that program as the file's: every operation that parses or
+leases records its refusals (`oxc_parse::refusals_within`, scoped to the
+operation on its thread, restored on return and on unwind, an inner
+operation's refusal carried to the one enclosing it), and a refusal makes
+the operation's product typed incompleteness, never an empty file's.
+
+- The scheduler's source stage (`host_executor::execute_source`) fails
+  with `StageErrorKind::StackUnavailable`, which the upsert reports as
+  `SchedulerError::StackUnavailable { file_id, needed }`; it publishes no
+  snapshot, and the same upsert once the stack can be had publishes the
+  file. A refused script parse sets `ParseSnapshot::refused`; a refused
+  carrier projection is `SyntaxReject::StackUnavailable`, which the
+  publication store never retains, and a stage sharing another stage's
+  projection maps that reject to the same typed failure.
+- The analysis lanes that parse on their own serve no analysis and
+  publish no artifact from a refused parse or lease: the rebuild of a
+  snapshot from source (`host_manage/analysis_io.rs`,
+  `host_manage/eval_env.rs`), the overlay materializer and the
+  evaluation program (`parsed_eval_program`), whose flights publish
+  nothing from it.
+- Template facts whose expression parse was refused are absent, not
+  empty, and the result that would have read them is partial, so a cache
+  keyed on the source never retains it.
+- A compile whose parse or lease was refused is refused whole
+  (`VueHostCompileRefusal` / `SvelteHostCompileRefusal::StackUnavailable`)
+  and publishes no product: the host reports the fatal diagnostic
+  `HOST_STACK_UNAVAILABLE`, a failure blocked on an input outside the
+  bytes.
+- A public-API projection with a refused parse fails with
+  `TscGenerationError::StackUnavailable` (detail code `stack-unavailable`),
+  whose subject is the whole source (`TscFailureSubject::Source`, on the
+  wire `{ "kind": "source" }` through napi and wasm), and caches no extract
+  of the script read off the refused parse.
+
+Through the shipped module a script past the profile throws the typed
+refusal on upsert, serves no analysis, and raises no `no-undef-properties`
+warning for the binding it declares.
+
+The compiler's entries outside a host record their own refusals: the
+standalone compile (`StandaloneCompiler::compile`, `compile_prepared`,
+`compile_batch`) fails with `DirectCompileError::StackUnavailable`, a
+prepared carrier keeps its preparation's refusal and refuses every compile
+from it; the `tsc` generation (`generate_tsc_output*`,
+`extract_tsc_state`, `generate_tsc_from_state`) fails with
+`TscGenerationError::StackUnavailable`; the specifier inventory
+(`collect_module_specifier_spans`) answers the refusal, and the
+standalone checker reports it as the file's typed failure.
+
+A walk's stack is taken by a walk-stack lease, the one fallible step, at
+an operation's boundary: the operation holds a lease sized for the
+program it walks (the analysis lanes, the evaluation program's function
+index and the walks over its functions), or a walk takes a lease of its
+own (`oxc_parse::leased_program_walk`, `leased_span_walk`,
+`leased_ast_walk`) inside an operation that records its refusals: the
+source stage, the indexed and overlay materialisations (each on its
+calling thread and in the cold-index job on the declaration-lowering
+worker), the compile and render entries, the compile request, and the
+public-API projection. A refused lease is `StackUnavailable`, recorded
+for the operation, and the walk does not run; nothing ends the process.
+The remaining containment calls reserve a region of their own when no
+lease covers them, which fails only by ending the process; test builds
+report each such walk by its call site, and each leased walk that could
+reserve while no operation records its refusals.
+`every_walk_of_the_host_operations_runs_under_a_lease` runs the host's
+operations (upsert, analysis, a flow return, the runtime compile, a
+compile request, the public-API projection) and the compiler's standalone
+entries (the direct, prepared and batched compile, the `tsc` generation,
+the specifier inventory) over TypeScript, Vue and Svelte sources nesting
+201 levels, in a child process, and fails on any reported walk.
+
+### Hand-written recursions over oxc syntax
+
+The containment guard finds walks of oxc's (`Visit`, `walk_*`,
+`clone_in`, the semantic builder); it does not find Verter's own
+functions that recurse over oxc syntax, which spend native stack per
+level just the same and belong on explicit work stacks, not stack
+regions: a stack region contains oxc's own recursion only.
+
+The script analysis is one such consumer, and it runs on the calling
+thread's stack, outside any region. Every pass of it that input nesting
+reaches walks from an explicit stack: the module-reference collector, the
+await scan, the string evaluator, the nested-macro scan, the binding
+leaves of a destructuring pattern, the macro type references, the macro
+call walk and the macro type-argument role walk.
+`build_tests.rs` →
+`every_deeply_nested_script_is_analyzed_on_a_small_stack` analyzes 34
+forms 10,000 deep on a 1 MiB thread (calls, parentheses, arrays,
+objects, conditionals, operator and member chains, awaits, templates,
+arrows, `ref` / `computed`, `defineProps` / `defineEmits` values and
+types, `withDefaults`, destructuring, returns, blocks, `if`s, classes),
+each in a child process; restoring any pass's recursion overflows the
+forms that reach it. The dynamic event-name walks of the Vue projection
+walk from explicit stacks too.
+
+A census of the functions over oxc AST types that lie on a cycle of
+calls within their file (calling themselves, or calling or passing by
+name a function that leads back to them) counts 251 left (67 in
+`verter_parser`, 66 in `verter_session`, 65 in `verter_semantic`, 51 in
+`verter_compiler`, 2 in `verter_lsp`); a cycle through another file is
+not counted. Some are bounded by a depth of their own, and some run
+inside a walk's containment. They are tracked, not converted:
+`hand_written_recursions_over_oxc_syntax_do_not_grow` fails on a new
+recursive function over oxc syntax (listed in
+`oxc_parse/hand_written_recursions.txt`), pointing it to an explicit
+stack, and on a listed one that no longer recurses. The analysis
+flagging an `AppConfig` interface in a namespace nest, a cycle of three
+functions the census missed while it counted only direct calls,
+overflowed the scheduler's I/O thread on namespaces nested 10,000 deep
+once analysis ran off the parse's stack region; it walks the nest from
+an explicit stack.
 
 ## Canary
 

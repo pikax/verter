@@ -177,10 +177,12 @@ impl SemanticNodeData {
     /// Returns [`ChildWalk::Sealed`] for the sealed callable carrier, whose
     /// children are not enumerable here.
     ///
-    /// This is the SEMANTIC descent topology, and three kinds of retained id
+    /// This is the SEMANTIC descent topology, and four kinds of retained id
     /// are deliberately leaves of it: an `Opaque(RecursiveRef { args })`
     /// refusal is a typed back-edge whose arguments name the instantiation
-    /// it stands for, not structure beneath it; a class expression's
+    /// it stands for, not structure beneath it; an `Opaque(CheckerRecovery {
+    /// origin })` is the checker's error type, and the authored form of the
+    /// refused operation is a record beside it, not a part of it; a class expression's
     /// recorded `prototype` is a derived record beside its instance, not a
     /// part of it; and a pending conditional frame's parameters are the
     /// binders it substitutes, not operands. A reader that must see every
@@ -193,10 +195,10 @@ impl SemanticNodeData {
             | Self::Literal(_)
             | Self::Opaque(_)
             | Self::RawFallback { .. }
-            | Self::Infer { .. }
             | Self::InferRef { .. }
             | Self::DeclRef { .. }
             | Self::TypeOfNominal(_) => {}
+            Self::Infer { constraint, .. } => constraint.iter().copied().for_each(visit),
             Self::EnumLiteral(literal) => visit(literal.base),
             Self::IntrinsicApplication { args, .. } | Self::InstantiationRef { args, .. } => {
                 args.iter().copied().for_each(visit);
@@ -346,6 +348,10 @@ impl SemanticNodeData {
             Self::Opaque(super::QueryError::RecursiveRef { args, .. }) => {
                 args.iter().copied().for_each(visit);
             }
+            Self::Opaque(super::QueryError::CheckerRecovery {
+                origin: Some(origin),
+                ..
+            }) => visit(*origin),
             Self::ClassExpressionInstance { identity, .. } => {
                 identity.prototype.into_iter().for_each(visit);
             }

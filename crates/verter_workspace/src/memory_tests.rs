@@ -2136,3 +2136,454 @@ fn a_repeated_byteless_content_transition_is_strictly_newer_each_time() {
         WorkspaceRead::last_content_transition_generation(&ws, "/src/Unrelated.vue"),
     );
 }
+
+/// The in-memory twin of the filesystem sibling regressions: twelve sibling
+/// owners' resolutions of the same `./types`, one landing before every
+/// admission attempt of the demanded resolution, cost it no restart and no
+/// admission.
+#[test]
+fn twelve_sibling_publications_never_refuse_a_route() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(
+        "d:/project/src/types.ts".to_string(),
+        Arc::from("export interface Props { a: string }\n"),
+    );
+    for index in 0..13 {
+        ws.inject_file(
+            format!("d:/project/src/Comp{index}.ts"),
+            Arc::from("import type { Props } from './types'\n"),
+        );
+    }
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let sibling_ws = Arc::clone(&ws);
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if index > 12 {
+                return;
+            }
+            let owner = format!("d:/project/src/Comp{index}.ts");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| sibling_ws.resolve_import_outcome(&owner, "./types", CONTEXT))
+                    .join()
+                    .expect("the sibling resolves");
+            });
+        },
+        || ws.resolve_import_outcome("d:/project/src/Comp0.ts", "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "siblings never refuse the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(restarts, 0, "compatible siblings cost no restart");
+}
+
+/// Owners importing one `./types` beside them, in memory.
+fn sibling_owners_workspace(owners: usize) -> Arc<MemoryWorkspace> {
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(
+        "d:/project/src/types.ts".to_string(),
+        Arc::from("export interface Props { a: string }\n"),
+    );
+    for index in 0..owners {
+        ws.inject_file(
+            format!("d:/project/src/Comp{index}.ts"),
+            Arc::from("import type { Props } from './types'\n"),
+        );
+    }
+    ws
+}
+
+/// Resolve `owner`'s `./types` with `siblings` sibling resolutions each held
+/// INSIDE a world write (its epoch window open) across one admission check
+/// of the demanded resolution, released once that check has run: returns
+/// the outcome and the outer restarts it was charged.
+fn resolve_across_held_sibling_writes(
+    ws: &Arc<MemoryWorkspace>,
+    siblings: usize,
+) -> (crate::resolution_currency::ResolutionOutcome, usize) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    struct Held {
+        release: mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<()>,
+    }
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held: Arc<Mutex<Option<Held>>> = Arc::new(Mutex::new(None));
+    let hook_held = Arc::clone(&held);
+    let hook_ws = Arc::clone(ws);
+    let release = move |held: &Mutex<Option<Held>>| {
+        if let Some(sibling) = held.lock().unwrap().take() {
+            sibling.release.send(()).unwrap();
+            sibling.handle.join().expect("the sibling resolves");
+        }
+    };
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| match phase {
+            ResolutionPhase::PreAdmissionValidation => {
+                let index = started.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                if index > siblings {
+                    return;
+                }
+                let (held_tx, held_rx) = mpsc::channel::<()>();
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let ws = Arc::clone(&hook_ws);
+                let handle = std::thread::spawn(move || {
+                    let owner = format!("d:/project/src/Comp{index}.ts");
+                    resolution_test_hooks::with_hook(
+                        ResolutionPhase::WorldWriteHeld,
+                        move || {
+                            held_tx.send(()).unwrap();
+                            release_rx
+                                .recv_timeout(Duration::from_secs(30))
+                                .expect("the demanded resolution releases the sibling");
+                        },
+                        || {
+                            let _ = ws.resolve_import_outcome(&owner, "./types", CONTEXT);
+                        },
+                    );
+                });
+                held_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the sibling writes the resolution world");
+                *hook_held.lock().unwrap() = Some(Held {
+                    release: release_tx,
+                    handle,
+                });
+            }
+            // The admission check passed, or a restart begins a new
+            // attempt: either way the check has run, and the sibling may
+            // publish now.
+            ResolutionPhase::RequestCompletion | ResolutionPhase::AttemptStart => {
+                release(&hook_held)
+            }
+            _ => {}
+        },
+        || ws.resolve_import_outcome("d:/project/src/Comp0.ts", "./types", CONTEXT),
+    );
+    let restarts = crate::resolver::take_outer_restarts_for_test();
+    if let Some(sibling) = held.lock().unwrap().take() {
+        let _ = sibling.release.send(());
+        let _ = sibling.handle.join();
+    }
+    (outcome, restarts)
+}
+
+/// A sibling resolution INSIDE a world write while the demanded resolution
+/// validates for admission is contention, not a conflict: the sibling's
+/// write retains the world the demanded resolution read. The demanded
+/// resolution is admitted, cacheable, and charged no restart.
+#[test]
+fn a_sibling_world_write_in_flight_at_admission_costs_no_restart() {
+    let ws = sibling_owners_workspace(2);
+    let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 1);
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "an in-flight compatible write never refuses the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(
+        restarts, 0,
+        "an in-flight compatible write costs no restart"
+    );
+}
+
+/// Twelve siblings, each inside its world write across one admission check
+/// of the demanded resolution, as a concurrent component batch overlaps
+/// them: the demanded route is still answered, admitted and cacheable.
+/// Charged one restart each, they exhaust the operation's restart budget
+/// and refuse the route (`BudgetExceeded`), which the session reads as an
+/// unrootable route, so the batch never warms.
+#[test]
+fn twelve_sibling_world_writes_in_flight_never_refuse_a_route() {
+    let ws = sibling_owners_workspace(13);
+    let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 12);
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("d:/project/src/types.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "in-flight compatible writes never refuse the route: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(restarts, 0, "in-flight compatible writes cost no restart");
+}
+
+// ── A checkout landing inside one resolution attempt ──
+
+/// Where a checkout lands inside the demanded resolution's attempt.
+#[derive(Clone, Copy, Debug)]
+enum CheckoutPoint {
+    /// Between two input rounds: the attempt read some inputs before the
+    /// checkout and reads the rest after it.
+    BetweenInputRounds,
+    /// After every read, before the admission check.
+    BeforeAdmission,
+}
+
+/// A fresh workspace holding `files`, in which `importer`'s `specifier`
+/// resolves with no concurrent writer: the single-world answer.
+fn single_world_answer(
+    files: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+) -> Option<String> {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    for (path, source) in files {
+        ws.inject_file((*path).to_string(), Arc::from(*source));
+    }
+    ws.resolve_import(importer, specifier, context)
+        .map(|result| result.source_id)
+}
+
+/// Resolve `importer`'s `specifier` in a workspace holding `before`, with
+/// `checkout` applied by another thread at `point` of the first attempt;
+/// returns the outcome and whether the checkout landed where asked.
+fn resolve_across_checkout(
+    before: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+    checkout: Vec<WorkspaceChange>,
+    point: CheckoutPoint,
+) -> (crate::resolution_currency::ResolutionOutcome, bool) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    for (path, source) in before {
+        ws.inject_file((*path).to_string(), Arc::from(*source));
+    }
+    let hook_ws = Arc::clone(&ws);
+    let landed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_landed = Arc::clone(&landed);
+    let mut checkout = Some(checkout);
+    let mut rounds = 0usize;
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| {
+            let due = match (point, phase) {
+                (CheckoutPoint::BetweenInputRounds, ResolutionPhase::DriverRound) => {
+                    rounds += 1;
+                    rounds == 2
+                }
+                (CheckoutPoint::BeforeAdmission, ResolutionPhase::PreAdmissionValidation) => true,
+                _ => false,
+            };
+            if !due {
+                return;
+            }
+            let Some(changes) = checkout.take() else {
+                return;
+            };
+            let ws = Arc::clone(&hook_ws);
+            std::thread::spawn(move || {
+                ws.apply_changes(changes);
+            })
+            .join()
+            .expect("the checkout applies");
+            hook_landed.store(true, std::sync::atomic::Ordering::Release);
+        },
+        || ws.resolve_import_outcome(importer, specifier, context),
+    );
+    (outcome, landed.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// The attempt's outcome after a checkout it straddled: never an answer from
+/// the world before it, and never a mix of the two. A cacheable answer is
+/// the single-world answer of the world AFTER the checkout (the attempt was
+/// restarted into it, or its reads still hold there).
+fn assert_checkout_never_admits_a_torn_answer(
+    before: &[(&str, &str)],
+    after: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+    checkout: Vec<WorkspaceChange>,
+    point: CheckoutPoint,
+) {
+    let old = single_world_answer(before, importer, specifier, context);
+    let new = single_world_answer(after, importer, specifier, context);
+    assert_ne!(
+        old, new,
+        "precondition: the checkout must change the single-world answer"
+    );
+    let (outcome, landed) =
+        resolve_across_checkout(before, importer, specifier, context, checkout, point);
+    assert!(landed, "precondition: the checkout must land at {point:?}");
+    let answer = outcome.result().map(|result| result.source_id.clone());
+    assert!(
+        outcome.is_cacheable(),
+        "a checkout is a real edit: the attempt restarts into the new world \
+         and is admitted there, {point:?}: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(
+        answer, new,
+        "the admitted answer belongs wholly to the world after the checkout \
+         (before: {old:?}), {point:?}"
+    );
+}
+
+const CHECKOUT_TYPE_IMPORT: ResolutionContext = ResolutionContext {
+    phase: ResolvePhase::CodegenBlocker,
+    kind: ResolveRequestKind::TypeImport,
+};
+
+const CHECKOUT_ESM_IMPORT: ResolutionContext = ResolutionContext {
+    phase: ResolvePhase::CodegenBlocker,
+    kind: ResolveRequestKind::EsmImport,
+};
+
+/// The files before a checkout, the files after it, and the checkout.
+type Checkout<const FILES: usize> = (
+    [(&'static str, &'static str); FILES],
+    [(&'static str, &'static str); FILES],
+    Vec<WorkspaceChange>,
+);
+
+/// A checkout swapping `mod.ts` for `mod.tsx`: two inputs the attempt probes
+/// (the two candidate extensions), both changed.
+fn module_swap() -> Checkout<2> {
+    (
+        [
+            ("d:/p/src/main.ts", "import { a } from './mod'\n"),
+            ("d:/p/src/mod.ts", "export const a = 1\n"),
+        ],
+        [
+            ("d:/p/src/main.ts", "import { a } from './mod'\n"),
+            ("d:/p/src/mod.tsx", "export const a = 2\n"),
+        ],
+        vec![
+            WorkspaceChange::FileDeleted {
+                canonical_id: "d:/p/src/mod.ts".to_string(),
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/src/mod.tsx".to_string(),
+                source: Some(Arc::from("export const a = 2\n")),
+            },
+        ],
+    )
+}
+
+/// A checkout on a package: the manifest the attempt read points elsewhere
+/// and its old target disappears.
+fn package_checkout() -> Checkout<3> {
+    (
+        [
+            ("d:/p/src/main.ts", "import { a } from 'pkg'\n"),
+            (
+                "d:/p/node_modules/pkg/package.json",
+                r#"{"module":"dist/old.js"}"#,
+            ),
+            ("d:/p/node_modules/pkg/dist/old.js", "export const a = 1;"),
+        ],
+        [
+            ("d:/p/src/main.ts", "import { a } from 'pkg'\n"),
+            (
+                "d:/p/node_modules/pkg/package.json",
+                r#"{"module":"dist/new.js"}"#,
+            ),
+            ("d:/p/node_modules/pkg/dist/new.js", "export const a = 2;"),
+        ],
+        vec![
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/node_modules/pkg/package.json".to_string(),
+                source: Some(Arc::from(r#"{"module":"dist/new.js"}"#)),
+            },
+            WorkspaceChange::FileDeleted {
+                canonical_id: "d:/p/node_modules/pkg/dist/old.js".to_string(),
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/node_modules/pkg/dist/new.js".to_string(),
+                source: Some(Arc::from("export const a = 2;")),
+            },
+        ],
+    )
+}
+
+#[test]
+fn a_module_swap_before_admission_never_admits_a_torn_answer() {
+    let (before, after, checkout) = module_swap();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "./mod",
+        CHECKOUT_TYPE_IMPORT,
+        checkout,
+        CheckoutPoint::BeforeAdmission,
+    );
+}
+
+#[test]
+fn a_module_swap_between_input_rounds_never_admits_a_torn_answer() {
+    let (before, after, checkout) = module_swap();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "./mod",
+        CHECKOUT_TYPE_IMPORT,
+        checkout,
+        CheckoutPoint::BetweenInputRounds,
+    );
+}
+
+#[test]
+fn a_package_checkout_before_admission_never_admits_a_torn_answer() {
+    let (before, after, checkout) = package_checkout();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "pkg",
+        CHECKOUT_ESM_IMPORT,
+        checkout,
+        CheckoutPoint::BeforeAdmission,
+    );
+}
+
+#[test]
+fn a_package_checkout_between_input_rounds_never_admits_a_torn_answer() {
+    let (before, after, checkout) = package_checkout();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "pkg",
+        CHECKOUT_ESM_IMPORT,
+        checkout,
+        CheckoutPoint::BetweenInputRounds,
+    );
+}

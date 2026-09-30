@@ -1181,7 +1181,10 @@ fn collect_snippet_import_type_references(
     }
 
     let mut collector = SnippetImportTypeCollector { out };
-    verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
+    // A walk refused its stack collects nothing; the operation around it is
+    // refused with the refusal.
+    let _ =
+        verter_parser::oxc_parse::leased_program_walk(program, || collector.visit_program(program));
 }
 
 /// The names of every INSTANCE-region top-level `let`/`var` binding in the

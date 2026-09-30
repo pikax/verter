@@ -48,6 +48,26 @@ impl SemanticGraphStore {
         self.union_views.lock().len()
     }
 
+    /// Number of stable-key classes (distinct subtrees) the store's key
+    /// table holds; see [`crate::semantic_query::stable_key::KeyClasses`].
+    #[must_use]
+    pub fn stable_key_class_count(&self) -> usize {
+        self.key_classes.lock().class_count()
+    }
+
+    /// Number of nodes whose stable-key class the store's key table holds.
+    #[must_use]
+    pub fn stable_key_classified_count(&self) -> usize {
+        self.key_classes.lock().classified_count()
+    }
+
+    /// Number of memoized class orders and fingerprint hash-map offsets the
+    /// store's key table holds.
+    #[must_use]
+    pub fn stable_key_memo_count(&self) -> usize {
+        self.key_classes.lock().memo_count()
+    }
+
     /// Number of `unresolved_reach` entries (retention observability).
     #[must_use]
     pub fn unresolved_reach_count(&self) -> usize {

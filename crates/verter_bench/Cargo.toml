@@ -41,6 +41,7 @@ verter_audit = { path = "../verter_audit" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }
 blake3 = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
@@ -54,6 +55,13 @@ rayon = "1.12"
 tempfile = "3.27"
 sha2 = { workspace = true }
 hotpath = { version = "0.23", optional = true }
+
+# Process statistics for the semantic benchmark probe (`src/semantic_perf/process_stats.rs`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Activates `test-support` on `verter_compiler` for THIS crate's own
@@ -75,6 +83,16 @@ smallvec = "1.15"
 [[bin]]
 name = "css_latency_gate"
 path = "src/bin/css_latency_gate.rs"
+
+# The Verter arm of `scripts/benchmark/semantic-perf.mjs` (production library,
+# system allocator) and its separately labelled allocation-counting twin.
+[[bin]]
+name = "semantic_perf_probe"
+path = "src/bin/semantic_perf_probe.rs"
+
+[[bin]]
+name = "semantic_perf_probe_counted"
+path = "src/bin/semantic_perf_probe_counted.rs"
 
 [[bench]]
 name = "bindings_bench"

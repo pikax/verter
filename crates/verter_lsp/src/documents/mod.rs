@@ -656,6 +656,7 @@ impl DocumentRegistry {
                 verter_session::HostError::MissingSource { .. }
                 | verter_session::HostError::Scheduler(_)
                 | verter_session::HostError::Superseded
+                | verter_session::HostError::Cancelled
                 | verter_session::HostError::Shutdown
                 | verter_session::HostError::BlockContentRefused(_),
             ) => false,

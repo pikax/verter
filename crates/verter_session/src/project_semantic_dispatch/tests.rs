@@ -642,6 +642,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             )),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(TypeExpr::Ref {
                 name: Arc::from("T"),
@@ -653,6 +654,7 @@ fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
             check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
             extends: Arc::new(TypeExpr::Infer {
                 name: "T".to_string(),
+                constraint: None,
             }),
             true_type: Arc::new(inner),
             false_type: Arc::new(loser),
@@ -923,8 +925,12 @@ fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
     );
 }
 
+/// An `infer` at an object's index signature value or at a call or
+/// construct signature's return infers through the relation like a
+/// property's (TypeScript 7.0.2: `{ [k: string]: string } extends { [k:
+/// string]: infer U }`, and the call and construct forms, are `string`).
 #[test]
-fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_positions() {
+fn conditional_infer_reaches_object_index_call_and_construct_positions() {
     use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
 
     let host = host();
@@ -935,6 +941,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("UnsupportedObjectPosition"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let signature = |kind, value| {
         graph.intern_node(SemanticNodeData::Signature {
@@ -1001,7 +1008,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
         spans: Default::default(),
         declaration_origin: None,
     };
-    let unsupported = [
+    let positions = [
         (
             "index",
             object(
@@ -1048,14 +1055,11 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             ),
         ),
     ];
-    for (label, source, target) in unsupported {
+    for (label, source, target) in positions {
         let result = reverse_test_conditional(&dispatch, source, target, infer, never);
-        assert!(
-            matches!(
-                graph.node_data(result).as_deref(),
-                Some(SemanticNodeData::Conditional { .. })
-            ),
-            "an object {label}-signature infer position is deliberately unsupported and must stay deferred, never select true with an unresolved Infer"
+        assert_eq!(
+            result, string,
+            "an object {label}-signature infer position infers the source's type"
         );
     }
 }
@@ -1975,6 +1979,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Rest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let rest_pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2069,6 +2074,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("ExactRest"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let pattern = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -2082,10 +2088,21 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         ),
         readonly: true,
     });
+    // The capture keeps labels, optionality and rest and is never readonly
+    // (TypeScript 7.0.2, every setting: `readonly [head?: string, ...tail:
+    // number[]] extends readonly [...infer R] ? R : never` is `[head?:
+    // string, ...tail: number[]]`).
+    let captured = graph.intern_node(SemanticNodeData::Tuple {
+        elements: match graph.node_data(concrete).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+            _ => unreachable!("a tuple"),
+        },
+        readonly: false,
+    });
     assert_eq!(
         reverse_test_conditional(&dispatch, concrete, pattern, infer, never),
-        concrete,
-        "covariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "covariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 
     let signature = |param_ty| {
@@ -2118,8 +2135,8 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             infer,
             never,
         ),
-        concrete,
-        "contravariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "contravariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 }
 
@@ -2147,6 +2164,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("Tail"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
@@ -7311,6 +7329,7 @@ fn infer_in_closed_conditional_binds_via_relation() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: binder.clone(),
+        constraint: None,
     });
     let true_branch = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),
@@ -7384,11 +7403,13 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = simple_object(&graph, &[("a", infer_x)]);
     let true_branch = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let false_branch = primitive(&graph, PrimitiveKind::Never);
 
@@ -13481,6 +13502,181 @@ fn a_resolved_workload_arena_is_a_dag() {
     }
 }
 
+/// The node ids `data`'s `Debug` form prints: every `SemanticNodeId` the
+/// payload holds, however deep in its fields. Independent of either child
+/// walk, so a field a walk forgets still shows here.
+fn node_ids_printed_in(data: &SemanticNodeData) -> Vec<u64> {
+    const MARK: &str = "SemanticNodeId(";
+    let printed = format!("{data:?}");
+    let mut ids = Vec::new();
+    let mut rest = printed.as_str();
+    while let Some(at) = rest.find(MARK) {
+        rest = &rest[at + MARK.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse() {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// Whether the retention workload below must produce a node of `tag`. The
+/// match names every variant, so a new one does not compile until it is
+/// placed here: either the workload produces it (and the sweep checks
+/// that every id it holds is retained) or the arm says why it cannot.
+fn retention_workload_produces(tag: crate::semantic_query::SemanticNodeTag) -> bool {
+    use crate::semantic_query::SemanticNodeTag as Tag;
+    match tag {
+        Tag::Object
+        | Tag::Union
+        | Tag::Intersection
+        | Tag::Primitive
+        | Tag::Literal
+        | Tag::Array
+        | Tag::Tuple
+        | Tag::TemplateLiteral
+        | Tag::Mapped
+        | Tag::TypeParam
+        | Tag::Infer
+        | Tag::InferRef
+        | Tag::Conditional
+        | Tag::Signature
+        | Tag::InstantiationRef
+        | Tag::KeyOf
+        | Tag::IndexedAccess
+        | Tag::Opaque => true,
+        // Payloads this type-only workload does not intern: value-side and
+        // host-bridge carriers, and the forms its reads reduce before they
+        // are interned. The arena checks every payload any test interns in
+        // the same way, so each is swept wherever its own producer's tests
+        // build it.
+        Tag::Alias
+        | Tag::DeclRef
+        | Tag::EnumLiteral
+        | Tag::IntrinsicApplication
+        | Tag::ObjectSpreadProgram
+        | Tag::TypeOf
+        | Tag::TypeOfNominal
+        | Tag::MergedDecl
+        | Tag::DeferredCallable
+        | Tag::ClassExpressionInstance
+        | Tag::BareRef
+        | Tag::ImportType
+        | Tag::RawFallback
+        | Tag::SyntheticBinding => false,
+    }
+}
+
+/// Every node id a payload holds is visited by
+/// `SemanticNodeData::for_each_retained_child`, over the arena of a real
+/// workload: generic, recursive, mapped, conditional, template, intrinsic,
+/// enum and overloaded declarations, their instantiations, and relations
+/// between references to generic interfaces (whose variance measurement
+/// interns marker instantiations). The held ids are read off each
+/// payload's `Debug` form, independently of the walk, so a field or a
+/// variant the walk forgets fails here — and a releasing holder that walks
+/// it would otherwise keep the node that field names alive.
+#[test]
+fn every_node_id_a_payload_holds_is_a_retained_child() {
+    use crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/retained.ts",
+        "export interface Box<T> { value: T; map<U>(f: (v: T) => U): Box<U> }\n\
+         export interface Sink<T> { put(v: T): void }\n\
+         export interface Node<T> { value: T; next: Node<T> | null; children: Node<T>[] }\n\
+         export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };\n\
+         export type Partialize<T> = { [K in keyof T]?: T[K] };\n\
+         export type Unwrap<T> = T extends Promise<infer U> ? Unwrap<U> : T;\n\
+         export type Lazy<T> = T extends string ? { s: T } : { n: T };\n\
+         export type Pair<T> = [T, number?];\n\
+         export type Greeting<N extends string> = `hello ${Uppercase<N>}`;\n\
+         export enum Color { Red, Green = \"g\" }\n\
+         export type Red = Color.Red;\n\
+         export type Both<T> = { a: T } & { b: 2 };\n\
+         export type Keys<T> = keyof T;\n\
+         export type At<T> = T[keyof T];\n\
+         export declare function pick<T, K extends keyof T>(o: T, k: K): T[K];\n\
+         export declare function pick(o: string): number;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let instantiate = |name: &str, arg: SemanticNodeId| {
+        dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                decl_identity(&host, "/w/retained.ts", name),
+                Arc::from(vec![arg].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ),
+        ))
+    };
+    for name in ["Json", "Color", "Red", "pick"] {
+        let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            "/w/retained.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name,
+        )));
+    }
+    for name in [
+        "Node",
+        "Partialize",
+        "Unwrap",
+        "Lazy",
+        "Pair",
+        "Both",
+        "Keys",
+        "At",
+    ] {
+        let _ = instantiate(name, number);
+    }
+    let _ = instantiate("Greeting", string);
+    for name in ["Box", "Sink"] {
+        let (QueryResult::Value(of_number), QueryResult::Value(of_string)) =
+            (instantiate(name, number), instantiate(name, string))
+        else {
+            panic!("premise: {name} instantiates");
+        };
+        let _ = dispatch.execute_relate(dispatch.relate_key_for(of_number.value, of_string.value));
+    }
+
+    let count = graph.node_count() as u64;
+    let mut seen = std::collections::BTreeSet::new();
+    for id in 0..count {
+        let Some(data) = graph.node_data(SemanticNodeId(id)) else {
+            continue;
+        };
+        seen.insert(data.node_tag());
+        let mut retained = std::collections::BTreeSet::new();
+        data.for_each_retained_child(|child| {
+            retained.insert(child.0);
+        });
+        for held in node_ids_printed_in(&data) {
+            assert!(
+                held >= UNALLOCATABLE_ID_FLOOR || retained.contains(&held),
+                "node {id} ({:?}) holds node {held}, which its retained walk never visits",
+                data.node_tag()
+            );
+        }
+    }
+    let missing: Vec<_> = crate::semantic_query::SemanticNodeTag::ALL
+        .into_iter()
+        .filter(|&tag| retention_workload_produces(tag) && !seen.contains(&tag))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the workload produced no {missing:?} node; seen {seen:?}"
+    );
+}
+
 /// Substitute-rebuild arms must preserve the origin scope. A plain
 /// `self.graph().intern_node(...)` is scope-less: under compound
 /// `(payload, scope)` interning it would intern a file-scoped shell's
@@ -13604,24 +13800,16 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     );
 }
 
-/// The iterative relation engine handles structurally-novel deeply
-/// nested distribution without a per-frame stack-safety cap. A
-/// fixed per-frame recursion cap would have returned `Unknown` on
-/// anything deeper; the iterative form runs the work on a
-/// heap-backed worklist and only fires the work budget on genuine
-/// runaway (budget = `10 × graph.node_count()`, 4096 floor), not on
-/// reasonably-deep nesting.
-///
-/// Discriminator: build a 500-deep **readonly** nested array chain
-/// `readonly Number[]…[]` on the source and `readonly String[]…[]`
-/// on the target. Readonly Array-Array relation is covariant (forward
-/// only) so descent is linear in depth — one sub-pair per level,
-/// not the exponential 2ⁿ growth of mutable-array bidirectional
-/// comparison. The iterative worklist driver bounds itself on a
-/// graph-size work budget rather than a fixed recursion-frame cap, so
-/// it walks to the innermost `Number` vs `String` mismatch and returns
-/// `NotAssignable` instead of short-circuiting to `Unknown` once a
-/// recursion-depth limit is reached.
+/// Deeply nested arrays relate on the heap-backed worklist, one element
+/// pair per level, and never answer `Unknown` for their depth: within the
+/// checker's recursion depth the relation reaches the innermost `Number`
+/// vs `String` mismatch, and past it the relation overflows, false, as the
+/// checker's does (every element pair is one `recursiveTypeRelatedTo`
+/// entry; measured on TypeScript 7.0.2, `{ v: … }[]` nested 50 times
+/// overflows with TS2321). Either way a 90-deep and a 500-deep
+/// **readonly** chain `readonly Number[]…[]` against `readonly
+/// String[]…[]` are `NotAssignable`. Readonly Array-Array relation is
+/// covariant (forward only), so descent is linear in depth.
 #[test]
 fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
     use crate::semantic_query::RelationResult;
@@ -13648,24 +13836,28 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
         }
         id
     }
-    const DEPTH: u32 = 500;
-    let source = nest_readonly_array(&graph, PrimitiveKind::Number, DEPTH);
-    let target = nest_readonly_array(&graph, PrimitiveKind::String, DEPTH);
-    assert_ne!(
-        source, target,
-        "distinct base primitives must not alias under structural interning"
-    );
+    for depth in [90, 500] {
+        let source = nest_readonly_array(&graph, PrimitiveKind::Number, depth);
+        let target = nest_readonly_array(&graph, PrimitiveKind::String, depth);
+        assert_ne!(
+            source, target,
+            "distinct base primitives must not alias under structural interning"
+        );
 
-    let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
-    assert!(
-        matches!(result, RelationResult::NotAssignable),
-        "iterative relate must walk a 500-deep readonly Array \
-         chain to the leaf primitive mismatch and return NotAssignable \
-         rather than short-circuiting to Unknown at a recursion-depth \
-         cap; got {result:?}",
-    );
+        let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
+        assert!(
+            matches!(result, RelationResult::NotAssignable),
+            "relating a {depth}-deep readonly Array chain must answer NotAssignable \
+             (the leaf mismatch, or the checker's depth overflow), never Unknown; \
+             got {result:?}",
+        );
+    }
 }
 
+/// Within the checker's recursion depth the array descent reaches its leaf
+/// on the worklist and reduces it through the canonical conditional
+/// oracle: 90 nested readonly arrays are 90 recursion entries, the leaf
+/// pair one more.
 #[test]
 fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
     use crate::semantic_query::{LiteralValue, RelationResult};
@@ -13687,7 +13879,7 @@ fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
         pending: None,
     });
     let nest = |mut node| {
-        for _ in 0..500 {
+        for _ in 0..90 {
             node = graph.intern_node(SemanticNodeData::Array {
                 element: node,
                 readonly: true,
@@ -13729,6 +13921,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -13858,6 +14051,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = call_sig(infer_u, string_node);
 
@@ -13890,6 +14084,7 @@ fn reverse_test_binders(
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from(infer_name),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
@@ -14545,6 +14740,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let mapper_parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("<reverse-mapper>"),
@@ -15287,6 +15483,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("AbortFencedT"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let key = dispatch.relation_key_with_inference(dispatch.relate_key_for(string, infer));
     assert!(
@@ -15782,6 +15979,7 @@ fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("InactiveU"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = reverse_test_target(
         &graph,
@@ -16427,51 +16625,30 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
     }
 }
 
+/// A direct candidate outranks a reverse homomorphic mapped one: the
+/// inference owner fixes from the strongest priority a variable received,
+/// and complete reverse recovery outranks partial recovery.
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use super::dispatch_txn::InferenceCandidate;
+    use crate::semantic_query::InferenceCandidatePriority;
 
     let host = host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
-    let never = primitive(&graph, PrimitiveKind::Never);
-    let (infer, parameter) = reverse_test_binders(&graph, "PriorityT", 31);
-    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
-        object: infer,
-        index: IndexKey::Computed(parameter),
-    });
-    let template = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", projection, false, false),
-            surface_member("direct", infer, false, false),
-        ],
-    );
-    let target = reverse_test_target(
-        &graph,
-        infer,
-        parameter,
-        template,
-        OptionalityMod::Keep,
-        ReadonlyMod::Keep,
-    );
-    let source_value = intern_object_with_members(
-        &graph,
-        vec![
-            surface_member("projection", string, false, false),
-            surface_member("direct", number, false, false),
-        ],
-    );
-    let source = intern_object_with_members(
-        &graph,
-        vec![surface_member("a", source_value, false, false)],
-    );
-
-    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let candidate = |node, priority| InferenceCandidate {
+        node,
+        priority,
+        variance: crate::semantic_query::VariancePhase::Covariant,
+    };
+    let winning = super::inference::winning_candidates(&[
+        candidate(string, InferenceCandidatePriority::HomomorphicMapped),
+        candidate(number, InferenceCandidatePriority::Argument),
+    ]);
     assert_eq!(
-        result, number,
+        winning.covariant,
+        vec![number],
         "the direct Argument candidate must outrank the aggregate HomomorphicMapped candidate"
     );
     assert!(
@@ -19620,25 +19797,28 @@ fn builtin_key_domain_verdict_is_route_independent() {
     );
 }
 
-/// The shared oracle owns the FULL branch-selection path, INCLUDING the
-/// pre-relation infer-pattern cases `build_conditional` selects before
-/// any relation query: `T extends infer X ? A : B` ALWAYS selects the
-/// TRUE branch (an infer pattern matches anything), with `X := check`.
-/// The classifiers must see the same selection — an open LOSING branch
-/// behind a bare-infer extends is dead and must not false-OPEN the key
-/// domain — and must bind the selected branch's infer name to the
-/// check's own identity/openness, so `? X : …` with an open check stays
-/// honestly OPEN.
+/// The shared oracle owns the FULL branch-selection path, the pre-relation
+/// infer-pattern cases `build_conditional` selects before any relation
+/// query included: a bare-infer extends (`C extends infer X ? A : B`)
+/// selects the TRUE branch with `X := C` for a check that is not generic,
+/// and — as the checker's `getConditionalType` defers any conditional whose
+/// check type is generic — stays deferred over a generic check. The
+/// classifiers see the same selection: a deferred conditional over the
+/// open `T` is OPEN, a selected one over a closed check is judged by its
+/// selected branch, with the branch's infer name bound to the check.
 ///
-/// **Discriminating.** An oracle without the pre-relation infer cases
-/// returns `Deferred` for an `Infer` extends, classifies the check
-/// value-sensitively (open `T` ⇒ OPEN) — the CLOSED assertions and the
-/// materialisation witness fail on that implementation. The
-/// closed-check/bound-branch assertion fails on any implementation that
-/// selects TRUE but leaves the branch's infer name unbound-open or
-/// blindly closed.
+/// Measured on tsc 7.0.2 (`--strict`): with `type InferSel<T> = T extends
+/// infer X ? { label: string } : T`, `Omit<InferSel<T>, "x">` over a
+/// function's own `T` prints as `Omit<InferSel<T>, "x">` (unresolved),
+/// `T extends infer X ? { label: string } : T` prints as written, and
+/// `string extends infer X ? X : 1` is `string`.
+///
+/// **Discriminating.** An oracle that selects TRUE for a bare-infer extends
+/// over a generic check judges `Omit<InferSel<T>, 'x'>` CLOSED and
+/// materialises `{ label }` for it; one without the pre-relation infer case
+/// leaves `Omit<InferSel<string>, 'x'>` unmaterialised.
 #[test]
-fn bare_infer_extends_selects_true_through_the_shared_oracle() {
+fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
     use crate::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
@@ -19655,6 +19835,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
     let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "x".to_string(),
     )));
@@ -19664,7 +19845,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
-    let inst = |name: &str| {
+    let inst = |name: &str, arg: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
@@ -19672,38 +19853,45 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: Arc::from(vec![arg].into_boxed_slice()),
         })
     };
 
-    // TypeExpr route: bare-infer extends selects TRUE — the open `T`
-    // false branch is dead, the key domain is `{ label }` ⇒ CLOSED.
-    assert!(
-        !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &dispatch,
-            &builtin_omit,
-            &[inst("InferSel"), x_lit],
-        ),
-        "Omit<InferSel<T>, 'x'> over `T extends infer X ? {{ label: string }} : T` must \
-         be CLOSED — the bare-infer pattern selects TRUE and the open false branch is dead"
-    );
-
-    // Control: the same pattern with the OPEN branch WINNING stays OPEN.
+    // TypeExpr route: over the generic `T` the conditional is deferred,
+    // so the key domain depends on `T` ⇒ OPEN (the checker keeps
+    // `Omit<InferSel<T>, "x">` unresolved).
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_omit,
-            &[inst("InferSelOpenWin"), x_lit],
+            &[inst("InferSel", t_param), x_lit],
         ),
-        "Omit<InferSelOpenWin<T>, 'x'> over `T extends infer X ? T : …` must stay OPEN — \
-         the selected TRUE branch is the open T"
+        "Omit<InferSel<T>, 'x'> over `T extends infer X ? {{ label: string }} : T` must \
+         stay OPEN — the conditional defers over the generic T"
+    );
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_omit,
+            &[inst("InferSelOpenWin", t_param), x_lit],
+        ),
+        "Omit<InferSelOpenWin<T>, 'x'> must stay OPEN"
+    );
+    // Over the closed `string` the TRUE branch is selected ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_omit,
+            &[inst("InferSel", string_ty), x_lit],
+        ),
+        "Omit<InferSel<string>, 'x'> must be CLOSED — the bare-infer pattern selects TRUE"
     );
 
     // Node route: the interned conditional with a bare `Infer` extends.
-    let string_ty = primitive(&graph, PrimitiveKind::String);
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let label_obj = simple_object(&graph, &[("label", string_ty)]);
     let node_cond = graph.intern_node(SemanticNodeData::Conditional {
@@ -19715,12 +19903,12 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         pending: None,
     });
     assert!(
-        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_omit,
             &[node_cond, x_lit],
         ),
-        "the node-route bare-infer conditional must be CLOSED — same selection as \
+        "the node-route bare-infer conditional over T must stay OPEN — same deferral as \
          build_conditional, route-independently"
     );
 
@@ -19743,8 +19931,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         "`string extends infer X ? X : T` must be CLOSED — X binds the CLOSED check"
     );
 
-    // Control: `T extends infer X ? X : { label }` — TRUE selected with
-    // `X := T` (open) ⇒ the selected branch IS the open T ⇒ OPEN.
+    // Control: `T extends infer X ? X : { label }` stays OPEN.
     let bound_open = graph.intern_node(SemanticNodeData::Conditional {
         check: t_param,
         extends: infer_x,
@@ -19759,46 +19946,46 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
             &builtin_omit,
             &[bound_open, x_lit],
         ),
-        "`T extends infer X ? X : …` must stay OPEN — X binds the OPEN check"
+        "`T extends infer X ? X : …` must stay OPEN"
     );
 
-    // Dispatch-level witness (strict): the TRUE-selected source must
-    // MATERIALISE `label`, not the builtin carrier.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+    // Dispatch-level witness: over `string` the TRUE-selected source
+    // MATERIALISES `label`; over `T` nothing materialises.
+    let omit = |arg: SemanticNodeId| match dispatch.execute_type_node(
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
-            Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
+            Arc::from(vec![inst("InferSel", arg), x_lit].into_boxed_slice()),
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
                 crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        ),
-    )) {
+        )),
+    ) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Omit<InferSel<T>, 'x'> must produce a Value, got {other:?}"),
+        other => panic!("Omit<InferSel<…>, 'x'> must produce a Value, got {other:?}"),
     };
-    match graph.node_data(result).as_deref() {
-        Some(SemanticNodeData::Object(view)) => {
-            let names: Vec<&str> = view
-                .positive_members()
-                .iter()
-                .map(|m| m.string_name().expect("string-key fixture"))
-                .collect();
-            assert!(
-                names.contains(&"label"),
-                "Omit<InferSel<T>, 'x'> must materialise `label`, got {names:?}"
-            );
-        }
-        other => panic!(
-            "Omit<InferSel<T>, 'x'> over a bare-infer TRUE-selected conditional must \
-             materialise an Object surface (NOT the builtin carrier), got {other:?}"
-        ),
-    }
+    let label_names = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(view)) => view
+            .positive_members()
+            .iter()
+            .filter_map(|m| m.string_name().map(str::to_owned))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(
+        label_names(omit(string_ty)),
+        vec!["label".to_owned()],
+        "Omit<InferSel<string>, 'x'> materialises `label`"
+    );
+    assert!(
+        label_names(omit(t_param)).is_empty(),
+        "Omit<InferSel<T>, 'x'> over the deferred conditional materialises no surface"
+    );
 }
 
 /// VALUE-SENSITIVE operands judge VALUE openness, not just bare-argument
@@ -26237,7 +26424,8 @@ fn typeof_instantiation_args_do_not_clobber_same_name_infer_declaration() {
     assert_eq!(
         expect_object_property(extends, "boxed", "extends carrier surface"),
         verter_type_expr::TypeExpr::Infer {
-            name: "T".to_string()
+            name: "T".to_string(),
+            constraint: None,
         },
         "the `infer T` declaration survives in the extends position"
     );
@@ -28300,6 +28488,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let string_ty = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
@@ -28459,6 +28648,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
@@ -28540,6 +28730,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let root = graph.intern_node(SemanticNodeData::Array {
         element: infer_t,
@@ -29277,9 +29468,9 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 /// budget-exhausted / partial results never enter warm shared caches.
 ///
 /// This fixture reproduces that hole WITHOUT a `RequestContext` using a
-/// `RequestContext`-INDEPENDENT partiality source: a template-literal
-/// whose interpolated unions' cartesian product exceeds the fixed
-/// `TEMPLATE_LITERAL_KEYSPACE_CAP`. That carrier-stops with
+/// `RequestContext`-INDEPENDENT partiality source: a template literal
+/// whose construction the connected-work ledger refuses (a 40 × 40 product
+/// under a 256-unit work limit). That carrier-stops with
 /// `result_is_partial = true` regardless of any request budget. The
 /// entry-scoped gate withholds it; a request-sticky gate would not.
 #[test]
@@ -29290,14 +29481,10 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    // Two wide string-literal unions whose product exceeds the keyspace cap.
-    let cap = crate::project_semantic_dispatch::build::TEMPLATE_LITERAL_KEYSPACE_CAP;
+    // Two wide string-literal unions whose 1,600 concatenations the
+    // connected-work ledger refuses at a 256-unit limit.
     let union_side = 40usize;
-    assert!(
-        union_side * union_side > cap,
-        "fixture invariant: the {union_side}x{union_side} product must exceed the keyspace \
-         cap ({cap}) so the reduce carrier-stops as a budget-tainted partial"
-    );
+    dispatch.connected_demand.set_limits_for_tests(256, 24);
     let make_union = |prefix: &str| -> SemanticNodeId {
         let members: Vec<SemanticNodeId> = (0..union_side)
             .map(|i| {
@@ -29336,20 +29523,20 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
         "fixture invariant: no RequestContext ⇒ the request sticky must be false (the \
          request-sticky authority that would wrongly permit the publish)"
     );
-    // Fixture invariant 2: the keyspace cap actually tripped — the evaluation
-    // carrier-stopped to the `TemplateLiteral` shell (a partial), it did NOT
-    // fold to a fully-enumerated `Union`.
+    // Fixture invariant 2: the ledger actually refused the construction — the
+    // evaluation carrier-stopped to the `TemplateLiteral` shell (a partial),
+    // it did NOT fold to a fully-enumerated `Union`.
     assert!(
         matches!(
             graph.node_data(result).as_deref(),
             Some(SemanticNodeData::TemplateLiteral { .. })
         ),
-        "FIXTURE INVALID: the over-cap product must carrier-stop to the TemplateLiteral shell, \
+        "FIXTURE INVALID: the refused product must carrier-stop to the TemplateLiteral shell, \
          got {:?}",
         graph.node_data(result).as_deref()
     );
     // The typed completeness IS the entry-scoped admission authority: the
-    // over-cap keyspace surfaced through the `TemplateLiteralReduce` read's
+    // refused construction surfaced through the `TemplateLiteralReduce` read's
     // `result_is_partial` (the boolean bridge, lifted `PROPAGATED`), so the
     // evaluated entry is `Partial` — which is exactly why the memo gate below
     // withholds it with NO RequestContext installed.
@@ -29358,7 +29545,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
             result_completeness,
             crate::semantic_query::ResultCompleteness::Partial(_)
         ),
-        "the over-cap template evaluation must report Partial completeness (the \
+        "the refused template evaluation must report Partial completeness (the \
          admission authority the no-poison gate consults), got {result_completeness:?}"
     );
     // No-poison: the entry-scoped gate withholds the partial regardless of the
@@ -29512,7 +29699,8 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
         let outcome = dispatch.normalize_node_for_structural_fact_demand(subject, navigate);
         let frame = guard.finish();
         match outcome {
-            StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            StructuralFactDemandOutcome::Recovered { reasons, .. }
+            | StructuralFactDemandOutcome::Partial(reasons) => assert!(
                 reasons.contains(reason),
                 "{label}: the demand must be Partial({reason:?}), got Partial({reasons:?})"
             ),
@@ -29558,32 +29746,23 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     );
 }
 
-#[test]
-fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
-    // GROWING-GENERIC discriminator. A recursive generic whose every
-    // instantiation mints a FRESH node id (`type Grow<T> = Grow<[T]>` — each step
-    // wraps the arg in a new tuple, so `Grow<string>` → `Grow<[string]>` →
-    // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
-    // can NEVER match) DEFEATS visited-ID cycle detection. The demand primitive
-    // instantiates each residual `InstantiationRef` and re-evaluates; because the
-    // ids never repeat, the regrowth is bounded EXACTLY by the connected-demand
-    // work budget (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
-    // (`SAME_PATH_RECURSION`), which would only fire if the growth had FOLDED.
-    // The outcome types `Partial` — never a fabricated concrete type, never a
-    // hang.
-    //
-    // This test proves BOTH discriminating facts codex required: (1) distinct
-    // instantiated node ids per level (fresh-node growth, below), and (2) the
-    // reason is the connected work budget, NOT same-path recursion.
-    //
-    // The demand runs inside an enclosing taint frame, so the operational
-    // truncation ALSO refuses warm admission (`result_is_partial` +
-    // `cache_suppress`).
+/// `Grow<string>` over `source`'s `Grow`, demanded at `Navigate` under a
+/// connected-work budget of `work` (the production caps when `None`)
+/// inside an enclosing taint frame: the demand's outcome, the frame's
+/// partial and suppression rails, and the node its instantiation answers.
+fn grow_string_demand(
+    source: &str,
+    work: Option<usize>,
+) -> (
+    StructuralFactDemandOutcome,
+    bool,
+    bool,
+    Option<SemanticNodeData>,
+) {
     let host = host();
-    upsert_ts(&host, "/grow.ts", "export type Grow<T> = Grow<[T]>;\n");
+    upsert_ts(&host, "/grow.ts", source);
     let dispatch = ProjectSemanticDispatch::new(&host);
     let navigate = ProjectionReductionContext::published(ProjectionMode::Navigate);
-
     let string_ref = verter_type_expr::TypeExpr::Ref {
         name: Arc::from("string"),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -29595,103 +29774,116 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     let carrier = dispatch
         .lower_type_expr_in_scope_with_context("/grow.ts", &grow_ref, navigate)
         .expect("Grow<string> lowers to a carrier");
-    // Precondition: the raw node is genuinely an uninstantiated
-    // `InstantiationRef` carrier (the growth happens at instantiation, not in
-    // the raw node) — so the demand exercises the growing-instantiation path.
-    assert!(
-        matches!(
-            host.project_type_store()
-                .semantic_graph()
-                .node_data(carrier)
-                .as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        ),
-        "FIXTURE INVALID: Grow<string> must lower to an InstantiationRef carrier, got {:?}",
-        host.project_type_store()
-            .semantic_graph()
-            .node_data(carrier)
-            .as_deref()
-    );
-
-    // DISTINCT-NODE-ID EVIDENCE. Manually drive two instantiation levels of the
-    // SAME `Grow` decl: each mints a STRUCTURALLY-DISTINCT `InstantiationRef`
-    // (`Grow<[string]>` then `Grow<[[string]]>`), i.e. a FRESH node id per level.
-    // This is precisely what defeats the demand loop's `visited`-ID cycle
-    // detection — a same-id back-edge would be CAUGHT (`SAME_PATH_RECURSION`),
-    // but these ids never repeat, so ONLY the connected work budget can bound
-    // the regrowth.
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let (base0, args0) = match graph.node_data(carrier).as_deref() {
+    // Precondition: the raw node is an uninstantiated `InstantiationRef`
+    // carrier, so the demand exercises the instantiation path.
+    let (base, args) = match graph.node_data(carrier).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
         other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
     };
-    let slot0 = dispatch.type_slot_for(
-        Arc::clone(&base0.canonical_id),
-        base0.owner,
-        Arc::clone(&base0.decl_name),
-    );
-    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
-    let level1 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Grow<string> must instantiate to its grown body, got {other:?}"),
-    };
-    let (base1, args1) = match graph.node_data(level1).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
-        other => panic!(
-            "level-1 instantiation of Grow<string> must GROW to a fresh Grow<[string]> \
-             InstantiationRef (not terminate), got {other:?}"
+    let (work, depth) = match work {
+        Some(work) => (work, super::connected_demand::MAX_CONNECTED_QUERY_DEPTH),
+        None => (
+            super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+            super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
         ),
     };
-    let slot1 = dispatch.type_slot_for(
-        Arc::clone(&base1.canonical_id),
-        base1.owner,
-        Arc::clone(&base1.decl_name),
-    );
-    let level2 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot1, args1, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("level-1 must instantiate to its grown body, got {other:?}"),
-    };
-    assert!(
-        matches!(
-            graph.node_data(level2).as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        ),
-        "level-2 instantiation must GROW to a fresh Grow<[[string]]> InstantiationRef, got {:?}",
-        graph.node_data(level2).as_deref()
-    );
-    assert_ne!(
-        level1, level2,
-        "each Grow instantiation level MUST mint a DISTINCT node id (fresh-node growth) — equal \
-         ids would mean the growth folded and the visited-ID guard could catch it"
-    );
-    assert_ne!(
-        carrier, level1,
-        "the level-1 grown body is a DISTINCT node id from the Grow<string> carrier (fresh growth)"
-    );
-
     let guard =
         crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
-    dispatch.set_connected_limits_for_tests(256, 24);
+    dispatch.set_connected_limits_for_tests(work, depth);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
     let frame = guard.finish();
+    let slot = dispatch.type_slot_for(
+        Arc::clone(&base.canonical_id),
+        base.owner,
+        Arc::clone(&base.decl_name),
+    );
+    let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
+    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot, args, context),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
+            graph.node_data(value).as_deref().cloned()
+        }
+        _ => None,
+    };
+    (
+        outcome,
+        frame.result_is_partial,
+        frame.cache_suppress,
+        instantiated,
+    )
+}
 
+#[test]
+fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
+    // `type Grow<T> = Grow<[T]>` applies itself with no conditional type
+    // deciding: its declared type requires itself. That is the checker's
+    // TS2456 — a checker ERROR, not a resource limit — so `Grow<string>` is
+    // its recovery (`any`) under a starved ledger and the production ledger
+    // alike, complete, never a budget partial.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): TS2456 "Type
+    // alias 'Grow' circularly references itself.", and `Grow<string>` is
+    // `any`.
+    let is_ts2456 = |data: &Option<SemanticNodeData>| {
+        matches!(
+            data,
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.code == crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
+        )
+    };
+    for work in [Some(256), None] {
+        let (outcome, partial, suppressed, instantiated) =
+            grow_string_demand("export type Grow<T> = Grow<[T]>;\n", work);
+        assert!(
+            matches!(outcome, StructuralFactDemandOutcome::Complete(_)),
+            "a circular alias is a checker error, never a budget partial (work {work:?})"
+        );
+        assert!(
+            !partial && !suppressed,
+            "the checker's TS2456 does not taint the enclosing build (work {work:?})"
+        );
+        assert!(
+            is_ts2456(&instantiated),
+            "Grow<string> is the checker's TS2456 recovery (work {work:?}), got {instantiated:?}"
+        );
+    }
+}
+
+#[test]
+fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
+    // GROWING-GENERIC discriminator. A conditional generic whose every
+    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
+    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
+    // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
+    // visited-ID cycle detection. Under a ledger too small for its tail run
+    // the regrowth is bounded by the connected-demand work budget
+    // (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
+    // (`SAME_PATH_RECURSION`), which would only fire if the growth had
+    // FOLDED — and types `Partial`, never a fabricated concrete type, never
+    // a hang. The demand runs inside an enclosing taint frame, so the
+    // operational truncation ALSO refuses warm admission (`result_is_partial`
+    // + `cache_suppress`). Under a ledger with room, the run reaches its tail
+    // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
+    // tail budget than production's stands in on the same path.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
+    // is `any` under TS2589.
+    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
-        StructuralFactDemandOutcome::Partial(reasons) => reasons,
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => reasons,
         StructuralFactDemandOutcome::Complete(node) => panic!(
-            "a fresh-node growing generic MUST type Partial (bounded by the fuse / recursion \
-             guard), got Complete({:?})",
-            dispatch.graph().node_data(node).as_deref()
+            "a fresh-node growing generic MUST type Partial under a starved ledger, got \
+             Complete({node:?})"
         ),
     };
-    // The fresh-node regrowth is bounded by the connected-demand work budget
-    // (`PROJECTION_WORK_LIMIT`), NOT by the `visited`-ID cycle guard: the
-    // ids never repeat (proven distinct above), so `SAME_PATH_RECURSION` must
-    // NOT be the reason — its presence would mean visited-ID CAUGHT the loop, the
-    // OPPOSITE of the fresh-node-growth class this test characterises.
     assert!(
         reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
         "the growing-generic truncation MUST be bounded by PROJECTION_WORK_LIMIT — \
@@ -29700,23 +29892,29 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     assert!(
         !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
         "fresh-node growth defeats the visited-ID guard, so the reason MUST NOT be \
-         SAME_PATH_RECURSION (that would mean visited-ID caught it — not fresh-node growth), \
-         got {reasons:?}"
+         SAME_PATH_RECURSION, got {reasons:?}"
     );
     assert!(
-        frame.result_is_partial && frame.cache_suppress,
+        partial && suppressed,
         "the build-enclosed growing-generic partial MUST refuse warm admission \
          (result_is_partial + cache_suppress on the frame)"
     );
 
-    // SCOPE (honest): this characterises fresh-node growth at the DEMAND-PRIMITIVE
-    // layer (`normalize_node_for_structural_fact_demand`'s Instantiate loop),
-    // where the pure-recursion `Grow<T> = Grow<[T]>` grows through the top-level
-    // carrier. The union-base variant `Grow<T> = T | Grow<[T]>` terminates the
-    // demand's top-level carrier at the `Union` (Complete), so it does NOT
-    // exercise growth HERE. The CRASH-SCALE `Grow<T> = T | Grow<[[[[T]]]]>`
-    // fresh-node-growth proof over the Instantiate / projection publication path
-    // is owned by the deep-recursion crash-regression suite, not this unit test.
+    let _budget = super::connected_demand::TailBudgetForTests::install(200);
+    let (_, _, _, instantiated) = grow_string_demand(GROW, None);
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.code
+                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
+        ),
+        "Grow<string> reaches the tail budget as the checker's TS2589 recovery, got \
+         {instantiated:?}"
+    );
 }
 
 #[test]

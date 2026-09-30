@@ -94,10 +94,13 @@ pub struct RetentionLimits {
     /// working sets cannot consume the whole aggregate ceiling and
     /// starve every cache.
     pub active_ceiling_bytes: usize,
-    /// Largest single reservation the account will ever admit. A value
-    /// above this is refused as [`RetentionRefusal::Oversized`] without
-    /// consulting occupancy — retaining it would evict an unbounded
-    /// number of useful entries to store one outlier.
+    /// Largest single cache entry the account will ever retain. A
+    /// [`ChargeClass::Retained`] reservation above this is refused as
+    /// [`RetentionRefusal::Oversized`] without consulting occupancy —
+    /// retaining it would evict an unbounded number of useful entries to
+    /// store one outlier. It is a rule about what a cache keeps, not about
+    /// what a computation may build: an [`ChargeClass::Active`]
+    /// reservation is bounded by [`Self::active_ceiling_bytes`] alone.
     pub max_entry_bytes: usize,
     /// Pinned bytes past which the process is considered to be under PIN
     /// pressure ([`SemanticRetentionAccount::under_pin_pressure`]).
@@ -426,7 +429,7 @@ impl SemanticRetentionAccount {
         if !class.is_refusable() {
             return RetentionAdmission::Admitted(self.pin(bytes));
         }
-        if bytes > self.limits.max_entry_bytes {
+        if class == ChargeClass::Retained && bytes > self.limits.max_entry_bytes {
             self.refusals_oversized.fetch_add(1, Ordering::Relaxed);
             verter_audit::attribute!(RetentionAdmitRefused);
             return RetentionAdmission::Refused(RetentionRefusal::Oversized {
@@ -697,5 +700,23 @@ impl Drop for RetentionCharge {
         if let Some(account) = self.account.take() {
             account.release(self.class, self.bytes);
         }
+    }
+}
+
+/// The aggregate account as the workspace's resident resolution state sees
+/// it: each overlay-lane answer and each interned overlay value version is
+/// a [`ChargeClass::Retained`] charge, refused under pressure like any
+/// other warm cache entry (the workspace then serves the answer uncached).
+pub(crate) struct ResolutionRetention(pub(crate) Arc<SemanticRetentionAccount>);
+
+impl verter_workspace::ResolutionRetentionAccount for ResolutionRetention {
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+        self.0
+            .reserve(ChargeClass::Retained, bytes)
+            .admitted()
+            .map(verter_workspace::ResolutionRetentionCharge::new)
     }
 }

@@ -332,10 +332,10 @@ Recorded plainly so no reader mistakes absence for a pass:
     chains answer. Only a return holding a function TYPE written in the
     body with a same-name clause (`const id: <T>(z: T) => T`), whose
     binder is the outer one's node, is evaluated under the instantiation
-    instead: over a 256-level chain through local arrow functions its
+    instead: over a 128-level chain through local arrow functions its
     `witness` answers and so does a new instantiation `second(v:
     boolean)` (tsc: `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`;
-    held by `schedule::a_256_level_chain_returning_a_same_name_function_type_answers`);
+    held by `schedule::a_128_level_chain_returning_a_same_name_function_type_answers`);
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;
@@ -364,9 +364,10 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`ReturnType<typeof f>`, `Parameters<…>`, …) resolves where the body
   builds it, as the checker resolves a conditional type whose check type
   is not generic, so a chain through type positions is linear in work
-  too: 12 units per level at 16, 64 and 200 levels, 11,990 in all at
-  1,000 (`schedule::a_type_position_chain_costs_the_same_work_per_level`,
-  `schedule::a_1000_level_type_position_chain_answers`). An application
+  too: 12 units per level at 16, 64 and 200 levels, 5,990 in all at 500
+  (`schedule::a_type_position_chain_costs_the_same_work_per_level`,
+  `schedule::a_500_level_type_position_chain_answers`, which overflows the
+  default test stack with the schedule off). An application
   over a type parameter stays the deferred carrier, as the checker defers
   it (`schedule::a_return_type_in_a_body_resolves_unless_its_check_type_is_generic`).
 
@@ -442,17 +443,36 @@ Recorded plainly so no reader mistakes absence for a pass:
   recurses once per structural level, and is bounded as the checker bounds
   it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
   The relation frames stacked directly on one another are one checker
-  `checkTypeRelatedTo` call; a frame whose operands, unwrapped, are a
-  structured pair is one `recursiveTypeRelatedTo` entry. The 101st entry
+  `checkTypeRelatedTo` call. Every pair the checker enters
+  `recursiveTypeRelatedTo` for is one entry — a frame whose operands,
+  unwrapped, are such a pair, and a pair the frame's own worklist relates
+  inline (an element pair of two tuples or arrays, a union source's member
+  against a target that is no union, an intersection target's arm), which
+  counts as one more level on its frame while its items run; a small union
+  the checker relates without caching it (`skipCaching`) and, without
+  `strictNullChecks`, a union of one type and `null` / `undefined` (that
+  type, to the checker) are no entry of their own. The 101st entry
   overflows: the relation is false, every structured relation after it in
   the chain is false (the checker's `overflow` flag), and nothing computed
   under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
   own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
   nested `Box` applications or `{ v: … }` literals and `2` with TS2321
-  over 100, 101, 102 and 500 (the tuple wrapper is the first entry); the
-  lane answers the same (`relation_depth_tests.rs` →
+  over 100, 101, 102 and 500 (the tuple wrapper is the first entry), written
+  inline or behind an alias; `[{ v: … }]` and `{ v: … }[]` count two a
+  level and overflow at 50, nested tuples at 100, `{ v: … } | null` two a
+  level under `strictNullChecks` and one without, and a small union source
+  one a level; the lane answers the same (`relation_depth_tests.rs` →
   `nested_object_types_overflow_at_the_checkers_depth`,
-  `nested_generic_applications_overflow_at_the_checkers_depth`). The
+  `inline_nested_object_types_overflow_at_the_checkers_depth`,
+  `inline_element_and_union_pairs_count_toward_the_checkers_depth`,
+  `a_union_erased_without_strict_null_checks_counts_as_its_object`,
+  `a_small_union_source_is_no_recursion_entry_of_its_own`,
+  `nested_generic_applications_overflow_at_the_checkers_depth`). An inline
+  entry is a counter on its frame, not a relation of its own: relating
+  tuples of 1,000, 2,000 and 5,000 object pairs takes 27, 52 and 131 ms
+  unoptimized with the count and 25, 50 and 126 ms without it (the best
+  of five cold relations in each of three alternating builds), one
+  relation check and one reduction per element (`relating_wide_tuples_of_object_pairs_costs_the_same_per_element`). The
   checker's `isDeeplyNestedType` stops a recursion earlier: three entries
   of one recursion identity on both stacks, each read from a newer
   instantiation, answer `Maybe`, which holds. The lane gives a type
@@ -460,19 +480,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   type literal relates `1` to `string` from its third level, and an
   infinitely recursive one stops there
   (`a_recursive_alias_is_deeply_nested_from_its_third_instantiation`,
-  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two known
-  differences stay open, each a skipped test asserting the checker's
-  answer: an interface or class reference has no recursion identity,
-  because the checker relates two references to one generic interface by
-  its type arguments' variance and this engine does not
-  (`an_infinitely_recursive_interface_relates_by_its_variance`: the lane
-  overflows to `2` where the checker's variance measurement answers
-  `1`); and the checker's cache keeps the failures its overflow produced,
-  so in one file a 99-deep relation after a 100-deep one is `2`, where the
-  lane answers `1`, as the relation does alone — an answer computed under
-  an overflow depends on where its relation began, and the relation memo is
-  shared across requests
-  (`a_relation_after_an_overflowed_one_reads_its_failures`). The native
+  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two references
+  to one generic interface or class relate by their type arguments'
+  measured variance before any structural descent, so an infinitely
+  recursive interface never descends a level per nesting
+  (`an_infinitely_recursive_interface_relates_by_its_variance`); and a
+  memo entry is replayed only where its recorded height and recursion
+  identities prove the cold computation takes the same course, so a
+  relation answers its cold answer whatever was related before it
+  (`a_relation_answers_its_cold_answer_in_either_order_around_the_depth_limit`;
+  the checker's own cache answers the 99-deep relation `2` after the
+  100-deep one, see `determinism-matrix.md`). The native
   stack one relation uses, measured from the relating thread's start: 1.9
   MiB for 100 `Box` levels and 1.1 MiB for 100 object levels unoptimized
   (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
@@ -480,23 +498,42 @@ Recorded plainly so no reader mistakes absence for a pass:
   of `verter_wasm` (wasm32's linker default; no override is configured),
   the 2 MiB default of the tokio blocking and rayon CPU pools and the
   scheduler's I/O and CPU workers, and the 8 MiB of the LSP serve thread,
-  the host CPU pool and the declaration-lowering workers.
+  the host CPU pool and the declaration-lowering workers. A pair that is
+  no entry — a small union source against a target that is no union — takes
+  no relation frame either: the checker relates it without caching it
+  (`skipCaching`), member by member, and so does the lane
+  (`relate_uncached_union_source`), so a chain of such unions holds one
+  frame open per entry whatever its arms are written as. It took a frame
+  of its own beside its member's before: with each arm written as
+  `Box<S(i-1)>` over `type Box<X> = { v: X }`, 99 levels needed 1,152 to
+  1,280 KiB optimized, over the 1 MiB of `verter_wasm`. Measured optimized
+  on a thread of each size at 99 and 100 levels: literal, alias and
+  generic-alias arms fit 896 KiB and overflow 768
+  (`a_small_union_source_opens_no_frame_of_its_own`, which also holds the
+  frames open at once to the levels plus eight, and
+  `a_small_union_source_is_no_recursion_entry_of_its_own`), nested object
+  types fit 768 KiB, nested `Box` applications 640 KiB, and the doubling
+  unions of `a_pair_every_union_member_reaches_is_related_once` 1 MiB;
+  unoptimized, every shape fits 1.5 MiB (nested `Box` applications 1 MiB),
+  under the 2 MiB default test stack.
 
-* **A long logical chain applies a quadratic count of guards and
-  evaluates without a native level per operand.** Each operand of `a && b
-  && c …` is evaluated under every earlier operand's guard and each
-  short-circuit edge under their negations, as the checker's flow walk
-  reads every earlier condition for each operand — a count that grows with
-  the square of the chain. The short-circuit edge's union
+* **A long logical chain applies a linear count of guards and evaluates
+  without a native level per operand.** A chain of one operator over
+  references (`a && b && c …`) reads each operand under the chain of the
+  earlier operands' conditions, as the checker's flow graph gives it with
+  no join between them, so each operand's guard is applied once on top of
+  the ones before it, and the chain's short-circuit edges are joined once
+  past it (`eval_reference_chain`). Applying every earlier operand's guard
+  again for each operand grew the count with the square of the chain (635
+  guard applications per five operands at 40 operands against 335 at 20;
+  the same at both now). The short-circuit edge's union
   (`apply_guard_union`) reads the earlier parts' negations as one growing
   prefix whose standing facts are kept one per subject; re-reading the
-  whole prefix for every alternative made the count grow with the cube
-  (the second difference of the count per five operands was 650 at 20 and
-  1,150 at 40 operands; it is now the same at both). The evaluator walks a
-  chain's nested left operands from the innermost one outward
-  (`eval_logical`), so a 300-operand chain answers on a 1 MiB thread
-  (`flow_return_null_policy_tests.rs` →
-  `an_and_chain_applies_a_quadratic_count_of_guards` and
+  whole prefix for every alternative made the count grow with the cube.
+  The evaluator walks a chain's nested left operands from the innermost
+  one outward (`eval_logical`), so a 300-operand chain answers on a 1 MiB
+  thread (`flow_return_null_policy_tests.rs` →
+  `an_and_chain_applies_a_linear_count_of_guards` and
   `a_300_operand_and_chain_evaluates_on_a_small_stack`, the checker's
   `"" | 0 | 1 | false | null | undefined`). The slice lowering of the chain
   (`Lowerer::lower_logical_value`, on the declaration-lowering workers)
@@ -515,17 +552,16 @@ Recorded plainly so no reader mistakes absence for a pass:
   and the evaluation stops at the first operand after the connected
   demand's work budget trips, instead of evaluating the rest of the chain
   under a result already refused. A 2,000-operand chain lowers and
-  evaluates on a 1 MiB thread in 8 s unoptimized
+  evaluates on a 1 MiB thread and answers the checker's
+  `"" | 0 | 1 | false | null | undefined` in about 1 s unoptimized, its
+  guard applications growing linearly with the chain
   (`flow_return_null_policy_tests.rs` →
-  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
-  typed `Budget(WorkBudgetExceeded)` refusal, with the guard applications of
-  a 1,000-operand chain; without the early stop, 6.0 million against 1.5
-  million and 90 s). Recursive slice lowering overflows the worker, and a
-  recursive fresh-literal collection or effect walk the 1 MiB thread. The
-  checker answers the chain in about a second
-  (`"" | 0 | 1 | false | null | undefined`); the lane's connected work
-  outgrows the budget from about 420 operands
-  (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
+  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`;
+  applying every earlier guard per operand, the lane's connected work
+  outgrew the budget from about 420 operands and answered the typed
+  `Budget(WorkBudgetExceeded)` refusal). Recursive slice lowering
+  overflows the worker, and a recursive fresh-literal collection or effect
+  walk the 1 MiB thread.
 
 * **The scheduler's workers parse on the platform's default stack.** The
   oxc parser, the syntax-tree clone the semantic builder reads
@@ -535,11 +571,11 @@ Recorded plainly so no reader mistakes absence for a pass:
   default of 2 MiB). Each runs under `verter_parser::oxc_parse`'s
   containment, on a stack segment sized from the source when the worker's
   own stack is short (`oxc-deep-parse.md`), so the workers need no larger
-  stack of their own. The script analysis's own recursions over the
-  program (the module-reference collector, the binding extractors) run
-  under the same containment: a module constant of 10,000 nested calls
-  overflowed a 2 MiB I/O worker in the collector and now returns
-  (`deep_input_tests.rs` →
+  stack of their own. The script analysis's own passes over the program
+  (the module-reference collector, the await, string, macro and binding
+  walks) run from explicit stacks on the worker's own stack, outside any
+  region: a module constant of 10,000 nested calls overflowed a 2 MiB I/O
+  worker in the collector and now returns (`deep_input_tests.rs` →
   `module_calls_nested_10000_deep_return_on_production_stacks`).
   `type_syntax_depth_tests.rs` →
   `a_700_deep_nested_generic_application_parses_on_a_scheduler_worker`
@@ -580,11 +616,12 @@ Recorded plainly so no reader mistakes absence for a pass:
   `oxc_parser::Parser`. The scan costs about a third of the parse (1.8 ms
   against 5.8 ms for `lib.dom.d.ts`, optimized); a source short enough
   that every byte could be a level skips it. On wasm32 the engine's own
-  call stack, which nothing grows, bounds the parse: a source nesting past
-  `WASM_ENGINE_NESTING` (313 levels, from V8's 984 KiB default stack and
-  the measured 1,188 bytes of the costliest level) returns the same typed
-  diagnostic. oxc's walks over the tree run under the same containment
-  (below).
+  call stack, which nothing grows, bounds the parse under a measured
+  runtime safety profile of the engine, not a limit of the language: a
+  source nesting past `V8_DEFAULT_STACK_PROFILE` (V8's 984 KiB default
+  stack, oxc 0.151.0, the release build; 313 levels of the scan's bound)
+  returns the same typed diagnostic. oxc's walks over the tree run under
+  the same containment (below).
 
 * **A class expression raises one instance per level.** The lane's graph
   of `class { m() { return class { … } } }` nested `n` deep is linear
@@ -884,16 +921,15 @@ Recorded plainly so no reader mistakes absence for a pass:
   expression's members (`flow_return_class.rs`: its `extends` value,
   initializers and member functions are children of the class's step).
   `await` and a comma sequence's value operand evaluate from the
-  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 at
-  10,000 levels on a 1 MiB caller for callbacks (`number`; through a
-  generic callee they answer at 400 levels and return their typed
-  work-budget failure at 10,000),
-  immediately invoked arrows and function expressions (`number`), object
-  methods and class methods (`1` for `extends object` / `extends
-  Function`), arrows initializing a declarator (`1`) and 10,000
-  `await`s (`Promise<number>`). Evaluating in place instead — a
-  declarator's initializer, a generic call's callback, a class's member
-  function, an object's method — overflows each.
+  expression stack too. `deep_input_tests.rs` answers TypeScript 7.0.2 on
+  a 1 MiB caller for callbacks 10,000 deep (`number`; through a generic
+  callee they answer at 400 levels and return their typed work-budget
+  failure at 2,000), and 2,000 deep for immediately invoked arrows and
+  function expressions (`number`), object methods and class methods (`1`
+  for `extends object` / `extends Function`) and arrows initializing a
+  declarator (`1`), and 10,000 `await`s (`Promise<number>`).
+  Evaluating each nested function in place instead (a native level per
+  function) overflows every one of the 2,000-deep nests within 200 levels.
 
 * **Branch statements evaluate as frames of their region's run.** An
   `if`'s arms, a `switch`'s clauses, a labeled statement's body, a
@@ -903,12 +939,13 @@ Recorded plainly so no reader mistakes absence for a pass:
   head analysis runs from an explicit stack of the references under
   analysis. A function returned from inside any of them is therefore
   evaluated from the stack of evaluators too:
-  `arrows_returned_from_branches_nested_10000_deep_answer_on_production_stacks`
-  answers `1` for arrows returned from a block, an `if` arm, a `switch`
-  clause and a labeled statement, 10,000 deep (TypeScript 7.0.2 answers
-  `1` too, reporting TS2563 — body too large for control-flow analysis —
-  on the `if` and `switch` nests), and evaluating the `if` in place
-  overflows it.
+  the `arrows_returned_from_*_nested_2000_deep_answer_on_production_stacks`
+  tests answer `1` for arrows returned from a block, an `if` arm, a
+  `switch` clause and a labeled statement, 2,000 deep (TypeScript 7.0.2
+  answers `1` too; 10,000 deep it reports TS2563 — body too large for
+  control-flow analysis — on the `if` and `switch` nests), and
+  evaluating each nested function in place overflows every one of them
+  within 200 levels.
 
 * **Compound statements lower as frames of their region's lowering.**
   The demand-slice lowering takes an `if`'s arms, a labeled statement's
@@ -919,8 +956,9 @@ Recorded plainly so no reader mistakes absence for a pass:
   run from explicit stacks, and the evaluator binds a pattern, registers
   its correlated elements and walks a loop's carried references from
   explicit stacks. A pattern element and a capture scope chain drop from a
-  loop. `branch_and_loop_statements_nested_10000_deep_return_on_production_stacks`
-  returns on a 1 MiB caller for `if`, `switch`, `try`, `while`,
+  loop. `branch_statements_nested_10000_deep_return_on_production_stacks`
+  and `loop_statements_nested_10000_deep_return_on_production_stacks`
+  return on a 1 MiB caller for `if`, `switch`, `try`, `while`,
   `for` and `do` statements nested 10,000 deep (their demand slices
   exceed the plan budget), and
   `destructuring_patterns_nested_10000_deep_answer_on_production_stacks`
@@ -948,8 +986,61 @@ Recorded plainly so no reader mistakes absence for a pass:
   `unreachable_code_nested_10000_deep_returns_on_production_stacks` and
   `code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks`
   return the plan's typed budget failure at 10,000 levels on a 1 MiB
-  caller and answer `number` under the 256-return-site budget; evaluating
-  the unreachable region in place overflows the former.
+  caller and answer `number` 120 levels deep; evaluating
+  the unreachable region in place overflows the former. A loop body
+  behind a literal `false` test is entered the same way, a frame of the
+  run on a dead path its pass restores:
+  `dead_loops_nested_10000_deep_return_on_production_stacks` returns the
+  plan's typed budget failure for `while (false)` and `for (; false; )`
+  nested 10,000 deep and answers `1 | 2` 1,000 deep; evaluating the body
+  through a nested drive overflowed at 100 levels. Past a call the
+  evaluator settles as `never`-returning (a method, a callee typed by a
+  parameter) the dead tail reads declared types, as tsc does
+  (`nStop`: `string | number`), while past an exhaustive `switch` it keeps
+  reading the no-matching-case edge.
+
+* **Type-level nests lower and evaluate from explicit stacks.**
+  - Every walk registering a namespace's members under qualified names —
+    the header index, the declaration-body collection and the dependency
+    collection, for the file scope and an augmentation block — shares one
+    explicit-stack walk (`verter_semantic` `namespace_walk.rs`) holding one
+    qualified path for the nest; a namespace block's instantiation settles
+    when its frame closes instead of re-searching its subtree at every
+    level. `namespaces_nested_10000_deep_answer_on_production_stacks`
+    answers `1`; the recursive walks overflow it.
+  - A template literal type in a template's hole splices into the
+    template (`getTemplateLiteralType`) from an explicit stack before the
+    reduction, instead of reducing each nested template by its own query:
+    `template_literal_types_nested_10000_deep_answer_on_production_stacks`
+    answers `"1"`; reducing nested templates by query overflows it.
+  - A mapped type's source, value and `as` clause lower as children on the
+    locator lowering's stack; each body's binder frames push onto a shared
+    chain; a binder's identity folds each nested mapped type by a digest
+    its drive computes once; and the openness walk's recursive arms are
+    functions of their own (the walk is bounded by its 256-node budget, and
+    a level now carries only the arm it takes).
+    `mapped_types_nested_10000_deep_return_on_production_stacks` returns
+    the connected-demand work budget's typed failure 10,000 deep (5.9 s,
+    against 256 s before the digest fix) and
+    `mapped_types_nested_1000_deep_answer_on_production_stacks` answers
+    `"a"` 1,000 deep;
+    `a_mapped_type_nest_lowers_in_linear_work` holds the structural walk
+    (3,000 nodes at 500 levels against 300 at 50) and the binder-frame
+    copies (none) linear, which re-hashing each value subtree (501,000
+    against 5,100) and copying the frames (125,250 against 1,275) fail.
+
+* **Nested loops take polynomial passes.** A loop's head analysis runs a
+  pass per carried reference and then the converged pass, so each nested
+  loop's body ran once per pass of every loop around it. A pass is a
+  function of its start state: a reference whose pass would start from a
+  state an earlier pass of the loop started from takes its back edge, and
+  a converged head equal to such a start takes that pass, its side outputs
+  set aside and replayed (a loop head restores values without the analysis
+  passes' write receipts, so an unchanged head is that start).
+  `nested_loops_take_passes_polynomial_in_their_depth` counts 65 passes at
+  10 levels and 230 at 20 for `x = 0`, `x = 0; y = 0` and `x = 1` (tsc:
+  `0`, `readonly [0, 0]`, `0 | 1`); without the reuse the 20-level nest
+  exhausts the work budget.
 
 * **A nest's per-function work does not read the nest around it.** Four
   paths repeated work proportional to the nest for every nested function,
@@ -1037,12 +1128,13 @@ Recorded plainly so no reader mistakes absence for a pass:
   Each now runs from an explicit stack, children queued last first so every
   edge comes out in the order the recursive walk emitted it (only childless
   nodes emit). `route_facts_tests.rs` →
-  `bodies_nested_10000_deep_produce_route_facts_on_a_small_stack` produces
-  the facts of a 10,000-deep `keyof` chain, object nest and parenthesized
+  `bodies_nested_3000_deep_produce_route_facts_on_a_small_stack` produces
+  the facts of a 3,000-deep `keyof` chain, object nest and parenthesized
   intersection chain on a 1 MiB thread; walking the children in place
-  overflows it. The object nest's seed edges are one per member path, each
-  with its full path, so their count is linear and their size quadratic in
-  the nest's depth (8 s unoptimized at 10,000).
+  overflows it within 500 levels. The object nest's seed edges are one per
+  member path, each with its full path, so their count is linear and their
+  size quadratic in the nest's depth (under 1 s unoptimized at 3,000, 10 s
+  at 10,000).
 
 * **Type dependency facts collect from an explicit stack.** The collector
   of an authored type's dependency paths (`verter_type_expr_oxc`'s
@@ -1131,6 +1223,49 @@ Recorded plainly so no reader mistakes absence for a pass:
   difference over 8/12/16 equal to that over 12/16/20; it fails with the
   re-recording restored), and 256 nested calls lower in 0.5 s optimized.
 
+* **Relating two object types looks each property up once.** Each
+  target property found its source member by scanning the source's
+  members, so relating two object types of `n` members made `n²` key
+  comparisons: 1,000, 2,000 and 5,000 members took 115, 323 and 1,408 ms
+  to relate unoptimized (the best of five cold relations), 251,500 to
+  4,006,000 comparisons from 500 to 2,000 members. The relation indexes
+  the source's keys once (`SurfaceView::key_index`, dropped with the
+  relation) and looks each target property up there under the JS
+  property spelling (`{ 1: … }` and `{ "1": … }` are one property): 145,
+  305 and 609 ms, and no scanned comparison
+  (`relation_depth_tests.rs` →
+  `relating_wide_object_types_costs_the_same_per_member`,
+  `a_property_finds_the_member_of_either_spelling`).
+* **A pair every union member reaches is related once.** Over
+  `type Si = { v: S(i-1); a?: 1 } | { v: S(i-1); b?: 1 }`, every member of
+  every level reaches the same pair below it, along `2ⁿ` paths. A decided
+  pair was reused only once its batch published, so a relation inside one
+  transaction related it along every path (8, 32 and 128 reductions at 2,
+  4 and 6 levels), and the probe gave no answer at 8 levels. The relation now
+  reads a pair this transaction already decided from the transaction's
+  `settled` table (the checker's relation cache within one
+  `checkTypeRelatedTo`; request-scoped, cleared with the member batch it
+  mirrors, at most one entry per queued member), through the same recursion
+  footprint a memo entry is read through. The footprint counts
+  instantiations per recursion identity, as `isDeeplyNestedType` does, and
+  an alias named without type arguments is no identity: a sum over
+  different identities refused the replays the cold computation takes.
+  Relating the chain costs the same per level now (two reductions a level
+  at 10, 20 and 40 levels) and answers as the checker does at 10, 20, 50,
+  99 and 100 levels, for the two-member, three-member and reversed shapes
+  (`relation_depth_tests.rs` → `relating_doubling_unions_costs_the_same_per_level`,
+  `a_pair_every_union_member_reaches_is_related_once`).
+* **A union over aliases of unions relates as one union.** `type Ai =
+  A(i-1) | T` is, to the checker's `getUnionType`, one flat union of
+  `A0` and `T`. The relation related each alias as a union of its own, one
+  frame a level: 200 aliases answered `2` where the checker answers `1`,
+  and 2,000 overflowed the stack. It flattens a union member that names an
+  alias of a union from an explicit stack (`relation_union_members`), so
+  1,000 aliases relate one level deep
+  (`a_union_over_aliases_of_unions_relates_as_one_union`). From 1,995
+  aliases the request's projection-operation fuse (2,000 by default),
+  which counts the one `Instantiate` query each alias costs, ends the
+  probe with no answer (see *Known limits*).
 * **A pair of literal types relates without a query.** Two literal types
   relate, under every relation kind, exactly when they are one value, so
   the relation authority decides such a pair before its reentry intercept,
@@ -1144,13 +1279,29 @@ Recorded plainly so no reader mistakes absence for a pass:
   structural reducer, 200 guards take 0.33 s, and 800 answer the checker's
   `"k799"` (`wide_union_relation_tests.rs` →
   `an_equality_guard_chain_over_a_literal_union_reduces_no_relation`).
-* **The demand slice plans at most 256 return sites.** A function with
-  more `return` statements on its demanded paths is refused before
-  evaluating, with `Budget(WorkBudgetExceeded)`
-  (`FlowSliceBudget::max_return_sites`): 255 `if (x === i) return …`
-  guards and the final return answer, 256 are refused. The work each such
-  guard costs is constant (relation checks `5N + 2`, guard applications
-  `2N` at 50, 100 and 200 guards), so the refusal is the planner's
-  return-site cap, not super-linear work; the skipped
-  `differential_depth_tests.rs` →
-  `an_800_return_if_chain_answers_within_the_work_budget` holds it open.
+* **Each return site is connected work.** The demand slice plans every
+  `return` on its demanded paths, and each one is a unit of connected work
+  the demand pays before the body evaluates: a `switch` of 100, 200, 400
+  and 800 returning cases costs its cases plus two units, and a budget one
+  unit short ends on the typed work budget
+  (`flow_return_schedule_tests.rs` →
+  `each_return_site_is_connected_work_the_demand_pays_for`, 0.7 s). The
+  work each guard costs is constant (relation checks `5N + 2`, guard
+  applications `2N` at 50, 100 and 200 guards), so 800
+  `if (x === i) return …` guards answer the checker's union
+  (`differential_depth_tests.rs` →
+  `an_800_return_if_chain_answers_within_the_work_budget`, 1.6 s), and
+  `else if` chains and `switch`es of 300 and 800 returns answer in under
+  a second. A body of 10,000 returns selects more nodes than the flow-slice
+  plan budget holds and returns `Budget(WorkBudgetExceeded)`.
+* **A request reads at most 2,000 aliases of one union chain.** Each
+  alias of `type Ai = A(i-1) | T` is read with one `Instantiate` query, and
+  the request's projection-operation fuse (`HostConfig::projection_op_budget`,
+  2,000 by default) counts every one: from 1,995 aliases
+  `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2` ends in
+  `Budget(WorkBudgetExceeded)` where the checker answers `1` (measured at
+  200, 2,000 and 10,000). The work is linear (seven connected-work units an
+  alias from 250 to 1,900 aliases, far under the connected demand's
+  262,144), so the fuse, not super-linear work, stops it; the skipped
+  `relation_depth_tests.rs` →
+  `a_union_over_2000_aliases_of_unions_relates_as_one_union` holds it open.

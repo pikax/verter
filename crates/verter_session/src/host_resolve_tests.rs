@@ -5518,10 +5518,12 @@ fn direct_compiler_public_api_for(
     component_name: &str,
     mode: verter_compiler::tsc::TscMode,
 ) -> verter_compiler::tsc::TscOutput {
-    let macro_output = host.produce_vue_macro_codegen(
-        canonical_id,
-        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-    );
+    let macro_output = host
+        .produce_vue_macro_codegen(
+            canonical_id,
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+        )
+        .expect("an uncancelled production publishes");
     let bundle = macro_output.tsc.expect("direct compiler TSC bundle");
     let extracted = verter_compiler::tsc::extract_tsc_state(
         source,
@@ -5530,6 +5532,7 @@ fn direct_compiler_public_api_for(
             filename: Some(canonical_id.to_string()),
         },
     )
+    .expect("the stack is had")
     .expect("direct compiler extraction");
     // The direct control must be handed the SAME resolver-owned inputs the
     // production path threads, or this equivalence assertion would silently
@@ -5561,6 +5564,7 @@ fn public_api_tsc_bundle(host: &VerterHost, canonical_id: &str) -> Arc<MacroTscB
         canonical_id,
         crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
     )
+    .expect("an uncancelled production publishes")
     .tsc
     .expect("public API TSC bundle")
 }
@@ -8089,7 +8093,8 @@ fn tsc_expose_member_type(
             canonical_id,
             crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
         )
-    });
+    })
+    .expect("an uncancelled production publishes");
     let bundle = output
         .tsc
         .unwrap_or_else(|| panic!("expected a TSC bundle for {canonical_id}"));

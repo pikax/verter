@@ -128,6 +128,26 @@ impl MapperFingerprint {
         readonly: MappedModifier,
         name_type: Option<&Arc<TypeExpr>>,
     ) -> Self {
+        Self::from_components_in(
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+            &mut MappedDigests::default(),
+        )
+    }
+
+    /// [`Self::from_components`], reading the mapped types nested in the
+    /// subtrees through `digests`.
+    pub(crate) fn from_components_in<'t>(
+        source: &'t Arc<TypeExpr>,
+        value: &'t Arc<TypeExpr>,
+        optional: MappedModifier,
+        readonly: MappedModifier,
+        name_type: Option<&'t Arc<TypeExpr>>,
+        digests: &mut MappedDigests<'t>,
+    ) -> Self {
         let mut hasher = FxHasher::default();
         // Domain separator so a `MapperFingerprint` over (source,
         // value, ...) cannot accidentally collide with another
@@ -144,7 +164,7 @@ impl MapperFingerprint {
         // identity — `Some` vs `None` flips the discriminator.
         if let Some(nt) = name_type {
             1u8.hash(&mut hasher);
-            hash_type_expr_structurally(nt, &mut hasher);
+            walk_type_expr(nt, &mut hasher, &mut StorageLeaves, &mut digests.storage);
         } else {
             0u8.hash(&mut hasher);
         }
@@ -152,9 +172,14 @@ impl MapperFingerprint {
         // permuting `(source, value)` cannot land on the same
         // fingerprint as the swapped pair.
         b"|source|".hash(&mut hasher);
-        hash_type_expr_structurally(source, &mut hasher);
+        walk_type_expr(
+            source,
+            &mut hasher,
+            &mut StorageLeaves,
+            &mut digests.storage,
+        );
         b"|value|".hash(&mut hasher);
-        hash_type_expr_structurally(value, &mut hasher);
+        walk_type_expr(value, &mut hasher, &mut StorageLeaves, &mut digests.storage);
         Self(hasher.finish())
     }
 
@@ -167,6 +192,22 @@ impl MapperFingerprint {
     pub(crate) fn raw(self) -> u64 {
         self.0
     }
+}
+
+/// The digests of the mapped types nested in the trees one lowering pass
+/// walks, each computed once. A walk folds a mapped type as the digest of
+/// its own walk (tag 25), so a mapper's identity reads every mapped type
+/// nested in it once, however deep the nest — never once per enclosing
+/// mapper. Owned by the pass that walks the trees and dropped with it: its
+/// borrow of the trees (`'t`) outlives every key, so a key is always a
+/// node of a live tree.
+#[derive(Default)]
+pub(crate) struct MappedDigests<'t> {
+    /// Under the logical-identity leaves ([`mapper_binder_decl_name`]).
+    identity: FxHashMap<*const TypeExpr, u128>,
+    /// Under the storage leaves ([`MapperFingerprint`]).
+    storage: FxHashMap<*const TypeExpr, u128>,
+    tree: std::marker::PhantomData<&'t TypeExpr>,
 }
 
 /// Leading text of every mapped-binder declaration name.
@@ -193,6 +234,28 @@ pub(crate) fn mapper_binder_decl_name(
     readonly: MappedModifier,
     name_type: Option<&Arc<TypeExpr>>,
 ) -> Arc<str> {
+    mapper_binder_decl_name_in(
+        graph,
+        source,
+        value,
+        optional,
+        readonly,
+        name_type,
+        &mut MappedDigests::default(),
+    )
+}
+
+/// [`mapper_binder_decl_name`], reading the mapped types nested in the
+/// mapping through `digests`.
+pub(crate) fn mapper_binder_decl_name_in<'t>(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    source: &'t Arc<TypeExpr>,
+    value: &'t Arc<TypeExpr>,
+    optional: MappedModifier,
+    readonly: MappedModifier,
+    name_type: Option<&'t Arc<TypeExpr>>,
+    digests: &mut MappedDigests<'t>,
+) -> Arc<str> {
     let mut events = crate::semantic_query::ExactHashEventRecorder::default();
     let mut leaves = IdentityLeaves { graph };
     b"MapperBinderIdentity::v1".hash(&mut events);
@@ -201,14 +264,14 @@ pub(crate) fn mapper_binder_decl_name(
     match name_type {
         Some(name_type) => {
             1u8.hash(&mut events);
-            walk_type_expr(name_type, &mut events, &mut leaves);
+            walk_type_expr(name_type, &mut events, &mut leaves, &mut digests.identity);
         }
         None => 0u8.hash(&mut events),
     }
     b"|source|".hash(&mut events);
-    walk_type_expr(source, &mut events, &mut leaves);
+    walk_type_expr(source, &mut events, &mut leaves, &mut digests.identity);
     b"|value|".hash(&mut events);
-    walk_type_expr(value, &mut events, &mut leaves);
+    walk_type_expr(value, &mut events, &mut leaves, &mut digests.identity);
     let digest = xxhash_rust::xxh3::xxh3_128(&events.into_bytes());
     Arc::from(format!("{MAPPER_BINDER_DECL_PREFIX}{digest:032x}>"))
 }
@@ -225,30 +288,6 @@ fn encode_modifier(m: MappedModifier) -> u8 {
         MappedModifier::Add => 1,
         MappedModifier::Remove => 2,
     }
-}
-
-/// Stack-safe structural hash of a `TypeExpr` subtree.
-///
-/// Walks the tree iteratively with a manually-managed worklist
-/// (`Vec<&TypeExpr>`), folding each node's discriminator tag plus
-/// its leaf data into `hasher`. Child subtrees are pushed onto
-/// the worklist for later processing rather than recursing into
-/// them on the Rust call stack — so the function tolerates trees
-/// of arbitrary depth (deeply-nested `Array<Array<...>>` chains,
-/// long `extends ? : extends ? : ...` chains, deeply-quasi'd
-/// template literals, etc.) without ever risking stack overflow.
-///
-/// The hash is deterministic: a fixed visit order (each variant
-/// arm hashes its leaf data, then pushes its children in a fixed
-/// order onto the worklist) guarantees that two structurally-equal
-/// `TypeExpr` trees produce the same `u64`.
-///
-/// `pub(crate)`: this is the ONE structural `TypeExpr` hash walker in the
-/// crate — sibling fingerprint needs (e.g. the resolution-policy cycle
-/// guard's anonymous-shape discriminator) reuse it rather than growing a
-/// second walker that could diverge.
-pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
-    walk_type_expr(root, hasher, &mut StorageLeaves);
 }
 
 /// How the walk folds the three leaves whose storage form is not a logical
@@ -353,15 +392,100 @@ impl<H: Hasher> LeafPolicy<H> for IdentityLeaves<'_> {
 }
 
 /// The one structural `TypeExpr` walk, with its leaves folded by `leaves`.
-fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, leaves: &mut P) {
+///
+/// A mapped type folds as the digest of its own walk (tag 25), read from
+/// `digests` when an earlier walk computed it: the walks of the mapped
+/// types being digested are frames of an explicit stack, innermost last.
+fn walk_type_expr<'t, H, P>(
+    root: &'t TypeExpr,
+    hasher: &mut H,
+    leaves: &mut P,
+    digests: &mut FxHashMap<*const TypeExpr, u128>,
+) where
+    H: Hasher,
+    P: LeafPolicy<H> + LeafPolicy<crate::semantic_query::ExactHashEventRecorder>,
+{
     // Worklist of references into the live `TypeExpr` graph.
     // We push every node's children here so the loop visits the
     // whole subtree without recursing. Borrow-checker note: all
     // refs are into `root`'s subtree which outlives the loop.
     let mut worklist: Vec<&TypeExpr> = Vec::with_capacity(16);
     worklist.push(root);
+    // Each mapped type being digested: its node, its walk's events and
+    // its walk's worklist.
+    type Digesting<'t> = (
+        &'t TypeExpr,
+        crate::semantic_query::ExactHashEventRecorder,
+        Vec<&'t TypeExpr>,
+    );
+    let mut digesting: Vec<Digesting<'t>> = Vec::new();
+    loop {
+        let next = match digesting.last_mut() {
+            Some((_, _, list)) => list.pop(),
+            None => worklist.pop(),
+        };
+        let Some(node) = next else {
+            let Some((mapped, events, _)) = digesting.pop() else {
+                break;
+            };
+            let digest = xxhash_rust::xxh3::xxh3_128(&events.into_bytes());
+            digests.insert(mapped as *const TypeExpr, digest);
+            match digesting.last_mut() {
+                Some((_, events, _)) => fold_mapped_digest(digest, events),
+                None => fold_mapped_digest(digest, hasher),
+            }
+            continue;
+        };
+        if let TypeExpr::Mapped { .. } = node {
+            if let Some(&digest) = digests.get(&(node as *const TypeExpr)) {
+                match digesting.last_mut() {
+                    Some((_, events, _)) => fold_mapped_digest(digest, events),
+                    None => fold_mapped_digest(digest, hasher),
+                }
+            } else {
+                let mut events = crate::semantic_query::ExactHashEventRecorder::default();
+                let mut list = Vec::new();
+                visit_type_expr(node, &mut events, &mut list, leaves);
+                digesting.push((node, events, list));
+            }
+            continue;
+        }
+        match digesting.last_mut() {
+            Some((_, events, list)) => visit_type_expr(node, events, list, leaves),
+            None => visit_type_expr(node, hasher, &mut worklist, leaves),
+        }
+    }
+}
 
-    while let Some(node) = worklist.pop() {
+#[cfg(test)]
+thread_local! {
+    /// The nodes this thread's structural walks visited.
+    static TYPE_EXPR_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The nodes this thread's structural walks visited so far.
+#[cfg(test)]
+pub(crate) fn type_expr_visits_for_tests() -> u64 {
+    TYPE_EXPR_VISITS.with(std::cell::Cell::get)
+}
+
+/// Fold a mapped type's digest into the walk around it.
+fn fold_mapped_digest<H: Hasher>(digest: u128, hasher: &mut H) {
+    25u8.hash(hasher);
+    digest.hash(hasher);
+}
+
+/// Fold one node's discriminator and leaves into `hasher`, pushing its
+/// children onto `worklist`.
+fn visit_type_expr<'a, H: Hasher, P: LeafPolicy<H>>(
+    node: &'a TypeExpr,
+    hasher: &mut H,
+    worklist: &mut Vec<&'a TypeExpr>,
+    leaves: &mut P,
+) {
+    #[cfg(test)]
+    TYPE_EXPR_VISITS.with(|visits| visits.set(visits.get() + 1));
+    {
         // Discriminator tag — one fixed byte per variant. The tag
         // must change whenever a variant's shape changes; we use
         // explicit constants rather than `mem::discriminant` so
@@ -416,12 +540,12 @@ fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, 
                 6u8.hash(hasher);
                 (obj.properties.len() as u64).hash(hasher);
                 for member in obj.properties.iter() {
-                    hash_object_member(member, hasher, &mut worklist, leaves);
+                    hash_object_member(member, hasher, worklist, leaves);
                 }
             }
             TypeExpr::Function(func) => {
                 7u8.hash(hasher);
-                hash_function_expr(func, hasher, &mut worklist);
+                hash_function_expr(func, hasher, worklist);
             }
             // A constructor type carries the same `FunctionExpr` payload as a
             // function type but is a DISTINCT type, so it hashes with a distinct
@@ -430,7 +554,7 @@ fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, 
             // `new () => X` never collides with `() => X` in this hash.
             TypeExpr::ConstructorType(func) => {
                 22u8.hash(hasher);
-                hash_function_expr(func, hasher, &mut worklist);
+                hash_function_expr(func, hasher, worklist);
             }
             TypeExpr::Ref {
                 name,
@@ -478,7 +602,7 @@ fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, 
             }
             TypeExpr::TypeOf(value_ref) => {
                 11u8.hash(hasher);
-                leaves.value_ref(value_ref, hasher, &mut worklist);
+                leaves.value_ref(value_ref, hasher, worklist);
             }
             TypeExpr::IndexedAccess { object, index } => {
                 12u8.hash(hasher);
@@ -532,9 +656,13 @@ fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, 
                     worklist.push(e);
                 }
             }
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 16u8.hash(hasher);
                 name.hash(hasher);
+                constraint.is_some().hash(hasher);
+                if let Some(constraint) = constraint {
+                    worklist.push(constraint);
+                }
             }
             TypeExpr::Rest(inner) => {
                 17u8.hash(hasher);
@@ -557,7 +685,7 @@ fn walk_type_expr<H: Hasher, P: LeafPolicy<H>>(root: &TypeExpr, hasher: &mut H, 
                 }
                 (conditional_context.len() as u64).hash(hasher);
                 for frame in conditional_context.iter() {
-                    hash_recursive_conditional_frame(frame, hasher, &mut worklist);
+                    hash_recursive_conditional_frame(frame, hasher, worklist);
                 }
             }
             TypeExpr::SyntheticSlotBinding(carrier) => {

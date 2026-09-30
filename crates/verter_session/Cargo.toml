@@ -253,6 +253,11 @@ toml = "1.1"
 # unifies feature requirements per-target — for tests/examples/benches
 # the union includes `test-support`; for production it does not.
 verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
+# Activates the reservation fault injection of `verter_parser`'s stack
+# containment (`oxc_parse::faults`) for `cargo test --package verter_session`
+# only, so host tests fail a parse's or a walk-stack lease's reservation
+# without exhausting the machine; production builds carry none of it.
+verter_parser = { path = "../verter_parser", features = ["stack-fault-injection"] }
 # Activates the `test-support` feature on `verter_semantic` for
 # `cargo test --package verter_session` (and example/bench) builds only —
 # the flow-slice hash / plan invocation counters

@@ -46,6 +46,27 @@ pub enum MetaError {
     /// — never silently rendered as `Unknown`.
     #[error("output materialization error: {0}")]
     OutputMaterialization(#[from] crate::meta_resolve::ComponentMetaOutputError),
+    /// The computation was aborted (a cancelled request, a superseded view,
+    /// a shut down host): it published nothing.
+    #[error("request aborted: {0:?}")]
+    Aborted(crate::semantic_query::ExecutionAbort),
+}
+
+impl From<crate::semantic_query::ExecutionAbort> for MetaError {
+    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+        Self::Aborted(abort)
+    }
+}
+
+impl From<crate::meta_resolve::ComponentMetaFailure> for MetaError {
+    fn from(failure: crate::meta_resolve::ComponentMetaFailure) -> Self {
+        match failure {
+            crate::meta_resolve::ComponentMetaFailure::Output(error) => {
+                Self::OutputMaterialization(error)
+            }
+            crate::meta_resolve::ComponentMetaFailure::Aborted(abort) => Self::Aborted(abort),
+        }
+    }
 }
 
 /// One `get_component_meta_batch_payloads` result slot: `Ok(Some(bytes))`
@@ -76,6 +97,7 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
             ExpansionStopReason::BudgetExceeded
                 | ExpansionStopReason::ProjectionWorkLimit
                 | ExpansionStopReason::ConnectedQueryDepthLimit
+                | ExpansionStopReason::ConnectedMemoryLimit
         )
     };
 
@@ -167,6 +189,11 @@ pub enum SessionOverlay {
 pub(crate) struct SessionState {
     pub(crate) overlays: HashMap<String, SessionOverlay>,
     pub(crate) generation: u64,
+    /// The session's overlay authority: the workspace holds the session's
+    /// resident request-overlay resolution state under it, across every
+    /// request, and releases that state when the session is released
+    /// (after its last in-flight request).
+    pub(crate) resolution_authority: verter_workspace::OverlayAuthority,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +370,7 @@ impl MetaProject {
             SessionState {
                 overlays: HashMap::new(),
                 generation: 0,
+                resolution_authority: verter_workspace::OverlayAuthority::new(),
             },
         );
         let runtime = SessionRuntime::new(Arc::clone(self));
@@ -666,7 +694,7 @@ impl MetaSession {
             let fixed = host.capture_batch_fixed_view(view);
             host.get_component_meta_via_view_with_fixed_store_view(canonical_or_alias, view, &fixed)
         });
-        Ok(analysis)
+        Ok(analysis?)
     }
 
     /// Batch surface for [`Self::get_component_meta`]: compute metadata
@@ -770,11 +798,12 @@ impl MetaSession {
             let fixed = host.capture_batch_fixed_view(view);
             host.batch_coordinator().run_batch(&jobs, &policy, |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
-                Ok(host.get_component_meta_via_view_with_fixed_store_view(
+                host.get_component_meta_via_view_with_fixed_store_view(
                     canonical_id.as_ref(),
                     view,
                     &fixed,
-                ))
+                )
+                .map_err(MetaError::from)
             })
         });
         Ok(results)
@@ -899,7 +928,7 @@ impl MetaSession {
         let host = self.project.host();
         let resolved = self.with_overlay_view(|view| {
             host.get_component_meta_with_resolution_via_view(canonical_or_alias, view)
-        });
+        })?;
         match resolved {
             Some((analysis, resolved)) => {
                 if let Some(err) = component_meta_resolution_budget_error(
@@ -1201,7 +1230,7 @@ impl MetaSession {
     /// Binds R17 (session overlays never mutate the base host) and
     /// R18 (the view is passed by explicit `&dyn SessionView`
     /// argument, never via a thread-local).
-    fn with_overlay_view<R>(
+    pub(crate) fn with_overlay_view<R>(
         &self,
         f: impl FnOnce(&dyn crate::session_view::SessionView) -> R,
     ) -> R {
@@ -1211,10 +1240,12 @@ impl MetaSession {
             rustc_hash::FxHashMap::default();
         let mut overlay_tombstones: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut resolution_authority = None;
 
         {
             let sessions = self.project.sessions.read();
             if let Some(state) = sessions.get(&self.id) {
+                resolution_authority = Some(state.resolution_authority.clone());
                 for (canonical, overlay) in state.overlays.iter() {
                     match overlay {
                         SessionOverlay::Upsert { source } => {
@@ -1237,6 +1268,10 @@ impl MetaSession {
             &overlay_hashes,
             &overlay_tombstones,
         );
+        let view = match resolution_authority {
+            Some(authority) => view.with_resolution_authority(authority),
+            None => view,
+        };
         f(&view)
     }
 }

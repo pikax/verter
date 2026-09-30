@@ -1,8 +1,8 @@
 //! Hash-cons memo accessors for the
 //! `substitute_semantic_type_param` and
 //! `evaluate_deferred_semantic_node_with_context` caches. Extracted
-//! from `mod.rs` to keep the split-target module under the
-//! architecture-guard line ceiling.
+//! from `mod.rs` so the memo accessors live beside the caches they
+//! serve.
 //!
 //! Retention budget: both memos are bounded by
 //! [`HASH_CONS_MEMO_RETENTION_CAP`]. Each publish pushes the key

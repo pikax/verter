@@ -2,7 +2,7 @@ use super::type_eval::*;
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
-    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_DEPTH, MAX_SEMANTIC_INFERENCE_WORK,
+    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_WORK,
 };
 use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use crate::analysis::types::{
@@ -38,7 +38,11 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
             .parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
-    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
+    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(
+        statement,
+        source,
+        &Default::default(),
+    )
 }
 
 #[test]
@@ -70,6 +74,7 @@ namespace Ns { export class C { value!: string } }
         source,
         &context,
         &owners,
+        &Default::default(),
     );
 
     let module_group = env
@@ -130,6 +135,7 @@ const instanceMarker = 0;
         source,
         &context,
         &owners,
+        &Default::default(),
     );
     assert_eq!(
         env.type_symbols[&DeclBindingKey::new(module, "Shared")]
@@ -1527,8 +1533,8 @@ fn static_class_method_return_inference_normal_control_is_exact() {
 }
 
 #[test]
-fn static_class_method_return_inference_budget_unavailable_is_exact() {
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+fn static_class_method_return_of_a_deep_body_is_its_served_position() {
+    let expression = nested_object_expression(72);
     let env = parse_and_build_env(&format!(
         "class Service {{ static deep() {{ return {expression}; }} }}"
     ));
@@ -1536,7 +1542,7 @@ fn static_class_method_return_inference_budget_unavailable_is_exact() {
 
     assert!(
         matches!(fact.return_source, FunctionReturnSource::Flow(_)),
-        "a budget-stopped body still names its served position"
+        "a deep body names its served position"
     );
 }
 
@@ -1643,57 +1649,118 @@ fn nested_arrow_expression(depth: usize) -> String {
     expression
 }
 
-fn assert_initializer_inference_unavailable(source: &str, name: &str) {
-    let parts = lowered(source);
-    let declaration = parts.value_decl(name).expect("lowered value");
-    assert_eq!(declaration.type_annotation, None);
+/// Initializers nested a thousand levels deep, which the inference visits
+/// within its work budget and which a native level per nesting level would
+/// overflow a 1 MiB thread at: the shallow inference infers every nest from
+/// its explicit stacks, bounded only by its work. TypeScript 7.0.2 infers
+/// the same module-level nests (72 levels of objects, arrays and arrows, and
+/// a 70-term `&&` chain) in all four strictNullChecks × noImplicitAny
+/// settings.
+const DEEP_INITIALIZER: usize = 1_000;
+
+/// `source`'s value declaration `name`, lowered on a 1 MiB thread: its
+/// inferred type and its unavailable-inference reason.
+fn initializer_on_a_small_stack(
+    source: String,
+    name: &'static str,
+) -> (Option<TypeExpr>, Option<InferenceUnavailableReason>) {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let parts = lowered(&source);
+            let declaration = parts.value_decl(name).expect("lowered value");
+            (
+                declaration.type_annotation.clone(),
+                declaration.inference_unavailable,
+            )
+        })
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the lowering returns")
+}
+
+/// How many single-member objects, arrays and function results `ty` nests,
+/// and the type innermost — read from a loop.
+fn nesting_of(ty: &TypeExpr) -> (usize, &TypeExpr) {
+    let mut levels = 0;
+    let mut current = ty;
+    loop {
+        current = match current {
+            TypeExpr::Object(object) => match object.properties.as_slice() {
+                [ObjectMember::Property(property)] => &property.ty,
+                _ => break,
+            },
+            TypeExpr::Array { element, .. } => element,
+            TypeExpr::Function(function) => match function.return_type.as_deref() {
+                Some(return_type) => return_type,
+                None => break,
+            },
+            _ => break,
+        };
+        levels += 1;
+    }
+    (levels, current)
+}
+
+#[test]
+fn deep_object_initializers_infer() {
+    let expression = nested_object_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
     assert_eq!(
-        declaration.inference_unavailable,
-        Some(InferenceUnavailableReason::DepthBudgetExceeded)
+        nesting_of(&ty),
+        (
+            DEEP_INITIALIZER,
+            &TypeExpr::Primitive(PrimitiveName::Number)
+        )
     );
+}
 
-    let env = parse_and_build_env(source);
+#[test]
+fn deep_array_initializers_infer() {
+    let expression = nested_array_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
     assert_eq!(
-        env.value_symbols[name]
-            .primary()
-            .type_annotation
-            .classification,
-        ValueAnnotationClass::InferenceUnavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
-    );
-    assert!(
-        env.value_symbols[name]
-            .primary()
-            .type_annotation
-            .annotation
-            .is_none(),
-        "unavailable inference must not publish a narrowed source"
+        nesting_of(&ty),
+        (
+            DEEP_INITIALIZER,
+            &TypeExpr::Primitive(PrimitiveName::Number)
+        )
     );
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_object_initializer() {
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+fn deep_function_initializers_infer() {
+    let expression = nested_arrow_expression(DEEP_INITIALIZER);
+    let (ty, unavailable) =
+        initializer_on_a_small_stack(format!("const deep = {expression};"), "deep");
+    assert_eq!(unavailable, None);
+    let ty = ty.expect("the initializer's type");
+    assert_eq!(nesting_of(&ty).0, DEEP_INITIALIZER);
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_array_initializer() {
-    let expression = nested_array_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+fn long_logical_chain_initializers_infer() {
+    let chain = vec!["x === 1"; DEEP_INITIALIZER].join(" && ");
+    let (ty, unavailable) = initializer_on_a_small_stack(
+        format!("declare const x: number;\nconst chain = {chain};"),
+        "chain",
+    );
+    assert_eq!(unavailable, None);
+    assert_eq!(ty, Some(TypeExpr::Primitive(PrimitiveName::Boolean)));
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_function_initializer() {
-    let expression = nested_arrow_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
-    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
-}
-
-#[test]
-fn semantic_inference_budget_deep_return_expression_stays_a_served_position() {
+fn semantic_inference_deep_return_expression_stays_a_served_position() {
     // The extraction carries no return carrier for an unannotated body —
-    // the budget edge of a deeply nested return expression surfaces at the
-    // whole-function producer's evaluation, not at signature extraction.
-    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    // the whole-function producer evaluates a deeply nested return
+    // expression, not signature extraction.
+    let expression = nested_object_expression(72);
     let source = format!("function deep() {{ return {expression}; }}");
     let parts = lowered(&source);
     let signature = &parts
@@ -2809,6 +2876,76 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
         crate::analysis::type_eval_build::IndexedValueExpression::Call(nested)
             if nested.point == 45
     ));
+}
+
+/// A member call on a call's result lowers its callee as a member read off
+/// the call before it, which is also its receiver, so the call keeps no
+/// separate receiver record: `b.m().m()` is `Call { callee: Member {
+/// object: Call(b.m), name: "m" } }`.
+#[test]
+fn a_member_call_on_a_call_result_reads_its_callee_off_the_call() {
+    let source = "b.m().m()";
+    let allocator = oxc_allocator::Allocator::default();
+    let expression =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
+    let indexed =
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
+    let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = indexed else {
+        panic!("the outer call is a call record");
+    };
+    assert!(
+        call.receiver.is_none(),
+        "the callee's object is the receiver"
+    );
+    let crate::analysis::type_eval_build::IndexedValueExpression::Member { object, name } =
+        call.callee.as_ref()
+    else {
+        panic!(
+            "the callee is a member read off the inner call: {:?}",
+            call.callee
+        );
+    };
+    assert_eq!(name.as_ref(), "m");
+    assert!(matches!(
+        object.as_ref(),
+        crate::analysis::type_eval_build::IndexedValueExpression::Call(inner) if inner.point == 0
+    ));
+}
+
+/// A receiver chain 10,000 links long lowers, rebases and drops on a 1 MiB
+/// thread: each is a walk of an explicit stack, never a native level per
+/// link.
+#[test]
+fn a_receiver_chain_10000_links_long_lowers_rebases_and_drops_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let source = format!("b{}", ".m()".repeat(10_000));
+            let allocator = oxc_allocator::Allocator::default();
+            let expression = verter_parser::oxc_parse::Parser::new(
+                &allocator,
+                &source,
+                oxc_span::SourceType::ts(),
+            )
+            .parse_expression()
+            .expect("fixture expression");
+            let mut indexed = crate::analysis::type_eval_build::lower_indexed_value_expression(
+                &expression,
+                &source,
+            );
+            crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 7);
+            let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = &indexed
+            else {
+                panic!("the outer call is a call record");
+            };
+            assert_eq!(call.point, 7);
+            drop(indexed);
+        })
+        .expect("spawn the lowering thread")
+        .join()
+        .expect("the chain lowers, rebases and drops");
 }
 
 fn indexed_call_with_observed_roots(
@@ -4753,4 +4890,32 @@ fn calls_nested_10000_deep_lower_to_indexed_records_on_a_small_stack() {
         .join()
         .expect("the lowering returns");
     assert_eq!(levels, DEPTH);
+}
+
+/// Whether a call's callback argument derives its value from a call is
+/// answered without a containment scan of the callback: a function value
+/// is its own frame, which the probe never enters. Scanning it read the
+/// text of the whole nest below every level of a callback nest
+/// (`a(() => a(() => …))`), the square of the nesting; the call's scans
+/// read its one-byte callee `a` alone, whatever the depth.
+#[test]
+fn a_callback_nest_lowers_without_scanning_its_callbacks() {
+    use super::type_eval_build::{
+        call_probe_scanned_bytes_for_tests, lower_indexed_call_expression,
+    };
+    let scanned = |depth: usize| {
+        let source = format!("{}1{}", "a(() => ".repeat(depth), ")".repeat(depth));
+        let allocator = oxc_allocator::Allocator::default();
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
+        let oxc_ast::ast::Expression::CallExpression(call) = expression else {
+            panic!("fixture must be a direct call");
+        };
+        let before = call_probe_scanned_bytes_for_tests();
+        let _ = lower_indexed_call_expression(&call, &source);
+        call_probe_scanned_bytes_for_tests() - before
+    };
+    assert_eq!([1, 8, 64].map(scanned), [1, 1, 1]);
 }

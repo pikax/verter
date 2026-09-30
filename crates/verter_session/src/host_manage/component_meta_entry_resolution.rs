@@ -114,6 +114,9 @@ impl VerterHost {
     /// `from_cache = true`, `total_ms = 0.0` is finalised through the
     /// registration so audit consumers via
     /// `take_audit_record(resolution.request_id)` work uniformly.
+    ///
+    /// An aborted computation also returns `None`: it publishes nothing.
+    /// [`Self::try_get_component_meta_with_resolution`] names the abort.
     pub fn get_component_meta_with_resolution(
         &self,
         canonical_or_alias: &str,
@@ -121,6 +124,23 @@ impl VerterHost {
         verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
+        self.try_get_component_meta_with_resolution(canonical_or_alias)
+            .ok()
+            .flatten()
+    }
+
+    /// [`Self::get_component_meta_with_resolution`], naming an aborted
+    /// computation.
+    pub fn try_get_component_meta_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        crate::semantic_query::ExecutionAbort,
+    > {
         self.provenance
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -145,7 +165,7 @@ impl VerterHost {
         if let Some((analysis, resolution)) =
             self.try_with_resolution_cache_hit(canonical.as_str(), request_id)
         {
-            return Some((analysis, resolution));
+            return Ok(Some((analysis, resolution)));
         }
 
         // Cold compute under a `with_fact_tracer` outer scope so the
@@ -181,7 +201,7 @@ impl VerterHost {
             overlay,
         );
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let cold = self.component_meta_with_resolution_cold(
+        let Some(cold) = self.component_meta_with_resolution_cold(
             canonical.as_str(),
             request_id,
             &view,
@@ -189,8 +209,11 @@ impl VerterHost {
             host_ctx_ref,
             &seed_fence,
             validated_at_generation,
-        )?;
-        Some((cold.analysis, cold.resolved))
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((cold.analysis, cold.resolved)))
     }
 
     /// The SHARED audited cold body: resolve PINNED to the caller's captured
@@ -217,7 +240,10 @@ impl VerterHost {
         host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext,
         seed_fence: &super::component_meta_entry::ColdSeedFence,
         validated_at_generation: u64,
-    ) -> Option<super::component_meta_entry::ComponentMetaColdResult> {
+    ) -> Result<
+        Option<super::component_meta_entry::ComponentMetaColdResult>,
+        crate::semantic_query::ExecutionAbort,
+    > {
         #[cfg(test)]
         super::component_meta_entry::run_cold_body_pre_resolve_hook();
         let canonical = canonical.to_string();
@@ -296,7 +322,9 @@ impl VerterHost {
                 )
             },
         );
-        let (analysis, resolved, extract_completeness) = maybe_resolved_analysis?;
+        let Some((analysis, resolved, extract_completeness)) = maybe_resolved_analysis else {
+            return super::component_meta_entry::absent_unless_aborted(host_ctx_ref);
+        };
         // ONE merged admission signal: the resolve-phase completeness merged
         // with the whole-extract scope (macro-DTO read + fallthrough compute).
         // The SAME value travels out to the caller: an output-bearing caller
@@ -310,11 +338,18 @@ impl VerterHost {
         // `try_with_resolution_cache_hit`; suppression is enforced inside
         // `publish_component_meta_cache_entry` via the merged
         // `final_completeness` signal.
-        Some(super::component_meta_entry::ComponentMetaColdResult {
-            completeness: crate::meta_resolve::PublishedCompleteness::merged(
-                resolved.completeness,
-                extract_completeness,
-            ),
+        let completeness = crate::meta_resolve::PublishedCompleteness::merged(
+            resolved.completeness,
+            extract_completeness,
+        );
+        // An aborted computation publishes nothing (its partial result was
+        // never admitted either).
+        if let Some(abort) = crate::semantic_query::ExecutionAbort::observed_in(completeness.get())
+        {
+            return Err(abort);
+        }
+        Ok(Some(super::component_meta_entry::ComponentMetaColdResult {
+            completeness,
             resolved,
             analysis,
             // The resolution-bearing lane publishes no output publication
@@ -322,7 +357,7 @@ impl VerterHost {
             // `publish_component_meta_cache_entry` above, and no admitted
             // final result travels out for an output read to observe.
             admitted: None,
-        })
+        }))
     }
 
     /// Output-bearing AUDITED resolution entry: the wire consumers' (NAPI /
@@ -354,7 +389,7 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Result<
         (Option<crate::meta_resolve::ComponentMetaOutput>, u64),
-        (crate::meta_resolve::ComponentMetaOutputError, u64),
+        (crate::meta_resolve::ComponentMetaFailure, u64),
     > {
         self.provenance
             .get_component_meta_calls
@@ -404,7 +439,7 @@ impl VerterHost {
                         });
                 return output
                     .map(|output| (Some(output), request_id))
-                    .map_err(|err| (err, request_id));
+                    .map_err(|err| (err.into(), request_id));
             }
         } else {
             self.project_type_store
@@ -433,15 +468,17 @@ impl VerterHost {
             analysis,
             completeness,
             admitted: _,
-        }) = self.component_meta_with_resolution_cold(
-            canonical.as_str(),
-            request_id,
-            &view,
-            &fixed,
-            host_ctx_ref,
-            &seed_fence,
-            validated_at_generation,
-        )
+        }) = self
+            .component_meta_with_resolution_cold(
+                canonical.as_str(),
+                request_id,
+                &view,
+                &fixed,
+                host_ctx_ref,
+                &seed_fence,
+                validated_at_generation,
+            )
+            .map_err(|abort| (abort.into(), request_id))?
         else {
             return Ok((None, request_id));
         };
@@ -461,7 +498,7 @@ impl VerterHost {
                 });
         output
             .map(|output| (Some(output), request_id))
-            .map_err(|err| (err, request_id))
+            .map_err(|err| (err.into(), request_id))
     }
 
     /// View-aware variant of [`Self::get_component_meta_with_resolution`].
@@ -476,21 +513,26 @@ impl VerterHost {
     /// [`Self::resolve_component_meta_with_view`] threads the view
     /// fingerprint into the singleflight cache key so two sessions
     /// with different overlays admit distinct candidate slots.
+    ///
+    /// An aborted computation returns the abort: it publishes nothing.
     pub fn get_component_meta_with_resolution_via_view(
         &self,
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        crate::meta_resolve::ResolvedComponentMetaState,
-    )> {
+    ) -> Result<
+        Option<(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        crate::semantic_query::ExecutionAbort,
+    > {
         self.provenance
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         if view.is_tombstoned(canonical.as_str()) {
-            return None;
+            return Ok(None);
         }
 
         // Overlay-priority pre-warm for owner + every dep the view
@@ -518,14 +560,17 @@ impl VerterHost {
         // second unrelated store view and pair a fresh-view analysis with
         // this capture's extraction context (the torn-result race).
         let fixed = self.capture_batch_fixed_view(view);
-        let (mut resolved, admission) = {
+        let resolved = {
             let (executor_view, executor_fp) = fixed.executor_fixed_view();
             self.resolve_component_meta_with_view_and_fixed_admission(
                 canonical.as_str(),
                 crate::types::ProjectionMode::Expanded,
                 view,
                 Some((executor_view, executor_fp, fixed.is_current())),
-            )?
+            )
+        };
+        let Some((mut resolved, admission)) = resolved else {
+            return Ok(None);
         };
         resolved.request_id = self.next_request_id();
         // Keep the session view attached while extracting: policy,
@@ -551,6 +596,12 @@ impl VerterHost {
             true,
             host_ctx_ref,
         );
+        // An aborted computation publishes nothing.
+        if let Some(abort) = crate::semantic_query::ExecutionAbort::observed_in(
+            resolved.completeness.merge(extract.completeness),
+        ) {
+            return Err(abort);
+        }
         self.merge_extraction_facts_into_admitted_resolved_meta(
             canonical.as_str(),
             crate::types::ProjectionMode::Expanded,
@@ -559,7 +610,7 @@ impl VerterHost {
             extract.fallthrough_fact_versions.as_deref(),
             admission.as_ref(),
         );
-        Some((extract.analysis, resolved))
+        Ok(Some((extract.analysis, resolved)))
     }
 
     /// Cache-hit path. Returns `Some((analysis, resolution))` on a

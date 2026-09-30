@@ -81,6 +81,10 @@ pub use intersection_input::{
     IntersectionInputId, IntersectionInputRef, IntersectionPurpose, IntersectionRecipe,
     IntersectionTerm,
 };
+pub mod fact_result;
+#[cfg(test)]
+mod fact_result_tests;
+pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]
@@ -149,9 +153,11 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, RecoveryBasis,
 };
-pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
+/// The checker compatibility policy: the limits at which the checker gives up
+/// on a type operation, and the diagnostic it reports there.
+pub(crate) mod checker_policy;
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1979,6 +1985,16 @@ pub enum FlowReturnDegradation {
     /// A fabricated `any` is forbidden here: it is indistinguishable from
     /// an authored one at every downstream gate.
     UnmodeledPosition,
+    /// The evaluation composed its value from a member's body-derived
+    /// return whose evaluation closed degraded, read as a type
+    /// (`ReturnType<typeof C.m>`): the usable value is published, and the
+    /// answer carries the member's degradation as this typed reason rather
+    /// than publishing clean.
+    PartialInterior,
+    /// The evaluation's value holds, or was derived from, the checker's
+    /// recovery after an operation exhausted its own allowance: usable as the
+    /// checker's answer, a resource partial, never kept.
+    OperationBudget,
 }
 
 /// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
@@ -2135,6 +2151,11 @@ pub enum CallArgKey {
         /// which a `const` type parameter the argument is passed to infers
         /// from (`isConstContext`). `None` for any other argument.
         const_view: Option<SemanticNodeId>,
+        /// A context-sensitive object literal as the call's first inference
+        /// pass reads it (`SkipContextSensitive`): its context-sensitive
+        /// members read as the non-inferring `any`, so its other members
+        /// infer before those are typed. `None` for any other argument.
+        first_pass: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).
@@ -4310,6 +4331,111 @@ impl<'a> ClosedSurfaceView<'a> {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// How many members this thread's key lookups compared by scanning a
+    /// surface; test-only.
+    static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one member a key lookup compared by scanning a surface.
+fn note_key_scan_comparison() {
+    #[cfg(test)]
+    KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+/// How many members this thread's key lookups compared by scanning a
+/// surface; test-only.
+#[cfg(test)]
+pub(crate) fn key_scan_comparisons_for_tests() -> usize {
+    KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)
+}
+
+/// The accessor the public members addressing one key form: `None` when
+/// one of them is no accessor, or none is present.
+fn known_key_accessor<'a>(
+    members: impl Iterator<Item = &'a SurfaceMember>,
+) -> Option<KnownKeyAccessor<'a>> {
+    let mut accessor = KnownKeyAccessor {
+        getter: None,
+        setter: None,
+    };
+    for member in members {
+        match member.method_kind {
+            Some(verter_type_expr::ObjectMethodKind::Get) => {
+                accessor.getter.get_or_insert(member);
+            }
+            Some(verter_type_expr::ObjectMethodKind::Set) => {
+                accessor.setter.get_or_insert(member);
+            }
+            _ => return None,
+        }
+    }
+    (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
+}
+
+/// The one spelling of the JS property `key` addresses: a string that is
+/// the canonical spelling of an admissible integer is that number, so two
+/// keys collide under element access exactly when their spellings are
+/// equal.
+fn property_spelling(key: PropertyKey) -> PropertyKey {
+    match key.element_access_equivalent() {
+        Some(numeric @ verter_type_expr::PropertyKey::Number(_))
+            if matches!(key, verter_type_expr::PropertyKey::String(_)) =>
+        {
+            numeric
+        }
+        _ => key,
+    }
+}
+
+/// A surface's known-key members indexed by the property each addresses
+/// ([`SurfaceView::key_index`]): the lookups
+/// [`SurfaceView::project_known_key`] and
+/// [`SurfaceView::project_known_key_accessor`] make, each answered without
+/// scanning the surface. Built for one relation of two surfaces and dropped
+/// with it, so relating a surface of `n` members to one of `m` costs
+/// `n + m` lookups rather than `n × m` comparisons.
+pub(crate) struct SurfaceKeyIndex<'a> {
+    members: std::collections::HashMap<PropertyKey, smallvec::SmallVec<[&'a SurfaceMember; 1]>>,
+}
+
+impl<'a> SurfaceKeyIndex<'a> {
+    /// The members addressing `key`, in member order.
+    fn colliding(&self, key: &PropertyKey) -> &[&'a SurfaceMember] {
+        let spelled = match key {
+            verter_type_expr::PropertyKey::String(_) => key
+                .element_access_equivalent()
+                .filter(|numeric| matches!(numeric, verter_type_expr::PropertyKey::Number(_))),
+            _ => None,
+        };
+        self.members
+            .get(spelled.as_ref().unwrap_or(key))
+            .map_or(&[], |members| members.as_slice())
+    }
+
+    /// [`SurfaceView::project_known_key`] through the index.
+    pub(crate) fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'a> {
+        match self.colliding(key).first() {
+            Some(member) => SurfaceKeyProjection::Exact(member),
+            None => SurfaceKeyProjection::AbsentProven,
+        }
+    }
+
+    /// [`SurfaceView::project_known_key_accessor`] through the index.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'a>> {
+        known_key_accessor(
+            self.colliding(key)
+                .iter()
+                .copied()
+                .filter(|member| member.visibility.is_public()),
+        )
+    }
+}
+
 /// Key evidence available from the sole positive-member state.
 pub enum SurfaceKeyProjection<'a> {
     Exact(&'a SurfaceMember),
@@ -4487,6 +4613,7 @@ impl SurfaceView {
         // property — a numeric member answers the string-spelling needle
         // (and vice versa), so element-access collision is the match rule.
         if let Some(known) = self.members.iter().find(|member| {
+            note_key_scan_comparison();
             member
                 .key
                 .as_known()
@@ -4560,28 +4687,33 @@ impl SurfaceView {
         &self,
         key: &PropertyKey,
     ) -> Option<KnownKeyAccessor<'_>> {
-        let mut accessor = KnownKeyAccessor {
-            getter: None,
-            setter: None,
-        };
-        for member in self.members.iter().filter(|member| {
+        known_key_accessor(self.members.iter().filter(|member| {
+            note_key_scan_comparison();
             member.visibility.is_public()
                 && member
                     .key
                     .as_known()
                     .is_some_and(|known| known.element_access_collides(&key.as_ref()))
-        }) {
-            match member.method_kind {
-                Some(verter_type_expr::ObjectMethodKind::Get) => {
-                    accessor.getter.get_or_insert(member);
-                }
-                Some(verter_type_expr::ObjectMethodKind::Set) => {
-                    accessor.setter.get_or_insert(member);
-                }
-                _ => return None,
+        }))
+    }
+
+    /// This surface's known-key members indexed by the property each
+    /// addresses, for a caller that looks up many keys
+    /// ([`SurfaceKeyIndex`]).
+    pub(crate) fn key_index(&self) -> SurfaceKeyIndex<'_> {
+        let mut members: std::collections::HashMap<
+            PropertyKey,
+            smallvec::SmallVec<[&SurfaceMember; 1]>,
+        > = std::collections::HashMap::default();
+        for member in self.members.iter() {
+            if let Some(known) = member.key.cloned_known() {
+                members
+                    .entry(property_spelling(known))
+                    .or_default()
+                    .push(member);
             }
         }
-        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
+        SurfaceKeyIndex { members }
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -4903,6 +5035,28 @@ impl PartialReasonSet {
     /// `props: {…}` / `emits: […]` option objects, `get_component_meta`)
     /// is missing members it cannot name and must fail closed.
     pub const FLOW_RETURN_NO_SURFACE: Self = Self(1 << 16);
+    /// A conditional type over operands the checker decides (neither holds
+    /// a type variable the checker defers on) whose branch the lane could
+    /// not select: the relation it asks is undecided (`Unknown`, a budget,
+    /// a coinductive assumption), or the `extends` pattern is one the lane
+    /// does not infer from. The conditional shell it publishes is a typed
+    /// gap, never the checker's answer; a conditional the checker itself
+    /// defers (a generic operand) is complete.
+    pub const UNDECIDED_CONDITIONAL: Self = Self(1 << 17);
+    /// The connected semantic demand exhausted its construction-byte
+    /// allowance: the bytes it reserves before it builds a type grew past
+    /// the envelope. Like [`Self::PROJECTION_WORK_LIMIT`], a resource stop,
+    /// never a checker fact: the returned node is an intermediate carrier
+    /// stop and is never admitted to a shared memo or result cache.
+    pub const CONNECTED_MEMORY_LIMIT: Self = Self(1 << 18);
+    /// A type operation exhausted Verter's own budget for it (its product,
+    /// comparisons, tail steps, tuple elements or instantiation depth), and
+    /// the value is the checker's recovery for that operation, with the
+    /// checker's diagnostic. Usable as that recovery — it reads and relates
+    /// as the checker's error type, or a relation as false — but a resource
+    /// stop, never a complete answer: it is never admitted to a shared memo
+    /// or result cache.
+    pub const OPERATION_BUDGET: Self = Self(1 << 19);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -5007,11 +5161,17 @@ pub enum PartialReason {
     FlowReturnUnverified,
     /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`].
     FlowReturnNoSurface,
+    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`].
+    UndecidedConditional,
+    /// [`PartialReasonSet::CONNECTED_MEMORY_LIMIT`].
+    ConnectedMemoryLimit,
+    /// [`PartialReasonSet::OPERATION_BUDGET`].
+    OperationBudget,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -5029,6 +5189,9 @@ impl PartialReason {
         Self::FlowReturnUninferred,
         Self::FlowReturnUnverified,
         Self::FlowReturnNoSurface,
+        Self::UndecidedConditional,
+        Self::ConnectedMemoryLimit,
+        Self::OperationBudget,
     ];
 
     /// The single-reason set this variant names.
@@ -5052,6 +5215,9 @@ impl PartialReason {
             Self::FlowReturnUninferred => PartialReasonSet::FLOW_RETURN_UNINFERRED,
             Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+            Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
+            Self::ConnectedMemoryLimit => PartialReasonSet::CONNECTED_MEMORY_LIMIT,
+            Self::OperationBudget => PartialReasonSet::OPERATION_BUDGET,
         }
     }
 
@@ -5078,6 +5244,9 @@ impl PartialReason {
             Self::FlowReturnUninferred => "flowReturnUninferred",
             Self::FlowReturnUnverified => "flowReturnUnverified",
             Self::FlowReturnNoSurface => "flowReturnNoSurface",
+            Self::UndecidedConditional => "undecidedConditional",
+            Self::ConnectedMemoryLimit => "connectedMemoryLimit",
+            Self::OperationBudget => "operationBudget",
         }
     }
 }
@@ -5585,17 +5754,40 @@ pub enum QueryError {
     /// minted itself one frame down: doing so fed the marker straight back
     /// into the frame-level failure it exists to avoid.
     UnmodeledPosition,
+    /// The checker's wildcard type (`wildcardType`): what a conditional's
+    /// definitely-false test substitutes for every type parameter of its
+    /// operands (`getPermissiveInstantiation`). It relates both ways like
+    /// `any`, and an operation over it (a conditional, `keyof`, an indexed
+    /// access) is the wildcard itself rather than the operation over `any`.
+    /// Transient: it lives only in the operands of that test and is never
+    /// published.
+    PermissiveWildcard,
     /// The checker's ERROR TYPE after a diagnostic it recovers from: the
     /// operation [`CheckerDiagnostic::operation`] names raised
     /// [`CheckerDiagnostic::code`], and the checker continues with its error
     /// type, which reads as the diagnostic's
     /// [`recovery`](CheckerDiagnostic::recovery) (`any`).
     ///
-    /// A complete, language-defined answer: it relates, absorbs and raises
-    /// as that recovery, carrying the diagnostic that produced it. Never a
-    /// stand-in for something this substrate cannot answer — those stay
-    /// typed gaps.
-    CheckerRecovery(CheckerDiagnostic),
+    /// A language-defined answer: it relates, absorbs and raises as that
+    /// recovery, carrying the diagnostic that produced it. Never a stand-in
+    /// for something this substrate cannot answer — those stay typed gaps.
+    /// Its [`RecoveryBasis`] says whether it is complete: a diagnostic the
+    /// types decide, or a certified divergence, is a complete answer; an
+    /// operation that exhausted Verter's own allowance for it
+    /// ([`checker_policy`]) leaves a resource partial — usable, but never a
+    /// complete answer and never kept.
+    CheckerRecovery {
+        /// The diagnostic the checker reports.
+        diagnostic: CheckerDiagnostic,
+        /// Whether the recovery is proven or the allowance decided it.
+        basis: RecoveryBasis,
+        /// The authored form of the refused operation, where one already
+        /// exists (the written template or intersection), kept for display.
+        /// It is never the operation's answer and nothing reads it as one:
+        /// the recovery is `any`, and this is a retained leaf of the node,
+        /// never a descendant a semantic walk enters.
+        origin: Option<SemanticNodeId>,
+    },
 }
 
 impl QueryError {
@@ -5612,7 +5804,10 @@ impl QueryError {
         match self {
             QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
-            | QueryError::CheckerRecovery(_) => false,
+            | QueryError::CheckerRecovery { .. }
+            // The wildcard stands for every type at once: it is a known
+            // type, and the same wildcard relates to itself.
+            | QueryError::PermissiveWildcard => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5747,7 +5942,18 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
-            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
+            (
+                Self::CheckerRecovery {
+                    diagnostic: a_d,
+                    basis: a_s,
+                    origin: a_b,
+                },
+                Self::CheckerRecovery {
+                    diagnostic: b_d,
+                    basis: b_s,
+                    origin: b_b,
+                },
+            ) => a_d == b_d && a_s == b_s && a_b == b_b,
             _ => false,
         }
     }
@@ -5782,7 +5988,8 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
-            Self::CheckerRecovery(_) => 21,
+            Self::CheckerRecovery { .. } => 21,
+            Self::PermissiveWildcard => 22,
         }
     }
 }
@@ -5837,8 +6044,17 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurface
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
+            | Self::PermissiveWildcard
             | Self::OpenSurface => {}
-            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
+            Self::CheckerRecovery {
+                diagnostic,
+                basis,
+                origin,
+            } => {
+                basis.hash(state);
+                diagnostic.hash(state);
+                origin.hash(state);
+            }
         }
     }
 }
@@ -6494,6 +6710,74 @@ pub struct RelationPayload {
     /// detail dereferences the table by id. (Wire exposure of proof detail is a
     /// separate concern — see the type doc above.)
     pub relation_proof: RelationProofId,
+    /// What the relation's computation used of the checker's recursion
+    /// bounds. A warm read replays the outcome only where the cold
+    /// computation takes the same course.
+    pub recursion: RelationRecursionFootprint,
+}
+
+/// What a relation's cold computation used of the checker's two recursion
+/// bounds — `recursiveTypeRelatedTo`'s depth limit and
+/// `isDeeplyNestedType` — measured from the relation itself.
+///
+/// A relation answers what it answers when it is checked with fresh
+/// caches. The checker's own relation cache lets an earlier relation
+/// change a later one's answer (a cached shallower pair spares a deeper
+/// relation the depth that overflows it); this engine does not. A memo
+/// entry is replayed inside another relation only where its footprint
+/// proves the cold computation from that position takes the same course:
+/// it reaches no deeper than the depth left, and the recursion identities
+/// below the read cannot complete a deeply-nested stack with its own.
+/// Anywhere else the relation is computed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RelationRecursionFootprint {
+    /// The most structured relations the computation stacked, the
+    /// relation itself included (`0` for a pair of simple types).
+    pub height: u16,
+    /// Per side (source, target): a count every recursion identity's
+    /// instantiations on one path are within, the listed ones
+    /// ([`Self::side_identities`]) included: `0` when the list is exact,
+    /// the component's bound for a member of a cyclic component (whose own
+    /// computation stopped at an assumption a cold computation relates).
+    pub any: [u16; 2],
+    /// The computation met a variance marker the checker reports as
+    /// unreliable (`ReportsUnreliable`): a rest parameter holding it, or an
+    /// unreliable parameter's argument. A variance measurement whose
+    /// relations report it lets a failed argument check fall back to the
+    /// structural comparison.
+    pub unreliable: bool,
+    /// Per side, the recursion identities the computation stacked with the
+    /// most distinct instantiations of each on one path; `None` when
+    /// neither side stacked one (every memo entry carries a footprint, so
+    /// the rare list sits behind one pointer).
+    pub identities: Option<Arc<RecursionIdentities>>,
+}
+
+/// The per-side identity lists of a [`RelationRecursionFootprint`]:
+/// `(identity fingerprint, instantiations)` pairs, in fingerprint order.
+/// Only an identity with type arguments has more than one instantiation,
+/// so only a generic alias's appears.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecursionIdentities {
+    /// Source side, target side.
+    pub sides: [Box<[(u64, u16)]>; 2],
+}
+
+impl RelationRecursionFootprint {
+    /// The recursion identities side `side` stacked (`0` source, `1`
+    /// target).
+    #[must_use]
+    pub fn side_identities(&self, side: usize) -> &[(u64, u16)] {
+        self.identities
+            .as_deref()
+            .map_or(&[], |identities| &identities.sides[side])
+    }
+
+    /// Whether side `side` stacked no recursion identity.
+    #[must_use]
+    pub fn side_is_empty(&self, side: usize) -> bool {
+        self.any[side] == 0 && self.side_identities(side).is_empty()
+    }
 }
 
 /// Public value-domain outcome of a relation query (assignability / subtype /
@@ -7924,6 +8208,18 @@ impl PendingSubstitutionFrame {
         &self.pairs
     }
 
+    /// The frame with the last pair binding `param` rebound to `arg`.
+    #[must_use]
+    pub fn rebind_last(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        let mut pairs = self.pairs.to_vec();
+        if let Some(pair) = pairs.iter_mut().rev().find(|(bound, _)| *bound == param) {
+            pair.1 = arg;
+        }
+        Self {
+            pairs: Arc::from(pairs.into_boxed_slice()),
+        }
+    }
+
     #[must_use]
     pub fn append(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
         if param == arg {
@@ -7945,6 +8241,12 @@ impl PendingSubstitutionFrame {
 pub struct ConditionalPendingSubstitution {
     true_branch: PendingSubstitutionFrame,
     false_branch: PendingSubstitutionFrame,
+    /// The type parameter a distributive conditional's check was written
+    /// as, once a substitution supplied it: distributing over the union it
+    /// was given binds it to each member in turn (the checker's
+    /// `getConditionalTypeInstantiation` maps the check parameter to each
+    /// member).
+    distribution: Option<SemanticNodeId>,
 }
 
 impl ConditionalPendingSubstitution {
@@ -7964,7 +8266,31 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: PendingSubstitutionFrame::empty(),
             false_branch: PendingSubstitutionFrame::empty(),
+            distribution: None,
         }
+    }
+
+    /// This frame with `param` recorded as the distributive check's
+    /// parameter.
+    #[must_use]
+    pub fn distributing(&self, param: SemanticNodeId) -> Self {
+        Self {
+            distribution: Some(param),
+            ..self.clone()
+        }
+    }
+
+    /// The frame one member of the distribution relates under: the check's
+    /// parameter bound to `member` in both branches. `None` when no
+    /// substitution supplied the check's parameter.
+    #[must_use]
+    pub fn distributed_over(&self, member: SemanticNodeId) -> Option<Self> {
+        let param = self.distribution?;
+        Some(Self {
+            true_branch: self.true_branch.rebind_last(param, member),
+            false_branch: self.false_branch.rebind_last(param, member),
+            distribution: None,
+        })
     }
 
     #[must_use]
@@ -7987,6 +8313,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.append(param, arg),
             false_branch: self.false_branch.clone(),
+            distribution: self.distribution,
         }
     }
 
@@ -7995,6 +8322,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.clone(),
             false_branch: self.false_branch.append(param, arg),
+            distribution: self.distribution,
         }
     }
 
@@ -8003,6 +8331,7 @@ impl ConditionalPendingSubstitution {
         Self {
             true_branch: self.true_branch.append(param, arg),
             false_branch: self.false_branch.append(param, arg),
+            distribution: self.distribution,
         }
     }
 }
@@ -8700,7 +9029,7 @@ pub enum SemanticQueryKey {
     ///   unwrapping on the current path is the checker's recursive
     ///   thenable: TS1062, with the arm dropped from an enclosing union and
     ///   otherwise the checker's error type as the answer
-    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   (`Opaque(QueryError::CheckerRecovery { .. })`, reading as `any`) —
     ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
     ///   not expand, an exhausted budget, or any other unsettled shape is
@@ -9587,10 +9916,12 @@ pub enum SemanticNodeData {
     /// Modelled as an explicit variant rather than
     /// encoded via scope overloading (rejects anti-pattern #3 — scope-
     /// as-discriminator). The `name` is the infer binding name the
-    /// `true` branch will substitute the bound type into.
+    /// `true` branch will substitute the bound type into; `constraint` is
+    /// the declared `infer X extends C` constraint.
     Infer {
         name: Arc<str>,
         binder: InferBinderId,
+        constraint: Option<SemanticNodeId>,
     },
     /// A true-branch REFERENCE to an in-scope `infer` binder — the node
     /// a `Ref { name }` occurrence resolves to through the conditional's
@@ -10070,12 +10401,14 @@ impl PartialEq for SemanticNodeData {
                 Self::Infer {
                     name: a,
                     binder: ab,
+                    constraint: ac,
                 },
                 Self::Infer {
                     name: b,
                     binder: bb,
+                    constraint: bc,
                 },
-            ) => a == b && ab == bb,
+            ) => a == b && ab == bb && ac == bc,
             (
                 Self::InferRef {
                     name: a,
@@ -10270,9 +10603,14 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name, binder } => {
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => {
                 name.hash(state);
                 binder.hash(state);
+                constraint.hash(state);
             }
             Self::InferRef { name, binder } => {
                 name.hash(state);
@@ -10778,11 +11116,16 @@ mod tests {
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
+            QueryError::PermissiveWildcard,
             QueryError::UnmodeledPosition,
-            QueryError::CheckerRecovery(CheckerDiagnostic {
-                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                operation: CheckerDiagnosticOperation::LibAwaited,
-            }),
+            QueryError::CheckerRecovery {
+                diagnostic: CheckerDiagnostic {
+                    code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: CheckerDiagnosticOperation::LibAwaited,
+                },
+                basis: RecoveryBasis::Certified,
+                origin: None,
+            },
         ];
         let mut tags = HashSet::new();
         for variant in &variants {
@@ -11225,6 +11568,7 @@ mod tests {
                     outcome: RelationOutcome::Assignable,
                     bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
                     relation_proof: RelationProofId(0),
+                    recursion: RelationRecursionFootprint::default(),
                 }),
                 SemanticQueryValueTag::Relation,
             ),

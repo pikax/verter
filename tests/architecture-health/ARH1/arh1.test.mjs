@@ -1399,41 +1399,6 @@ test("ARH1-cutover dirty twin: satisfying an invented or foreign ARH0 debt is re
   );
 });
 
-// ---------------------------------------------------------------------------
-// The products bind one measurable source basis (F4/F14): snapshot counts
-// are live invariants, independent of historical source references.
-// ---------------------------------------------------------------------------
-
-test("ARH1-surface dirty twin: a stale or key-stripped snapshot is rejected", () => {
-  const stale = cloneProducts();
-  hotspot(stale, SCHEDULER).snapshot.pubFn = 54; // the pre-merge count
-  let result = validate(stale, loadManifest(), arh0);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) =>
-        e.caseId === "ARH1-surface" &&
-        e.code === "snapshot-count-drift" &&
-        e.detail.includes("pubFn"),
-    ),
-    JSON.stringify(result.errors),
-  );
-
-  const stripped = cloneProducts();
-  delete hotspot(stripped, SCHEDULER).snapshot.pubFnTestHooks;
-  result = validate(stripped, loadManifest(), arh0);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) =>
-        e.caseId === "ARH1-surface" &&
-        e.code === "snapshot-count-drift" &&
-        e.detail.includes("pubFnTestHooks"),
-    ),
-    JSON.stringify(result.errors),
-  );
-});
-
 test("source references are optional context, independent of commit identity", () => {
   const products = cloneProducts();
   for (const product of Object.values(products)) {

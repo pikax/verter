@@ -90,6 +90,9 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
         FactVersionRef::ProjectGeneration { .. }
         | FactVersionRef::DomainGeneration(_)
         | FactVersionRef::StrictSelfRootWorld(_) => false,
+        // A consumed result's receipt references every canonical its
+        // evidence reaches.
+        FactVersionRef::Receipt(receipt) => receipt.references_canonical(canonical_id),
     }
 }
 

@@ -527,6 +527,10 @@ impl VerterHost {
     }
 
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {
+        verter_debug_assert!(
+            parse.refused.is_none(),
+            "a refused parse has no analysis snapshot: its readers serve none",
+        );
         // The snapshot is shared by `Arc`; this builder consumes a freshly
         // parsed `ParseSnapshot` whose snapshot is uniquely held, so
         // `unwrap_or_clone` moves the inner value out without copying (it only
@@ -561,15 +565,19 @@ impl VerterHost {
         }
     }
 
+    /// The analysis snapshot of `source`, read afresh, and its template
+    /// inputs; `None` when the script's parse, or the walk-stack lease of
+    /// its walks, was refused for want of stack: typed operational
+    /// incompleteness, served as no analysis, never an empty file's.
     pub(crate) fn build_snapshot_and_template_inputs_from_source(
         &self,
         canonical: &str,
         source: &Arc<str>,
         store_published: bool,
-    ) -> (
+    ) -> Option<(
         FileAnalysisSnapshot,
         Option<crate::types::VueTemplateInputs>,
-    ) {
+    )> {
         component_meta_trace_custom!(
             "build_snapshot_from_source",
             format!("owner={} bytes={}", canonical, source.len()),
@@ -577,18 +585,18 @@ impl VerterHost {
         let file_language = self.language_classifier.classify(canonical);
         if file_language.is_vue() {
             let Some(source_snapshot) = self.scheduler.try_get_source(canonical) else {
-                return (FileAnalysisSnapshot::default(), None);
+                return Some((FileAnalysisSnapshot::default(), None));
             };
             if source_snapshot.source.as_ref() != source.as_ref() {
-                return (FileAnalysisSnapshot::default(), None);
+                return Some((FileAnalysisSnapshot::default(), None));
             }
             let Some(host_data) =
                 source_snapshot.downcast_data::<crate::host_executor::HostSourceData>()
             else {
-                return (FileAnalysisSnapshot::default(), None);
+                return Some((FileAnalysisSnapshot::default(), None));
             };
             let Some(parsed) = host_data.framework_parse.clone() else {
-                return (FileAnalysisSnapshot::default(), None);
+                return Some((FileAnalysisSnapshot::default(), None));
             };
             let Some((parse, _)) = crate::parse::carrier_snapshot_from_artifact(
                 canonical,
@@ -598,7 +606,7 @@ impl VerterHost {
                 &self.provenance,
                 &parsed,
             ) else {
-                return (FileAnalysisSnapshot::default(), None);
+                return Some((FileAnalysisSnapshot::default(), None));
             };
             component_meta_trace_custom!(
                 "parse_vue_snapshot_result",
@@ -620,10 +628,13 @@ impl VerterHost {
                 // template serves the caller but never persists.
                 source_generation: Some(source_snapshot.generation),
             };
-            (
+            if parse.refused.is_some() {
+                return None;
+            }
+            Some((
                 Self::build_snapshot_from_parse(parse),
                 Some(template_inputs),
-            )
+            ))
         } else {
             component_meta_trace_custom!("parse_non_sfc_snapshot", format!("owner={canonical}"));
             let parse = crate::parse::parse_non_sfc_snapshot(
@@ -642,7 +653,10 @@ impl VerterHost {
                     parse.export_signatures.len(),
                 ),
             );
-            (Self::build_snapshot_from_parse(parse), None)
+            if parse.refused.is_some() {
+                return None;
+            }
+            Some((Self::build_snapshot_from_parse(parse), None))
         }
     }
 
@@ -816,43 +830,49 @@ impl VerterHost {
             }
         }
 
-        let mut refused = false;
-        let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
+        // One run of the companion probes per canonical per request: every
+        // consumer normalizing it again in the request shares that run.
+        let normalization = self.request_normalized_canonical(canonical_id, || {
+            let mut refused = false;
+            let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
+                if refused {
+                    return false;
+                }
+                match self.resolve_for_persistent_state(
+                    canonical_id,
+                    candidate,
+                    verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    },
+                ) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.result().is_some()
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        refused = true;
+                        false
+                    }
+                }
+            });
             if refused {
-                return false;
+                // The original canonical remains useful to this query, but
+                // no resolution-derived mapping may be retained. Taint
+                // every enclosing cacheability scope so a caller folding
+                // this fallback serves ReturnOnly.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return (None, true);
             }
-            match self.resolve_for_persistent_state(
-                canonical_id,
-                candidate,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-                },
-            ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    admitted.result().is_some()
-                }
-                verter_workspace::ResolutionPublication::Refused(_) => {
-                    refused = true;
-                    false
-                }
-            }
+            let normalized = resolved
+                .filter(|resolved| resolved != canonical_id)
+                .map(|resolved| std::sync::Arc::<str>::from(resolved.as_str()));
+            (normalized, false)
         });
-
-        if refused {
-            // The original canonical remains useful to this query, but no
-            // resolution-derived mapping may be retained. Taint every
-            // enclosing cacheability scope so a caller folding this fallback
-            // serves ReturnOnly.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
-            );
-            return std::borrow::Cow::Borrowed(canonical_id);
-        }
-
-        match resolved {
-            Some(resolved) if resolved != canonical_id => std::borrow::Cow::Owned(resolved),
-            _ => std::borrow::Cow::Borrowed(canonical_id),
+        match normalization.normalized.as_deref() {
+            Some(normalized) => std::borrow::Cow::Owned(normalized.to_string()),
+            None => std::borrow::Cow::Borrowed(canonical_id),
         }
     }
 

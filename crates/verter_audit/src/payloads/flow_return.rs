@@ -95,6 +95,9 @@ pub enum FlowDegradationTag {
     /// A sub-expression position contributed the typed unresolved
     /// marker and the enclosing structure composed around it.
     UnmodeledPosition,
+    /// The value was composed around an interior read that did not
+    /// complete.
+    PartialInterior,
 }
 
 /// Closed mirror of the session's no-value flow-return reasons — the

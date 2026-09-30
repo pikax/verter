@@ -818,3 +818,594 @@ fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Overloads whose first candidate relates through a method parameter, and
+/// arguments inferred against a union parameter's fixed members.
+const OVERLOADS_AND_UNION_MEMBERS: &str = r##"
+declare function pick(v: { m(x: string | number): void }): "wide";
+declare function pick(v: {}): "fallback";
+declare function pickP(v: { m: (x: string | number) => void }): "wide";
+declare function pickP(v: {}): "fallback";
+declare const a: { m(x: string): void };
+export function oMethod() { return pick(a); }
+export function oProperty() { return pickP(a); }
+declare function inferObject<T>(x: T | { a: unknown }): T;
+declare const anyObject: { a: any } | 1;
+declare const unknownObject: { a: unknown } | 1;
+export function uAny() { return inferObject(anyObject); }
+export function uUnknown() { return inferObject(unknownObject); }
+declare function inferBoolean<T>(x: T | boolean): T;
+declare function inferTrue<T>(x: T | true): T;
+declare const trueOrOne: true | 1;
+declare const booleanOrOne: boolean | 1;
+export function uTrue() { return inferBoolean(trueOrOne); }
+export function uBoolean() { return inferBoolean(booleanOrOne); }
+export function uFalse() { return inferTrue(booleanOrOne); }
+"##;
+
+/// A method member keeps its bivariant parameters in every overload pass,
+/// the subtype pass included, so `{ m(x: string): void }` selects the
+/// method candidate (`"wide"`) while a function-typed property stays
+/// contravariant (`"fallback"`). Measured on TypeScript 7.0.2, alike under
+/// all four settings.
+#[test]
+fn a_method_parameter_stays_bivariant_in_the_overload_subtype_pass() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[("oMethod", "\"wide\""), ("oProperty", "\"fallback\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An argument member matches a fixed member of the union parameter only by
+/// the checker's identity: `{ a: any }` is not `{ a: unknown }` (`uAny` is
+/// `1 | { a: any; }`), and `boolean` on either side is its two literals
+/// (`true | 1` against `T | boolean` infers `1`, `boolean | 1` against `T |
+/// true` infers `1 | false`). Measured on TypeScript 7.0.2, alike under all
+/// four settings.
+#[test]
+fn a_union_argument_matches_a_fixed_member_by_the_checkers_identity() {
+    let matrix = Matrix::new(OVERLOADS_AND_UNION_MEMBERS);
+    let failures = matrix.returns(&[
+        ("uAny", "1 | { a: any; }"),
+        ("uUnknown", "1"),
+        ("uTrue", "1"),
+        ("uBoolean", "1"),
+        ("uFalse", "1 | false"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls through a rigid type parameter and through local overloads.
+const RIGID_AND_LOCAL_OVERLOADS: &str = r##"
+declare class Box2<U> { put<T>(x: T, y: U | string): T; }
+export function rigidArgument<U>(b: Box2<U>, u: U) { return b.put(1, u); }
+export function localOverloads<U>(u: U) { function k(x: string): 1; function k(x: number): 2; function k(x: any): any { return x; } return k("s"); }
+export function localGenericOverloads<U>(u: U) { function k<T>(x: T, y: U | string): "first"; function k(x: unknown, y: unknown): "second"; function k(x: any, y: any): any { return x; } const v = "a" as "a" | "b"; return k(1, v); }
+"##;
+
+/// A rigid type parameter argument relates to a union parameter holding it
+/// through that identical member, so `b.put(1, u)` over `put<T>(x: T, y: U
+/// | string): T` infers `T` from `1`: `number`. Measured on TypeScript
+/// 7.0.2, alike under all four settings.
+#[test]
+fn a_rigid_type_parameter_relates_to_a_union_holding_it() {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let failures = matrix.returns(&[("rigidArgument", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The rows of local overloaded functions, with the checker's answers:
+/// the call resolves over the overload signatures, never the
+/// implementation's (`1` and `"first"`). Measured on TypeScript 7.0.2, alike
+/// under all four settings.
+const LOCAL_OVERLOAD_ROWS: [(&str, &str); 2] = [
+    ("localOverloads", "1"),
+    ("localGenericOverloads", "\"first\""),
+];
+
+/// Each local-overload row that does not read the checker's answer, only
+/// those the lane publishes clean when `clean_only`.
+fn local_overload_misses(clean_only: bool) -> Vec<String> {
+    let matrix = Matrix::new(RIGID_AND_LOCAL_OVERLOADS);
+    let rows: Vec<(Read<'_>, Vec<&str>)> = LOCAL_OVERLOAD_ROWS
+        .iter()
+        .map(|(function, answer)| (Read::Return(function), vec![*answer; 4]))
+        .collect();
+    LOCAL_OVERLOAD_ROWS
+        .iter()
+        .zip(matrix.verdicts(&rows))
+        .flat_map(|((function, _), verdicts)| {
+            verdicts
+                .into_iter()
+                .filter(|verdict| !verdict.matched && (!clean_only || verdict.class != "GAP"))
+                .map(move |verdict| format!("`{function}`: {}", verdict.lane))
+        })
+        .collect()
+}
+
+/// A local function with overload signatures is never called through its
+/// implementation's signature (whose `any` return the checker never
+/// exposes): the call degrades rather than publishing `any`.
+#[test]
+fn a_local_overloaded_function_is_never_called_through_its_implementation() {
+    let wrong = local_overload_misses(true);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the lane gives: each row degrades (the overloaded local function
+/// has no modelled value).
+#[test]
+#[ignore = "a local overloaded function resolves the call over its overload signatures"]
+fn a_local_overloaded_function_resolves_over_its_overloads() {
+    let failures = local_overload_misses(false);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Member calls chained on call results, each receiver its own: every call
+/// of a chain starts where the chain does, and each reads the value its own
+/// callee's object evaluated to, on every loop pass.
+const RECEIVER_CHAINS: &str = r##"
+interface A { m(this: A): B }
+interface B { m(this: B): C }
+interface C { m(this: C): D }
+interface D { tag: string | number }
+declare const a: A;
+declare function cond(): boolean;
+export function looped() { let x: string | number = 0; while (cond()) { x = a.m().m().m().tag; } return x; }
+export function straight() { return a.m().m().m(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics:
+/// `string | number` looped, `D` straight.
+#[test]
+fn each_call_of_a_receiver_chain_reads_its_own_receiver() {
+    let matrix = Matrix::new(RECEIVER_CHAINS);
+    let failures = matrix.returns(&[("looped", "string | number"), ("straight", "D")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
+/// Calls whose value depends on the receiver they are called through: a
+/// member's polymorphic `this` (the reference the member is read through
+/// binds it), a type parameter a `this` parameter infers, and overloads a
+/// `this` parameter selects between.
+const RECEIVER_SENSITIVE_CALLS: &str = r##"
+interface Box<V> { v: V }
+interface S { self(): this; wrap(): Box<this>; pair(o: this): this; n: number }
+interface T extends S { t: string }
+declare const t: T;
+interface G { id<X>(this: X): X; next(): H }
+interface H { tag: "h" }
+declare const g: G;
+class K { self(): this { return this; } k = 1 }
+declare function mkT(): T;
+declare const u: T | K;
+interface O { pick(this: O & { a: 1 }): "a"; pick(this: O): "o" }
+declare const o: O;
+declare const oa: O & { a: 1 };
+export function selfOnce() { return t.self(); }
+export function selfTwice() { return t.self().self(); }
+export function idOnce() { return g.id(); }
+export function idThenNext() { return g.id().next().tag; }
+export function onParam(p: T) { return p.self(); }
+export function onLocal() { const l = t; return l.self(); }
+export function onClass(k: K) { return k.self(); }
+export function onResult() { return mkT().self(); }
+export function onUnion() { return u.self(); }
+export function wrapped() { return t.wrap().v; }
+export function paired() { return t.pair(t); }
+export function spreadArg() { const a: [T] = [t]; return t.pair(...a); }
+export function detached() { const fn = t.self; return fn(); }
+export function detachedOnResult() { const fn = mkT().self; return fn(); }
+export function parenthesized() { return (t.self)(); }
+export function overloadPlain() { return o.pick(); }
+export function overloadA() { return oa.pick(); }
+export const constSelf = t.self();
+export const constId = g.id();
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `T` for
+/// every call of `self`, `pair` and `wrap().v` through a `T` (a detached
+/// `self` read off one too), `G` and `"h"` through `g`, `K` through `k`,
+/// `K | T` through `u`, `"o"` and `"a"` for the overloads, and `T` and `G`
+/// for the two module constants.
+#[test]
+fn a_call_reads_its_receiver_where_its_value_depends_on_it() {
+    let matrix = Matrix::new(RECEIVER_SENSITIVE_CALLS);
+    let mut failures = matrix.returns(&[
+        ("selfOnce", "T"),
+        ("selfTwice", "T"),
+        ("idOnce", "G"),
+        ("idThenNext", "\"h\""),
+        ("onParam", "T"),
+        ("onLocal", "T"),
+        ("onClass", "K"),
+        ("onResult", "T"),
+        ("onUnion", "K | T"),
+        ("wrapped", "T"),
+        ("paired", "T"),
+        ("spreadArg", "T"),
+        ("detached", "T"),
+        ("detachedOnResult", "T"),
+        ("parenthesized", "T"),
+        ("overloadPlain", "\"o\""),
+        ("overloadA", "\"a\""),
+    ]);
+    failures.extend(matrix.same(&[
+        (Read::Type("typeof constSelf"), "T"),
+        (Read::Type("typeof constId"), "G"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls with no receiver: the checker's this-argument is `void`.
+const RECEIVERLESS_CALLS: &str = r##"
+function d<X>(this: X): X { return this; }
+function q<X>(this: X, x: number): X { return this; }
+function vo(this: void) { return 1 as const; }
+export function direct() { return d(); }
+export function inferVoid() { return q(1); }
+export function voidThis() { return vo(); }
+export function bareGeneric(f: <X>(this: X) => X) { return f(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `void` for
+/// each `this` type parameter a bare call infers, and `1` for the
+/// `this: void` function.
+#[test]
+fn a_call_without_a_receiver_passes_void_as_its_this() {
+    let matrix = Matrix::new(RECEIVERLESS_CALLS);
+    let failures = matrix.returns(&[
+        ("direct", "void"),
+        ("inferVoid", "void"),
+        ("voidThis", "1"),
+        ("bareGeneric", "void"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A `super` call of a base member returning its polymorphic `this`: the
+/// member's `this` is the calling class's own, which a call through a
+/// `B` binds to `B`.
+const SUPER_THIS_CALL: &str = r##"
+declare class A { self(): this; a: number }
+class B extends A { m() { return super.self(); } b = 1 }
+export function viaSuper(b: B) { return b.m(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting: `B`.
+#[test]
+fn a_super_call_binds_the_calling_class_this() {
+    let matrix = Matrix::new(SUPER_THIS_CALL);
+    let failures = matrix.returns(&[("viaSuper", "B")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A method whose body returns `this`, called through a parameter, a
+/// module constant and a constructed value.
+const BODY_THIS_CALLS: &str = r##"
+class K2 { self() { return this; } k = 1 }
+declare const k2: K2;
+export function bodyThis(k: K2) { return k.self(); }
+export function bodyThisConst() { return k2.self(); }
+export function bodyThisNew() { return new K2().self(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting: `K2` for each call.
+#[test]
+fn a_method_returning_this_reads_its_receiver() {
+    let matrix = Matrix::new(BODY_THIS_CALLS);
+    let failures = matrix.returns(&[
+        ("bodyThis", "K2"),
+        ("bodyThisConst", "K2"),
+        ("bodyThisNew", "K2"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls of an element (`t["m"]()`, `t[0]()`, `t[k]()` with a literal-typed
+/// `k`): the element's object is the call's receiver.
+const ELEMENT_CALLS: &str = r##"
+interface S { self(): this; n: number; 0(): this; pick<X>(this: X): X }
+interface T extends S { t: string }
+declare const t: T;
+declare const k: "self";
+declare const z: 0;
+declare const tup: [() => string, (x: number) => number];
+declare function mkT(): T;
+export function elementCall() { return t["self"](); }
+export function templateElement() { return t[`self`](); }
+export function elementKeyCall() { return t[k](); }
+export function elementNumericCall() { return t[0](); }
+export function elementZeroCall() { return t[z](); }
+export function elementGenericThis() { return t["pick"](); }
+export function tupleCall() { return tup[1](2); }
+export function elementOnResult() { return mkT()["self"](); }
+export function elementChain() { return t["self"]()["self"](); }
+export function paramElement(p: T) { return p["self"](); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `T` for
+/// each element call through a `T`, `number` for the tuple's.
+#[test]
+fn an_element_call_reads_its_object_as_its_receiver() {
+    let matrix = Matrix::new(ELEMENT_CALLS);
+    let failures = matrix.returns(&[
+        ("elementCall", "T"),
+        ("templateElement", "T"),
+        ("elementKeyCall", "T"),
+        ("elementNumericCall", "T"),
+        ("elementZeroCall", "T"),
+        ("elementGenericThis", "T"),
+        ("tupleCall", "number"),
+        ("elementOnResult", "T"),
+        ("elementChain", "T"),
+        ("paramElement", "T"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Calls of a call's value: the callee is what the inner call evaluates
+/// to, its arguments included.
+const CALLS_OF_CALLS: &str = r##"
+declare function mk(): (x: number) => string;
+declare function g2<T>(x: T): () => T;
+export function callOfCall() { return g2(1)(); }
+export function callOfCallResult() { return mk()(1); }
+export function callOfCallTwice() { return g2(g2("a"))()(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting: `number`, `string`, `string`.
+#[test]
+fn a_call_of_a_call_value_reads_the_inner_call() {
+    let matrix = Matrix::new(CALLS_OF_CALLS);
+    let failures = matrix.returns(&[
+        ("callOfCall", "number"),
+        ("callOfCallResult", "string"),
+        ("callOfCallTwice", "string"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The ambient `Function` surface the `call` / `apply` / `bind` rows read:
+/// `CallableFunction`'s generic signatures under `strictBindCallApply`,
+/// `Function`'s `any`-returning ones without it.
+const FUNCTION_LIB: &str = r##"interface Object { toString(): string; }
+interface Function { apply(this: Function, thisArg: any, argArray?: any): any; call(this: Function, thisArg: any, ...argArray: any[]): any; bind(this: Function, thisArg: any, ...argArray: any[]): any; readonly length: number; }
+interface CallableFunction extends Function {
+  apply<T, R>(this: (this: T) => R, thisArg: T): R;
+  apply<T, A extends any[], R>(this: (this: T, ...args: A) => R, thisArg: T, args: A): R;
+  call<T, A extends any[], R>(this: (this: T, ...args: A) => R, thisArg: T, ...args: A): R;
+  bind<T>(this: T, thisArg: ThisParameterType<T>): OmitThisParameter<T>;
+  bind<T, A extends any[], B extends any[], R>(this: (this: T, ...args: [...A, ...B]) => R, thisArg: T, ...args: A): (...args: B) => R;
+}
+interface NewableFunction extends Function {}
+interface IArguments { [index: number]: any; length: number; }
+interface Array<T> { length: number; [n: number]: T; }
+interface String {} interface Number {} interface Boolean {} interface RegExp {}
+type ThisParameterType<T> = T extends (this: infer U, ...args: never) => any ? U : unknown;
+type OmitThisParameter<T> = unknown extends ThisParameterType<T> ? T : T extends (...args: infer A) => infer R ? (...args: A) => R : T;
+"##;
+
+/// `Function.prototype`'s `call` / `apply` / `bind` over function values,
+/// module functions, call results, local arrows and methods read off
+/// objects.
+const FUNCTION_CALL_APPLY_BIND: &str = r##"
+declare const f: (x: number) => string;
+declare function mk(): (x: number) => string;
+declare function add(a: number, b: number): number;
+interface M { m(this: M, x: number): string; n(x: number): boolean }
+declare const obj: M;
+interface Ctx { c: 1 }
+interface M2 { m(this: Ctx, x: number): string }
+declare const obj2: M2;
+declare const ctx: Ctx;
+declare function id<T>(x: T): T;
+declare function ov(x: string): string;
+declare function ov(x: number): number;
+export function called() { return f.call(null, 1); }
+export function calledOnResult() { return mk().call(null, 1); }
+export function appliedOnResult() { return mk().apply(null, [1]); }
+export function applied() { return add.apply(undefined, [1, 2]); }
+export function bound() { return f.bind(null); }
+export function boundCalled() { return f.bind(null)(1); }
+export function boundPartial() { return add.bind(undefined, 1); }
+export function boundPartialCalled() { return add.bind(undefined, 1)(2); }
+export function methodCall() { return obj.m.call(obj, 1); }
+export function methodApply() { return obj.n.apply(obj, [1]); }
+export function methodBind() { return obj.m.bind(obj); }
+export function methodCall2() { return obj2.m.call(ctx, 1); }
+export function methodBind2() { return obj2.m.bind(ctx); }
+export function localArrow() { const g = (x: number) => x > 0; return g.call(undefined, 1); }
+export function nestedDecl() { function h(a: number) { return a > 0; } return h.call(undefined, 1); }
+declare function opt(a: number, b?: string): void;
+declare function three(a: number, b: string, c: boolean): number;
+export function boundAll() { return add.bind(undefined, 1, 2); }
+export function boundAllCalled() { return add.bind(undefined, 1, 2)(); }
+export function boundOptional() { return opt.bind(null, 1); }
+export function boundTwoOfThree() { return three.bind(null, 1, "s"); }
+export function boundOneOfThree() { return three.bind(null, 1); }
+export function boundGeneric() { return id.bind(null, 1); }
+export function idCall() { return id.call(null, 1); }
+export function idApply() { return id.apply(null, [1]); }
+export function ovCall() { return ov.call(null, 1); }
+export function ovApply() { return ov.apply(null, [1]); }
+export function idBind() { return id.bind(null); }
+export function ovBind() { return ov.bind(null); }
+"##;
+
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on, as
+/// `strict` sets it), with no diagnostics: `string` for `call` and
+/// `apply` over `(x: number) => string` values and methods, `number` for
+/// `add.apply`, `boolean` for the `n` method and the local arrow.
+#[test]
+fn function_call_and_apply_read_the_function_they_are_read_off() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.returns(&[
+        ("called", "string"),
+        ("calledOnResult", "string"),
+        ("appliedOnResult", "string"),
+        ("applied", "number"),
+        ("methodCall", "string"),
+        ("methodApply", "boolean"),
+        ("methodCall2", "string"),
+        ("localArrow", "boolean"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2 with `strictBindCallApply` off, under every
+/// `strictNullChecks` × `noImplicitAny` setting: `any` for every
+/// `call` / `apply` / `bind` form (`Function`'s signatures), and for a
+/// call of a bound value.
+#[test]
+fn function_call_apply_and_bind_are_any_without_strict_bind_call_apply() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND)
+        .lib(FUNCTION_LIB)
+        .settings(&super::differential_harness_tests::BIND_CALL_APPLY_OFF);
+    let failures = matrix.returns(&[
+        ("called", "any"),
+        ("calledOnResult", "any"),
+        ("appliedOnResult", "any"),
+        ("applied", "any"),
+        ("bound", "any"),
+        ("boundCalled", "any"),
+        ("boundPartial", "any"),
+        ("boundPartialCalled", "any"),
+        ("methodCall", "any"),
+        ("methodApply", "any"),
+        ("methodBind", "any"),
+        ("methodCall2", "any"),
+        ("methodBind2", "any"),
+        ("localArrow", "any"),
+        ("nestedDecl", "any"),
+        ("idCall", "any"),
+        ("ovCall", "any"),
+        ("idBind", "any"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics, through `CallableFunction`'s generic signatures: `bind`
+/// with no bound argument gives `(x: number) => string` over `f` and both
+/// methods (their `this` omitted, `OmitThisParameter`) and its call
+/// `string`; `call` / `apply` over the generic `id` are `unknown` (its
+/// base signature) and over the overloaded `ov` `number` (its last
+/// signature); `bind` over them is their own type; a nested function
+/// declaration's `call` is `boolean`.
+#[test]
+fn function_bind_and_generic_calls_read_the_function_they_are_read_off() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.returns(&[
+        ("bound", "(x: number) => string"),
+        ("boundCalled", "string"),
+        ("methodBind", "(x: number) => string"),
+        ("methodBind2", "(x: number) => string"),
+        ("idCall", "unknown"),
+        ("idApply", "unknown"),
+        ("ovCall", "number"),
+        ("ovApply", "number"),
+        ("idBind", "<T>(x: T) => T"),
+        ("ovBind", "{ (x: string): string; (x: number): number; }"),
+        ("nestedDecl", "boolean"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, under every setting (`strictBindCallApply` on), with
+/// no diagnostics: `bind` with bound arguments takes its second overload,
+/// which splits the function's parameters as `[...A, ...B]` at the number
+/// of bound arguments — `add.bind(undefined, 1)` is `(b: number) =>
+/// number`, `add.bind(undefined, 1, 2)` `() => number`, `three` bound at
+/// one and at two arguments `(b: string, c: boolean) => number` and `(c:
+/// boolean) => number`, the generic `id` bound at one `() => unknown` (its
+/// base signature) — and a call of a bound value is the function's return.
+#[test]
+fn a_partially_applied_bind_reads_its_remaining_parameters() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.returns(&[
+        ("boundPartial", "(b: number) => number"),
+        ("boundPartialCalled", "number"),
+        ("boundAll", "() => number"),
+        ("boundAllCalled", "number"),
+        ("boundOneOfThree", "(b: string, c: boolean) => number"),
+        ("boundTwoOfThree", "(c: boolean) => number"),
+        ("boundGeneric", "() => unknown"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2: `opt.bind(null, 1)` over `opt(a: number, b?: string)`
+/// is `(b?: string | undefined) => void`, `(b?: string) => void` without
+/// `strictNullChecks` — the optional parameter stays optional in the split.
+#[test]
+fn a_partially_applied_bind_keeps_an_optional_parameter() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.nullness(&[(
+        Read::Return("boundOptional"),
+        "(b?: string | undefined) => void",
+        "(b?: string) => void",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A member a derived class or interface declares replaces the base's
+/// member of the same name.
+const OVERRIDDEN_MEMBERS: &str = r##"
+declare class C0 { m(): string | number }
+declare class C1 extends C0 { m(): number }
+interface B0 { m(): string | number }
+interface D0 extends B0 { m(): number }
+declare const c1: C1;
+declare const d0: D0;
+export function classDerivedCall() { return c1.m(); }
+export function interfaceDerivedCall() { return d0.m(); }
+"##;
+
+/// TypeScript 7.0.2, under every setting, with no diagnostics: `number`
+/// for both calls, `() => number` for `C1["m"]` and `D0["m"]`.
+#[test]
+#[ignore = "a derived member intersects the base member of the same name instead of replacing it"]
+fn a_derived_member_replaces_the_base_member() {
+    let matrix = Matrix::new(OVERRIDDEN_MEMBERS);
+    let mut failures = matrix.returns(&[
+        ("classDerivedCall", "number"),
+        ("interfaceDerivedCall", "number"),
+    ]);
+    failures.extend(matrix.same(&[
+        (Read::Type("C1[\"m\"]"), "() => number"),
+        (Read::Type("D0[\"m\"]"), "() => number"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `bind` checks its `thisArg` against its parameter as the call's
+/// inference INSTANTIATED it: `ThisParameterType<T>` with `T` the function
+/// `bind` is read off reduces (`unknown` for a function with no `this`, the
+/// declared `this` otherwise), so the check is decided and every answer of
+/// [`function_bind_and_generic_calls_read_the_function_they_are_read_off`]
+/// closes with its proof.
+#[test]
+fn function_bind_and_generic_calls_close_with_their_proof() {
+    let matrix = Matrix::new(FUNCTION_CALL_APPLY_BIND).lib(FUNCTION_LIB);
+    let failures = matrix.unproven_returns(&[
+        "bound",
+        "boundCalled",
+        "methodBind",
+        "methodBind2",
+        "idCall",
+        "idApply",
+        "ovCall",
+        "ovApply",
+        "idBind",
+        "ovBind",
+        "nestedDecl",
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

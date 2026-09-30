@@ -4,9 +4,12 @@
 //! (`inferFromLiteralPartsToTemplateLiteral`) and checking it against the
 //! hole (`isValidTypeForTemplateLiteralPlaceholder`).
 
+use std::sync::Arc;
+
 use super::build::TemplatePiece;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query_memo::SemanticGraphStore;
 
 /// One side of a template relation: its texts (one more than its holes)
 /// and its holes.
@@ -116,7 +119,6 @@ impl ProjectSemanticDispatch<'_> {
                 quasis,
                 expressions,
             }) if quasis.len() == expressions.len() + 1
-                && quasis.iter().all(|quasi| !quasi.contains('\\'))
                 && expressions.iter().any(|hole| is_infer(*hole))
                 && expressions
                     .iter()
@@ -183,15 +185,13 @@ impl ProjectSemanticDispatch<'_> {
 
     /// A settled template literal type's parts: every hole a placeholder
     /// the reducer keeps (`string`, `number`, `bigint`, `any`, a string
-    /// mapping over one). `None` for any other node, or a template whose
-    /// quasis are not comparable raw text.
+    /// mapping over one). `None` for any other node.
     fn template_parts(&self, node: SemanticNodeId) -> Option<TemplateParts> {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
             }) if quasis.len() == expressions.len() + 1
-                && quasis.iter().all(|quasi| !quasi.contains('\\'))
                 && expressions.iter().all(|hole| self.is_template_hole(*hole)) =>
             {
                 Some(TemplateParts {
@@ -379,14 +379,38 @@ fn valid_number_string(text: &str) -> bool {
         ("0B", 2),
     ] {
         if let Some(digits) = trimmed.strip_prefix(prefix) {
-            return !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix));
+            return !digits.is_empty()
+                && digits.chars().all(|c| c.is_digit(radix))
+                && prefixed_integer_is_finite(digits, radix);
         }
     }
     let unsigned = trimmed
         .strip_prefix('+')
         .or_else(|| trimmed.strip_prefix('-'))
         .unwrap_or(trimmed);
-    decimal_literal(unsigned)
+    // A decimal literal's value is its correctly rounded double, which
+    // overflows to infinity past the largest finite one (`1e999`).
+    decimal_literal(unsigned) && unsigned.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// Whether a binary, octal or hexadecimal integer's value rounds to a finite
+/// double: under 1024 significant bits it does; at exactly 1024 it rounds
+/// to infinity when its top 54 bits are all set (at or past the midpoint
+/// between the largest finite double and 2^1024, a tie going to the even
+/// 2^1024); past 1024 it never does.
+fn prefixed_integer_is_finite(digits: &str, radix: u32) -> bool {
+    let width = radix.trailing_zeros();
+    let significant: Vec<bool> = digits
+        .chars()
+        .filter_map(|c| c.to_digit(radix))
+        .flat_map(|value| (0..width).rev().map(move |bit| value >> bit & 1 == 1))
+        .skip_while(|bit| !bit)
+        .collect();
+    match significant.len() {
+        length if length < 1024 => true,
+        1024 => !significant[..54].iter().all(|bit| *bit),
+        _ => false,
+    }
 }
 
 /// A JavaScript `StrUnsignedDecimalLiteral` other than `Infinity` (whose
@@ -452,6 +476,120 @@ fn valid_bigint_string(text: &str) -> bool {
             && unsigned.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Whether `pattern` is a pattern literal type (`isPatternLiteralType`): a
+/// template literal type whose every hole is a placeholder — `string`,
+/// `number`, `bigint`, `any` or a pattern literal type — or a string
+/// mapping over one.
+pub(super) fn is_pattern_literal(graph: &SemanticGraphStore, pattern: SemanticNodeId) -> bool {
+    match graph.node_data(pattern).as_deref() {
+        Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => expressions
+            .iter()
+            .all(|hole| is_pattern_placeholder(graph, *hole)),
+        Some(_) => string_mapping(graph, pattern)
+            .is_some_and(|(_, operand)| is_pattern_placeholder(graph, operand)),
+        None => false,
+    }
+}
+
+/// `isPatternLiteralPlaceholderType`, over the placeholders a canonical
+/// template holds.
+fn is_pattern_placeholder(graph: &SemanticGraphStore, hole: SemanticNodeId) -> bool {
+    matches!(
+        graph.node_data(hole).as_deref(),
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::String
+                | PrimitiveKind::Number
+                | PrimitiveKind::BigInt
+                | PrimitiveKind::Any
+        ))
+    ) || is_pattern_literal(graph, hole)
+}
+
+/// The intrinsic string mapping `node` applies and its operand.
+pub(super) fn string_mapping(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<(Arc<str>, SemanticNodeId)> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args })
+            if base.canonical_id.as_ref() == "__builtin__"
+                && matches!(
+                    base.decl_name.as_ref(),
+                    "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize"
+                )
+                && args.len() == 1 =>
+        {
+            Some((Arc::clone(&base.decl_name), args[0]))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the string literal `text` is matched by the pattern literal type
+/// `pattern` (`isTypeMatchedByTemplateLiteralOrStringMapping`): its slices,
+/// each target text matched leftmost, each fit their placeholder; under a
+/// string mapping, the mapping leaves `text` unchanged and the operand
+/// matches it.
+pub(super) fn string_literal_matches_pattern(
+    graph: &SemanticGraphStore,
+    text: &str,
+    pattern: SemanticNodeId,
+) -> bool {
+    if let Some((intrinsic, operand)) = string_mapping(graph, pattern) {
+        return super::build::transform_string_intrinsic(&intrinsic, text) == text
+            && placeholder_accepts(graph, text, operand);
+    }
+    let (quasis, holes) = match graph.node_data(pattern).as_deref() {
+        Some(SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        }) if quasis.len() == expressions.len() + 1 => (quasis.clone(), expressions.clone()),
+        _ => return false,
+    };
+    let last = quasis.len() - 1;
+    let (start, end) = (quasis[0].as_ref(), quasis[last].as_ref());
+    if text.len() < start.len() + end.len() || !text.starts_with(start) || !text.ends_with(end) {
+        return false;
+    }
+    let remaining = &text[..text.len() - end.len()];
+    let mut pos = start.len();
+    let mut slices: Vec<&str> = Vec::with_capacity(holes.len());
+    for delimiter in &quasis[1..last] {
+        let found = if delimiter.is_empty() {
+            match remaining[pos..].chars().next() {
+                Some(c) => pos + c.len_utf8(),
+                None => return false,
+            }
+        } else {
+            match remaining[pos..].find(delimiter.as_ref()) {
+                Some(offset) => pos + offset,
+                None => return false,
+            }
+        };
+        slices.push(&remaining[pos..found]);
+        pos = found + delimiter.len();
+    }
+    slices.push(&remaining[pos..]);
+    slices
+        .iter()
+        .zip(holes.iter())
+        .all(|(slice, hole)| placeholder_accepts(graph, slice, *hole))
+}
+
+/// `isValidTypeForTemplateLiteralPlaceholder` for a string literal slice
+/// against a pattern placeholder.
+fn placeholder_accepts(graph: &SemanticGraphStore, slice: &str, hole: SemanticNodeId) -> bool {
+    match graph.node_data(hole).as_deref() {
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Any)) => true,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => valid_number_string(slice),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => valid_bigint_string(slice),
+        Some(_) if is_pattern_literal(graph, hole) => {
+            string_literal_matches_pattern(graph, slice, hole)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{valid_bigint_string, valid_number_string};
@@ -469,6 +607,40 @@ mod tests {
         }
         for text in ["", "-0x1", "Infinity", "1_000", "NaN", "1e"] {
             assert!(!valid_number_string(text), "{text:?} is not a number");
+        }
+    }
+
+    /// Measured on TypeScript 7.0.2 through ``S extends `${number}` ``: a
+    /// numeric string whose value overflows the largest finite double is no
+    /// number. `"1e308"`, `"1.7976931348623157e308"`, 255 hexadecimal `F`s,
+    /// `0b1` followed by 1023 zeros and `0o1` by 341 zeros are numbers;
+    /// `"1e999"`, `"-1e999"`, `"2e308"`, `"1.7976931348623159e308"`, 256
+    /// hexadecimal `F`s, `0b1` followed by 1024 zeros and `0o1` by 342 zeros
+    /// are not.
+    #[test]
+    fn a_number_placeholder_refuses_a_value_past_the_largest_finite_double() {
+        let hex = |digits: usize| format!("0x{}", "F".repeat(digits));
+        let binary = |zeros: usize| format!("0b1{}", "0".repeat(zeros));
+        let octal = |zeros: usize| format!("0o1{}", "0".repeat(zeros));
+        for text in [
+            "1e308".to_owned(),
+            "1.7976931348623157e308".to_owned(),
+            hex(255),
+            binary(1023),
+            octal(341),
+        ] {
+            assert!(valid_number_string(&text), "{text:?} is a number");
+        }
+        for text in [
+            "1e999".to_owned(),
+            "-1e999".to_owned(),
+            "2e308".to_owned(),
+            "1.7976931348623159e308".to_owned(),
+            hex(256),
+            binary(1024),
+            octal(342),
+        ] {
+            assert!(!valid_number_string(&text), "{text:?} is not a number");
         }
     }
 

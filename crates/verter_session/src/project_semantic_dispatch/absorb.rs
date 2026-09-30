@@ -46,8 +46,8 @@ use crate::semantic_query::{
 use super::ProjectSemanticDispatch;
 
 /// A lattice-extreme operand the §22 absorption table reacts to.
-/// `pub(super)` so the shared conditional branch-selection oracle
-/// (`build.rs::conditional_branch_selection`) can route `any` / `error`
+/// `pub(super)` so the conditional branch selection
+/// (`conditional_decision.rs::conditional_branch_selection`) can route `any` / `error`
 /// checks — which semantically use BOTH branches / dominate — to
 /// `Deferred` instead of letting the relation table select a branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +81,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// `string | number | symbol` — the `keyof any` / `keyof never` keyspace.
-    fn string_number_symbol(&self) -> SemanticNodeId {
+    pub(super) fn string_number_symbol(&self) -> SemanticNodeId {
         let s = self.primitive_node(PrimitiveKind::String);
         let n = self.primitive_node(PrimitiveKind::Number);
         let sym = self.primitive_node(PrimitiveKind::Symbol);
@@ -235,7 +235,9 @@ impl ProjectSemanticDispatch<'_> {
 
     // ── Conditional ───────────────────────────────────────────────────────
     /// §22.2 conditional absorption on the CHECK type. Three rows, in
-    /// dominance order:
+    /// dominance order, after the checker's own first test — an error
+    /// EXTENDS type is the answer as well (`T extends error` ⇒ `error`),
+    /// unless the check type already is one:
     ///
     /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
     ///    and both branches — stays FIRST).
@@ -272,19 +274,32 @@ impl ProjectSemanticDispatch<'_> {
         mut force_branch: impl FnMut(bool) -> SemanticNodeId,
     ) -> Option<QueryBuildOutput> {
         let decision_roots = [check, extends];
+        // (0) An error EXTENDS type is the conditional's answer too: the
+        //     checker returns its error type when either operand is it.
+        if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
+            if !matches!(self.peek_special(check), Some((SpecialKind::Error, _))) {
+                return Some(self.absorbed_output(err, decision_roots));
+            }
+        }
         match self.peek_special(check)? {
             // (1) error dominates any/never and both branches.
             (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
             // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
             //     would be involved (then fall through to the infer path).
-            (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
+            // A conditional the checker defers over a generic operand
+            // (`any extends T ? 1 : 2`) keeps its shell: `getConditionalType`
+            // reads an `any` check only once neither operand is generic.
+            (SpecialKind::Any, _)
+                if !self.extends_is_infer_pattern(extends)
+                    && !self.conditional_is_deferred(check, extends) =>
+            {
                 let true_branch = force_branch(true);
                 // An `any` or `unknown` extends type admits every check
                 // type, so the false branch never joins: `any extends
                 // unknown ? X : Y` is `X` (the checker adds the false branch
                 // only when the extends type is neither).
                 if matches!(
-                    self.peek_special(extends),
+                    self.peek_special(self.declared_operand_where_written(extends)),
                     Some((SpecialKind::Any | SpecialKind::Unknown, _))
                 ) {
                     return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
@@ -305,6 +320,46 @@ impl ProjectSemanticDispatch<'_> {
             ),
             _ => None,
         }
+    }
+
+    /// The checker's error type a conditional's check or extends operand,
+    /// written as a name, stands for: the recovery from a diagnostic the
+    /// name's own instantiation raised is the conditional's answer, as the
+    /// checker returns its error type when either operand is it. Read after
+    /// the conditional is related, which has already read the name.
+    pub(super) fn absorb_named_error_operand(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> Option<QueryBuildOutput> {
+        let named = |operand: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(operand).as_deref(),
+                Some(
+                    SemanticNodeData::Alias(_)
+                        | SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::BareRef(_)
+                        | SemanticNodeData::ImportType(_)
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                )
+            )
+        };
+        [check, extends]
+            .into_iter()
+            .filter(|operand| named(*operand))
+            .find_map(|operand| {
+                let resolved = self
+                    .normalize_node_for_structural_fact_demand(
+                        operand,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    )
+                    .into_usable_node()?;
+                matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
+                    .then_some(resolved)
+            })
+            .map(|error| self.absorbed_output(error, [check, extends]))
     }
 
     // ── Builtin-utility degenerate operands ──────────────────────────────

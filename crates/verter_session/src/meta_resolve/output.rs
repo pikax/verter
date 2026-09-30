@@ -633,6 +633,40 @@ pub struct ComponentMetaOutputError {
     pub failure: ComponentMetaOutputFailure,
 }
 
+/// Why an output-bearing component-meta request published no output: a
+/// typed materialization failure, or an aborted computation (a cancelled
+/// request, a superseded view), which publishes nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentMetaFailure {
+    /// A present source the terminal sink could not materialize.
+    Output(ComponentMetaOutputError),
+    /// The computation was aborted.
+    Aborted(crate::semantic_query::ExecutionAbort),
+}
+
+impl From<ComponentMetaOutputError> for ComponentMetaFailure {
+    fn from(error: ComponentMetaOutputError) -> Self {
+        Self::Output(error)
+    }
+}
+
+impl From<crate::semantic_query::ExecutionAbort> for ComponentMetaFailure {
+    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+        Self::Aborted(abort)
+    }
+}
+
+impl std::fmt::Display for ComponentMetaFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Output(error) => error.fmt(f),
+            Self::Aborted(abort) => write!(f, "component metadata aborted: {abort:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ComponentMetaFailure {}
+
 impl std::fmt::Display for ComponentMetaOutputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let failure = match &self.failure {

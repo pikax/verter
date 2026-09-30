@@ -181,3 +181,25 @@ type T5 = { [k: `x${string}`]: 1; [k: number]: 2 };
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A template literal type in a template's hole splices its texts and holes
+/// into the template (`getTemplateLiteralType`), so a nest of templates is
+/// one template.
+///
+/// Measured on TypeScript 7.0.2, under every setting:
+///
+/// | probe | checker |
+/// | --- | --- |
+/// | `F<string>` over `` type F<X extends string> = `a${`b${X}c`}d` `` | `` `ab${string}cd` `` |
+/// | `` `x${`y${`z${1 \| 2}`}`}w` `` | `"xyz1w" \| "xyz2w"` |
+#[test]
+fn a_template_in_a_template_hole_splices_into_it() {
+    let failures = mismatches(
+        "type F<X extends string> = `a${`b${X}c`}d`;\n",
+        &[
+            ("F<string>", "`ab${string}cd`"),
+            ("`x${`y${`z${1 | 2}`}`}w`", "\"xyz1w\" | \"xyz2w\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

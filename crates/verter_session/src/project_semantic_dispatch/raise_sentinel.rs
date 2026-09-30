@@ -66,12 +66,13 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         // `Stale`/`Incomplete` above). A checker recovery raises to its
         // recovery type — a materialised value.
         QueryError::RaiseMiss
-        | QueryError::CheckerRecovery(_)
+        | QueryError::CheckerRecovery { .. }
         | QueryError::TypeParamCycle
         | QueryError::RecursiveRef { .. }
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::ForeignSemanticOperand
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. } => false,
     }
 }
@@ -107,9 +108,10 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::RaiseMiss
         | QueryError::OpenSurface
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnmodeledPosition
-        | QueryError::CheckerRecovery(_)
+        | QueryError::CheckerRecovery { .. }
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
@@ -144,13 +146,14 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         | QueryError::RaiseMiss
         | QueryError::OpenSurface
         | QueryError::Other(_)
+        | QueryError::PermissiveWildcard
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnrepresentableSurface
         // NOT the miss sentinel: the flow marker is a DISTINCT carrier
         // precisely so a consumer keyed on `Miss` cannot mistake it for
         // one.
         | QueryError::UnmodeledPosition
-        | QueryError::CheckerRecovery(_)
+        | QueryError::CheckerRecovery { .. }
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
@@ -218,10 +221,16 @@ mod tests {
             QueryError::IncompleteSemanticOperand {
                 reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
-            QueryError::CheckerRecovery(crate::semantic_query::CheckerDiagnostic {
-                code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
-                operation: crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand,
-            }),
+            QueryError::PermissiveWildcard,
+            QueryError::CheckerRecovery {
+                diagnostic: crate::semantic_query::CheckerDiagnostic {
+                    code:
+                        crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+                    operation: crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand,
+                },
+                basis: crate::semantic_query::RecoveryBasis::Certified,
+                origin: None,
+            },
         ]
     }
 

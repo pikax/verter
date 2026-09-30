@@ -13,11 +13,22 @@ pub(crate) enum ResolutionPhase {
     PreAdmissionValidation,
     ParsedEdgePreCommit,
     RequestCompletion,
+    /// Inside a base resolution-world write, with the world epoch odd.
+    WorldWriteHeld,
+    /// An importer resolution attempt begins, before its world capture.
+    AttemptStart,
+    /// The input driver begins one round of an attempt.
+    DriverRound,
+    /// A resolution is about to wait on the publication gate (a writer is
+    /// inside its window at capture, or the attempt is taking the gate to
+    /// admit).
+    PublicationGateWait,
 }
 
 struct InstalledHook {
-    phase: ResolutionPhase,
-    action: Option<Box<dyn FnMut()>>,
+    /// `None` fires at every phase.
+    phase: Option<ResolutionPhase>,
+    action: Option<Box<dyn FnMut(ResolutionPhase)>>,
     repeat: bool,
 }
 
@@ -66,8 +77,8 @@ pub(crate) fn with_hook<T>(
             "resolution concurrency hooks must not nest"
         );
         *slot.borrow_mut() = Some(InstalledHook {
-            phase,
-            action: Some(Box::new(move || {
+            phase: Some(phase),
+            action: Some(Box::new(move |_| {
                 action
                     .take()
                     .expect("a one-shot resolution hook must fire once")();
@@ -81,7 +92,7 @@ pub(crate) fn with_hook<T>(
 
 pub(crate) fn with_repeating_hook<T>(
     phase: ResolutionPhase,
-    action: impl FnMut() + 'static,
+    mut action: impl FnMut() + 'static,
     operation: impl FnOnce() -> T,
 ) -> T {
     HOOK.with(|slot| {
@@ -90,7 +101,29 @@ pub(crate) fn with_repeating_hook<T>(
             "resolution concurrency hooks must not nest"
         );
         *slot.borrow_mut() = Some(InstalledHook {
-            phase,
+            phase: Some(phase),
+            action: Some(Box::new(move |_| action())),
+            repeat: true,
+        });
+    });
+    let _clear = ClearHook;
+    operation()
+}
+
+/// A repeating hook that fires at EVERY phase this thread reaches, told
+/// which one: the shape a test needs to hold another thread across two
+/// phases of one resolution.
+pub(crate) fn with_every_phase_hook<T>(
+    action: impl FnMut(ResolutionPhase) + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "resolution concurrency hooks must not nest"
+        );
+        *slot.borrow_mut() = Some(InstalledHook {
+            phase: None,
             action: Some(Box::new(action)),
             repeat: true,
         });
@@ -103,7 +136,7 @@ pub(crate) fn fire(phase: ResolutionPhase) {
     let action = HOOK.with(|slot| {
         let mut slot = slot.borrow_mut();
         let installed = slot.as_mut()?;
-        if installed.phase != phase {
+        if installed.phase.is_some_and(|installed| installed != phase) {
             return None;
         }
         installed
@@ -112,7 +145,7 @@ pub(crate) fn fire(phase: ResolutionPhase) {
             .map(|action| (action, installed.repeat))
     });
     if let Some((mut action, repeat)) = action {
-        action();
+        action(phase);
         if repeat {
             HOOK.with(|slot| {
                 let mut slot = slot.borrow_mut();

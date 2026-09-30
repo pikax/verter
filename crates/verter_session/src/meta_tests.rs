@@ -4928,6 +4928,46 @@ import Child from './Child.vue'
     );
 }
 
+/// A `v-bind` spread of a member read on a call's result — directly, and
+/// through a member call on the result of the call before it — consumes the
+/// member's attributes: the spread's value is the member of the call's value.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_spread_of_a_member_of_a_call_result_consumes_its_attributes() {
+    for spread in ["make().attrs", "make().next().attrs"] {
+        let project = make_project();
+        project
+            .upsert_base(
+                "/App.vue",
+                &format!(
+                    r#"<script setup lang="ts">
+interface Made {{ attrs: {{ id: string; title: string }}; next(): Made }}
+declare function make(): Made
+</script>
+<template><div v-bind="{spread}" /></template>"#
+                ),
+            )
+            .unwrap();
+        let surface = project
+            .host()
+            .resolve_fallthrough_surface("/App.vue")
+            .expect("the fallthrough surface resolves");
+        let names: Vec<&str> = surface
+            .accepted_props
+            .iter()
+            .map(|prop| prop.name.as_ref())
+            .collect();
+        assert!(
+            names.contains(&"placeholder"),
+            "{spread}: the remaining div attributes stay: {names:?}"
+        );
+        assert!(
+            !names.contains(&"id") && !names.contains(&"title"),
+            "{spread}: the spread consumes its attributes: {names:?}"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_recomputes_and_reuses_runtime_subnode_after_top_level_node_clear() {
@@ -5507,6 +5547,11 @@ defineProps<Props>()
     // Dependency tracking assertions removed — the legacy walker is deleted.
 }
 
+/// The script setup generic reaches the props: `items` is `T[]`, and
+/// `selected` is the conditional the checker defers over the generic `T`,
+/// `T extends infer Selected ? Selected : never` (tsc 7.0.2 prints exactly
+/// that for `Props<T>["selected"]` inside a function generic over `T`, and
+/// its declaration emit keeps it) — never the `T` an early selection gives.
 #[test]
 fn evaluate_types_preserve_script_setup_generic_metadata_in_define_props() {
     let project = make_project();
@@ -5555,15 +5600,37 @@ defineProps<Props<T>>()
     }
 
     match &evaluated_define_props_type(&project, "/Generic.vue", &evaluated, "selected") {
-        TypeExpr::TypeParameter(param) => {
-            assert_eq!(param.name, "T");
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+            ..
+        } => {
+            assert!(
+                matches!(check.as_ref(), TypeExpr::TypeParameter(param)
+                if param.name == "T"
+                    && matches!(
+                        param.constraint.as_deref(),
+                        Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                    )),
+                "the check is the script setup generic: {check:?}"
+            );
+            assert!(
+                matches!(extends.as_ref(), TypeExpr::Infer { name, .. } if name == "Selected"),
+                "the extends clause declares `infer Selected`: {extends:?}"
+            );
+            assert!(
+                matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "Selected"),
+                "the true branch reads `Selected`: {true_type:?}"
+            );
             assert!(matches!(
-                param.constraint.as_deref(),
-                Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                false_type.as_ref(),
+                TypeExpr::Primitive(PrimitiveName::Never)
             ));
         }
         other => panic!(
-            "expected infer conditional to resolve to the script setup generic, got {other:?}"
+            "expected the infer conditional deferred over the script setup generic, got {other:?}"
         ),
     }
 }
@@ -33717,7 +33784,7 @@ defineProps<{ config: { handler(msg: string) } }>()
         )
         .unwrap();
 
-    let err = project
+    let failure = project
         .host()
         .get_component_meta_output("/App.vue")
         .expect_err(
@@ -33725,6 +33792,9 @@ defineProps<{ config: { handler(msg: string) } }>()
              unknown-materializing failure must FAIL output materialization — \
              never shell-fold to a completed unknown",
         );
+    let crate::meta_resolve::ComponentMetaFailure::Output(err) = failure else {
+        panic!("an uncancelled request never aborts: {failure:?}");
+    };
     assert_eq!(
         err.lane,
         crate::meta_resolve::ComponentMetaOutputLane::Prop,

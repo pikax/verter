@@ -613,6 +613,13 @@ impl MacroProjectionLane {
     /// extends` heritage clause, makes the surface non-empty and the
     /// missing members disappear without a diagnostic.
     ///
+    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`] parts the lanes the same
+    /// way: a conditional type the lane could not decide stands where the
+    /// checker's answer should be, and when it is the whole macro type
+    /// argument there is no member set to derive an option object from. At
+    /// ONE member's value the member classification contains it and encodes
+    /// that member's type as unknown, as it does a missing surface.
+    ///
     /// The runtime lane still ALSO keeps the structural check, and it is
     /// not redundant with this one: a DEGRADED SUCCESS whose marker sits
     /// at the ROOT position (`{ ...new Box(), n: 1 }` — the literal fails
@@ -636,6 +643,7 @@ impl MacroProjectionLane {
             Self::Tsc | Self::RuntimeNames | Self::RuntimeMemberValue | Self::File => {
                 PartialReasonSet::FLOW_RETURN_DEGRADED
                     .union(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
+                    .union(PartialReasonSet::UNDECIDED_CONDITIONAL)
             }
         }
     }
@@ -705,16 +713,14 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
     }
 }
 
+/// The typed refusal of a lane whose inputs are incomplete. An abort class
+/// the computation observed makes the whole production publish nothing
+/// ([`crate::semantic_query::ExecutionAbort::observed_in`]), so it has no refusal row of its own here.
 pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
-    let reason = if reasons.contains(PartialReasonSet::CANCELLED) {
-        MacroPartialReason::Cancelled
-    } else if reasons.contains(PartialReasonSet::SUPERSEDED_GENERATION) {
-        MacroPartialReason::SupersededGeneration
-    } else if reasons.contains(PartialReasonSet::UNSTABLE_STATE) {
-        MacroPartialReason::UnstableState
-    } else if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+    let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
         || reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT)
     {
@@ -859,6 +865,37 @@ mod lane_containment_tests {
                 );
             }
         }
+    }
+
+    /// An undecided conditional parts the lanes as a missing surface does:
+    /// the authored splice, a names-only demand, one member's
+    /// classification and the file aggregate contain it, and a demand that
+    /// renders the option object from the value faults on it.
+    #[test]
+    fn an_undecided_conditional_parts_the_lanes_as_a_missing_surface_does() {
+        let undecided = PartialReasonSet::UNDECIDED_CONDITIONAL;
+        for lane in [
+            MacroProjectionLane::Tsc,
+            MacroProjectionLane::RuntimeNames,
+            MacroProjectionLane::RuntimeMemberValue,
+            MacroProjectionLane::File,
+        ] {
+            assert!(
+                residual(undecided, lane).is_empty(),
+                "{lane:?} contains an undecided conditional"
+            );
+        }
+        assert_eq!(
+            residual(undecided, MacroProjectionLane::RuntimeOptions),
+            undecided,
+            "an option object derived from an undecided conditional is missing members it \
+             cannot name"
+        );
+        assert!(
+            !PartialReasonSet::FLOW_RETURN_DEGRADED.contains(undecided)
+                && !PartialReasonSet::FLOW_RETURN_NO_SURFACE.contains(undecided),
+            "the class is its own bit"
+        );
     }
 
     /// The two flow-return NO-VALUE and DEGRADED-SUCCESS classes are

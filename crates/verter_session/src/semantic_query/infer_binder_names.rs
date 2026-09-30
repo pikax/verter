@@ -15,6 +15,7 @@ use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr};
 pub(crate) enum InferSyntaxPathStep {
     ParenthesizedInner,
     RestInner,
+    InferConstraint,
     KeyOfOperand,
     ArrayElement,
     UnionArm(u32),
@@ -66,8 +67,20 @@ pub(crate) enum InferSyntaxPathStep {
 }
 
 /// Exact typed child path from one lowering root to a syntax node.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub(crate) struct InferSyntaxPath(Arc<[InferSyntaxPathStep]>);
+///
+/// A path shares its parent's steps: a child is its parent and one more
+/// step, so indexing every node of a tree nested `n` deep costs `n` steps,
+/// not a copy of every ancestor's path (the square of the depth). Equality,
+/// hashing and the debug form are those of the step sequence.
+#[derive(Clone, Default)]
+pub(crate) struct InferSyntaxPath(Option<Arc<InferSyntaxPathLink>>);
+
+/// The last step of a non-empty [`InferSyntaxPath`], after its parent's.
+struct InferSyntaxPathLink {
+    parent: InferSyntaxPath,
+    step: InferSyntaxPathStep,
+    len: usize,
+}
 
 impl InferSyntaxPath {
     #[must_use]
@@ -77,18 +90,93 @@ impl InferSyntaxPath {
 
     #[must_use]
     pub(crate) fn child(&self, step: InferSyntaxPathStep) -> Self {
-        let mut path = Vec::with_capacity(self.0.len() + 1);
-        path.extend_from_slice(&self.0);
-        path.push(step);
-        Self(Arc::from(path.into_boxed_slice()))
+        #[cfg(test)]
+        PATH_STEPS_STORED.with(|stored| stored.set(stored.get() + 1));
+        Self(Some(Arc::new(InferSyntaxPathLink {
+            parent: self.clone(),
+            step,
+            len: self.len() + 1,
+        })))
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |link| link.len)
+    }
+
+    /// The steps, root first.
+    fn steps(&self) -> Vec<InferSyntaxPathStep> {
+        let mut steps = Vec::with_capacity(self.len());
+        let mut current = self.0.as_ref();
+        // bounded-loop: one step per link, `len` of them.
+        while let Some(link) = current {
+            steps.push(link.step);
+            current = link.parent.0.as_ref();
+        }
+        steps.reverse();
+        steps
     }
 }
 
-/// One declaration introduced by a conditional's `extends` pattern.
+impl Drop for InferSyntaxPath {
+    /// Release the links this path alone holds from a loop: a deep path
+    /// dropped link by link through each parent's own drop took a native
+    /// frame per step.
+    fn drop(&mut self) {
+        let mut current = self.0.take();
+        // bounded-loop: one link per step, until a link another path shares.
+        while let Some(link) = current {
+            current = match Arc::try_unwrap(link) {
+                Ok(mut owned) => owned.parent.0.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
+impl PartialEq for InferSyntaxPath {
+    fn eq(&self, other: &Self) -> bool {
+        let (mut left, mut right) = (self.0.as_ref(), other.0.as_ref());
+        if self.len() != other.len() {
+            return false;
+        }
+        // bounded-loop: both paths have the same number of links.
+        loop {
+            match (left, right) {
+                (None, None) => return true,
+                (Some(a), Some(b)) if Arc::ptr_eq(a, b) => return true,
+                (Some(a), Some(b)) if a.step == b.step => {
+                    left = a.parent.0.as_ref();
+                    right = b.parent.0.as_ref();
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl Eq for InferSyntaxPath {}
+
+impl std::hash::Hash for InferSyntaxPath {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.steps().hash(state);
+    }
+}
+
+impl std::fmt::Debug for InferSyntaxPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("InferSyntaxPath")
+            .field(&self.steps())
+            .finish()
+    }
+}
+
+/// One declaration introduced by a conditional's `extends` pattern, with
+/// the constraint its first declaration writes (`infer X extends C`).
 #[derive(Debug, Clone)]
-pub(crate) struct InferDeclarationSite {
+pub(crate) struct InferDeclarationSite<'a> {
     pub(crate) name: Arc<str>,
     pub(crate) path: InferSyntaxPath,
+    pub(crate) constraint: Option<&'a TypeExpr>,
 }
 
 /// Visit every direct typed child of `expr`.
@@ -103,9 +191,13 @@ pub(crate) fn for_each_type_expr_child<'a>(
     match expr {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown(_) => {}
+        TypeExpr::Infer { constraint, .. } => {
+            if let Some(constraint) = constraint {
+                visit(InferSyntaxPathStep::InferConstraint, constraint);
+            }
+        }
         TypeExpr::Parenthesized(inner) => visit(InferSyntaxPathStep::ParenthesizedInner, inner),
         TypeExpr::Rest(inner) => visit(InferSyntaxPathStep::RestInner, inner),
         TypeExpr::KeyOf(inner) => visit(InferSyntaxPathStep::KeyOfOperand, inner),
@@ -320,22 +412,23 @@ fn index_subtree_paths(
 /// Discover exactly the declarations owned by one conditional `extends`
 /// pattern. A nested conditional is a new lexical owner, so its subtree is
 /// deliberately not visited by the enclosing collector.
-pub(crate) fn collect_extends_infer_declarations(
-    extends: &TypeExpr,
+pub(crate) fn collect_extends_infer_declarations<'a>(
+    extends: &'a TypeExpr,
     extends_path: &InferSyntaxPath,
-) -> Vec<InferDeclarationSite> {
+) -> Vec<InferDeclarationSite<'a>> {
     let mut declarations = Vec::new();
     let mut pending = vec![(extends, extends_path.clone())];
     while let Some((expr, path)) = pending.pop() {
         match expr {
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 if !declarations
                     .iter()
-                    .any(|site: &InferDeclarationSite| site.name.as_ref() == name.as_str())
+                    .any(|site: &InferDeclarationSite<'a>| site.name.as_ref() == name.as_str())
                 {
                     declarations.push(InferDeclarationSite {
                         name: Arc::from(name.as_str()),
                         path,
+                        constraint: constraint.as_deref(),
                     });
                 }
             }
@@ -495,4 +588,67 @@ fn visit_object_function_children<'a>(
 
 fn ordinal_u32(ordinal: usize) -> u32 {
     u32::try_from(ordinal).expect("typed infer syntax ordinal exceeds u32")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many path steps this thread's paths stored; test-only.
+    static PATH_STEPS_STORED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod path_index_tests {
+    use super::*;
+
+    /// `depth` parentheses around `number`.
+    fn nest(depth: usize) -> TypeExpr {
+        (0..depth).fold(
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            |inner, _| TypeExpr::Parenthesized(Arc::new(inner)),
+        )
+    }
+
+    /// The path index of a nest stores one step per node, so a nest twice
+    /// as deep stores twice the steps, and each node's path is its step
+    /// sequence. A path that copied its parent's steps stored the square
+    /// of the depth. A deep index drops from a loop on a 1 MiB thread.
+    #[test]
+    fn a_nest_indexes_its_paths_in_linear_work() {
+        let stored = |depth: usize| {
+            let root = nest(depth);
+            let before = PATH_STEPS_STORED.with(std::cell::Cell::get);
+            let paths = index_type_expr_paths(&root);
+            assert_eq!(paths.len(), depth + 1);
+            PATH_STEPS_STORED.with(std::cell::Cell::get) - before
+        };
+        assert_eq!(stored(2_000), 2 * stored(1_000));
+
+        let root = nest(3);
+        let paths = index_type_expr_paths(&root);
+        let mut deepest = &root;
+        while let TypeExpr::Parenthesized(inner) = deepest {
+            deepest = inner;
+        }
+        let expected = InferSyntaxPath::root()
+            .child(InferSyntaxPathStep::ParenthesizedInner)
+            .child(InferSyntaxPathStep::ParenthesizedInner)
+            .child(InferSyntaxPathStep::ParenthesizedInner);
+        let path = &paths[&(deepest as *const TypeExpr as usize)];
+        assert_eq!(path, &expected);
+        assert_ne!(path, &InferSyntaxPath::root());
+        assert_eq!(
+            format!("{path:?}"),
+            "InferSyntaxPath([ParenthesizedInner, ParenthesizedInner, ParenthesizedInner])"
+        );
+
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let root = nest(100_000);
+                drop(index_type_expr_paths(&root));
+            })
+            .expect("spawn the indexing thread")
+            .join()
+            .expect("a deep index drops");
+    }
 }

@@ -291,6 +291,7 @@ impl ProjectSemanticDispatch<'_> {
     /// declaration appearing or changing later misses the read.
     pub(super) fn global_namespace_object(
         &self,
+        demand_canonical: &str,
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
@@ -299,8 +300,11 @@ impl ProjectSemanticDispatch<'_> {
             return None;
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let population =
-            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Namespace);
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_semantic::facts::SymbolSpace::Namespace,
+        );
         let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
             .entries
             .iter()

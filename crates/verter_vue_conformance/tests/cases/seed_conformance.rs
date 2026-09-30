@@ -194,7 +194,8 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
         .to_string_lossy()
         .replace('\\', "/");
     let macro_semantics = corpus_host()
-        .vue_macro_semantic_input(&canonical_id, verter_session::CompileTarget::BUNDLER);
+        .vue_macro_semantic_input(&canonical_id, verter_session::CompileTarget::BUNDLER)
+        .expect("the corpus host is never cancelled");
     // A Verter compile panic is itself a divergence signal, not a harness
     // crash — keep the suite able to report every cell. (`AssertUnwindSafe`:
     // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons

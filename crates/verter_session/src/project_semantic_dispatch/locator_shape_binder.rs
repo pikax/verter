@@ -189,11 +189,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let mut lower_in = |finals: &[BuiltTypeParamBinder],
                                 position: TypeParamBoundPosition| {
                 let frame = bound_frame(finals, index, position);
-                let mut frames: Vec<LocatorBinderFrame> = base.binders.to_vec();
-                frames.push(frame);
-                let ctx =
-                    LocatorShapeCtx::new(scope, &frames, base.name_resolution, base.scope_payload)
-                        .with_optional_infer_source(base.infer_source);
+                let link = base.binders.push(frame);
+                let ctx = LocatorShapeCtx::on(
+                    scope,
+                    base.binders.over(&link),
+                    base.name_resolution,
+                    base.scope_payload,
+                )
+                .with_optional_infer_source(base.infer_source);
                 lower_bound(index as u32, position, &ctx)
             };
             let constraint = if spec.has_constraint {

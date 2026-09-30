@@ -2238,6 +2238,12 @@ impl VerterHost {
             let cold_lease =
                 self.decl_lowering
                     .acquire_lease(&snapshot_key, &eval_source, source_type);
+            // A program refused for want of stack is not retained: the flight
+            // publishes nothing for the source, never an artifact read off an
+            // empty program.
+            if cold_lease.refused.is_some() {
+                return None;
+            }
             if cold_lease.parsed_now {
                 self.provenance
                     .eval_program_parses
@@ -2247,50 +2253,54 @@ impl VerterHost {
             // this stack, so the retained snapshot is pinned for the
             // whole flight and this cold-index job reuses it — the run
             // cannot parse, per the lease-only worker contract.
+            // The job runs on a declaration-lowering worker, so it records its
+            // own refusals: a refused one publishes nothing, as a refused parse.
             let outcome = self.decl_lowering.run_leased(
                 &snapshot_key,
                 move |program: Option<&crate::ParsedEvalProgram>| {
-                    let owner_table = Arc::new(match program {
-                        Some(parsed) => crate::parse::top_level_owner_table(
-                            parsed.borrow_dependent(),
-                            job_framework_parse.as_deref(),
-                        )?,
-                        None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
-                    });
-                    let svelte_component_runes_mode = program.is_some_and(|parsed| {
-                        job_framework_parse.as_deref().is_some_and(|artifact| {
-                            crate::parse::svelte_component_runes_mode(
-                                artifact,
+                    verter_parser::oxc_parse::refusals_within(|| {
+                        let owner_table = Arc::new(match program {
+                            Some(parsed) => crate::parse::top_level_owner_table(
                                 parsed.borrow_dependent(),
-                            )
+                                job_framework_parse.as_deref(),
+                            )?,
+                            None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                        });
+                        let svelte_component_runes_mode = program.is_some_and(|parsed| {
+                            job_framework_parse.as_deref().is_some_and(|artifact| {
+                                crate::parse::svelte_component_runes_mode(
+                                    artifact,
+                                    parsed.borrow_dependent(),
+                                )
+                            })
+                        });
+                        let (header_index, route_inventory) = match program {
+                            Some(parsed) => {
+                                let body = parsed.borrow_dependent();
+                                let index = build_script_shallow_index_with_owners(
+                                    body,
+                                    parsed.source_str(),
+                                    &owner_table,
+                                )
+                                .map_err(|error| {
+                                    crate::parse::ScriptOwnerIndexError::ParserTable {
+                                        statement_count: error.statement_count(),
+                                        owner_count: error.owner_count(),
+                                    }
+                                })?;
+                                (index.declaration_headers, index.routes)
+                            }
+                            // Fatal parse: empty shallow index — no
+                            // re-parse under a different source type (the
+                            // authoritative `source_type` already failed).
+                            None => Default::default(),
+                        };
+                        Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
+                            header_index,
+                            route_inventory,
+                            svelte_component_runes_mode,
+                            owner_table,
                         })
-                    });
-                    let (header_index, route_inventory) = match program {
-                        Some(parsed) => {
-                            let body = parsed.borrow_dependent();
-                            let index = build_script_shallow_index_with_owners(
-                                body,
-                                parsed.source_str(),
-                                &owner_table,
-                            )
-                            .map_err(|error| {
-                                crate::parse::ScriptOwnerIndexError::ParserTable {
-                                    statement_count: error.statement_count(),
-                                    owner_count: error.owner_count(),
-                                }
-                            })?;
-                            (index.declaration_headers, index.routes)
-                        }
-                        // Fatal parse: empty shallow index — no
-                        // re-parse under a different source type (the
-                        // authoritative `source_type` already failed).
-                        None => Default::default(),
-                    };
-                    Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
-                        header_index,
-                        route_inventory,
-                        svelte_component_runes_mode,
-                        owner_table,
                     })
                 },
             );
@@ -2309,8 +2319,9 @@ impl VerterHost {
                 return None;
             };
             let products = match products {
-                Ok(products) => products,
-                Err(error) => {
+                (_, Some(_)) => return None,
+                (Ok(products), None) => products,
+                (Err(error), None) => {
                     tracing::error!(
                         canonical = %snapshot_key.canonical,
                         error = %error,
@@ -2528,7 +2539,14 @@ impl VerterHost {
                 // carries no resolved target for a route mutation to
                 // stale.
             }
-            materialize().ok_or(())
+            // The materialisation is one operation: a parse or walk-stack lease
+            // refused its stack anywhere inside it leaves some product read off
+            // an empty program, so the flight publishes nothing and a later
+            // demand materialises again.
+            match verter_parser::oxc_parse::refusals_within(materialize) {
+                (materialized, None) => materialized.ok_or(()),
+                (_, Some(_)) => Err(()),
+            }
         };
 
         // Bounded re-validation loop around the singleflight, mirroring
@@ -3126,13 +3144,16 @@ impl VerterHost {
             let mut chain_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
             let mut seen_facts: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
                 rustc_hash::FxHashSet::default();
-            // Direct-import specifiers the build SKIPPED because they did
-            // not resolve. A skipped specifier is dependency-set-derived
-            // negative state: the surface computed without it must be
-            // rooted in the owner's `ImportRoute` fact rail (below) so it
-            // goes stale the moment the missing target appears.
-            let mut unresolved_sources: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
+            // The resolution witness of every direct import the build
+            // SKIPPED because it did not resolve. A skipped import is
+            // dependency-set-derived negative state: the surface computed
+            // without it is rooted on the witness of the resolution that
+            // skipped it (below), so it goes stale the moment the missing
+            // target appears. `unrootable_skip` records a skip whose
+            // resolution left no witness to root on.
+            let mut skipped_witness: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+            let mut skipped_any = false;
+            let mut unrootable_skip = false;
             // ReturnOnly never publishes — fenced-walk signal. A
             // per-binding route walk that consumed a FENCED (ReturnOnly)
             // serve returns its resolved root with EMPTY route facts
@@ -3149,19 +3170,31 @@ impl VerterHost {
             let mut unrooted_route_walk = false;
             let mut resolution_refused = false;
             for (local_name, target) in shallow.import_targets.iter() {
-                let resolved_canonical_id = match self
-                    .resolve_type_dependency_canonical(owner_canonical, &target.source_specifier)
-                {
+                // The resolution is made inside a witness scope, so a skip
+                // is rooted on the very transaction that decided it — the
+                // witness is never rebuilt by resolving the specifier again.
+                let (publication, target_witness) = {
+                    let scope =
+                        crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+                    let publication = self
+                        .resolve_type_dependency_canonical(owner_canonical, &target.source_specifier);
+                    (publication, scope.collected())
+                };
+                let mut skip = |witness: &[crate::resolver_core::FactVersionRef]| {
+                    skipped_any = true;
+                    unrootable_skip |= witness.is_empty();
+                    skipped_witness.extend_from_slice(witness);
+                };
+                let resolved_canonical_id = match publication {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         let Some(canonical) = admitted.into_result() else {
-                            unresolved_sources.insert(target.source_specifier.clone());
+                            skip(&target_witness);
                             continue;
                         };
                         canonical
                     }
                     verter_workspace::ResolutionPublication::Refused(_) => {
                         resolution_refused = true;
-                        unresolved_sources.insert(target.source_specifier.clone());
                         continue;
                     }
                 };
@@ -3198,7 +3231,7 @@ impl VerterHost {
                 }
 
                 let Some(final_identity) = final_identity else {
-                    unresolved_sources.insert(target.source_specifier.clone());
+                    skip(&target_witness);
                     continue;
                 };
                 let final_canonical = final_identity.canonical_id.to_string();
@@ -3218,7 +3251,9 @@ impl VerterHost {
             (
                 entries,
                 chain_facts,
-                unresolved_sources,
+                skipped_witness,
+                skipped_any,
+                unrootable_skip,
                 unrooted_route_walk,
                 resolution_refused,
             )
@@ -3226,7 +3261,9 @@ impl VerterHost {
         let (
             entries,
             mut chain_facts,
-            unresolved_sources,
+            skipped_witness,
+            skipped_any,
+            unrootable_skip,
             unrooted_route_walk,
             resolution_refused,
         ) = cold_body();
@@ -3259,25 +3296,32 @@ impl VerterHost {
 
         // Root every SKIPPED unresolved direct import on the owner's
         // resolution-witness rail — the same rail that roots unresolvable
-        // wildcard route misses. Resolving the skipped specifiers fans the
-        // sealed transactions' observations (including the exhausted probe
-        // set for each miss), so the recorded witness MOVES the moment a
-        // skipped specifier becomes resolvable and the cached surface
-        // (computed without that import) declines. Coverage is structural:
-        // the witness is built FROM the skipped specifiers. A REFUSED
-        // resolution refuses admission (fail-closed): the surface is still
-        // served to the caller, and the next request cold-recomputes.
-        if !unresolved_sources.is_empty() {
-            let required: Vec<String> = unresolved_sources.into_iter().collect();
-            match self.import_route_witness_for_specifiers(owner_canonical, &required) {
-                Some(witness) => {
-                    for fact in witness {
+        // wildcard route misses. The witness of the resolution that skipped
+        // the import carries the sealed transaction's observations
+        // (including the exhausted probe set for the miss), so the recorded
+        // witness MOVES the moment the skipped specifier becomes
+        // resolvable and the cached surface (computed without that import)
+        // declines. Coverage is structural: every skip records the witness
+        // of the resolution that decided it. A skip with no witness to root
+        // on refuses admission (fail-closed): the surface is still served to
+        // the caller, and the next request cold-recomputes.
+        #[cfg(test)]
+        let unrootable_skip = unrootable_skip
+            || (skipped_any
+                && self
+                    .test_force
+                    .force_import_route_witness_refusal_for_tests
+                    .load(std::sync::atomic::Ordering::Relaxed));
+        if skipped_any {
+            match unrootable_skip {
+                false => {
+                    for fact in skipped_witness {
                         if !chain_facts.contains(&fact) {
                             chain_facts.push(fact);
                         }
                     }
                 }
-                None => {
+                true => {
                     self.provenance
                         .owner_import_surface_unrooted_skip_refusals
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

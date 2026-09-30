@@ -91,6 +91,9 @@ pub(super) fn expansion_stop_reason_to_string(
         verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit => {
             "connectedQueryDepthLimit".to_string()
         }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedMemoryLimit => {
+            "connectedMemoryLimit".to_string()
+        }
         verter_semantic::analysis::type_expand::ExpansionStopReason::MappedDepthExceeded => {
             "mappedDepthExceeded".to_string()
         }

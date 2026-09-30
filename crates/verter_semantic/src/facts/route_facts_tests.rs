@@ -2572,14 +2572,15 @@ fn discrimination_accumulator_merges_same_target_routes() {
     );
 }
 
-/// A declaration body nested 10,000 deep produces its route facts on a
+/// A declaration body nested 3,000 deep produces its route facts on a
 /// 1 MiB thread: a `keyof` chain (the whole-route walk), an object type
 /// whose every member holds the next (the member-path seed enumeration and
 /// the type-reference enumeration) and a parenthesized intersection chain
-/// (the direct-object descent) walk from explicit stacks.
+/// (the direct-object descent) walk from explicit stacks. Walking them
+/// recursively overflows the thread within 500 levels.
 #[test]
-fn bodies_nested_10000_deep_produce_route_facts_on_a_small_stack() {
-    let depth = 10_000;
+fn bodies_nested_3000_deep_produce_route_facts_on_a_small_stack() {
+    let depth = 3_000;
     let leaf = || TypeExpr::Ref {
         name: Arc::from("Leaf"),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),

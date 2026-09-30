@@ -213,6 +213,9 @@ pub enum ExpansionStopReason {
     /// (member surface = members in ALL arms). The arm index is
     /// surfaced through `ExpansionDiagnostic.context`.
     EmptyUnionArm,
+    /// The connected projection/evaluation demand exhausted its
+    /// construction-byte allowance.
+    ConnectedMemoryLimit,
 }
 
 impl ExpandedObjectShape {
@@ -432,6 +435,7 @@ impl From<ExpansionStopReason> for ResolutionDiagnosticKind {
             ExpansionStopReason::BudgetExceeded => Self::BudgetExceeded,
             ExpansionStopReason::ProjectionWorkLimit => Self::ProjectionWorkLimit,
             ExpansionStopReason::ConnectedQueryDepthLimit => Self::ConnectedQueryDepthLimit,
+            ExpansionStopReason::ConnectedMemoryLimit => Self::ConnectedMemoryLimit,
             ExpansionStopReason::MappedDepthExceeded => Self::MappedDepthExceeded,
             ExpansionStopReason::UnresolvedReference => Self::UnresolvedReference,
             ExpansionStopReason::IndeterminateConditional => Self::IndeterminateConditional,

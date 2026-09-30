@@ -400,6 +400,80 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
         .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
 }
 
+/// Relate the type named `source` to the type named `target`, both declared
+/// in `scope_canonical_id`, as one connected demand under
+/// `construction_byte_limit` when given: whether the source is assignable,
+/// and the work units and construction bytes the demand charged.
+pub fn relate_named_types_for_tests(
+    host: &crate::VerterHost,
+    scope_canonical_id: &str,
+    source: &str,
+    target: &str,
+    construction_byte_limit: Option<usize>,
+) -> (bool, usize, usize) {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    if let Some(limit) = construction_byte_limit {
+        dispatch.set_construction_byte_limit_for_tests(limit);
+    }
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Expanded,
+    );
+    let lower = |name: &str| {
+        let expr = verter_type_expr::TypeExpr::Ref {
+            name: std::sync::Arc::from(name),
+            type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        };
+        dispatch
+            .lower_type_expr_in_scope_with_context(scope_canonical_id, &expr, context)
+            .unwrap_or_else(|| panic!("`{name}` lowers in {scope_canonical_id}"))
+    };
+    let (source, target) = (lower(source), lower(target));
+    let step = dispatch.execute_relate(dispatch.relate_key_for(source, target));
+    let usage = dispatch.connected_demand_usage();
+    (
+        matches!(
+            step,
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
+        ),
+        usage.work,
+        usage.bytes,
+    )
+}
+
+/// Reduce the template literal type named `name` in `scope_canonical_id` as
+/// one connected demand under `construction_byte_limit` when given: whether
+/// the reduction completed, and the construction bytes the demand charged.
+pub fn reduce_named_template_for_tests(
+    host: &crate::VerterHost,
+    scope_canonical_id: &str,
+    name: &str,
+    construction_byte_limit: Option<usize>,
+) -> (bool, usize) {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    if let Some(limit) = construction_byte_limit {
+        dispatch.set_construction_byte_limit_for_tests(limit);
+    }
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Expanded,
+    );
+    let expr = verter_type_expr::TypeExpr::Ref {
+        name: std::sync::Arc::from(name),
+        type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+    };
+    let node = dispatch
+        .lower_type_expr_in_scope_with_context(scope_canonical_id, &expr, context)
+        .unwrap_or_else(|| panic!("`{name}` lowers in {scope_canonical_id}"));
+    let (_, completeness) =
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context);
+    (
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        dispatch.connected_demand_usage().bytes,
+    )
+}
+
 /// Integration-test shim that drives the
 /// `substitute_semantic_type_param` helper so its hash-cons
 /// discriminator tests can exercise the memo with controlled
@@ -1027,7 +1101,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
-    let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone());
+    let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone(), &Default::default());
     let entry = if let Some(nested_name) = nested {
         let mut matching = index.matches_named(name).filter(|candidate| {
             candidate.entry().lexical_parent.is_some() && nodes.get(&candidate.entry().key).is_some_and(|resolved| {
@@ -1045,6 +1119,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+        FunctionNode::Initializer(expression) => FunctionBodySource::from_initializer(expression),
     };
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
     let function = entry.key.clone();

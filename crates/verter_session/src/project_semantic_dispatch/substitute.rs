@@ -279,6 +279,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.evaluate_closed_operator(current)
                     }
                 }
+                // An instantiated conditional reduces as the checker's
+                // `getConditionalType` does on instantiation; one still open
+                // stays the deferred shell the query hands back.
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    distributive,
+                    pending,
+                } => match crate::semantic_query::SemanticQueryApi::execute_type_node(
+                    self,
+                    crate::semantic_query::SemanticQueryKey::Conditional {
+                        check: *check,
+                        extends: *extends,
+                        true_branch: *true_branch_ref,
+                        false_branch: *false_branch_ref,
+                        distributive: *distributive,
+                        pending: pending.clone(),
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(output) => output.value,
+                    _ => current,
+                },
                 _ if parts.iter().all(|part| reduced_part(*part) == *part) => current,
                 SemanticNodeData::Array { readonly, .. } => graph.intern_preserving_scope(
                     current,
@@ -462,6 +486,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         binders.into_iter().fold(node, |result, binder| {
             self.substitute_semantic_type_param(result, binder, receiver)
         })
+    }
+
+    /// The bare `this` types a callee reads in its own signature positions —
+    /// a declared member's polymorphic `this` (`self(): this`,
+    /// `wrap(): Promise<this>`), which the reference the member is read
+    /// through binds. The walk stops at object surfaces and declaration
+    /// contributors: a `this` inside one belongs to that type.
+    pub(super) fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut found: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if data
+                .bare_ref_head()
+                .is_some_and(|(name, _)| name.as_ref() == "this")
+            {
+                found.push(current);
+                continue;
+            }
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Object(_)
+                    | SemanticNodeData::MergedDecl { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            ) {
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        found
+    }
+
+    /// `callee` read through `receiver`: its polymorphic `this` — a class
+    /// member's `this` binder and a declared member's bare `this` — bound to
+    /// the receiver, the checker's instantiation of a member's `this` type
+    /// with the reference it is accessed through.
+    pub(crate) fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let bound = self.bind_this_receiver(callee, receiver);
+        self.receiver_this_types(bound)
+            .into_iter()
+            .fold(bound, |result, this| {
+                self.substitute_semantic_type_param(result, this, receiver)
+            })
     }
 
     /// Rebind the ENCLOSING type parameters a body-derived return mentions
@@ -1389,6 +1466,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     next_pending = next_pending.append_false(parameter_node, arg);
                 } else {
                     next_pending = next_pending.append_both(parameter_node, arg);
+                    // A distributive conditional's check IS this parameter:
+                    // its branches see each member it distributes over.
+                    if *distributive && *check == parameter_node {
+                        next_pending = next_pending.distributing(parameter_node);
+                    }
                 }
                 let next_pending = if next_pending.is_empty() {
                     None
@@ -1446,6 +1528,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 if !any_changed {
                     return (node, false);
+                }
+                // `NoInfer` over an operand that is no longer generic is
+                // that operand.
+                if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer)
+                    && !self.type_is_generic(new_args[0])
+                {
+                    return (new_args[0], true);
                 }
                 (
                     self.graph().intern_preserving_scope(

@@ -212,15 +212,66 @@ fn publication_pins_epoch_before_reading_membership() {
     );
 }
 
-fn note_live_window(index: &GlobalContributorIndex) {
-    let source = "export {};\ndeclare global { interface Window { x: 1 } }\n";
+fn note_live_window(index: &GlobalContributorIndex) -> FileArtifactKey {
+    note_live_source(
+        index,
+        "export {};\ndeclare global { interface Window { x: 1 } }\n",
+    )
+}
+
+fn note_live_source(index: &GlobalContributorIndex, source: &str) -> FileArtifactKey {
     let state = ShallowFileState::service_backed_for_test_at("/g.d.ts", source);
     let src: Arc<str> = Arc::from(source);
     let indexed =
         IndexedReady::new_for_test_with_state(state.whole_hash, state, Arc::clone(&src), src);
     let key = FileArtifactKey::for_indexed(Arc::from("/g.d.ts"), &indexed, BASE_PARSE_ENV_HASH);
     let payload = FileArtifacts::with_indexed(Arc::new(indexed));
-    index.note_live(key, &payload);
+    index.note_live(key.clone(), &payload);
+    key
+}
+
+/// A file's contribution record is superseded by its next version and
+/// leaves with its artifact: however many versions of one file are noted,
+/// the index holds one record and that version's contributions, and none
+/// once the live version is gone.
+#[test]
+fn a_files_contribution_record_is_superseded_and_released() {
+    let index = GlobalContributorIndex::new();
+    assert_eq!((index.record_count(), index.contribution_count()), (0, 0));
+    note_live_window(&index);
+    let one_version = (index.record_count(), index.contribution_count());
+    assert_eq!(one_version.0, 1);
+    assert!(one_version.1 > 0, "premise: the file contributes");
+    let mut last = None;
+    for version in 0..8 {
+        last = Some(note_live_source(
+            &index,
+            &format!("export {{}};\ndeclare global {{ interface Window {{ x: {version} }} }}\n"),
+        ));
+    }
+    assert_eq!(
+        (index.record_count(), index.contribution_count()),
+        one_version,
+        "a later version of the file replaces its record"
+    );
+    index.note_gone(&last.expect("a version"));
+    assert_eq!(
+        (index.record_count(), index.contribution_count()),
+        (0, 0),
+        "the retired version's record leaves with it"
+    );
+
+    // A script's class is a file-scope global type: its contributions ride
+    // the same record and leave with it.
+    let script = note_live_source(&index, "declare class Churn {}\ntype ChurnAlias = Churn;\n");
+    assert_eq!(index.record_count(), 1);
+    assert_eq!(
+        index.contribution_count(),
+        3,
+        "the class contributes its type and its value, the alias its type"
+    );
+    index.note_gone(&script);
+    assert_eq!((index.record_count(), index.contribution_count()), (0, 0));
 }
 
 #[test]

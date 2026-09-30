@@ -259,6 +259,12 @@ static_assertions::assert_not_impl_any!(FlowProductKey: Send, Sync);
 static_assertions::assert_not_impl_any!(SelectedFlowSite: Send, Sync);
 
 impl FlowProductStore {
+    /// Whether `other` holds exactly these products, in the same layout.
+    #[must_use]
+    pub fn same_as(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+    }
+
     #[must_use]
     pub fn get(&self, key: &FlowProductKey) -> Option<&FlowProductValue> {
         if !Rc::ptr_eq(&self.scope, &key.scope) {

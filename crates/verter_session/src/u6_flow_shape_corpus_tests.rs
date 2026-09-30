@@ -169,6 +169,8 @@ pub(crate) enum Degr {
     FailedBindingInitializer,
     UnreducedDeclaredUnion,
     UnresolvedValue,
+    PartialInterior,
+    OperationBudget,
 }
 
 /// The flow-graph lane expectation for one row.
@@ -767,6 +769,8 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
         Some(FlowReturnDegradation::FailedBindingInitializer) => Degr::FailedBindingInitializer,
         Some(FlowReturnDegradation::UnreducedDeclaredUnion) => Degr::UnreducedDeclaredUnion,
         Some(FlowReturnDegradation::UnresolvedValue) => Degr::UnresolvedValue,
+        Some(FlowReturnDegradation::PartialInterior) => Degr::PartialInterior,
+        Some(FlowReturnDegradation::OperationBudget) => Degr::OperationBudget,
     }
 }
 
@@ -1248,6 +1252,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "094addee6d5b49b37da84c00789b93f9bf2199ae708427f46814ba089fa2a407",
     ),
     (
+        "E04_spread_optional_chain",
+        "3096817da7d969842611fdb3faca184737f1c1fe0dc290e7d6a769935cb7c5b1",
+    ),
+    (
         "E05_empty_literal",
         "954bd988d8bcf4862f58c7d2cf598d8debda29850d2e60ac6d1b031d09dc4d08",
     ),
@@ -1412,6 +1420,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "60b88e0dd8c216eb7c3a29684952ed99475202da6431d8dfe46d4e592b0f7a6b",
     ),
     (
+        "N32_optional_chain_property_discriminant",
+        "1a3ba50b8d6e1c0059f17e42b97c403bdc183398882b1dce5b3d4b49968d630d",
+    ),
+    (
         "N31_discriminated_union_switch_positive_control",
         "82864336129b447c34bf97d99dd936464a993c1c7a6112ab35892ffa151ca93c",
     ),
@@ -1552,6 +1564,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c76dfe56935d20c486ad3695ee27b779e464d342d25d67178c8c7b892636f6be",
     ),
     (
+        "X24_try_write_catch_read",
+        "534a8807d4563419025d29a3b9c6692b211bd303ce66001bce7236f1ddbb4f1f",
+    ),
+    (
         "X25_try_assertion_catch_scope",
         "095993c48c8f8979211c6c00984ccb8b4a8516d601f2e1fea448eafaaffb6ad8",
     ),
@@ -1622,6 +1638,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X51_finally_write_not_on_abrupt_edge",
         "7788f7e8640c12051a56378d1636e025ab5d0a52341929e9fcb8e6901128ce17",
+    ),
+    (
+        "X52_finally_entry_joins_pending_break",
+        "0c318879b4d25bc404804372e74611b313043cb84b3c89973c2314025fbf6ea6",
     ),
     (
         "X53_terminated_if_arm_contributes_nothing",
@@ -3892,7 +3912,7 @@ mod corpus_suite {
             ),
             (
                 "E04_spread_optional_chain",
-                "checker prints `{ label?: string | undefined; }`; the renderer spells the unmodelled-position marker `Opaque(UnmodeledPosition)` — print syntax AND semantics differ; the FailsClosed divergence is held by the semantic test",
+                "checker prints `{ label?: string | undefined; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
             ),
             (
                 "H02_union_spread_source",
@@ -5359,16 +5379,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "root Other — a function value; deepening pins the signature (params + return)",
     ),
     (
-        "N29_switch_optional_chain_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — the recursive expectation vocabulary has no Miss variant, so the surface is unspellable as a deep pin; the member pin plus the KnownOwed note carry it",
-    ),
-    (
-        "N32_optional_chain_property_discriminant",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N33_computed_property_discriminant",
         Owner::U6NarrowLattice,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
@@ -5465,7 +5475,6 @@ const OPEN_DEBTS: &[&str] = &[
     //    ReturnOnly (zero candidates, recomputed cold), never a
     //    silently narrowed answer.
     "N29_switch_optional_chain_discriminant",
-    "N32_optional_chain_property_discriminant",
     "N33_computed_property_discriminant",
     "N34_non_null_asserted_property_discriminant",
     "N39_instanceof_imported_class",
@@ -5562,7 +5571,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // undefined` members take: 84 matching, 4 parked. A const context
     // copies a spread's members `readonly`, so B03, B04 and B10 match the
     // checker: 87 matching, 1 parked.
-    (Owner::U6ValueInference, 93, 87, 1),
+    (Owner::U6ValueInference, 93, 89, 1),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
     // loop break crossing an abrupt finally match the checker. A capture
@@ -5581,7 +5590,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // through the constructed instance matches too. Loops iterate to the
     // checker's fixed point: D05 and the X58–X60 loop transfers match the
     // checker.
-    (Owner::U6FlowReturnSubstrate, 67, 60, 1),
+    (Owner::U6FlowReturnSubstrate, 67, 61, 1),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
     // `let`-aliased condition control (N84) publishes complete. A `const`
@@ -5608,7 +5617,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // dropping N25's dead contributor, and a correlated tuple's
     // destructured discriminant narrows its siblings (N47), and an enum
     // member discriminant narrows as the checker's does (N65): 31.
-    (Owner::U6NarrowLattice, 38, 31, 7),
+    (Owner::U6NarrowLattice, 38, 32, 6),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
     // instantiated at the call (N56, N57, N59) — and a statement call

@@ -47,7 +47,7 @@ use verter_macro_dto::{
     TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
-use verter_parser::oxc_parse::{with_program_stack, Parser};
+use verter_parser::oxc_parse::Parser;
 use verter_type_expr::facts::TypeDependencyPathFact;
 
 use crate::code_transform::{CodeTransform, GeneratedSourceRange};
@@ -682,6 +682,13 @@ pub enum TscGenerationError {
     /// The DTO authorized parser-owned type syntax but the extracted slot has
     /// no complete, source-stable argument geometry.
     MissingAuthoredArgumentGeometry { subject: TscFailureSubject },
+    /// A parse or walk-stack lease the generation needed was refused its
+    /// stack: typed operational incompleteness, not a verdict on the source.
+    /// Its subject is [`TscFailureSubject::Source`].
+    StackUnavailable {
+        /// The bytes of stack the refused work needed.
+        needed: usize,
+    },
 }
 
 /// Authored compiler syntax carrier associated with a TSC generation failure.
@@ -691,6 +698,9 @@ pub enum TscFailureSubject {
     Macro { syntax_index: u32 },
     /// The raw type syntax authored in `<script setup attrs="…">`.
     ScriptSetupAttrs { source_range: Span },
+    /// The whole source: the failure is not attributable to one syntax slot
+    /// (a parse of the source refused its stack).
+    Source,
 }
 
 impl TscFailureSubject {
@@ -703,7 +713,7 @@ impl TscFailureSubject {
     pub const fn macro_syntax_index(self) -> Option<u32> {
         match self {
             Self::Macro { syntax_index } => Some(syntax_index),
-            Self::ScriptSetupAttrs { .. } => None,
+            Self::ScriptSetupAttrs { .. } | Self::Source => None,
         }
     }
 }
@@ -719,6 +729,7 @@ impl std::fmt::Display for TscFailureSubject {
                 "script setup attrs source range {}..{}",
                 source_range.start, source_range.end
             ),
+            Self::Source => formatter.write_str("the source"),
         }
     }
 }
@@ -778,9 +789,6 @@ impl TscUnavailableOutcome {
         match self {
             Self::Partial(failure) => match failure.reason {
                 MacroPartialReason::BudgetExceeded => "budget-exceeded",
-                MacroPartialReason::Cancelled => "cancelled",
-                MacroPartialReason::SupersededGeneration => "superseded-generation",
-                MacroPartialReason::UnstableState => "unstable-state",
                 MacroPartialReason::Recursion => "recursion",
                 MacroPartialReason::IncompleteTraversal => "incomplete-traversal",
             },
@@ -926,6 +934,7 @@ impl TscGenerationError {
             Self::InvalidAuthoredMemberOrdinal { .. } => "invalid-authored-member-ordinal",
             Self::InvalidMacroAnchor { .. } => "invalid-macro-anchor",
             Self::MissingAuthoredArgumentGeometry { .. } => "missing-authored-argument-geometry",
+            Self::StackUnavailable { .. } => "stack-unavailable",
         }
     }
 
@@ -947,6 +956,7 @@ impl TscGenerationError {
             | Self::InvalidAuthoredMemberOrdinal { subject, .. }
             | Self::InvalidMacroAnchor { subject }
             | Self::MissingAuthoredArgumentGeometry { subject } => *subject,
+            Self::StackUnavailable { .. } => TscFailureSubject::Source,
         }
     }
 
@@ -1051,6 +1061,12 @@ impl std::fmt::Display for TscGenerationError {
                 "authoritative TSC props projection requires missing authored argument geometry",
                 subject,
             ),
+            Self::StackUnavailable { needed } => {
+                return write!(
+                    formatter,
+                    "the source nests deeper than a stack this host can provide \n                     ({needed} bytes needed)"
+                );
+            }
         };
         write!(formatter, "{message} for {subject}")
     }
@@ -1781,7 +1797,40 @@ impl std::fmt::Debug for ExtractedTscState {
 /// surfaces remain empty until [`generate_tsc_from_state`] applies a bundle.
 ///
 /// Returns `None` if the SFC has no `<script setup>` block.
+///
+/// A parse or walk-stack lease refused its stack is
+/// [`TscGenerationError::StackUnavailable`], never a state read off the empty
+/// program in the source's place.
 pub fn extract_tsc_state(
+    sfc_source: &str,
+    component_name: &str,
+    options: &TscExtractOptions,
+) -> Result<Option<ExtractedTscState>, TscGenerationError> {
+    refused_as_tsc_error(verter_parser::oxc_parse::refusals_within(|| {
+        Ok(extract_tsc_state_unrecorded(
+            sfc_source,
+            component_name,
+            options,
+        ))
+    }))
+}
+
+/// The typed stack refusal of a generation that made one, or its outcome.
+fn refused_as_tsc_error<T>(
+    (outcome, refused): (
+        Result<T, TscGenerationError>,
+        Option<verter_parser::oxc_parse::StackUnavailable>,
+    ),
+) -> Result<T, TscGenerationError> {
+    match refused {
+        Some(unavailable) => Err(TscGenerationError::StackUnavailable {
+            needed: unavailable.needed,
+        }),
+        None => outcome,
+    }
+}
+
+fn extract_tsc_state_unrecorded(
     sfc_source: &str,
     component_name: &str,
     options: &TscExtractOptions,
@@ -1889,6 +1938,18 @@ pub fn extract_tsc_state(
 /// alongside the syntax extract would key cross-file semantics on a
 /// single-file hash.
 pub fn generate_tsc_from_state(
+    state: &ExtractedTscState,
+    component_name: &str,
+    mode: TscMode,
+    macro_tsc: MacroTscInput<'_>,
+    fallthrough: &FallthroughPropsProjection,
+) -> Result<TscOutput, TscGenerationError> {
+    refused_as_tsc_error(verter_parser::oxc_parse::refusals_within(|| {
+        generate_tsc_from_state_unrecorded(state, component_name, mode, macro_tsc, fallthrough)
+    }))
+}
+
+fn generate_tsc_from_state_unrecorded(
     state: &ExtractedTscState,
     component_name: &str,
     mode: TscMode,
@@ -2004,7 +2065,27 @@ fn sanitize_tsc_component_name(name: &str) -> String {
 }
 
 /// Like [`generate_tsc_output`] but with explicit options.
+/// A parse or walk-stack lease refused its stack is
+/// [`TscGenerationError::StackUnavailable`].
 pub fn generate_tsc_output_with_options(
+    sfc_source: &str,
+    component_name: &str,
+    tsc_options: &TscGenOptions,
+    macro_tsc: MacroTscInput<'_>,
+    fallthrough: &FallthroughPropsProjection,
+) -> Result<TscOutput, TscGenerationError> {
+    refused_as_tsc_error(verter_parser::oxc_parse::refusals_within(|| {
+        generate_tsc_output_with_options_unrecorded(
+            sfc_source,
+            component_name,
+            tsc_options,
+            macro_tsc,
+            fallthrough,
+        )
+    }))
+}
+
+fn generate_tsc_output_with_options_unrecorded(
     sfc_source: &str,
     component_name: &str,
     tsc_options: &TscGenOptions,
@@ -2390,9 +2471,13 @@ fn collect_local_type_inventory(
     source_offset: u32,
     owner: TscScriptOwner,
 ) -> Vec<LocalTypeDecl> {
-    let semantic = with_program_stack(program, || {
+    // A walk refused its stack finds no local types; the operation around it
+    // is refused with the refusal.
+    let Ok(semantic) = verter_parser::oxc_parse::leased_program_walk(program, || {
         SemanticBuilder::new().with_enum_eval(true).build(program)
-    });
+    }) else {
+        return Vec::new();
+    };
     let scoping = semantic.semantic.scoping();
     let mut contributors = FxHashMap::<String, u32>::default();
     let mut locals = Vec::new();

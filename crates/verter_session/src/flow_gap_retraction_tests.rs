@@ -948,10 +948,6 @@ fn optional_any_refuses_type_changing_or_effectful_interposed_nodes() {
             "function makeProps(x: any) { return x<string>?.b }",
         ),
         (
-            "call_interposed",
-            "function makeProps(x: any) { return x?.().b }",
-        ),
-        (
             "effectful_call_argument",
             "function makeProps(a: any, x: string | number) { return a?.b(x = \"s\") }",
         ),
@@ -964,6 +960,20 @@ fn optional_any_refuses_type_changing_or_effectful_interposed_nodes() {
         record_trace(id, &trace);
         assert_refused(&trace);
     }
+}
+
+/// A call interposed in an optional chain over `any` is the checker's
+/// untyped call: `x?.().b` is `any` (tsc 7.0.2, all four settings). The
+/// row was refused while the chain's call had no carrier.
+#[test]
+fn optional_call_chain_over_any_is_any() {
+    let trace = run(
+        "call_interposed",
+        "function makeProps(x: any) { return x?.().b }",
+        "makeProps",
+    );
+    record_trace("call_interposed", &trace);
+    assert_complete_warm(&trace, Some(r#"{"kind":"primitive","name":"any"}"#));
 }
 
 #[test]
@@ -1042,14 +1052,8 @@ fn checker_correct_unannotated_same_closure_write_remains_complete_and_warm() {
 
 #[test]
 fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
-    let mut default = "0".to_owned();
-    for depth in 0..65 {
-        default = if depth % 2 == 0 {
-            format!("[{default}]")
-        } else {
-            format!("{{ value: {default} }}")
-        };
-    }
+    // A default the inference's work budget cannot visit: 5,000 elements.
+    let default = format!("[{}]", vec!["0"; 5_000].join(", "));
     let trace = run(
         "default_budget",
         &format!("function makeProps(value = {default}) {{ return value }}"),
@@ -1057,7 +1061,7 @@ fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
     );
     record_trace("default_budget", &trace);
     let expected = Some(FlowReturnError::Failure(FlowReturnFailure::Budget(
-        verter_type_expr::facts::InferenceUnavailableReason::DepthBudgetExceeded,
+        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
     )));
     for sample in [&trace.first, &trace.second] {
         assert_eq!(sample.error, expected, "{trace:#?}");

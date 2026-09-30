@@ -485,7 +485,9 @@ fn accumulate_lowered_node_carrier_deps(
 /// `Union`, `Intersection`, `Tuple`, `Array`, etc. — these are
 /// directly enumerable by the empty-path Shallow walker.
 ///
-/// Depth-fused at 256 to bound recursion on adversarial inputs.
+/// The root is read one successor at a time — an alias's target, a concrete
+/// conditional's reduction, an instantiated carrier's body — however long
+/// the chain; a chain that returns to a node it passed is enumerable.
 ///
 /// `pub(crate)` so the DTO slot-binding extractor
 /// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_node` via
@@ -496,19 +498,35 @@ fn accumulate_lowered_node_carrier_deps(
 /// phantom binding that the graph-native path correctly declined.
 pub(crate) fn slot_param_root_is_symbolic_only(
     dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-    depth: u32,
+    root: SemanticNodeId,
 ) -> bool {
-    if depth > 256 {
-        return false;
-    }
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-        return false;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Alias(inner) => {
-            slot_param_root_is_symbolic_only(dispatch, *inner, depth + 1)
+    let mut node = root;
+    let mut passed: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    while passed.insert(node) {
+        match slot_param_root_step(dispatch, node) {
+            SlotRootStep::Symbolic(symbolic) => return symbolic,
+            SlotRootStep::Next(next) => node = next,
         }
+    }
+    false
+}
+
+/// One read of [`slot_param_root_is_symbolic_only`]: the node's own
+/// answer, or the node it stands for.
+enum SlotRootStep {
+    Symbolic(bool),
+    Next(SemanticNodeId),
+}
+
+fn slot_param_root_step(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SlotRootStep {
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        return SlotRootStep::Symbolic(false);
+    };
+    SlotRootStep::Symbolic(match data.as_ref() {
+        SemanticNodeData::Alias(inner) => return SlotRootStep::Next(*inner),
         // A Conditional is symbolic-only ONLY when it is genuinely OPEN — i.e.
         // its CHECK still contains a free `TypeParam` / `Infer` shell, so the
         // branch identity is undetermined. The distinction:
@@ -531,8 +549,8 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             let check = *check;
             drop(data);
             // Open check (free TypeParam / Infer) → genuinely symbolic.
-            if node_contains_free_type_param(dispatch, check, 0) {
-                return true;
+            if node_contains_free_type_param(dispatch, check) {
+                return SlotRootStep::Symbolic(true);
             }
             // Concrete check → reduce the conditional and classify the result.
             let empty_path: Arc<[crate::semantic_query::PathSegment]> =
@@ -550,7 +568,7 @@ pub(crate) fn slot_param_root_is_symbolic_only(
                 // Decidable: reduced to a concrete terminal — classify it (a
                 // concrete branch root is enumerable, not symbolic).
                 QueryResult::Value(reduced) if reduced != node => {
-                    slot_param_root_is_symbolic_only(dispatch, reduced, depth + 1)
+                    return SlotRootStep::Next(reduced)
                 }
                 // Stayed the deferred conditional shell (open / undecidable) —
                 // genuinely symbolic-only.
@@ -605,7 +623,7 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
                 QueryResult::Value(body_id) if body_id != node => {
-                    slot_param_root_is_symbolic_only(dispatch, body_id, depth + 1)
+                    return SlotRootStep::Next(body_id)
                 }
                 // Did not instantiate past the carrier shell (or errored) —
                 // an unresolvable carrier has no concrete enumerable root.
@@ -613,7 +631,7 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             }
         }
         _ => false,
-    }
+    })
 }
 
 /// Returns `true` when `node`'s structure still contains a FREE `TypeParam` or
@@ -632,62 +650,55 @@ pub(crate) fn slot_param_root_is_symbolic_only(
 /// predicate is applied to the CHECK only) — an `infer U` in `extends` is the
 /// binding mechanism, not an open check parameter. The lazy declaration carriers
 /// (`DeclRef` / `InstantiationRef`) are treated as NOT-free (they are concrete
-/// declaration references, resolved elsewhere). Depth-fused at 256.
+/// declaration references, resolved elsewhere). Every node is read once,
+/// whatever the nesting.
 fn node_contains_free_type_param(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-    depth: u32,
 ) -> bool {
-    if depth > 256 {
-        return false;
-    }
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-        return false;
-    };
-    match data.as_ref() {
-        SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::Infer { .. }
-        | SemanticNodeData::InferRef { .. } => true,
-        SemanticNodeData::Alias(inner) => {
-            node_contains_free_type_param(dispatch, *inner, depth + 1)
-        }
-        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-            let members = composite.composite_members().expect("composite arm");
-            members
+    use crate::graph_walk::Reach;
+    crate::graph_walk::reaches(node, |node| {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+            return Reach::Parts(Vec::new());
+        };
+        Reach::Parts(match data.as_ref() {
+            SemanticNodeData::TypeParam { .. }
+            | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. } => return Reach::Hit,
+            SemanticNodeData::Alias(inner) => vec![*inner],
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                composite
+                    .composite_members()
+                    .expect("composite arm")
+                    .iter()
+                    .copied()
+                    .collect()
+            }
+            SemanticNodeData::Array { element, .. } => vec![*element],
+            SemanticNodeData::Tuple { elements, .. } => {
+                elements.iter().map(|element| element.value).collect()
+            }
+            SemanticNodeData::Object(view) => view
+                .positive_members()
                 .iter()
-                .any(|m| node_contains_free_type_param(dispatch, *m, depth + 1))
-        }
-        SemanticNodeData::Array { element, .. } => {
-            node_contains_free_type_param(dispatch, *element, depth + 1)
-        }
-        SemanticNodeData::Tuple { elements, .. } => elements
-            .iter()
-            .any(|e| node_contains_free_type_param(dispatch, e.value, depth + 1)),
-        SemanticNodeData::Object(view) => view
-            .positive_members()
-            .iter()
-            .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1)),
-        SemanticNodeData::KeyOf { base } => {
-            node_contains_free_type_param(dispatch, *base, depth + 1)
-        }
-        SemanticNodeData::IndexedAccess { object, .. } => {
-            node_contains_free_type_param(dispatch, *object, depth + 1)
-        }
-        // A `BareRef` / `TypeOf` / `ImportType` carrier applies its arguments at
-        // the reference site; a free `TypeParam` inside those args makes the
-        // node contain a free param (the check stays open). Descend the args via
-        // the shared accessor (args-only; the carrier head is not resolved).
-        SemanticNodeData::BareRef(_)
-        | SemanticNodeData::TypeOf(_)
-        | SemanticNodeData::TypeOfNominal(_)
-        | SemanticNodeData::ImportType(_) => data
-            .carrier_type_args()
-            .iter()
-            .any(|&a| node_contains_free_type_param(dispatch, a, depth + 1)),
-        // Primitives, literals, functions, opaque, etc. carry no free open
-        // parameter on the check path.
-        _ => false,
-    }
+                .map(|member| member.value)
+                .collect(),
+            SemanticNodeData::KeyOf { base } => vec![*base],
+            SemanticNodeData::IndexedAccess { object, .. } => vec![*object],
+            // A `BareRef` / `TypeOf` / `ImportType` carrier applies its
+            // arguments at the reference site; a free `TypeParam` inside
+            // those args makes the node contain a free param (the check
+            // stays open). Descend the args via the shared accessor
+            // (args-only; the carrier head is not resolved).
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
+            | SemanticNodeData::ImportType(_) => data.carrier_type_args().to_vec(),
+            // Primitives, literals, functions, opaque, etc. carry no free
+            // open parameter on the check path.
+            _ => Vec::new(),
+        })
+    })
 }
 
 /// Compute the exactness flag for a synthesised binding's value node.
@@ -1204,7 +1215,7 @@ pub(crate) fn compute_bindings_via_graph(
         // analysis still publishes a binding row when the source-text
         // annotation is concrete; the synthesis here just declines to
         // overwrite that row with a materialised guess.
-        if slot_param_root_is_symbolic_only(dispatch, param0_ty, 0) {
+        if slot_param_root_is_symbolic_only(dispatch, param0_ty) {
             tracing::trace!(
                 target: "verter::meta_resolve::slot_binding",
                 slot = %slot_name,
@@ -1728,104 +1739,126 @@ fn owner_local_member_reaches_non_owner_ref(
     else {
         return false;
     };
-    node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node(), 0)
+    node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node())
 }
 
-/// Bounded typed-node scan: does any reference reachable under `node`
-/// resolve OUTSIDE `owner_canonical`? The node-domain mirror of the
-/// route-preservation "member value contains an imported reference"
-/// walk — refs that cannot be located are ignored (they cannot be
-/// proven imported; fail-closed keeps the slow path).
+/// Typed-node scan: does any reference reachable under `node` resolve
+/// OUTSIDE `owner_canonical`? The node-domain mirror of the
+/// route-preservation "member value contains an imported reference" walk —
+/// refs that cannot be located are ignored (they cannot be proven imported;
+/// fail-closed keeps the slow path). Every node is read once, whatever the
+/// nesting.
 fn node_reaches_non_owner_ref(
     dispatch: &ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     node: SemanticNodeId,
-    depth: u32,
 ) -> bool {
-    if depth > 32 {
-        return false;
-    }
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-        return false;
-    };
-    let recur =
-        |n: SemanticNodeId| node_reaches_non_owner_ref(dispatch, owner_canonical, n, depth + 1);
-    match &*data {
-        SemanticNodeData::DeclRef { identity } => identity.canonical_id.as_ref() != owner_canonical,
-        SemanticNodeData::InstantiationRef { base, args } => {
-            base.canonical_id.as_ref() != owner_canonical || args.iter().copied().any(recur)
-        }
-        // A dynamic-import reference names a module by specifier — a
-        // non-owner reference by construction.
-        SemanticNodeData::ImportType(_) => true,
-        SemanticNodeData::BareRef(_) => {
-            // Head-resolve through the shared carrier-preserving
-            // normalization (`Navigate` — routing only, no body
-            // expansion); an unresolvable name cannot be proven
-            // imported and is ignored.
-            drop(data);
-            let resolved = dispatch.resolve_carrier_subject_node(
-                node,
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Navigate,
-                ),
-            );
-            resolved != node && recur(resolved)
-        }
-        SemanticNodeData::Alias(inner) => recur(*inner),
-        SemanticNodeData::Array { element, .. } => recur(*element),
-        SemanticNodeData::KeyOf { base } => recur(*base),
-        SemanticNodeData::IndexedAccess { object, index } => {
-            recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
-        }
-        SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-            let members = composite.composite_members().expect("composite arm");
-            members.iter().copied().any(recur)
-        }
-        SemanticNodeData::MergedDecl {
-            contributors: members,
-        } => members.iter().copied().any(recur),
-        SemanticNodeData::Object(surface) => {
-            surface.positive_members().iter().any(|m| recur(m.value))
-                || surface
-                    .index_signatures
+    use crate::graph_walk::Reach;
+    crate::graph_walk::reaches(node, |node| {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+            return Reach::Parts(Vec::new());
+        };
+        let hit = |hit: bool| {
+            if hit {
+                Reach::Hit
+            } else {
+                Reach::Parts(Vec::new())
+            }
+        };
+        Reach::Parts(match &*data {
+            SemanticNodeData::DeclRef { identity } => {
+                return hit(identity.canonical_id.as_ref() != owner_canonical)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                if base.canonical_id.as_ref() != owner_canonical {
+                    return Reach::Hit;
+                }
+                args.to_vec()
+            }
+            // A dynamic-import reference names a module by specifier — a
+            // non-owner reference by construction.
+            SemanticNodeData::ImportType(_) => return Reach::Hit,
+            SemanticNodeData::BareRef(_) => {
+                // Head-resolve through the shared carrier-preserving
+                // normalization (`Navigate` — routing only, no body
+                // expansion); an unresolvable name cannot be proven
+                // imported and is ignored.
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    node,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                );
+                if resolved == node {
+                    Vec::new()
+                } else {
+                    vec![resolved]
+                }
+            }
+            SemanticNodeData::Alias(inner) => vec![*inner],
+            SemanticNodeData::Array { element, .. } => vec![*element],
+            SemanticNodeData::KeyOf { base } => vec![*base],
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let mut parts = vec![*object];
+                if let crate::semantic_query::IndexKey::Computed(inner) = index {
+                    parts.push(*inner);
+                }
+                parts
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                elements.iter().map(|element| element.value).collect()
+            }
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                composite
+                    .composite_members()
+                    .expect("composite arm")
                     .iter()
-                    .any(|sig| recur(sig.key_type) || recur(sig.value_type))
-                || surface.call_signatures.iter().copied().any(recur)
-                || surface.construct_signatures.iter().copied().any(recur)
-        }
-        SemanticNodeData::Signature {
-            params,
-            return_type,
-            predicate,
-            ..
-        } => {
-            params.iter().any(|p| recur(p.ty))
-                || recur(*return_type)
-                || predicate
-                    .and_then(|predicate| predicate.ty)
-                    .is_some_and(&recur)
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            pending,
-            ..
-        } => {
-            pending
-                .as_ref()
-                .is_some_and(|frame| frame.argument_nodes().any(&recur))
-                || recur(*check)
-                || recur(*extends)
-                || recur(*true_branch_ref)
-                || recur(*false_branch_ref)
-        }
-        _ => false,
-    }
+                    .copied()
+                    .collect()
+            }
+            SemanticNodeData::MergedDecl {
+                contributors: members,
+            } => members.to_vec(),
+            SemanticNodeData::Object(surface) => surface
+                .positive_members()
+                .iter()
+                .map(|member| member.value)
+                .chain(
+                    surface
+                        .index_signatures
+                        .iter()
+                        .flat_map(|signature| [signature.key_type, signature.value_type]),
+                )
+                .chain(surface.call_signatures.iter().copied())
+                .chain(surface.construct_signatures.iter().copied())
+                .collect(),
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                predicate,
+                ..
+            } => params
+                .iter()
+                .map(|param| param.ty)
+                .chain(std::iter::once(*return_type))
+                .chain(predicate.and_then(|predicate| predicate.ty))
+                .collect(),
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                pending,
+                ..
+            } => pending
+                .iter()
+                .flat_map(|frame| frame.argument_nodes())
+                .chain([*check, *extends, *true_branch_ref, *false_branch_ref])
+                .collect(),
+            _ => Vec::new(),
+        })
+    })
 }
 
 /// Parser-path slot-binding row indexed by [`SlotBindingJoinKey`] —

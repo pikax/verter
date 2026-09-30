@@ -94,8 +94,12 @@ fn an_unread_marker_is_never_a_relation_fact() {
     });
 }
 
-/// Two unmodelled values stay an undecided conditional in a probe: a
-/// function-local class's instance is an unmodelled position.
+/// Two unmodelled values leave a conditional undecided in a probe (a
+/// function-local class's instance is an unmodelled position), and an
+/// undecided conditional is a typed gap: tsc 7.0.2 answers `'y'` for both
+/// probes in all four settings, so the lane publishes the partial
+/// `UNDECIDED_CONDITIONAL` demand, never a complete conditional and never a
+/// relation fact.
 #[test]
 fn a_conditional_over_two_unmodelled_values_stays_undecided() {
     let fixture = "\
@@ -106,9 +110,27 @@ function locals() { class LB { x = 1 } class LS extends LB { y = 2 } return [new
         "Ext<ReturnType<typeof locals>[0], ReturnType<typeof locals>[1]>",
         "Ext<ReturnType<typeof locals>[0], ReturnType<typeof locals>[0]>",
     ] {
-        let measured = with_probe(fixture, probe, |dispatch, node| {
-            render_node(dispatch, node, 0)
-        });
-        assert_eq!(measured, "Conditional(…)", "`{probe}` is no relation fact");
+        let measured = super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &super::checker_probe_lane_tests::default_probe_host(),
+            Default::default(),
+            fixture,
+            probe,
+            |dispatch, outcome| match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                    Ok(render_node(dispatch, node, 0))
+                }
+                super::evaluate::StructuralFactDemandOutcome::Recovered { reasons, .. }
+                | super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => Err(reasons),
+            },
+        );
+        assert!(
+            matches!(
+                measured,
+                Err(reasons) if reasons.contains(
+                    crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL
+                )
+            ),
+            "`{probe}` is no relation fact: {measured:?}"
+        );
     }
 }

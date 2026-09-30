@@ -563,9 +563,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let capture_context = context;
         let mut evaluator = Box::new(FlowEvaluator {
             dispatch: self.dispatch,
+            call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&owned.content.call_arguments),
             self_slot: None,
             resolving_functions: std::rc::Rc::clone(&self.resolving_functions),
+            this_free_values: std::rc::Rc::clone(&self.this_free_values),
             canonical: self.canonical,
             owner: self.owner,
             nullability: self.nullability,

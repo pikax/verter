@@ -107,6 +107,8 @@ mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
 mod overlay_promotion_isolation_tests;
 #[cfg(test)]
+mod overlay_resolution_snapshot_tests;
+#[cfg(test)]
 mod overlay_template_conversion_isolation_tests;
 #[cfg(test)]
 mod prepared_decl_import_route_witness_tests;
@@ -123,6 +125,8 @@ pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
 pub(crate) mod compile_cache_mode;
 pub(crate) mod compile_fact_emission;
+#[cfg(test)]
+mod component_meta_abort_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
@@ -208,6 +212,7 @@ mod flow_completion_inventory_tests;
 pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;
+pub(crate) mod graph_walk;
 mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering
@@ -382,6 +387,8 @@ pub mod route_analysis_inputs;
 /// closed capability catalog and the certified engine binding that is the
 /// sole route a TypeScript engine's answer enters the semantic plane.
 pub mod semantic_capability;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod semantic_execution;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 /// The one PROCESS-wide aggregate retention account: public so the LSP

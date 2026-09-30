@@ -48,7 +48,7 @@ export function aForEachResult(xs: number[]) { return xs.forEach(() => {}); }
 
 /// The library every project registers and the checker reads as its only lib
 /// file.
-const GLOBALS_LIB: &str = r##"interface Object { toString(): string; hasOwnProperty(v: PropertyKey): boolean; }
+pub(super) const GLOBALS_LIB: &str = r##"interface Object { toString(): string; hasOwnProperty(v: PropertyKey): boolean; }
 interface Function { apply(this: Function, thisArg: any, argArray?: any): any; readonly length: number; }
 interface CallableFunction extends Function {
   apply<T, R>(this: (this: T) => R, thisArg: T): R;
@@ -322,26 +322,22 @@ fn a_member_read_of_a_literal_expression_resolves() {
 }
 
 /// Under `strictBindCallApply` `add.apply(undefined, [1, 2])` and
-/// `add.call(undefined, 1, 2)` are `number` and `add.bind(undefined, 1)` is
-/// `(b: number) => number`, through `CallableFunction`'s generic `this`-typed
-/// signatures.
-///
-/// What the lane gives:
-/// - `fnApply`: the checker answers `number`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `fnCall`: the checker answers `number`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `fnBind`: the checker answers `(b: number) => number`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
+/// `add.call(undefined, 1, 2)` are `number`, through `CallableFunction`'s
+/// generic `this`-typed signatures.
 #[test]
-#[ignore = "apply, call and bind resolve through CallableFunction's generic signatures"]
-fn function_apply_call_and_bind_resolve_through_callable_function() {
+fn function_apply_and_call_resolve_through_callable_function() {
     let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("fnApply", "number"),
-        ("fnCall", "number"),
-        ("fnBind", "(b: number) => number"),
-    ]);
+    let failures = matrix.returns(&[("fnApply", "number"), ("fnCall", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Under `strictBindCallApply` `add.bind(undefined, 1)` is `(b: number) =>
+/// number`, `bind`'s second overload splitting `add`'s parameters at the
+/// bound argument.
+#[test]
+fn function_bind_with_a_bound_argument_resolves_through_callable_function() {
+    let matrix = Matrix::new(STRINGS_AND_FUNCTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.returns(&[("fnBind", "(b: number) => number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -499,5 +495,32 @@ fn promise_all_and_race_map_their_tuple_argument() {
 fn a_map_size_read_reads_as_the_checker_reads_it() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[("mSize", "number")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Tuples whose optional elements the `Array` wrapper reads.
+const OPTIONAL_TUPLE_WRAPPERS: &str = r##"
+export function tOptionalForEach() { return null! as Parameters<Parameters<[number?]["forEach"]>[0]>[0]; }
+export function tOptionalMap() { return null! as Parameters<Parameters<[number, string?]["map"]>[0]>[0]; }
+"##;
+
+/// A tuple's `Array` wrapper reads each optional element as the tuple's
+/// indexed access reads it: `[number?]`'s `forEach` callback takes `number |
+/// undefined` with `strictNullChecks` and `number` without it.
+#[test]
+fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
+    let matrix = Matrix::new(OPTIONAL_TUPLE_WRAPPERS).lib(GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (
+            Read::Return("tOptionalForEach"),
+            "number | undefined",
+            "number",
+        ),
+        (
+            Read::Return("tOptionalMap"),
+            "string | number | undefined",
+            "string | number",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

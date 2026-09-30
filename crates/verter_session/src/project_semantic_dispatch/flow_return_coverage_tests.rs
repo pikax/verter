@@ -296,6 +296,11 @@ export function callOptional() {
   return maybeFn?.();
 }
 
+export declare const maybeRec: { m(): number } | undefined;
+export function callOptionalComputed() {
+  return maybeRec?.["m"]();
+}
+
 export declare function tag(strings: TemplateStringsArray, ...v: number[]): boolean;
 export function callTagged() {
   return tag`a${1}b`;
@@ -2561,30 +2566,18 @@ fn construct_signature_call_return_is_the_signature_instance_type() {
     assert_eq!(projected_member(&value, "q"), &string());
 }
 
-/// CANARY — an OPTIONAL-CHAINED call (`maybeFn?.()`) returns the callee's
-/// return unioned with `undefined`.
+/// An OPTIONAL-CHAINED call (`maybeFn?.()`) returns the callee's return
+/// unioned with `undefined`.
 ///
 /// Oracle: `ReturnType<typeof callOptional>` is `number | undefined`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-///  right: Union([Primitive(Number), Primitive(Undefined)])
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: the OPTIONAL-CALL capability — no arm routes `f?.()`
-/// through the call carrier, so the `| undefined` arm is never
-/// synthesised. The admission half is settled: the chain is a
-/// `ValueDescent::UnmodeledCall` and fails closed instead of publishing
-/// `any` warm.
+/// The chain's call lowers through the shared call carrier
+/// (`SliceCall::OptionalChain`): the `?.()` edge strips the callee's
+/// nullish arms, the stripped callee is called like any other, and the
+/// short-circuit edge adds `undefined`. Before it the chain was a
+/// `ValueDescent::UnmodeledCall` and failed closed with the typed
+/// unresolved marker.
 #[test]
-#[ignore = "ChainExpression has no optional-call arm: `f?.()` fails closed as an unmodeled call position"]
 fn optional_chained_call_return_unions_undefined() {
     let host = ts_host();
     assert_eq!(
@@ -3319,11 +3312,11 @@ fn return_position_infer_keeps_its_binder_in_both_positions() {
         panic!("expected an Array extends clause, got {extends:?}");
     };
     assert!(
-        matches!(element.as_ref(), TypeExpr::Infer { name } if name == "E"),
+        matches!(element.as_ref(), TypeExpr::Infer { name, .. } if name == "E"),
         "the `infer E` binder must survive in the extends clause"
     );
     assert!(
-        matches!(true_type.as_ref(), TypeExpr::Infer { name } if name == "E"),
+        matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "E"),
         "the true branch must reference the same `infer` binder"
     );
     assert_eq!(
@@ -3582,8 +3575,8 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     );
 }
 
-/// CANARY — a member read off a CONSTRAINED clause parameter resolves
-/// through the constraint.
+/// A member read off a CONSTRAINED clause parameter resolves through the
+/// constraint, the checker's apparent type of a type parameter.
 ///
 /// Oracle (bidirectional signature identity): tsc resolves
 /// `<T extends HasQ>(x: T) => x.q` as returning `string`, NOT `T["q"]`.
@@ -3592,39 +3585,23 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
 /// `const bad: <U extends HasQ>(x: U) => number = tlConstrainedMember;`
 /// fails with `TS2322: Type '<T extends HasQ>(x: T) => string' is not
 /// assignable to type '<U extends HasQ>(x: U) => number'.`
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: tlConstrainedMember
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
-///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the same member arm as the unconstrained row — the
-/// constraint is never reached, so this row does not yet discriminate
-/// constraint resolution specifically. The miss is `ReturnOnly`, so
-/// nothing warms on it.
 #[test]
-#[ignore = "blocked behind the member-read arm: `x.q` over a constrained binder evaluates to Opaque(Miss) before the constraint is consulted"]
 fn constrained_clause_parameter_member_read_resolves_through_the_constraint() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlConstrainedMember", string());
 }
 
-/// A COMPUTED member read off a constrained clause parameter (`x["q"]`)
-/// fails CLOSED — a distinct outcome from the static member read's warm
-/// opaque, and the architecturally correct one.
+/// A literal-keyed element read off a constrained clause parameter
+/// (`x["q"]`) resolves through the constraint exactly as the dotted read.
 ///
-/// Oracle (for the record — the answer the fail-closed arm declines to
-/// produce): tsc resolves `<T extends HasQ>(x: T) => x["q"]` as `string`
+/// Oracle: tsc resolves `<T extends HasQ>(x: T) => x["q"]` as `string`
 /// (`const bad: <U extends HasQ>(x: U) => number = tlConstrainedIndexed;`
 /// fails with `TS2322: Type '<T extends HasQ>(x: T) => string' is not
 /// assignable to type '<U extends HasQ>(x: U) => number'.`).
 #[test]
-fn computed_member_read_over_a_constrained_binder_fails_closed() {
+fn computed_member_read_over_a_constrained_binder_resolves_through_the_constraint() {
     let host = ts_host();
-    assert_fails_closed(&host, TL, "tlConstrainedIndexed");
+    assert_clean_warm(&host, TL, "tlConstrainedIndexed", string());
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -4174,7 +4151,7 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// produce, different from `any`:
 ///
 /// ```text
-/// callOptional    maybeFn?.()                     number | undefined
+/// callOptionalComputed    maybeRec?.["m"]()     number | undefined
 /// ```
 ///
 /// `await asyncSrc()` is NOT in this set: an awaited
@@ -4191,11 +4168,14 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
 /// exactly the matching rows — `ChainElement::CallExpression` to `false`
-/// flips `callOptional` back to a warm `any`.
+/// flips `callOptionalComputed` back to a warm `any`. An optional chain
+/// whose call is off a static member path (`callOptional`, `maybeFn?.()`)
+/// is modelled (see `optional_chained_call_return_unions_undefined`); a
+/// computed link keeps this rail.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    assert_fails_closed(&host, CALLS, "callOptional");
+    assert_fails_closed(&host, CALLS, "callOptionalComputed");
 }
 
 /// D7 — the SEQUENCE wrapping of a call does not change the call's
@@ -5726,7 +5706,7 @@ fn checker_recovery_of(
     node: SemanticNodeId,
 ) -> Option<crate::semantic_query::CheckerDiagnostic> {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))) => {
+        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })) => {
             Some(*diagnostic)
         }
         _ => None,
@@ -5825,8 +5805,8 @@ fn reduced_annotation_in(
                     crate::semantic_query::ProjectionMode::Expanded,
                 ),
             )
-            .into_complete_node()
-            .unwrap_or_else(|| panic!("{name}: the demand must complete"));
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("{name}: the demand must answer"));
         let data = dispatch
             .graph()
             .node_data(node)
@@ -5969,7 +5949,11 @@ fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
         let (data, raised) = reduced_annotation(&host, name);
         assert_eq!(
             data,
-            SemanticNodeData::Opaque(QueryError::CheckerRecovery(ts2589)),
+            SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                diagnostic: ts2589,
+                basis: crate::semantic_query::RecoveryBasis::Certified,
+                origin: None
+            }),
             "{name}"
         );
         assert_eq!(raised, any(), "{name}: the recovery raises as `any`");
@@ -6258,10 +6242,14 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
     let (data, raised) = reduced_annotation(&host, "libGenericRec");
     assert_eq!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-            operation: CheckerDiagnosticOperation::LibAwaited,
-        }))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            },
+            basis: crate::semantic_query::RecoveryBasis::Certified,
+            origin: None,
+        })
     );
     assert_eq!(raised, any());
     assert_clean_warm(
@@ -6315,10 +6303,14 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
     let (data, raised) = reduced_annotation(&host, "libGrowThen");
     assert_eq!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-            operation: CheckerDiagnosticOperation::LibAwaited,
-        }))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            },
+            basis: crate::semantic_query::RecoveryBasis::Budget,
+            origin: None,
+        })
     );
     assert_eq!(raised, any());
     let under_budget = |name: &str| {
@@ -6412,15 +6404,15 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         );
     }
     // The budget's measure: a cold chain charges 16 units per element plus
-    // 6, every tail step among them, so under a budget of 806 units a
-    // 50-element chain answers and a 51-element one does not.
+    // 7, every tail step and the return site among them, so under a budget
+    // of 807 units a 50-element chain answers and a 51-element one does not.
     for (steps, answers) in [(50, true), (51, false)] {
         let file = format!("/ws/cov/thenable_chain_{steps}.ts");
         let source = chain(steps);
         let host = host_with(&[(file.as_str(), source.as_str())]);
         let outcome = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(
-                16 * 50 + 6,
+                16 * 50 + 7,
                 super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
             );
             let key = key_of(dispatch, &file, "awaitChain");
@@ -6429,10 +6421,10 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         if answers {
             assert!(
                 matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
-                "{steps} elements answer within 806 units, got {outcome:?}"
+                "{steps} elements answer within 807 units, got {outcome:?}"
             );
         } else {
-            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 806 units");
+            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 807 units");
         }
     }
     // The same 200-step chain under a work budget it cannot finish within:
@@ -6521,34 +6513,49 @@ fn lib_awaited_probe(source: &str) -> SemanticNodeData {
 fn is_ts2589(data: &SemanticNodeData) -> bool {
     matches!(
         data,
-        SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })
             if diagnostic.code
                 == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
     )
 }
 
-/// The lib conditional's TAIL runs stop where the checker's do.
+/// The lib conditional's TAIL runs go on past the checker's limit to their
+/// value, and stop with the checker's TS2589 at Verter's tail budget —
+/// counted as the checker counts, a run entered through a callback union
+/// starting with one step counted. A far lower budget than production's
+/// stands in for it on the same path, so the chains stay short.
 ///
 /// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
 /// chains of distinct thenables: 999 tail steps are `number` and 1000 are
-/// `any` under TS2589 at the `Awaited` reference. A run entered through a
-/// callback union starts with one step counted: one nested step then 998
-/// tail steps are `number`, then 999 are `any` under TS2589.
+/// `any` under TS2589 at the `Awaited` reference, where Verter's full
+/// answer is `number`. A run entered through a callback union starts with
+/// one step counted: one nested step then 998 tail steps are `number`, then
+/// 999 are `any` under TS2589, where Verter's full answer is `number`.
 #[test]
-fn lib_awaited_tail_runs_stop_at_the_checker_limit() {
+fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+    const BUDGET: usize = 120;
     let tails = |count: usize| "t".repeat(count);
+    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+    assert_eq!(lib_awaited_probe(&thenable_chain(&tails(1000))), number());
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&tails(999))),
-        SemanticNodeData::Primitive(PrimitiveKind::Number)
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(999)))),
+        number()
     );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(1000)))));
+    let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(998)))),
-        SemanticNodeData::Primitive(PrimitiveKind::Number)
+        lib_awaited_probe(&thenable_chain(&tails(BUDGET - 1))),
+        number()
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(
+        BUDGET
+    )))));
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(BUDGET - 2)))),
+        number()
     );
     assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
         "n{}",
-        tails(999)
+        tails(BUDGET - 1)
     )))));
 }
 

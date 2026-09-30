@@ -3313,6 +3313,7 @@ dependencies = [
  "criterion",
  "glob",
  "hotpath",
+ "libc",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -3331,8 +3332,10 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
  "walkdir",
+ "windows-sys",
 ]
 
 [[package]]
@@ -3780,6 +3783,7 @@ dependencies = [
  "bitflags",
  "glob",
  "hotpath",
+ "imbl",
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",
@@ -3933,6 +3937,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_supervise"
+version = "0.0.1-beta.6"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "verter_test_support",
+ "windows-sys",
+]
+
+[[package]]
 name = "verter_svelte_conformance"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3964,6 +3979,7 @@ dependencies = [
  "verter_compiler",
  "verter_debug_assert",
  "verter_macro_dto",
+ "verter_parser",
  "verter_semantic",
  "verter_session",
  "verter_span",

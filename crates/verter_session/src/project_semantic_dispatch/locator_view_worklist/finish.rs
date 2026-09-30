@@ -99,8 +99,137 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    /// How `node`'s projection finishes once its children are projected: a
+    /// rebuilt or reduced node, or — for an application that evaluates — the
+    /// instantiation whose node it is.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn finish_projection_node(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        data: &SemanticNodeData,
+        inputs: &LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        memo: &ViewMemo,
+        ancestors: &[ProjectionFrame],
+    ) -> ProjectionFinish {
+        if let SemanticNodeData::InstantiationRef { base, args } = data {
+            return self.finish_application_projection(node, context, base, args, memo, ancestors);
+        }
+        ProjectionFinish::Node(self.finish_projection_structure(
+            node,
+            context,
+            data,
+            inputs,
+            substitutions,
+            memo,
+        ))
+    }
+
+    /// An application over its projected arguments: the application itself
+    /// where the view keeps it a carrier, its recursive back-edge, or the
+    /// instantiation it evaluates to.
+    fn finish_application_projection(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        base: &crate::semantic_query::DeclIdentity,
+        args: &Arc<[SemanticNodeId]>,
+        memo: &ViewMemo,
+        ancestors: &[ProjectionFrame],
+    ) -> ProjectionFinish {
+        let graph = self.graph();
+        let argument_context = context.into_structural_provenance();
+        let projected_args: Arc<[SemanticNodeId]> = Arc::from(
+            args.iter()
+                .map(|argument| projected(memo, *argument, argument_context))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let rebuild = |projected_args: Arc<[SemanticNodeId]>| {
+            if projected_args.as_ref() == args.as_ref() {
+                node
+            } else {
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::InstantiationRef {
+                        base: base.clone(),
+                        args: projected_args,
+                    },
+                )
+            }
+        };
+        if base.canonical_id.as_ref() == "__builtin__" {
+            if self.is_promise_global_name(base.decl_name.as_ref()) {
+                return ProjectionFinish::Node(rebuild(projected_args));
+            }
+            let build_carrier = (context.demand == ReductionDemand::StructuralTransit
+                && (context.mode != ProjectionMode::Skeleton
+                    || context.merge_role() == MemberMergeRole::Heritage))
+                || context.mode == ProjectionMode::Shallow
+                || (super::super::raise::is_l1_object_filter_utility(base.decl_name.as_ref())
+                    && (context.mode == ProjectionMode::Navigate
+                        || super::super::raise::utility_enumeration_domain_is_open_or_unknown(
+                            self,
+                            base,
+                            &projected_args,
+                        )))
+                || (matches!(
+                    context.mode,
+                    ProjectionMode::Navigate | ProjectionMode::Skeleton
+                ) && projected_args.iter().any(|argument| {
+                    super::super::raise::builtin_lowering_argument_is_open(self, *argument)
+                }));
+            if build_carrier {
+                return ProjectionFinish::Node(rebuild(projected_args));
+            }
+            return ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&base.canonical_id),
+                        base.owner,
+                        Arc::clone(&base.decl_name),
+                    ),
+                    projected_args,
+                    self.instantiate_context_for(&base.canonical_id, context),
+                ),
+            ));
+        }
+        if matches!(
+            context.mode,
+            ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
+        ) {
+            ProjectionFinish::Node(rebuild(projected_args))
+        } else if self.is_instantiate_active(
+            base.canonical_id.as_ref(),
+            base.owner,
+            base.decl_name.as_ref(),
+        ) && self.in_deferred_position(ancestors)
+        {
+            // An application of the declaration an enclosing
+            // `build_instantiate` frame is still materialising, in a
+            // position the checker defers, is its recursive back-edge,
+            // recording the instantiation it stands for — the same rule as
+            // a 0-arg `DeclRef`. In a position the checker instantiates
+            // eagerly it is instantiated below.
+            ProjectionFinish::Node(self.recursive_ref_sentinel(base, projected_args))
+        } else {
+            ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&base.canonical_id),
+                        base.owner,
+                        Arc::clone(&base.decl_name),
+                    ),
+                    projected_args,
+                    self.instantiate_context_for(&base.canonical_id, context),
+                ),
+            ))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn finish_projection_structure(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -574,98 +703,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let argument_context = context.into_structural_provenance();
-                let projected_args: Arc<[SemanticNodeId]> = Arc::from(
-                    args.iter()
-                        .map(|argument| projected(memo, *argument, argument_context))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let rebuild = |projected_args: Arc<[SemanticNodeId]>| {
-                    if projected_args.as_ref() == args.as_ref() {
-                        node
-                    } else {
-                        graph.intern_preserving_scope(
-                            node,
-                            SemanticNodeData::InstantiationRef {
-                                base: base.clone(),
-                                args: projected_args,
-                            },
-                        )
-                    }
-                };
-                if base.canonical_id.as_ref() == "__builtin__" {
-                    if self.is_promise_global_name(base.decl_name.as_ref()) {
-                        return rebuild(projected_args);
-                    }
-                    let build_carrier = (context.demand == ReductionDemand::StructuralTransit
-                        && (context.mode != ProjectionMode::Skeleton
-                            || context.merge_role() == MemberMergeRole::Heritage))
-                        || context.mode == ProjectionMode::Shallow
-                        || (super::super::raise::is_l1_object_filter_utility(
-                            base.decl_name.as_ref(),
-                        ) && (context.mode == ProjectionMode::Navigate
-                            || super::super::raise::utility_enumeration_domain_is_open_or_unknown(
-                                self,
-                                base,
-                                &projected_args,
-                            )))
-                        || (matches!(
-                            context.mode,
-                            ProjectionMode::Navigate | ProjectionMode::Skeleton
-                        ) && projected_args.iter().any(|argument| {
-                            super::super::raise::builtin_lowering_argument_is_open(self, *argument)
-                        }));
-                    if build_carrier {
-                        return rebuild(projected_args);
-                    }
-                    return match self.execute_type_node(SemanticQueryKey::Instantiate(
-                        crate::semantic_query::InstantiateKey::new(
-                            self.type_slot_for(
-                                Arc::clone(&base.canonical_id),
-                                base.owner,
-                                Arc::clone(&base.decl_name),
-                            ),
-                            projected_args,
-                            self.instantiate_context_for(&base.canonical_id, context),
-                        ),
-                    )) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
-                    };
-                }
-                if matches!(
-                    context.mode,
-                    ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-                ) {
-                    rebuild(projected_args)
-                } else if self.is_instantiate_active(
-                    base.canonical_id.as_ref(),
-                    base.owner,
-                    base.decl_name.as_ref(),
-                ) {
-                    // An application of the declaration an enclosing
-                    // `build_instantiate` frame is still materialising is its
-                    // recursive back-edge, recording the instantiation it
-                    // stands for — the same rule as a 0-arg `DeclRef`.
-                    self.recursive_ref_sentinel(base, projected_args)
-                } else {
-                    match self.execute_type_node(SemanticQueryKey::Instantiate(
-                        crate::semantic_query::InstantiateKey::new(
-                            self.type_slot_for(
-                                Arc::clone(&base.canonical_id),
-                                base.owner,
-                                Arc::clone(&base.decl_name),
-                            ),
-                            projected_args,
-                            self.instantiate_context_for(&base.canonical_id, context),
-                        ),
-                    )) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
-                    }
-                }
+            SemanticNodeData::InstantiationRef { .. } => {
+                unreachable!("an application finishes through its instantiation plan")
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)

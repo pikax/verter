@@ -244,10 +244,17 @@ impl FlowEvaluator<'_, '_> {
             return self.positional_element(object, index);
         }
         // A key of string or numeric literal types reads the members it
-        // names; a key of any other type (an index-signature read) is not
-        // read here.
+        // names, a `unique symbol` key the member it keys; a key of any
+        // other type (an index-signature read) is not read here.
         let mut members = Vec::new();
         for key in self.operand_arms(index) {
+            if let Some(identity) = self.dispatch.relation_nominal_identity(key) {
+                members.push(self.project_member_key(
+                    object,
+                    crate::semantic_query::PropertyKey::UniqueSymbol(identity),
+                )?);
+                continue;
+            }
             let name: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
                 Some(SemanticNodeData::Literal(LiteralValue::String(value))) => {
                     Arc::from(value.as_str())
@@ -631,6 +638,85 @@ impl FlowEvaluator<'_, '_> {
     }
 }
 
+/// One nested left node of a logical chain's spine: the node, its
+/// operator, right operand, guard, right-operand reachability and whether
+/// its position widens.
+type SpineNode<'e> = (
+    &'e SliceExpr,
+    SliceLogical,
+    &'e SliceExpr,
+    &'e SliceGuard,
+    Option<bool>,
+    bool,
+);
+
+/// A chain of one logical operator (`a && b && …`, `a || b || …`) whose
+/// operands are all references, read as they are: each node's left
+/// reading is the node before it's and the truthiness of that node's right
+/// operand, so the right edges extend one reading operand by operand.
+struct ReferenceChain {
+    operator: SliceLogical,
+    /// The reading each right operand is evaluated under: the left's true
+    /// edge for `&&`, its false edge for `||`.
+    right_reading: bool,
+}
+
+impl ReferenceChain {
+    /// The chain `innermost`, `spine` (innermost node first) and the outer
+    /// node (`right` under `guard`) form, when they form one.
+    fn of(
+        operator: SliceLogical,
+        innermost: &SliceExpr,
+        spine: &[SpineNode<'_>],
+        right: &SliceExpr,
+        guard: &SliceGuard,
+    ) -> Option<Self> {
+        if operator == SliceLogical::Coalesce {
+            return None;
+        }
+        let chain = Self {
+            operator,
+            right_reading: operator == SliceLogical::And,
+        };
+        let is_reference =
+            |expr: &SliceExpr| matches!(expr, SliceExpr::Param { .. } | SliceExpr::Local { .. });
+        if !is_reference(innermost) || !is_reference(right) {
+            return None;
+        }
+        let mut previous: &[SliceGuard] = &[];
+        for (_, node_operator, node_right, node_guard, node_reachable, _) in spine.iter().rev() {
+            if *node_operator != operator || node_reachable.is_some() || !is_reference(node_right) {
+                return None;
+            }
+            let parts = chain.parts(node_guard);
+            if !Self::extends(previous, parts) {
+                return None;
+            }
+            previous = parts;
+        }
+        Self::extends(previous, chain.parts(guard)).then_some(chain)
+    }
+
+    /// The facts of a node's left reading, in the order they apply.
+    fn parts<'g>(&self, guard: &'g SliceGuard) -> &'g [SliceGuard] {
+        match (self.operator, guard) {
+            (SliceLogical::And, SliceGuard::And(parts))
+            | (SliceLogical::Or, SliceGuard::Or(parts)) => parts,
+            _ => std::slice::from_ref(guard),
+        }
+    }
+
+    /// Whether `parts` is `previous` with the truthiness of further
+    /// references after it.
+    fn extends(previous: &[SliceGuard], parts: &[SliceGuard]) -> bool {
+        parts.len() > previous.len()
+            && parts.starts_with(previous)
+            && parts[previous.len()..]
+                .iter()
+                .all(|part| matches!(part, SliceGuard::Truthy { .. }))
+    }
+}
+
 /// What `getTypeFacts` says one operand type may be, for the logical
 /// operators' result rules.
 #[derive(Debug, Clone, Copy, Default)]
@@ -662,7 +748,7 @@ impl FlowEvaluator<'_, '_> {
         guard: &SliceGuard,
         right_reachable: Option<bool>,
     ) -> Positional<SemanticNodeId> {
-        let mut spine = Vec::new();
+        let mut spine: Vec<SpineNode<'_>> = Vec::new();
         let mut innermost = left;
         while let SliceExpr::Logical {
             operator,
@@ -688,6 +774,11 @@ impl FlowEvaluator<'_, '_> {
             Positional::Value(node) => node,
             other => return other,
         };
+        if let Some(chain) = ReferenceChain::of(operator, innermost, &spine, right, guard) {
+            if right_reachable.is_none() {
+                return self.eval_reference_chain(chain, left_type, &spine, right, guard);
+            }
+        }
         for (node, operator, right, guard, right_reachable, widen) in spine.into_iter().rev() {
             // Once the connected demand has tripped, the frame closes with
             // the budget failure whatever the rest of the chain evaluates
@@ -769,6 +860,105 @@ impl FlowEvaluator<'_, '_> {
             self.regular_right_operands.insert(right_key);
         }
         self.decided(result.map(|(value, _)| value))
+    }
+
+    /// A chain of one logical operator over references
+    /// ([`ReferenceChain`]): each right operand reads under its left's
+    /// reading as the checker's flow graph gives it — the chain of the
+    /// earlier operands' conditions, with no join between them — so each
+    /// operand's guard is applied once, on top of the ones before it,
+    /// rather than the whole prefix again for every operand (the square of
+    /// the chain). Past the chain, the flow joins its last right edge with
+    /// every operand's short-circuit edge, as [`Self::eval_logical_step`]
+    /// joins one node's two edges.
+    fn eval_reference_chain(
+        &mut self,
+        chain: ReferenceChain,
+        mut left_type: SemanticNodeId,
+        spine: &[SpineNode<'_>],
+        right: &SliceExpr,
+        guard: &SliceGuard,
+    ) -> Positional<SemanticNodeId> {
+        let entry_products = self.products.clone();
+        let entry_writes = self.products.observe_writes();
+        let narrow_mark = self.narrowing_snapshot();
+        let mut applied = 0;
+        let steps = spine
+            .iter()
+            .rev()
+            .map(|(node, _, right, guard, _, widen)| (Some(*node), *right, *guard, *widen))
+            .chain(std::iter::once((None, right, guard, false)));
+        let mut outcome = Positional::Unmodeled;
+        for (node, right, guard, widen) in steps {
+            // Once the connected demand has tripped, the frame closes with
+            // the budget failure whatever the rest of the chain evaluates
+            // to; the operands left are not evaluated.
+            if self.dispatch.connected_demand_tripped() {
+                outcome = Positional::Unmodeled;
+                break;
+            }
+            let parts = chain.parts(guard);
+            for part in &parts[applied..] {
+                self.apply_guard_scoped(part, chain.right_reading);
+            }
+            applied = parts.len();
+            let right_key = right as *const SliceExpr as usize;
+            self.regular_right_operands.remove(&right_key);
+            let right_type = match self.eval_operand_value(right) {
+                Positional::Value(node) => node,
+                other => {
+                    outcome = other;
+                    break;
+                }
+            };
+            if node.is_none() {
+                // The last right edge joins every short-circuit edge.
+                let right_products = self.products.clone();
+                self.restore_narrowings(narrow_mark.clone());
+                self.restore_arm_entry(&entry_products);
+                self.apply_guard_scoped(guard, !chain.right_reading);
+                let short_products = self.products.clone();
+                self.restore_narrowings(narrow_mark);
+                self.restore_arm_entry(&entry_products);
+                self.join_arm_writes(
+                    &right_products,
+                    true,
+                    &short_products,
+                    true,
+                    &entry_products,
+                    &entry_writes,
+                );
+                let result = self.logical_result(chain.operator, left_type, right_type);
+                if let Some((_, true)) = result {
+                    self.regular_right_operands.insert(right_key);
+                }
+                return self.decided(result.map(|(value, _)| value));
+            }
+            let result = self.logical_result(chain.operator, left_type, right_type);
+            if let Some((_, true)) = result {
+                self.regular_right_operands.insert(right_key);
+            }
+            let value = match self.decided(result.map(|(value, _)| value)) {
+                Positional::Value(value) => value,
+                other => {
+                    outcome = other;
+                    break;
+                }
+            };
+            let value = match (node, widen) {
+                (Some(node), true) => {
+                    let fresh = self.operator_fresh_values(node, value);
+                    super::widen_values_within(self.dispatch, value, &fresh, self.nullability)
+                }
+                _ => value,
+            };
+            left_type = self
+                .dispatch
+                .erase_nullable_members(value, self.nullability);
+        }
+        self.restore_narrowings(narrow_mark);
+        self.restore_arm_entry(&entry_products);
+        outcome
     }
 
     /// A logical operand's value: an assignment operand is read as
@@ -1249,17 +1439,20 @@ impl FlowEvaluator<'_, '_> {
             self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
             return Positional::Unmodeled;
         }
-        let reduced = self.dispatch.reduce_template_literal_nodes(
+        match self.dispatch.reduce_template_literal_nodes(
             quasis,
             &nodes,
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
-        );
-        if reduced.keyspace_budget_exceeded {
-            self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
-            return Positional::Unmodeled;
+        ) {
+            Ok(node) => Positional::Value(node),
+            Err(_) => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    FlowGap::UnmodeledExpression,
+                ));
+                Positional::Unmodeled
+            }
         }
-        Positional::Value(reduced.node)
     }
 }

@@ -45,8 +45,9 @@
 //!
 //! ### Category A: owner-gated cold path
 //!
-//! - `FallthroughResolverState::insert_admissible_node` in
-//!   `resolver_core/fallthrough_resolver.rs`. This private sink is
+//! - `FallthroughResolverState::keep` in
+//!   `resolver_core/fallthrough_resolver.rs`, the charged and bounded
+//!   write behind the private `insert_admissible_node` sink. It is
 //!   reachable only after `compute_and_maybe_admit` encloses the complete
 //!   cold compute in the cacheability scope and checks supersession.
 //!   Empty facts are accepted only for the generation-keyed intrinsic
@@ -104,11 +105,7 @@ fn workspace_root() -> PathBuf {
 /// production-tree guard.
 const EXPECTED_LOOSE_ADMISSION_COUNTS: &[(&str, &str, usize)] = &[
     // Category A: variant-gated / fact-presence-gated cold paths.
-    (
-        "resolver_core/fallthrough_resolver.rs",
-        "insert_admissible_node",
-        1,
-    ),
+    ("resolver_core/fallthrough_resolver.rs", "keep", 1),
 ];
 
 /// Production-source cache kinds. Mirrors

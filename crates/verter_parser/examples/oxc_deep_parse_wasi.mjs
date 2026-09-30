@@ -13,10 +13,7 @@ const [form, depth, module] = process.argv.slice(2);
 const path =
   module ??
   fileURLToPath(
-    new URL(
-      "../../../target/wasm32-wasip1/release/examples/oxc_deep_parse.wasm",
-      import.meta.url,
-    ),
+    new URL("../../../target/wasm32-wasip1/release/examples/oxc_deep_parse.wasm", import.meta.url),
   );
 const wasi = new WASI({ version: "preview1", args: ["oxc_deep_parse", form, depth, "0"] });
 const instance = await WebAssembly.instantiate(

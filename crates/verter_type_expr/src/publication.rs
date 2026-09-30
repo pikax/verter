@@ -98,6 +98,7 @@ pub enum ResolutionDiagnosticKind {
     CyclicInstantiation,
     InstantiationError,
     EmptyUnionArm,
+    ConnectedMemoryLimit,
 }
 
 /// One typed resolution diagnostic.

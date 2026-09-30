@@ -1078,6 +1078,7 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let owner_table = Arc::clone(&self.owner_table);
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
         let Some(mut env) = service.run_leased(&self.key, move |program| {
             // Charged on the WORKER, where the lowering actually runs — the
             // caller thread is blocked in the rendezvous, not doing this work.
@@ -1089,6 +1090,7 @@ impl DeclBodyMemo {
                         p.source_str(),
                         &build_ctx,
                         owner_table.as_ref(),
+                        &class_fields,
                     )
                 })
                 .unwrap_or_default()
@@ -1162,12 +1164,16 @@ impl DeclBodyMemo {
         let owner_table = Arc::clone(&self.owner_table);
         let canonical = Arc::clone(&self.key.canonical);
         let parse_env_hash = self.key.parse_env_hash;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
         let Some(index) = service.run_leased(&self.key, move |program| {
-            program.map(|p| {
+            // A walk-stack lease refused the program's index reads as a missed
+            // snapshot below: an uncached empty index, never memoized.
+            program.and_then(|p| {
                 p.function_program_index(
                     owner_table.as_ref(),
                     Arc::clone(&canonical),
                     &parse_env_hash,
+                    &class_fields,
                 )
             })
         }) else {
@@ -1458,6 +1464,9 @@ impl DeclBodyMemo {
                             }
                         }
                         FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                        FunctionNode::Initializer(expression) => {
+                            FunctionBodySource::from_initializer(expression)
+                        }
                     };
                     Some(build_indexed_function_body_skeleton_in(
                         &source,
@@ -1780,6 +1789,7 @@ impl DeclBodyMemo {
         let route_lens = self.route_fact_lens();
         let header_index = Arc::clone(&self.header_index);
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -1823,12 +1833,13 @@ impl DeclBodyMemo {
                 };
                 let owner = contributor.anchor.owner;
                 let parts = if svelte_component_runes_mode {
-                    lower_svelte_runes_statement_parts(stmt, source)
+                    lower_svelte_runes_statement_parts(stmt, source, &class_fields)
                 } else {
                     lower_statement_parts(
                         stmt,
                         source,
                         program.source_type.is_typescript_definition(),
+                        &class_fields,
                     )
                 };
                 for decl in &parts.type_decls {
@@ -2324,6 +2335,7 @@ impl DeclBodyMemo {
         let contributors = contributors.to_vec();
         let aug_scope = aug_scope.cloned();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -2340,6 +2352,7 @@ impl DeclBodyMemo {
                     stmt,
                     source,
                     program.source_type.is_typescript_definition(),
+                    &class_fields,
                 );
                 match aug_scope.as_ref() {
                     Some(scope) => {
@@ -2752,6 +2765,7 @@ impl DeclBodyMemo {
         let name = name.to_string();
         let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -2773,12 +2787,13 @@ impl DeclBodyMemo {
                     continue;
                 };
                 let parts = if svelte_component_runes_mode {
-                    lower_svelte_runes_statement_parts(stmt, source)
+                    lower_svelte_runes_statement_parts(stmt, source, &class_fields)
                 } else {
                     lower_statement_parts(
                         stmt,
                         source,
                         program.source_type.is_typescript_definition(),
+                        &class_fields,
                     )
                 };
                 let value_decls = parts.value_decls.iter().filter(|_| aug_scope.is_none());
@@ -2865,8 +2880,12 @@ pub(crate) fn lowered_decls_from_env_and_program(
         FxHashMap::default();
     let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
-        let parts =
-            lower_statement_parts(stmt, source, program.source_type.is_typescript_definition());
+        let parts = lower_statement_parts(
+            stmt,
+            source,
+            program.source_type.is_typescript_definition(),
+            &header_index.class_field_values,
+        );
         let contributor_anchor =
             u32::try_from(index)
                 .ok()

@@ -40,6 +40,17 @@ pub(crate) fn scheduler_dep_resolution_count_for_test(canonical_id: &str) -> u64
         .unwrap_or(0)
 }
 
+/// A source stage publishes nothing for a script whose parse, or the
+/// walk-stack lease of its walks, was refused: the stage fails with the
+/// typed [`StageErrorKind::StackUnavailable`] instead of publishing a
+/// snapshot read off a program the source is not.
+fn refuse_unparsed(parse_snapshot: &ParseSnapshot) -> Result<(), StageError> {
+    match parse_snapshot.refused {
+        Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
+        None => Ok(()),
+    }
+}
+
 /// Host-specific data stored in a [`SourceSnapshot`].
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
@@ -225,12 +236,10 @@ impl HostStageExecutor {
     }
 }
 
-impl StageExecutor for HostStageExecutor {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+impl HostStageExecutor {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn execute_source(
+    /// The source stage's snapshot of `content`: see [`StageExecutor::execute_source`].
+    fn source_snapshot(
         &self,
         canonical_id: &str,
         file_language: FileLanguage,
@@ -352,9 +361,20 @@ impl StageExecutor for HostStageExecutor {
                         .unwrap_or_default(),
                     registered.snapshot_id().clone(),
                 );
-                let envelope = self
-                    .publication_store
-                    .publish_or_get(&accepted, request)
+                let published = self.publication_store.publish_or_get(&accepted, request);
+                // A projection refused its stack, on this stage or on the one
+                // whose parse this stage shared, is the typed refusal.
+                if let crate::carrier_publication_store::PublicationOutcome::Failed(
+                    crate::carrier_publication_store::CarrierParseFailure::ParserRejected(reject),
+                ) = &published
+                {
+                    if let verter_language::SyntaxReject::StackUnavailable { needed, .. } =
+                        &**reject
+                    {
+                        return Err(StageError::stack_unavailable(*needed));
+                    }
+                }
+                let envelope = published
                     .into_envelope()
                     .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
                 (
@@ -381,6 +401,7 @@ impl StageExecutor for HostStageExecutor {
             .ok_or_else(|| {
                 StageError::new("published carrier artifact does not match its registered language")
             })?;
+            refuse_unparsed(&parse_snapshot)?;
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
@@ -421,6 +442,7 @@ impl StageExecutor for HostStageExecutor {
                 &file_language,
                 &self.provenance,
             );
+            refuse_unparsed(&parse_snapshot)?;
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
             let script_parse_key =
@@ -489,6 +511,33 @@ impl StageExecutor for HostStageExecutor {
         });
 
         Ok(snapshot)
+    }
+}
+
+impl StageExecutor for HostStageExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    /// The source stage is one operation: a parse or walk-stack lease
+    /// refused its stack anywhere inside it (the carrier projection, the
+    /// script parse, the template facts, the evaluation source) leaves a
+    /// product built from an empty program in place of the source's, so
+    /// the stage publishes nothing and fails with the typed refusal.
+    fn execute_source(
+        &self,
+        canonical_id: &str,
+        file_language: FileLanguage,
+        content: Arc<str>,
+        generation: u64,
+    ) -> Result<SourceSnapshot, StageError> {
+        let (snapshot, refused) = verter_parser::oxc_parse::refusals_within(|| {
+            self.source_snapshot(canonical_id, file_language, content, generation)
+        });
+        match refused {
+            Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
+            None => snapshot,
+        }
     }
 
     fn extract_deps(&self, canonical_id: &str, source: &SourceSnapshot) -> ExtractedDeps {
@@ -615,3 +664,7 @@ impl StageExecutor for HostStageExecutor {
 /// The underlying function lives in [`crate::parse::imported_eval_source_type`]
 /// so WASM-only fall-back paths can reach it without the scheduler feature.
 pub(crate) use crate::parse::imported_eval_source_type;
+
+#[cfg(test)]
+#[path = "stack_refusal_tests.rs"]
+mod stack_refusal_tests;

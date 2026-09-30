@@ -583,15 +583,11 @@ impl ObjectProjectionFormula {
             .iter()
             .all(|alternative| matches!(alternative.domain, AlternativeDomain::Closed(_)))
         {
-            // Formula-wide exact keyof: keys present in EVERY alternative.
-            // Matching uses element-access collision (the engine's JS
-            // property identity model: `{1: x}` and `{"1": x}` are one
-            // property), keeping the FIRST alternative's spelling for
-            // stability. DELIBERATE divergence from tsc, whose type-level
-            // `keyof (A | B)` intersects nominally (`1 & "1"` is never):
-            // the rest of this engine (fold, lookups, relation) already
-            // treats dual spellings as one property, so the formula
-            // agrees with the engine, not with tsc's nominal rule.
+            // Formula-wide exact keyof: keys present in EVERY alternative,
+            // intersected as the checker's `keyof (A | B)` is: nominally,
+            // so `1` in one alternative and `"1"` in another are no common
+            // key (`1 & "1"` is never), though an element access reads
+            // them as one property.
             let mut common: Vec<PropertyKey> = alternatives
                 .first()
                 .map(|alternative| match &alternative.domain {
@@ -604,7 +600,7 @@ impl ObjectProjectionFormula {
                     matches!(
                         &alternative.domain,
                         AlternativeDomain::Closed(closed)
-                            if closed.complete_keys.iter().any(|candidate| candidate.element_access_collides(key))
+                            if closed.complete_keys.iter().any(|candidate| candidate == key)
                     )
                 })
             });

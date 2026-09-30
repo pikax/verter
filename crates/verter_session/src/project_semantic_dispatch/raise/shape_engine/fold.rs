@@ -325,14 +325,20 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             let default_out = default_out?;
             alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
         }
-        SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
-            alg.infer(Arc::clone(name))
+        // A declaration raises with its constraint (a present but
+        // unraisable one fails the node); a reference names the declaration.
+        SemanticNodeData::Infer {
+            name, constraint, ..
+        } => {
+            let constraint_out = fold_optional_slot(alg, dispatch, *constraint, active)?;
+            alg.infer(Arc::clone(name), constraint_out)
         }
+        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::clone(name), None),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, .. } => alg.recursive_ref(Arc::clone(name)),
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
-            QueryError::CheckerRecovery(diagnostic) => match diagnostic.recovery() {
+            QueryError::CheckerRecovery { diagnostic, .. } => match diagnostic.recovery() {
                 Some(recovery) => alg.primitive(semantic_primitive_to_primitive_name(recovery)),
                 None => alg.opaque_sentinel(err),
             },

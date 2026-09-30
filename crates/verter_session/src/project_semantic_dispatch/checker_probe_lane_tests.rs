@@ -30,10 +30,11 @@ pub(super) struct ProbeProject<'a> {
 }
 
 const PROBE_ROOT: &str = "/wb";
-const PROBE_FILE: &str = "/wb/checker_probe.ts";
+pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
 /// Answer `probe` in TYPE position over a module of `source` and hand the
-/// reduced node to `read`.
+/// reduced node to `read`: the checker's answer, which after an operation
+/// exhausted its allowance is the checker's recovery.
 pub(super) fn with_probe<R>(
     source: &str,
     probe: &str,
@@ -49,7 +50,70 @@ pub(super) fn with_probe_in<R>(
     probe: &str,
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
-    let host = probe_host(project);
+    with_probe_on_host(&probe_host(project), project, source, probe, read)
+}
+
+/// A host for a default probe project, for probes that read one host
+/// across edits ([`with_probe_on_host`]).
+pub(super) fn default_probe_host() -> Arc<crate::VerterHost> {
+    probe_host(ProbeProject::default())
+}
+
+/// [`with_probe_in`] on `host`, a host of `project`: the probe module
+/// is (re)written on it, so a probe after another reads what the earlier
+/// one left in the host.
+pub(super) fn with_probe_on_host<R>(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
+        let node = outcome
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+        read(dispatch, node)
+    })
+}
+
+/// [`with_probe`] for a probe an operation's own allowance stops: the demand
+/// must be a resource partial whose only reason is the operation budget,
+/// and `read` gets the node holding the checker's recovery.
+pub(super) fn with_recovered_probe<R>(
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    let project = ProbeProject::default();
+    with_probe_outcome_on_host(
+        &probe_host(project),
+        project,
+        source,
+        probe,
+        |dispatch, outcome| match outcome {
+            super::evaluate::StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                assert_eq!(
+                    reasons,
+                    crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+                    "`{probe}` is a resource partial of the operation budget alone"
+                );
+                read(dispatch, node)
+            }
+            other => panic!("`{probe}` must be a recovered resource partial, got {other:?}"),
+        },
+    )
+}
+
+/// [`with_probe_on_host`] handing `read` the published demand's outcome,
+/// a partial one included.
+pub(super) fn with_probe_outcome_on_host<R>(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, super::evaluate::StructuralFactDemandOutcome) -> R,
+) -> R {
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \
@@ -57,30 +121,40 @@ pub(super) fn with_probe_in<R>(
         }}\n"
     );
     crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
+        host,
         PROBE_FILE,
         &crate::u6_flow_shape_corpus_tests::module_script(&module),
         crate::FileLanguage::script_ts(),
     );
-    let result = flow_return_of(&host, "__checker_probe")
+    let result = flow_return_of(host, "__checker_probe")
         .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     // A read of a global the ambient library declares is scoped by the
     // probe module's project, as the member access in its body would be.
     let _demand_scope = project.ambient_lib.map(|_| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
     });
-    let node = dispatch
-        .normalize_node_keeping_declaration_refs_for_tests(
-            result.return_type(),
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-        )
-        .into_complete_node()
-        .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
-    read(&dispatch, node)
+    let outcome = dispatch.normalize_node_keeping_declaration_refs_for_tests(
+        result.return_type(),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    // The probe's value is its function's flow return, which may already
+    // have evaluated through an operation's recovery: that return's
+    // operation-budget degradation is the probe's partiality too.
+    let outcome = match (outcome, result.degradation()) {
+        (
+            super::evaluate::StructuralFactDemandOutcome::Complete(node),
+            Some(crate::semantic_query::FlowReturnDegradation::OperationBudget),
+        ) => super::evaluate::StructuralFactDemandOutcome::Recovered {
+            node,
+            reasons: crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+        },
+        (outcome, _) => outcome,
+    };
+    read(&dispatch, outcome)
 }
 
 /// The degradation the body-derived return of `function` in a module of
@@ -101,6 +175,44 @@ pub(super) fn degradation_in(
     flow_return_of(&host, function)
         .map(|result| result.degradation())
         .ok_or(())
+}
+
+/// The typed outcome of the body-derived return of `function` in a module
+/// of `source`, checked in `project`: its degradation when it produced a
+/// value, or the typed [`FlowReturnError`](crate::host_flow_return_audit::FlowReturnError) it
+/// answered instead — a missing function (`Failure(Missing)`) told apart
+/// from a budget or any other incompleteness.
+pub(super) fn flow_return_outcome_in(
+    project: ProbeProject<'_>,
+    source: &str,
+    function: &str,
+) -> Result<
+    Option<crate::semantic_query::FlowReturnDegradation>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
+    let host = probe_host(project);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(source),
+        crate::FileLanguage::script_ts(),
+    );
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(PROBE_FILE),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(function),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    host.get_flow_return_type_with_audit(
+        &identity,
+        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+    )
+    .into_result()
+    .map(|result| result.degradation())
 }
 
 /// The audited body-derived return of the probe module's `function`.
@@ -216,7 +328,7 @@ pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<S
                         node,
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     )
-                    .into_complete_node()
+                    .into_usable_node()
                     .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
                 (!checker_syntax::matches_node(dispatch, value, &expected, 0)).then(|| {
                     format!(
@@ -283,7 +395,7 @@ pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec
                     result.return_type(),
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 )
-                .into_complete_node()
+                .into_usable_node()
                 .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
             (!checker_syntax::matches_node(&dispatch, node, &expected, 0)).then(|| {
                 format!(

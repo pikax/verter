@@ -8,7 +8,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
-use verter_parser::oxc_parse::{with_program_stack, Parser};
+use verter_parser::oxc_parse::Parser;
 
 use crate::code_transform::CodeTransform;
 
@@ -61,7 +61,11 @@ pub(crate) fn rewrite_ts_type_assertions(
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, content, SourceType::ts()).parse();
     let mut collector = TypeAssertionCollector::default();
-    with_program_stack(&parsed.program, || collector.visit_program(&parsed.program));
+    // A walk refused its stack rewrites nothing; the compile around it is
+    // refused with the refusal.
+    let _ = verter_parser::oxc_parse::leased_program_walk(&parsed.program, || {
+        collector.visit_program(&parsed.program)
+    });
 
     for edit in collector.edits {
         let Some(closing_angle) = type_assertion_closing_angle(content, edit) else {

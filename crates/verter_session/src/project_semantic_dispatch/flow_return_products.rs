@@ -582,6 +582,13 @@ pub(super) struct FlowWriteObservation {
     sequence: u64,
 }
 
+impl FlowWriteObservation {
+    /// Whether `other` observes the same execution at the same write.
+    pub(super) fn same_as(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.execution, &other.execution) && self.sequence == other.sequence
+    }
+}
+
 /// A snapshot of the sole product store, with typed binding accessors.
 #[derive(Clone)]
 pub(super) struct FlowFrameProducts {
@@ -896,6 +903,16 @@ impl FlowFrameProducts {
         }
     }
 
+    /// Whether `other` is this very continuation: the same execution, the
+    /// same product values and the same write receipts, so every later
+    /// transfer and join reads it exactly as it reads this one.
+    pub fn same_as(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.execution, &other.execution)
+            && self.writes_by_sequence == other.writes_by_sequence
+            && self.writes == other.writes
+            && self.state.same_as(&other.state)
+    }
+
     pub fn observe_writes(&self) -> FlowWriteObservation {
         FlowWriteObservation {
             execution: Rc::clone(&self.execution),
@@ -1026,6 +1043,24 @@ impl FlowFrameProducts {
                 }
             }
         }
+    }
+
+    /// [`Self::restore_reaching_from`] of a loop head's value: the
+    /// reference's values only, never a write receipt. A loop head is a
+    /// value the analysis settled, not a write on the path into the loop:
+    /// the passes that settled it are discarded, and the pass run from the
+    /// head records its own writes.
+    pub fn restore_head_value_from(&mut self, subject: &FlowBindingRef, source: &Self) {
+        let values: smallvec::SmallVec<[(FlowDomain, Option<FlowProductValue>); 4]> = [
+            FlowDomain::ReachingValue,
+            FlowDomain::ReachingType,
+            FlowDomain::DefiniteAssignment,
+            FlowDomain::Narrowing,
+        ]
+        .into_iter()
+        .map(|domain| (domain, source.get(domain, subject).cloned()))
+        .collect();
+        self.set_values(subject, values);
     }
 
     /// Replay a successfully executed clause write onto its normal continuation.

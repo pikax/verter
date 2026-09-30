@@ -866,6 +866,7 @@ fn source_root_typeof_path_carve_out() {
     // A bare `infer U` stays rejected at the source root.
     let infer_body = TypeExpr::Infer {
         name: "U".to_string(),
+        constraint: None,
     };
     assert_eq!(
         classify_source_root(&infer_body),

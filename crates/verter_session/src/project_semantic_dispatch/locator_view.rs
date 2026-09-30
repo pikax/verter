@@ -25,7 +25,9 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 
-use super::locator_view_worklist::ProjectedViewOutcome;
+use super::locator_view_worklist::{
+    ProjectedViewOutcome, ProjectionPoll, ProjectionRun, ProjectionSeam,
+};
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
@@ -33,6 +35,74 @@ use crate::semantic_query::{
     MemberMergeRole, NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
     ResultCompleteness, SemanticNodeData, SemanticNodeId,
 };
+
+/// A decl-body projection the caller can resume: its roots, the one memo
+/// they project over, and the run of the root in progress.
+pub(super) struct DeclBodyProjection {
+    shape: SemanticNodeId,
+    context: ProjectionReductionContext,
+    reference_arm_role: MemberMergeRole,
+    class_body: bool,
+    substitution_checkpoint: usize,
+    memo: ViewMemo,
+    completeness: ResultCompleteness,
+    plan: BodyPlan,
+    run: Option<ProjectionRun>,
+    seam: ProjectionSeam,
+}
+
+impl DeclBodyProjection {
+    /// Record the projected node of the root just finished.
+    fn feed(&mut self, node: SemanticNodeId) {
+        let group = match &mut self.plan {
+            BodyPlan::Group(group) => group,
+            BodyPlan::Merged { current, .. } => current
+                .as_mut()
+                .expect("a merged root belongs to an open group"),
+        };
+        match group {
+            BodyGroup::Whole { projected, .. } => *projected = Some(node),
+            BodyGroup::Arms { ids, .. } => ids.push(node),
+        }
+    }
+}
+
+/// How a decl body's projected roots combine.
+enum BodyPlan {
+    /// One group: the whole body, or a single declaration's arms.
+    Group(BodyGroup),
+    /// A merged declaration: one group per contributor, in order.
+    Merged {
+        contributors: Arc<[SemanticNodeId]>,
+        next: usize,
+        ids: Vec<SemanticNodeId>,
+        current: Option<BodyGroup>,
+    },
+}
+
+/// One group of roots that combine into one node.
+enum BodyGroup {
+    /// One root, whose projection is the group's node.
+    Whole {
+        root: (SemanticNodeId, ProjectionReductionContext),
+        started: bool,
+        projected: Option<SemanticNodeId>,
+    },
+    /// An intersection body's arms, projected one by one and rebuilt.
+    Arms {
+        body: SemanticNodeId,
+        arms: Arc<[SemanticNodeId]>,
+        next: usize,
+        ids: Vec<SemanticNodeId>,
+        demand: ReferenceArmDemand,
+    },
+}
+
+/// Where a decl-body projection stands after it ran as far as it could.
+pub(super) enum BodyProjectionPoll {
+    Done(ProjectedViewOutcome),
+    Need(crate::semantic_query::SemanticQueryKey),
+}
 
 /// The demand-specific stamp `Instantiate`/`ProjectPath` applies to a
 /// fetched shape AFTER substitution: the caller's surface provenance, the
@@ -296,8 +366,8 @@ impl<'a> ProjectionBenchHarness<'a> {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Project the substituted decl-body shape into the caller's demanded
-    /// view, applying the per-arm [`ProjectionStamp`] rule:
+    /// Plan the projection of a substituted decl-body shape into the
+    /// caller's demanded view, applying the per-arm [`ProjectionStamp`] rule:
     ///
     /// - a `MergedDecl` body projects each contributor as an OWN-body
     ///   surface (preserving the distinct peer-merge carrier);
@@ -307,14 +377,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   interface/class, `Authored` for an alias);
     /// - a whole `Object` body is its own own-body arm;
     /// - any other body projects under the caller's context verbatim.
-    pub(super) fn project_located_decl_body(
+    ///
+    /// Its roots project one after
+    /// another over one memo, and their nodes combine into the projected
+    /// body. `substitution_checkpoint` is where the body's substitutions
+    /// begin; a partial projection drops the ones it recorded.
+    pub(super) fn begin_decl_body_projection(
         &self,
         shape: SemanticNodeId,
         decl_kind: TypeDeclKind,
-        inputs: &LocatorViewInputs<'_>,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        substitution_checkpoint: usize,
         context: ProjectionReductionContext,
-    ) -> ProjectedViewOutcome {
+        seam: ProjectionSeam,
+    ) -> DeclBodyProjection {
         // The declaration-kind role stamped onto reference arms. Two
         // consumers: on the `CallerMode` path (a single declaration's
         // Intersection body) it drives the role-driven intersection surface
@@ -329,216 +404,334 @@ impl<'a> ProjectSemanticDispatch<'a> {
             TypeDeclKind::Interface | TypeDeclKind::Class => MemberMergeRole::Heritage,
             TypeDeclKind::Alias => MemberMergeRole::Authored,
         };
-        let mut memo: ViewMemo = ViewMemo::default();
-        let mut completeness = ResultCompleteness::Complete;
-        let substitution_checkpoint = substitutions.len();
-        let data = self.graph().node_data(shape);
-        let projected = match data.as_deref() {
-            Some(SemanticNodeData::MergedDecl { contributors }) => {
-                let contributors = contributors.clone();
-                drop(data);
-                // Per-arm heritage discrimination applies INSIDE each merged
-                // contributor exactly as it does to a single declaration's
-                // body: a contributor shaped `Intersection([extends Ref…,
-                // own Object])` stamps its inline object arms as OWN-body
-                // and its reference (heritage) arms as HERITAGE — never a
-                // blanket own-body stamp over the whole contributor, which
-                // would materialise the heritage reference into an `Object`
-                // that the peer-merge reducer then mis-buckets as OWN
-                // surface, losing own-body-shadows-heritage precedence.
-                let ids: Vec<SemanticNodeId> = contributors
-                    .iter()
-                    .map(|contributor| {
-                        self.project_decl_body_arms(
-                            *contributor,
-                            reference_arm_role,
-                            decl_kind == TypeDeclKind::Class,
-                            // The peer-merge reducer consumes contributor arms
-                            // by TOPOLOGY (`Intersection([heritage refs…, own
-                            // Object])`, heritage arms preserved for lazy
-                            // resolution under the heritage-overlay role) —
-                            // so a heritage reference must reach it as a
-                            // CARRIER, never eagerly materialised here.
-                            ReferenceArmDemand::Deferred,
-                            inputs,
-                            substitutions,
-                            context,
-                            &mut memo,
-                            &mut completeness,
-                        )
-                    })
-                    .collect();
-                self.graph().intern_preserving_scope(
-                    shape,
-                    SemanticNodeData::MergedDecl {
-                        contributors: Arc::from(ids.into_boxed_slice()),
-                    },
-                )
-            }
-            Some(SemanticNodeData::Intersection(_)) => {
-                drop(data);
-                self.project_decl_body_arms(
-                    shape,
-                    reference_arm_role,
-                    decl_kind == TypeDeclKind::Class,
-                    // A single declaration's body flows to the role-driven
-                    // intersection surface merge, which classifies members by
-                    // their stamped merge role — reference arms may evaluate
-                    // under the caller's demand.
-                    ReferenceArmDemand::CallerMode,
-                    inputs,
-                    substitutions,
-                    context,
-                    &mut memo,
-                    &mut completeness,
-                )
-            }
+        let class_body = decl_kind == TypeDeclKind::Class;
+        let plan = match self.graph().node_data(shape).as_deref() {
+            // Per-arm heritage discrimination applies INSIDE each merged
+            // contributor exactly as it does to a single declaration's body:
+            // a contributor shaped `Intersection([extends Ref…, own
+            // Object])` stamps its inline object arms as OWN-body and its
+            // reference (heritage) arms as HERITAGE — never a blanket
+            // own-body stamp over the whole contributor, which would
+            // materialise the heritage reference into an `Object` that the
+            // peer-merge reducer then mis-buckets as OWN surface, losing
+            // own-body-shadows-heritage precedence.
+            Some(SemanticNodeData::MergedDecl { contributors }) => BodyPlan::Merged {
+                contributors: Arc::clone(contributors),
+                next: 0,
+                ids: Vec::with_capacity(contributors.len()),
+                current: None,
+            },
+            // A single declaration's body flows to the role-driven
+            // intersection surface merge, which classifies members by their
+            // stamped merge role — reference arms may evaluate under the
+            // caller's demand.
+            Some(SemanticNodeData::Intersection(arms)) => BodyPlan::Group(BodyGroup::Arms {
+                body: shape,
+                arms: arms.to_vec().into(),
+                next: 0,
+                ids: Vec::new(),
+                demand: ReferenceArmDemand::CallerMode,
+            }),
             Some(SemanticNodeData::Object(_)) => {
-                drop(data);
                 let own = ProjectionStamp::new(
                     context,
                     MemberMergeRole::OwnBody,
                     AuthoredArmKind::OwnBodyObject,
                 );
-                self.project_view_node(
-                    shape,
-                    own.stamped_context(context),
-                    inputs,
-                    substitutions,
-                    &mut memo,
-                    &mut completeness,
-                )
+                BodyPlan::Group(BodyGroup::Whole {
+                    root: (shape, own.stamped_context(context)),
+                    started: false,
+                    projected: None,
+                })
             }
             _ => {
-                drop(data);
                 let whole =
                     ProjectionStamp::new(context, context.merge_role(), AuthoredArmKind::WholeBody);
-                self.project_view_node(
-                    shape,
-                    whole.stamped_context(context),
-                    inputs,
-                    substitutions,
-                    &mut memo,
-                    &mut completeness,
-                )
+                BodyPlan::Group(BodyGroup::Whole {
+                    root: (shape, whole.stamped_context(context)),
+                    started: false,
+                    projected: None,
+                })
             }
         };
-        if completeness.is_partial() {
-            substitutions.truncate(substitution_checkpoint);
-            ProjectedViewOutcome {
-                node: shape,
-                completeness,
+        DeclBodyProjection {
+            shape,
+            context,
+            reference_arm_role,
+            class_body,
+            substitution_checkpoint,
+            memo: ViewMemo::default(),
+            completeness: ResultCompleteness::Complete,
+            plan,
+            run: None,
+            seam,
+        }
+    }
+
+    /// Carry a decl-body projection on as far as it can go. `delivery` is
+    /// the node of the instantiation it last stopped at, when it stopped at
+    /// one.
+    pub(super) fn drain_decl_body_projection(
+        &self,
+        projection: &mut DeclBodyProjection,
+        inputs: &LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        mut delivery: Option<SemanticNodeId>,
+    ) -> BodyProjectionPoll {
+        // Every root this call projects belongs to one connected demand.
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        loop {
+            if let Some(run) = projection.run.as_mut() {
+                let poll = self.drain_projection(
+                    run,
+                    inputs,
+                    substitutions,
+                    &mut projection.memo,
+                    &mut projection.seam,
+                    delivery.take(),
+                );
+                match poll {
+                    ProjectionPoll::Need(key) => return BodyProjectionPoll::Need(key),
+                    ProjectionPoll::Done(outcome) => {
+                        projection.run = None;
+                        projection.completeness =
+                            projection.completeness.merge(outcome.completeness);
+                        projection.feed(outcome.node);
+                    }
+                }
+                continue;
             }
-        } else {
-            ProjectedViewOutcome {
-                node: projected,
-                completeness,
+            match self.next_body_root(projection) {
+                Some((root, root_context)) => {
+                    let begun = self.begin_projection(
+                        root,
+                        root_context,
+                        inputs,
+                        substitutions,
+                        &mut projection.memo,
+                        &mut projection.seam,
+                    );
+                    match begun {
+                        Ok(run) => projection.run = Some(run),
+                        Err(outcome) => {
+                            projection.completeness =
+                                projection.completeness.merge(outcome.completeness);
+                            projection.feed(outcome.node);
+                        }
+                    }
+                }
+                None => {
+                    let projected = self.finish_body_plan(projection);
+                    return BodyProjectionPoll::Done(if projection.completeness.is_partial() {
+                        substitutions.truncate(projection.substitution_checkpoint);
+                        ProjectedViewOutcome {
+                            node: projection.shape,
+                            completeness: projection.completeness,
+                        }
+                    } else {
+                        ProjectedViewOutcome {
+                            node: projected,
+                            completeness: projection.completeness,
+                        }
+                    });
+                }
             }
         }
     }
 
-    /// Project one declaration-body ROOT (a whole single body or one merged
-    /// contributor) applying the per-arm [`ProjectionStamp`] rule:
-    ///
-    /// - an `Intersection` body stamps inline object arms as own-body
-    ///   (caller provenance + `OwnBody` role) and reference arms as
-    ///   structural with the declaration-kind `reference_arm_role`
-    ///   (`Heritage` for an interface/class, `Authored` for an alias);
-    ///   reference arms evaluate per the caller's [`ReferenceArmDemand`];
-    /// - a whole `Object` body is its own own-body arm;
-    /// - any other shape projects as an own-body contributor surface.
-    #[allow(clippy::too_many_arguments)]
-    fn project_decl_body_arms(
+    /// The next root the projection projects, or `None` once every root is
+    /// projected. Finishing a merged contributor's group records its node
+    /// and opens the next contributor's group.
+    fn next_body_root(
         &self,
-        body: SemanticNodeId,
+        projection: &mut DeclBodyProjection,
+    ) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
+        let context = projection.context;
+        let reference_arm_role = projection.reference_arm_role;
+        let class_body = projection.class_body;
+        match &mut projection.plan {
+            BodyPlan::Group(group) => {
+                self.next_group_root(group, context, reference_arm_role, class_body)
+            }
+            BodyPlan::Merged {
+                contributors,
+                next,
+                ids,
+                current,
+            } => loop {
+                if let Some(group) = current.as_mut() {
+                    if let Some(root) =
+                        self.next_group_root(group, context, reference_arm_role, class_body)
+                    {
+                        return Some(root);
+                    }
+                    let finished = current.take().expect("an open contributor group");
+                    ids.push(self.finish_body_group(finished, reference_arm_role));
+                    continue;
+                }
+                let contributor = *contributors.get(*next)?;
+                *next += 1;
+                *current = Some(self.contributor_group(contributor, context));
+            },
+        }
+    }
+
+    /// The group one merged contributor projects as: its arms when it is an
+    /// intersection (each reference arm a deferred carrier, preserving the
+    /// topology the peer-merge reducer consumes), else the contributor as
+    /// one own-body surface.
+    fn contributor_group(
+        &self,
+        contributor: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> BodyGroup {
+        match self.graph().node_data(contributor).as_deref() {
+            // The peer-merge reducer consumes contributor arms by TOPOLOGY
+            // (`Intersection([heritage refs…, own Object])`, heritage arms
+            // preserved for lazy resolution under the heritage-overlay role)
+            // — so a heritage reference must reach it as a CARRIER, never
+            // eagerly materialised here.
+            Some(SemanticNodeData::Intersection(arms)) => BodyGroup::Arms {
+                body: contributor,
+                arms: arms.to_vec().into(),
+                next: 0,
+                ids: Vec::new(),
+                demand: ReferenceArmDemand::Deferred,
+            },
+            _ => {
+                let own = ProjectionStamp::new(
+                    context,
+                    MemberMergeRole::OwnBody,
+                    AuthoredArmKind::OwnBodyObject,
+                );
+                BodyGroup::Whole {
+                    root: (contributor, own.stamped_context(context)),
+                    started: false,
+                    projected: None,
+                }
+            }
+        }
+    }
+
+    /// The next root of one group, or `None` once the group's roots are all
+    /// projected.
+    fn next_group_root(
+        &self,
+        group: &mut BodyGroup,
+        context: ProjectionReductionContext,
         reference_arm_role: MemberMergeRole,
         class_body: bool,
-        reference_arm_demand: ReferenceArmDemand,
-        inputs: &LocatorViewInputs<'_>,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        context: ProjectionReductionContext,
-        memo: &mut ViewMemo,
-        completeness: &mut ResultCompleteness,
-    ) -> SemanticNodeId {
-        let data = self.graph().node_data(body);
-        match data.as_deref() {
-            Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
-                drop(data);
-                let arm_ids: Vec<SemanticNodeId> = arms
-                    .iter()
-                    .filter_map(|arm| {
-                        // A class's `extends` names a VALUE: one the type
-                        // space does not declare contributes the instance
-                        // type of its construct signature, or nothing.
-                        let arm = match class_body
-                            .then(|| self.class_heritage_value_arm(*arm, context))
-                            .flatten()
-                        {
-                            Some(Some(instance)) => instance,
-                            Some(None) => return None,
-                            None => *arm,
-                        };
-                        let arm_kind = match self.graph().node_data(arm).as_deref() {
-                            Some(SemanticNodeData::Object(_)) => AuthoredArmKind::OwnBodyObject,
-                            _ => AuthoredArmKind::ReferenceArm,
-                        };
-                        let role = match arm_kind {
-                            AuthoredArmKind::OwnBodyObject => MemberMergeRole::OwnBody,
-                            _ => reference_arm_role,
-                        };
-                        let stamp = ProjectionStamp::new(context, role, arm_kind);
-                        let mut arm_ctx = stamp.stamped_context(context);
-                        if matches!(arm_kind, AuthoredArmKind::ReferenceArm)
-                            && matches!(reference_arm_demand, ReferenceArmDemand::Deferred)
-                        {
-                            // A DEFERRED reference arm is a TRUE carrier-only
-                            // projection: the arm projects under the
-                            // NON-PUBLICATION `StructuralTransit` demand (with
-                            // the eager modes demoted to `Navigate`) so every
-                            // materialisation gate along the arm — the mapper
-                            // builtins (`Partial`/`Required`/`Readonly`)
-                            // included — carrier-stops. A `Published` demand
-                            // here would let a closed-arg builtin heritage ref
-                            // fall through to an executed `Instantiate`, and
-                            // the resulting `Object` is mis-bucketed as OWN
-                            // surface by the topology-driven peer-merge
-                            // reducer — inverting own-body-shadows-heritage.
-                            // The stamped merge role (`Heritage` for an
-                            // interface/class) is PRESERVED on the transit
-                            // context; substitution env and structural
-                            // provenance carry through unchanged.
-                            let mode = match arm_ctx.mode {
-                                ProjectionMode::Expanded | ProjectionMode::Identity => {
-                                    ProjectionMode::Navigate
-                                }
-                                other => other,
-                            };
-                            arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
+    ) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
+        match group {
+            BodyGroup::Whole { root, started, .. } => {
+                if *started {
+                    return None;
+                }
+                *started = true;
+                Some(*root)
+            }
+            BodyGroup::Arms {
+                arms, next, demand, ..
+            } => loop {
+                let arm = *arms.get(*next)?;
+                *next += 1;
+                // A class's `extends` names a VALUE: one the type space does
+                // not declare contributes the instance type of its construct
+                // signature, or nothing.
+                let arm = match class_body
+                    .then(|| self.class_heritage_value_arm(arm, context))
+                    .flatten()
+                {
+                    Some(Some(instance)) => instance,
+                    Some(None) => continue,
+                    None => arm,
+                };
+                let arm_kind = match self.graph().node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Object(_)) => AuthoredArmKind::OwnBodyObject,
+                    _ => AuthoredArmKind::ReferenceArm,
+                };
+                let role = match arm_kind {
+                    AuthoredArmKind::OwnBodyObject => MemberMergeRole::OwnBody,
+                    _ => reference_arm_role,
+                };
+                let stamp = ProjectionStamp::new(context, role, arm_kind);
+                let mut arm_ctx = stamp.stamped_context(context);
+                if matches!(arm_kind, AuthoredArmKind::ReferenceArm)
+                    && matches!(demand, ReferenceArmDemand::Deferred)
+                {
+                    // A DEFERRED reference arm is a TRUE carrier-only
+                    // projection: the arm projects under the NON-PUBLICATION
+                    // `StructuralTransit` demand (with the eager modes demoted
+                    // to `Navigate`) so every materialisation gate along the
+                    // arm — the mapper builtins (`Partial`/`Required`/
+                    // `Readonly`) included — carrier-stops. A `Published`
+                    // demand here would let a closed-arg builtin heritage ref
+                    // fall through to an executed `Instantiate`, and the
+                    // resulting `Object` is mis-bucketed as OWN surface by the
+                    // topology-driven peer-merge reducer — inverting
+                    // own-body-shadows-heritage. The stamped merge role
+                    // (`Heritage` for an interface/class) is PRESERVED on the
+                    // transit context; substitution env and structural
+                    // provenance carry through unchanged.
+                    let mode = match arm_ctx.mode {
+                        ProjectionMode::Expanded | ProjectionMode::Identity => {
+                            ProjectionMode::Navigate
                         }
-                        Some(self.project_view_node(
-                            arm,
-                            arm_ctx,
-                            inputs,
-                            substitutions,
-                            memo,
-                            completeness,
-                        ))
-                    })
-                    .collect();
-                if arm_ids.is_empty() {
+                        other => other,
+                    };
+                    arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
+                }
+                return Some((arm, arm_ctx));
+            },
+        }
+    }
+
+    /// The projected body once every root is projected.
+    fn finish_body_plan(&self, projection: &mut DeclBodyProjection) -> SemanticNodeId {
+        let reference_arm_role = projection.reference_arm_role;
+        match std::mem::replace(
+            &mut projection.plan,
+            BodyPlan::Merged {
+                contributors: Arc::from([]),
+                next: 0,
+                ids: Vec::new(),
+                current: None,
+            },
+        ) {
+            BodyPlan::Group(group) => self.finish_body_group(group, reference_arm_role),
+            BodyPlan::Merged { ids, .. } => self.graph().intern_preserving_scope(
+                projection.shape,
+                SemanticNodeData::MergedDecl {
+                    contributors: Arc::from(ids.into_boxed_slice()),
+                },
+            ),
+        }
+    }
+
+    /// One group's node over its projected roots.
+    fn finish_body_group(
+        &self,
+        group: BodyGroup,
+        reference_arm_role: MemberMergeRole,
+    ) -> SemanticNodeId {
+        match group {
+            BodyGroup::Whole { projected, .. } => {
+                projected.expect("a whole-body group projects its root")
+            }
+            BodyGroup::Arms { body, ids, .. } => {
+                if ids.is_empty() {
                     self.graph()
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if arm_ids.len() == 1 {
-                    arm_ids[0]
+                } else if ids.len() == 1 {
+                    ids[0]
                 } else {
                     // Order- and scope-preserving rebuild of the projected
                     // arms: own-body-last order is topology and display
                     // fidelity. An interface or class body (its reference
-                    // arms are `extends` heritage) is minted a heritage
-                    // body, which inherits signatures by concatenation; an
-                    // alias's intersection stays an intersection.
-                    let arms: Arc<[SemanticNodeId]> = Arc::from(arm_ids.into_boxed_slice());
+                    // arms are `extends` heritage) is minted a heritage body,
+                    // which inherits signatures by concatenation; an alias's
+                    // intersection stays an intersection.
+                    let arms: Arc<[SemanticNodeId]> = Arc::from(ids.into_boxed_slice());
                     let list = match reference_arm_role {
                         MemberMergeRole::Heritage => {
                             crate::semantic_query::composite::CompositeList::heritage(arms)
@@ -552,22 +745,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.graph()
                         .intern_preserving_scope(body, SemanticNodeData::Intersection(list))
                 }
-            }
-            _ => {
-                drop(data);
-                let own = ProjectionStamp::new(
-                    context,
-                    MemberMergeRole::OwnBody,
-                    AuthoredArmKind::OwnBodyObject,
-                );
-                self.project_view_node(
-                    body,
-                    own.stamped_context(context),
-                    inputs,
-                    substitutions,
-                    memo,
-                    completeness,
-                )
             }
         }
     }
@@ -609,23 +786,5 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .and_then(|base| base.instance),
         )
-    }
-
-    /// Project one substituted shape node into the demanded view — the
-    /// graph-node mirror of the reducing lowering entry's per-position
-    /// dispatch decisions.
-    #[allow(clippy::too_many_lines)]
-    fn project_view_node(
-        &self,
-        node: SemanticNodeId,
-        ctx: ProjectionReductionContext,
-        inputs: &LocatorViewInputs<'_>,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        memo: &mut ViewMemo,
-        completeness: &mut ResultCompleteness,
-    ) -> SemanticNodeId {
-        let outcome = self.project_view_node_worklist(node, ctx, inputs, substitutions, memo);
-        *completeness = completeness.merge(outcome.completeness);
-        outcome.node
     }
 }

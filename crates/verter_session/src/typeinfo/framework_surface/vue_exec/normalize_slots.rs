@@ -353,7 +353,6 @@ fn binding_fields_from_param_node(
     if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
         &dispatch,
         first_param,
-        0,
     ) {
         return Vec::new();
     }

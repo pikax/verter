@@ -4020,6 +4020,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("value", infer_v),
@@ -4086,6 +4087,7 @@ fn binding_session_abandoned_by_budget_publishes_nothing() {
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("value", infer_v),
@@ -4776,6 +4778,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: infer_u_binder.clone(),
+        constraint: None,
     });
 
     let function = |a: crate::semantic_query::SemanticNodeId,
@@ -4908,6 +4911,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     // Inner occurrence of the FUNCTION's own `U` (the shadowing binder's
     // reference — lowers as a TypeParam shell named "U").
@@ -5004,6 +5008,7 @@ fn mutable_array_infer_element_binds_covariantly() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let check = graph.intern_node(SemanticNodeData::Array {
         element: string_node,
@@ -5092,6 +5097,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     // Inner: `number extends infer U ? U : never`.
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -5134,6 +5140,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let inner_v = graph.intern_node(SemanticNodeData::Conditional {
         check: number_node,
@@ -5252,6 +5259,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: infer_u_binder.clone(),
+        constraint: None,
     });
     // The post-activation lowering shape: the inner check `U` is an
     // `InferRef` REFERENCE to the outer binder.
@@ -5372,6 +5380,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
@@ -5467,6 +5476,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let infer_k = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("K"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
@@ -5574,6 +5584,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
         binder: infer_t_binder.clone(),
+        constraint: None,
     });
     // References inside the true branch bind as `InferRef` (the producer
     // contract).
@@ -5656,6 +5667,7 @@ fn constructor_type_relates_and_binds_infer_return() {
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("R"),
         binder: infer_r_binder.clone(),
+        constraint: None,
     });
     let r_ref = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("R"),
@@ -5832,6 +5844,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
         binder: infer_p_binder.clone(),
+        constraint: None,
     });
     let p_ref = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("P"),
@@ -6161,6 +6174,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("R"),
         binder: graph.alloc_infer_binder_id(),
+        constraint: None,
     });
     let ctor_infer = {
         use crate::semantic_query::{FunctionParam, TypeParamDecl};

@@ -495,6 +495,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
                 session_delta: false,
                 opened_session: Some(relation_session),
                 inline_flight: None,
+                recursion: Default::default(),
             }),
         });
         txn.obligations.pending_mut().deposit(PendingObligation {
@@ -570,6 +571,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
                 session_delta: false,
                 opened_session: None,
                 inline_flight: None,
+                recursion: Default::default(),
             }),
         });
         txn.obligations.pending_mut().deposit(PendingObligation {

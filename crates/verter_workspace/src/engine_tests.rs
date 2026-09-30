@@ -286,6 +286,7 @@ fn a_compacted_resolution_witness_still_reobserves_the_pending_ledger() {
     workspace.engine.refresh_resolution_evidence(
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
+        None,
         &compacted_resolution_witness(),
     );
 
@@ -316,6 +317,7 @@ fn a_nonaggregate_unenumerable_witness_still_reobserves_the_pending_ledger() {
     workspace.engine.refresh_resolution_evidence(
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
+        None,
         &witness,
     );
 
@@ -341,6 +343,7 @@ fn a_precise_witness_still_reobserves_only_the_canonicals_it_names() {
     workspace.engine.refresh_resolution_evidence(
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
+        None,
         &precise_witness("/p/other.ts"),
     );
 
@@ -370,6 +373,7 @@ fn an_empty_witness_reobserves_nothing() {
     workspace.engine.refresh_resolution_evidence(
         &workspace,
         ResolutionEvidenceSource::ReaderAuthoritative,
+        None,
         &ReadSetSignature::empty(),
     );
 

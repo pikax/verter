@@ -144,6 +144,9 @@ pub enum ShallowDiagnostic {
     /// boundary limit. Heap-owned structural traversal does not count toward
     /// this rail.
     ConnectedQueryDepthLimit { root: SemanticNodeId },
+    /// The connected root demand exhausted its construction-byte allowance:
+    /// operational partiality, like the work envelope.
+    ConnectedMemoryLimit { root: SemanticNodeId },
     /// `T & T` — duplicate intersection arm short-circuited so the
     /// walker does not re-enter an arm that contributes nothing new.
     DuplicateArmShortCircuited { node: SemanticNodeId },
@@ -2312,55 +2315,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// The type an indexed access reads off a property whose declared type
-    /// is `value`, declared in `declaring_file` — TypeScript's indexed-access
-    /// read. Under the declaring project's `strictNullChecks` an OPTIONAL
-    /// property reads `value | undefined` (`{ o?: 3 }['o']` is
-    /// `3 | undefined`; `exactOptionalPropertyTypes` does not change the
-    /// read). With it off, `null` and `undefined` are not types of their
-    /// own: the read is the declared type with them erased (`o?: 3 |
-    /// undefined` reads `3`), the checker's union construction under that
-    /// option.
+    /// is `value`, declared in `declaring_file`
+    /// ([`ProjectSemanticDispatch::optional_member_read`]).
     fn index_read(
         &self,
         value: SemanticNodeId,
         optional: bool,
         declaring_file: Option<&str>,
     ) -> SemanticNodeId {
-        use crate::semantic_query::{NullabilityPolicy, PrimitiveKind};
-        let strict = declaring_file.is_none_or(|canonical| {
-            self.dispatch
-                .ctx
-                .host_for_fact_tracer_install()
-                .semantic_compiler_options_for(canonical)
-                .strict_null_checks
-        });
-        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
-        self.push_union_flattened(&mut arms, value);
-        if strict {
-            if !optional {
-                return value;
-            }
-            arms.push(
-                self.graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
-            );
-            return self
-                .dispatch
-                .intern_normalized_union(&arms, NullabilityPolicy::Strict);
-        }
-        let nullable = |arm: &SemanticNodeId| {
-            matches!(
-                self.graph().node_data(*arm).as_deref(),
-                Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                ))
-            )
-        };
-        if arms.len() < 2 || !arms.iter().any(nullable) {
-            return value;
-        }
         self.dispatch
-            .intern_normalized_union(&arms, NullabilityPolicy::Erased)
+            .optional_member_read(value, optional, declaring_file)
     }
 
     /// The apparent wrapper surface a primitive, an array or a tuple reads
@@ -5481,7 +5445,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             && !arm_lists
                 .iter()
                 .flatten()
-                .all(|arm| nullish_kind(*arm).is_some() || self.provably_non_nullish(*arm, 0))
+                .all(|arm| nullish_kind(*arm).is_some() || self.dispatch.provably_non_nullish(*arm))
         {
             return None;
         }
@@ -5495,7 +5459,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         let disjoint_from = |arm: SemanticNodeId, kind: PrimitiveKind| match nullish_kind(arm) {
             Some(other) => other != kind,
-            None => self.provably_non_nullish(arm, 0),
+            None => self.dispatch.provably_non_nullish(arm),
         };
         for (position, arms) in stripped.iter().enumerate() {
             for &arm in arms {
@@ -5538,53 +5502,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 .map(|kind| self.graph().intern_node(SemanticNodeData::Primitive(kind)))
                 .collect(),
         })
-    }
-
-    /// Whether `node` provably excludes both `null` and `undefined`, so the
-    /// checker's intersection of it with either is `never`: a literal, a
-    /// non-nullish primitive (`object` included), an object, array, tuple
-    /// or template-literal type, a signature, an interface or class
-    /// reference, or an intersection with such an arm.
-    fn provably_non_nullish(&self, node: SemanticNodeId, depth: usize) -> bool {
-        const MAX_NESTING: usize = 4;
-        if depth > MAX_NESTING {
-            return false;
-        }
-        let Some(data) = self.graph().node_data(node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Literal(_)
-            | SemanticNodeData::Object(_)
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::Signature { .. } => true,
-            SemanticNodeData::Primitive(kind) => matches!(
-                kind,
-                PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::Boolean
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Symbol
-                    | PrimitiveKind::Object
-            ),
-            SemanticNodeData::DeclRef { identity }
-            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
-                self.dispatch.prepared_decl_kind(identity),
-                Some(
-                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
-                )
-            ),
-            SemanticNodeData::Intersection(arms) => {
-                let arms = arms.members_arc();
-                drop(data);
-                arms.iter()
-                    .any(|arm| self.provably_non_nullish(*arm, depth + 1))
-            }
-            _ => false,
-        }
     }
 
     /// Join intersection `contributors` (at least one) the member-value
@@ -9934,6 +9851,52 @@ enum ExpandFrame {
 enum ExpansionCombineKind {
     Intersection,
     Union,
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// Whether `node` provably excludes both `null` and `undefined`, so the
+    /// checker's intersection of it with either is `never`: a literal, a
+    /// non-nullish primitive (`object` included), an object, array, tuple
+    /// or template-literal type, a signature, an interface or class
+    /// reference, or an intersection with such an arm, at any nesting.
+    pub(super) fn provably_non_nullish(&self, node: SemanticNodeId) -> bool {
+        use crate::graph_walk::Verdict;
+        crate::graph_walk::classify(node, |node| {
+            let Some(data) = self.graph().node_data(node) else {
+                return Verdict::Leaf(Some(false));
+            };
+            Verdict::Leaf(Some(match data.as_ref() {
+                SemanticNodeData::Literal(_)
+                | SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Signature { .. } => true,
+                SemanticNodeData::Primitive(kind) => matches!(
+                    kind,
+                    PrimitiveKind::String
+                        | PrimitiveKind::Number
+                        | PrimitiveKind::Boolean
+                        | PrimitiveKind::BigInt
+                        | PrimitiveKind::Symbol
+                        | PrimitiveKind::Object
+                ),
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                    self.prepared_decl_kind(identity),
+                    Some(
+                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                    )
+                ),
+                SemanticNodeData::Intersection(arms) => {
+                    return Verdict::Any(arms.members_arc().to_vec());
+                }
+                _ => false,
+            }))
+        })
+        .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

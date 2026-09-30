@@ -108,6 +108,182 @@ impl Drop for ResolutionWitnessScope {
     }
 }
 
+/// Replay observations a memoized witness build recorded into every open
+/// [`ResolutionWitnessScope`], as the resolutions that produced them
+/// recorded them when the build ran.
+fn replay_resolution_witness(observed: &[FactVersionRef]) {
+    if WITNESS_DEPTH.with(Cell::get) == 0 || observed.is_empty() {
+        return;
+    }
+    WITNESS_FRAMES.with(|frames| {
+        for frame in frames.borrow_mut().iter_mut() {
+            frame.extend_from_slice(observed);
+        }
+    });
+}
+
+/// What resolving one owner's specifier set observed: whether a resolution
+/// was refused, and every observation the admitted ones recorded, in order.
+#[derive(Debug)]
+pub(crate) struct ImportRouteObservation {
+    refused: bool,
+    observed: Vec<FactVersionRef>,
+}
+
+/// The identity of one witness build within a request: the host, the
+/// owner, the specifier lanes resolved, and the generations a load or an
+/// edit advances, so a build after either resolves again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ImportRouteObservationKey {
+    host: usize,
+    canonical: std::sync::Arc<str>,
+    specifiers: Vec<(
+        String,
+        Option<verter_semantic::resolver_core::ResolveRequestKind>,
+    )>,
+    load_generation: u64,
+    store_view_epoch: u64,
+}
+
+/// A request's witness builds, so every consumer that roots on an owner's
+/// import-route witness within the request shares one resolution of the
+/// owner's specifiers instead of resolving all of them again (the witness
+/// is rooting evidence: a build that a later change in the request makes
+/// stale fails validation, never answers wrongly). Owned by the
+/// [`crate::request_context::RequestContext`] and dropped with it; bounded
+/// by the owners the request roots on.
+#[derive(Debug, Default)]
+pub(crate) struct ImportRouteObservationMemo(
+    parking_lot::Mutex<
+        rustc_hash::FxHashMap<ImportRouteObservationKey, std::sync::Arc<ImportRouteObservation>>,
+    >,
+);
+
+/// One analysis-canonical normalization a request made: the canonical it
+/// normalized to (`None`: to itself), whether a resolution it drove was
+/// refused, and every observation those resolutions recorded.
+#[derive(Debug)]
+pub(crate) struct NormalizedCanonical {
+    pub(crate) normalized: Option<std::sync::Arc<str>>,
+    pub(crate) refused: bool,
+    observed: Vec<FactVersionRef>,
+}
+
+/// The identity of one normalization within a request: the host, the
+/// canonical, and the generations a load or an edit advances, so a
+/// normalization after either probes again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct NormalizedCanonicalKey {
+    host: usize,
+    canonical: std::sync::Arc<str>,
+    load_generation: u64,
+    store_view_epoch: u64,
+}
+
+/// A request's analysis-canonical normalizations, so every consumer that
+/// normalizes the same canonical in the request shares one run of its
+/// declaration-companion probes (a normalization is rooting evidence
+/// exactly like a witness build: its observations are replayed into the
+/// witness scopes open around each consumer, and a refusal is re-noted).
+/// Owned by the [`crate::request_context::RequestContext`] and dropped
+/// with it; bounded by the canonicals the request normalizes.
+#[derive(Debug, Default)]
+pub(crate) struct NormalizedCanonicalMemo(
+    parking_lot::Mutex<
+        rustc_hash::FxHashMap<NormalizedCanonicalKey, std::sync::Arc<NormalizedCanonical>>,
+    >,
+);
+
+#[cfg(test)]
+thread_local! {
+    /// How many normalizations ran their probes on this thread; test-only.
+    static NORMALIZATION_BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many normalizations ran their probes on this thread so far
+/// (test-only).
+#[cfg(test)]
+pub(crate) fn normalization_builds_for_tests() -> usize {
+    NORMALIZATION_BUILDS.with(Cell::get)
+}
+
+impl VerterHost {
+    /// `canonical`'s normalization: the one the active request already
+    /// made under the same generations — its observations replayed into
+    /// the open witness scopes and its refusal re-noted — or `normalize()`
+    /// run once and kept for the request. `normalize` answers the
+    /// canonical it normalizes to (`None`: itself) and whether a resolution
+    /// it drove was refused, noting that refusal itself.
+    pub(crate) fn request_normalized_canonical(
+        &self,
+        canonical: &str,
+        normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool),
+    ) -> std::sync::Arc<NormalizedCanonical> {
+        let request = crate::request_context::current_request_context();
+        let key = request.as_ref().map(|_| NormalizedCanonicalKey {
+            host: self as *const Self as usize,
+            canonical: std::sync::Arc::from(canonical),
+            load_generation: self.current_load_generation(),
+            store_view_epoch: self.store_view_epoch(),
+        });
+        if let (Some(request), Some(key)) = (request.as_ref(), key.as_ref()) {
+            let hit = request.normalized_canonicals.0.lock().get(key).cloned();
+            if let Some(hit) = hit {
+                replay_resolution_witness(&hit.observed);
+                if hit.refused {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    );
+                }
+                return hit;
+            }
+        }
+        #[cfg(test)]
+        NORMALIZATION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let normalization = {
+            let scope = ResolutionWitnessScope::enter();
+            let (normalized, refused) = normalize();
+            std::sync::Arc::new(NormalizedCanonical {
+                normalized,
+                refused,
+                observed: scope.collected(),
+            })
+        };
+        if let (Some(request), Some(key)) = (request, key) {
+            request
+                .normalized_canonicals
+                .0
+                .lock()
+                .insert(key, std::sync::Arc::clone(&normalization));
+        }
+        normalization
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many witness builds resolved their specifiers on this thread;
+    /// test-only.
+    static WITNESS_BUILDS: Cell<usize> = const { Cell::new(0) };
+    /// How many witness builds were served by replaying the request's
+    /// earlier build on this thread; test-only.
+    static WITNESS_REPLAYS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many witness builds were served by replay on this thread so far
+/// (test-only).
+#[cfg(test)]
+pub(crate) fn witness_replays_for_tests() -> usize {
+    WITNESS_REPLAYS.with(Cell::get)
+}
+
+/// How many witness builds resolved their specifiers on this thread so
+/// far (test-only).
+#[cfg(test)]
+pub(crate) fn witness_builds_for_tests() -> usize {
+    WITNESS_BUILDS.with(Cell::get)
+}
+
 /// Record an admitted resolution's sealed Decision signature into every open
 /// [`ResolutionWitnessScope`].
 ///
@@ -162,30 +338,6 @@ impl VerterHost {
         self.import_route_witness_for_lanes(canonical_id, &specifiers)
     }
 
-    /// Coverage-checked variant: the witness for an EXPLICIT specifier
-    /// set (the unresolved-wildcard rooting loop supplies the sources it
-    /// actually traversed).
-    ///
-    /// Every listed specifier is resolved, so the returned witness
-    /// necessarily observes each one. A refusal on any of them yields
-    /// `None` — the old coverage check ("is this source present in the
-    /// hashed table?") is structural here rather than a lookup, because
-    /// the witness is built FROM the requested sources.
-    pub(crate) fn import_route_witness_for_specifiers(
-        &self,
-        canonical_id: &str,
-        specifiers: &[String],
-    ) -> Option<Vec<FactVersionRef>> {
-        let lanes: Vec<(
-            String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
-        )> = specifiers
-            .iter()
-            .map(|specifier| (specifier.clone(), None))
-            .collect();
-        self.import_route_witness_for_lanes(canonical_id, &lanes)
-    }
-
     /// Lane-aware witness builder. `None` selects the shared type-route
     /// policy; `Some(kind)` replays a specifier through the SAME
     /// workspace lane the recorder produced it under. Exact resolutions
@@ -235,11 +387,67 @@ impl VerterHost {
             Option<verter_semantic::resolver_core::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
-        let (refused, observed) = {
+        let observation = self.import_route_observation(canonical_id, specifiers);
+        if observation.refused {
+            return self.decline_import_route_witness();
+        }
+
+        // Dedup while preserving first-observation order. The consuming
+        // producer folds these into its own `FactReadSet`, which sorts
+        // and dedups canonically on finalise.
+        let observed = &observation.observed;
+        let mut seen: rustc_hash::FxHashSet<FactVersionRef> =
+            rustc_hash::FxHashSet::with_capacity_and_hasher(observed.len(), Default::default());
+        let mut witness: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
+        for fact in observed.iter().cloned() {
+            if seen.insert(fact.clone()) {
+                witness.push(fact);
+            }
+        }
+        Some(witness)
+    }
+
+    /// The resolution of `specifiers` a witness is built from: the one the
+    /// active request already made for the same owner, specifiers and
+    /// generations, its observations replayed into the open witness scopes,
+    /// or a fresh one the request keeps.
+    fn import_route_observation(
+        &self,
+        canonical_id: &str,
+        specifiers: &[(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )],
+    ) -> std::sync::Arc<ImportRouteObservation> {
+        let request = crate::request_context::current_request_context();
+        let key = request.as_ref().map(|_| ImportRouteObservationKey {
+            host: self as *const Self as usize,
+            canonical: std::sync::Arc::from(canonical_id),
+            specifiers: specifiers.to_vec(),
+            load_generation: self.current_load_generation(),
+            store_view_epoch: self.store_view_epoch(),
+        });
+        if let (Some(request), Some(key)) = (request.as_ref(), key.as_ref()) {
+            let hit = request.import_route_observations.0.lock().get(key).cloned();
+            if let Some(hit) = hit {
+                #[cfg(test)]
+                WITNESS_REPLAYS.with(|replays| replays.set(replays.get() + 1));
+                replay_resolution_witness(&hit.observed);
+                return hit;
+            }
+        }
+        #[cfg(test)]
+        WITNESS_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let observation = {
             let scope = ResolutionWitnessScope::enter();
             let mut refused = false;
             for (specifier, lane) in specifiers {
-                match self.generation_current_route_resolution(canonical_id, specifier, *lane) {
+                match self.generation_current_route_resolution_in(
+                    None,
+                    canonical_id,
+                    specifier,
+                    *lane,
+                ) {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         // The witness is the point of the call; the
                         // projected target is not consumed here.
@@ -250,24 +458,19 @@ impl VerterHost {
                     }
                 }
             }
-            (refused, scope.collected())
+            std::sync::Arc::new(ImportRouteObservation {
+                refused,
+                observed: scope.collected(),
+            })
         };
-        if refused {
-            return self.decline_import_route_witness();
+        if let (Some(request), Some(key)) = (request, key) {
+            request
+                .import_route_observations
+                .0
+                .lock()
+                .insert(key, std::sync::Arc::clone(&observation));
         }
-
-        // Dedup while preserving first-observation order. The consuming
-        // producer folds these into its own `FactReadSet`, which sorts
-        // and dedups canonically on finalise.
-        let mut seen: rustc_hash::FxHashSet<FactVersionRef> =
-            rustc_hash::FxHashSet::with_capacity_and_hasher(observed.len(), Default::default());
-        let mut witness: Vec<FactVersionRef> = Vec::with_capacity(observed.len());
-        for fact in observed {
-            if seen.insert(fact.clone()) {
-                witness.push(fact);
-            }
-        }
-        Some(witness)
+        observation
     }
 
     /// Mark the enclosing compute non-cacheable and report an

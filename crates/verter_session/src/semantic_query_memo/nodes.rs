@@ -114,3 +114,45 @@ impl SemanticGraphStore {
         self.arena.get(id)
     }
 }
+
+/// Where a chain of transparent `Alias` redirects from a node ends
+/// ([`SemanticGraphStore::alias_chain_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AliasChainEnd {
+    /// The first node on the chain that is not an `Alias` — the start
+    /// itself when it is not one.
+    Node(SemanticNodeId),
+    /// A redirect to an id with no data.
+    Dangling(SemanticNodeId),
+    /// The chain returns to a node it passed.
+    Cycle,
+}
+
+impl SemanticGraphStore {
+    /// Follow `start`'s transparent `Alias` redirects to where they end,
+    /// however long the chain is; `visit` sees each node on it, the end
+    /// included. A node that is not an alias costs one read and no
+    /// allocation.
+    pub(crate) fn alias_chain_end(
+        &self,
+        start: SemanticNodeId,
+        mut visit: impl FnMut(SemanticNodeId),
+    ) -> AliasChainEnd {
+        let mut current = start;
+        let mut passed: Option<rustc_hash::FxHashSet<SemanticNodeId>> = None;
+        loop {
+            visit(current);
+            let Some(data) = self.node_data(current) else {
+                return AliasChainEnd::Dangling(current);
+            };
+            let SemanticNodeData::Alias(next) = &*data else {
+                return AliasChainEnd::Node(current);
+            };
+            let next = *next;
+            if !passed.get_or_insert_with(Default::default).insert(current) {
+                return AliasChainEnd::Cycle;
+            }
+            current = next;
+        }
+    }
+}
