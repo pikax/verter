@@ -147,8 +147,113 @@ pub struct FallthroughNodeResult {
     pub diagnostics: Vec<ResolverDiagnostic>,
 }
 
+impl FallthroughNodeResult {
+    /// Estimated bytes one cached candidate keeps alive: the result, its fact
+    /// signature (held twice, once as the candidate's signature) and the
+    /// top-level rows of its value.
+    fn retained_bytes(&self, key: &FallthroughNodeKey) -> usize {
+        use std::mem::size_of;
+        let value = match &self.value {
+            FallthroughNodeValue::RootFollow(result) => {
+                result.accepted_props.len() * size_of::<AcceptedPropAnalysis>()
+                    + result.accepted_events.len() * size_of::<AcceptedEventAnalysis>()
+                    + result.branches.len() * size_of::<FallthroughBranchResult>()
+            }
+            FallthroughNodeValue::BranchUnion(result) => {
+                result.accepted_props.len() * size_of::<AcceptedPropAnalysis>()
+                    + result.accepted_events.len() * size_of::<AcceptedEventAnalysis>()
+                    + result.branches.len() * size_of::<FallthroughBranchResult>()
+            }
+            FallthroughNodeValue::IntrinsicSurface(surface) => {
+                surface.members.len() * size_of::<crate::resolver_core::IntrinsicSurfaceMember>()
+            }
+            FallthroughNodeValue::ChildSurfaceFollow(_) => 0,
+            FallthroughNodeValue::ConsumedBindings(result) => {
+                (result.attrs.len() + result.listeners.len() + result.consumed_names.len())
+                    * size_of::<String>()
+            }
+        };
+        size_of::<Self>()
+            + 2 * self.facts.len() * size_of::<FactVersionRef>()
+            + self.diagnostics.len() * size_of::<ResolverDiagnostic>()
+            + value
+            + key.canonical().len()
+    }
+}
+
+/// The most keys the fallthrough node cache keeps: the bound the semantic
+/// memo keeps on its families.
+pub(crate) const FALLTHROUGH_NODE_CAP: usize = crate::bounded_query_retention::DEFAULT_BUDGET_CAP;
+
+/// What the node cache keeps, and why. The cache itself answers reads; this
+/// is its single write-side consistency domain: every admission and removal
+/// updates the cache and this record under one lock, so a key is kept exactly
+/// while it has a record here.
+#[derive(Default)]
+struct NodeResidency {
+    /// Per kept key: its latest admission and one retention charge per
+    /// candidate, oldest first, mirroring the cache's candidate order.
+    kept: rustc_hash::FxHashMap<FallthroughNodeKey, KeptNode>,
+    /// Kept keys per owning component (or project, for an intrinsic surface),
+    /// so a close or a delete releases exactly its component's keys.
+    by_owner: rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<FallthroughNodeKey>>,
+    /// Keys in admission order, oldest first. An entry whose sequence is not
+    /// its key's latest admission is stale and skipped.
+    admitted: std::collections::VecDeque<(u64, FallthroughNodeKey)>,
+    next_seq: u64,
+}
+
+struct KeptNode {
+    seq: u64,
+    charges: smallvec::SmallVec<
+        [crate::semantic_retention_account::RetentionCharge; crate::resolver_core::CANDIDATE_CAP],
+    >,
+}
+
+impl NodeResidency {
+    /// Forget `key`'s record and its place in the owner index.
+    fn forget(&mut self, key: &FallthroughNodeKey) -> Option<KeptNode> {
+        let kept = self.kept.remove(key)?;
+        if let Some(keys) = self.by_owner.get_mut(key.canonical()) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.by_owner.remove(key.canonical());
+            }
+        }
+        Some(kept)
+    }
+
+    /// Drop the stale entries from the admission order once they outnumber
+    /// the live ones, so the queue stays proportional to the kept keys.
+    fn compact(&mut self) {
+        if self.admitted.len() <= 2 * self.kept.len() + 16 {
+            return;
+        }
+        let kept = &self.kept;
+        self.admitted
+            .retain(|(seq, key)| kept.get(key).is_some_and(|node| node.seq == *seq));
+    }
+}
+
+/// The fallthrough node cache, bounded and owned.
+///
+/// **Lifetime.** A node is keyed by the component whose surface it describes
+/// (or, for an intrinsic element surface, by its project), and it lives until
+/// the first of: that component closes or is deleted
+/// ([`Self::release_owner`]); [`FALLTHROUGH_NODE_CAP`] newer keys are admitted
+/// after it was last admitted (oldest first); the reader retires a superseded
+/// intrinsic surface. An edit does not retire a key: the edited component's
+/// next resolution admits a fresh candidate beside the stale ones, at most
+/// [`crate::resolver_core::CANDIDATE_CAP`] per key.
+///
+/// **Accounting.** Every candidate holds a `Retained` charge on the process's
+/// retention account for its bytes; a candidate the account refuses is served
+/// uncached. The key count is reported as the host retention snapshot's
+/// `fallthrough_nodes`. Evicting a live node only forces a recompute.
 pub struct FallthroughResolverState {
     cache: ValidatedFactCache<FallthroughNodeKey, FallthroughNodeResult>,
+    residency: parking_lot::Mutex<NodeResidency>,
+    retention_account: crate::semantic_retention_account::StoreAccount,
     counters: Arc<ResolverCounters>,
 }
 
@@ -156,15 +261,42 @@ impl FallthroughResolverState {
     pub fn new(counters: Arc<ResolverCounters>) -> Self {
         Self {
             cache: ValidatedFactCache::default(),
+            residency: parking_lot::Mutex::new(NodeResidency::default()),
+            retention_account: crate::semantic_retention_account::StoreAccount::default(),
             counters,
         }
     }
 
     pub fn clear_cache(&self) {
+        let mut residency = self.residency.lock();
         self.cache.clear();
+        *residency = NodeResidency::default();
+    }
+
+    /// Keys the node cache holds (retention observability).
+    pub fn retained_node_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Release every node the closed or deleted `owner` keyed: they can
+    /// never be read again under a live component. Returns how many keys
+    /// went.
+    pub fn release_owner(&self, owner: &str) -> usize {
+        let mut residency = self.residency.lock();
+        let Some(keys) = residency.by_owner.remove(owner) else {
+            return 0;
+        };
+        for key in &keys {
+            residency.kept.remove(key);
+            self.cache.remove(key);
+        }
+        residency.compact();
+        keys.len()
     }
 
     pub fn remove_node_for_test(&self, key: &FallthroughNodeKey) {
+        let mut residency = self.residency.lock();
+        residency.forget(key);
         self.cache.remove(key);
     }
 
@@ -191,7 +323,9 @@ impl FallthroughResolverState {
         key: &FallthroughNodeKey,
         observed_generation: u64,
     ) -> bool {
-        self.cache
+        let mut residency = self.residency.lock();
+        let retired = self
+            .cache
             .remove_if_all_candidates(key, |node| match &node.value {
                 FallthroughNodeValue::IntrinsicSurface(surface) => {
                     surface.cache_generation < observed_generation
@@ -199,7 +333,12 @@ impl FallthroughResolverState {
                 // A non-intrinsic value has no value-carried generation axis, so
                 // this reader cannot judge it superseded; leave it alone.
                 _ => false,
-            })
+            });
+        if retired {
+            residency.forget(key);
+            residency.compact();
+        }
+        retired
     }
 
     /// Admit a node through the same admission body the compute path uses,
@@ -338,8 +477,77 @@ impl FallthroughResolverState {
         if !result.facts.is_empty()
             || matches!(result.value, FallthroughNodeValue::IntrinsicSurface(_))
         {
-            self.cache.insert(key, result.clone(), result.facts.clone());
+            self.keep(key, result);
         }
+    }
+
+    /// Admit one candidate under `key`, charged and bounded (see the type
+    /// docs). A refused charge serves the result uncached.
+    fn keep(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
+        let Some(charge) = self
+            .retention_account
+            .get()
+            .reserve(
+                crate::semantic_retention_account::ChargeClass::Retained,
+                result.retained_bytes(&key),
+            )
+            .admitted()
+        else {
+            return;
+        };
+        let mut evicted = Vec::new();
+        {
+            let mut residency = self.residency.lock();
+            let facts = result.facts.clone();
+            self.cache.insert(key.clone(), result, facts);
+            let seq = residency.next_seq;
+            residency.next_seq += 1;
+            match residency.kept.get_mut(&key) {
+                Some(kept) => {
+                    kept.seq = seq;
+                    kept.charges.push(charge);
+                    // The cache keeps the newest candidates; so do the charges.
+                    let over = kept
+                        .charges
+                        .len()
+                        .saturating_sub(crate::resolver_core::CANDIDATE_CAP);
+                    evicted.extend(kept.charges.drain(..over));
+                }
+                None => {
+                    residency.kept.insert(
+                        key.clone(),
+                        KeptNode {
+                            seq,
+                            charges: smallvec::smallvec![charge],
+                        },
+                    );
+                    residency
+                        .by_owner
+                        .entry(key.canonical().to_string())
+                        .or_default()
+                        .insert(key.clone());
+                }
+            }
+            residency.admitted.push_back((seq, key));
+            while residency.kept.len() > FALLTHROUGH_NODE_CAP {
+                let Some((seq, oldest)) = residency.admitted.pop_front() else {
+                    break;
+                };
+                if residency
+                    .kept
+                    .get(&oldest)
+                    .is_some_and(|kept| kept.seq == seq)
+                {
+                    if let Some(kept) = residency.forget(&oldest) {
+                        evicted.extend(kept.charges);
+                    }
+                    self.cache.remove(&oldest);
+                }
+            }
+            residency.compact();
+        }
+        // The charges of what left the cache release here, outside its lock.
+        drop(evicted);
     }
 
     /// Admit a node produced by the stable request owner.
@@ -426,6 +634,45 @@ pub fn consumed_bindings_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The node cache keeps at most [`FALLTHROUGH_NODE_CAP`] keys, the
+    /// least recently admitted leaving first, and a component release drops
+    /// exactly its own keys. Discriminating: the cache kept every key ever
+    /// admitted.
+    #[test]
+    fn the_node_cache_is_bounded_and_released_per_component() {
+        let state = FallthroughResolverState::new(Arc::new(ResolverCounters::default()));
+        let key = |n: usize| {
+            root_follow_key(
+                &format!("/src/C{n}.vue"),
+                FallthroughOverrideIdentity::NoOverrides,
+                false,
+            )
+        };
+        let over = 64;
+        for n in 0..FALLTHROUGH_NODE_CAP + over {
+            state.admit_node_for_test(key(n), cacheable_root_node(&format!("/src/C{n}.vue"), 1));
+        }
+        assert_eq!(state.retained_node_count(), FALLTHROUGH_NODE_CAP);
+        assert_eq!(
+            state.cached_candidate_count(&key(0)),
+            0,
+            "the oldest key left first"
+        );
+        assert_eq!(
+            state.cached_candidate_count(&key(FALLTHROUGH_NODE_CAP + over - 1)),
+            1
+        );
+        assert!(
+            state.residency.lock().admitted.len() <= 2 * FALLTHROUGH_NODE_CAP + 16,
+            "the admission order stays proportional to the kept keys"
+        );
+
+        let last = format!("/src/C{}.vue", FALLTHROUGH_NODE_CAP + over - 1);
+        assert_eq!(state.release_owner(&last), 1);
+        assert_eq!(state.retained_node_count(), FALLTHROUGH_NODE_CAP - 1);
+        assert_eq!(state.release_owner(&last), 0, "a release is idempotent");
+    }
 
     fn cacheable_root_node(canonical: &str, hash: u8) -> FallthroughNodeResult {
         FallthroughNodeResult {
