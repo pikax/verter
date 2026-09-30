@@ -43,6 +43,10 @@ export const BIOME_ARMS = {
     label: "Biome lint, noFloatingPromises only, on an unhandled call returning __Probe",
   },
 };
+/** The arms a run's options select: no tsc arm under `--no-tsc`. */
+export const biomeArms = (options) =>
+  Object.keys(BIOME_ARMS).filter((arm) => !(options?.noTsc && arm === "tsc-thenable"));
+
 export const FLOATING_CATEGORY = "lint/nursery/noFloatingPromises";
 
 /** Biome's configuration: only the rule whose decision projects the type. */
@@ -287,7 +291,7 @@ export async function runBiome(ctx) {
       ...m,
     };
   }
-  const arms = Object.keys(BIOME_ARMS);
+  const arms = biomeArms(opts);
   const plan = ctx.schedule(Object.keys(cells), arms, opts.repeat, opts.warmup);
   const c2 = { ...ctx, biome };
   const invocations = [];
@@ -415,6 +419,7 @@ export function summarizeBiome(result, expectedFile, options) {
     if (!groups.has(inv.case)) groups.set(inv.case, {});
     (groups.get(inv.case)[inv.arm] ??= []).push(inv);
   }
+  const tscRan = (result.arms ?? []).includes("tsc-thenable");
   const cells = [];
   for (const [id, cell] of Object.entries(result.cells ?? {})) {
     const expected = expectedFor(expectedFile, id);
@@ -438,8 +443,9 @@ export function summarizeBiome(result, expectedFile, options) {
     const pick = (arm, key) =>
       (groups.get(id)?.[arm] ?? []).filter((i) => !i.warmup).map((i) => metrics(i)[key]);
     const ok = (arm) => arms[arm]?.class === "matched" && !arms[arm].repetitionsDiffer;
+    // The tsc arm, where it ran, must reproduce the reference for the row to count.
     const headline =
-      ok("tsc-thenable") && ok("verter-thenable") && ok("biome-types")
+      (!tscRan || ok("tsc-thenable")) && ok("verter-thenable") && ok("biome-types")
         ? {
             wallMs: verdict(pick("verter-thenable", "wallMs"), pick("biome-types", "wallMs"), 1),
             peakBytes: verdict(
@@ -490,7 +496,7 @@ export function summarizeBiome(result, expectedFile, options) {
     matched: {
       verter: count("verter-thenable"),
       biome: count("biome-types"),
-      tsc: count("tsc-thenable"),
+      tsc: tscRan ? count("tsc-thenable") : null,
       of: cells.length,
     },
   };
@@ -579,6 +585,10 @@ export function validateBiome(result, expectedFile, options, schedule) {
         fail(`${id}: the reference used another library`);
     }
   }
+  if (stable(result.arms) !== stable(biomeArms(options)))
+    fail(
+      `the arms are not ${options?.noTsc ? "the tool arms (--no-tsc)" : "every Biome-section arm"}`,
+    );
   const want = schedule(
     Object.keys(result.cells ?? {}),
     result.arms ?? [],
@@ -655,12 +665,12 @@ export function renderBiomeMarkdown(result) {
     `- Biome ${esc(t.pin)} (commit \`${String(t.commit).slice(0, 12)}\`, release file sha256 \`${String(t.source?.sha256).slice(0, 12)}\`, binary sha256 \`${t.binary.sha256.slice(0, 12)}\`, ${esc(t.license)}).`,
     "- Biome has no type query: its type inference answers only through its type-aware lint rules. Every tool therefore answers the same **boolean projection** of the demand — is the declared type of `__Probe` Promise-like? — Biome through `noFloatingPromises` on an unhandled call returning `__Probe`, Verter through its declared type (which must also equal tsc's in full), tsc through the reference's measuring program. The expected answer is tsc 7.0.2's, measured.",
     "- Every feature is a **pair** of programs differing in one place, one Promise-like and one not: a tool that does not evaluate the feature answers both alike and cannot decide the pair.",
-    "- Timed unit: a **cold process to a decided answer** (start, read the library and the module, answer, print, exit), every arm under the same supervisor, cap and deadline, counterbalanced. Verter's process also reads its own OS statistics and prints the full answer; Biome's builds its project scan. Verter's in-engine first type handle is shown apart. A row is compared only when all three arms matched; a verdict names a winner only when every measured repetition of one arm beats every repetition of the other (by more than 1 ms for times); ×N is Biome's median over Verter's (above 1 favours Verter).",
+    "- Timed unit: a **cold process to a decided answer** (start, read the library and the module, answer, print, exit), every arm under the same supervisor, cap and deadline, counterbalanced. Verter's process also reads its own OS statistics and prints the full answer; Biome's builds its project scan. Verter's in-engine first type handle is shown apart. A row is compared only when every arm that ran matched (tsc's arm does not run under `--no-tsc`); a verdict names a winner only when every measured repetition of one arm beats every repetition of the other (by more than 1 ms for times); ×N is Biome's median over Verter's (above 1 favours Verter).",
     "",
   );
   const s = result.summary ?? {};
   push(
-    `Matched: Verter ${s.matched?.verter ?? 0}, Biome ${s.matched?.biome ?? 0}, tsc ${s.matched?.tsc ?? 0} of ${s.matched?.of ?? 0} programs.`,
+    `Matched: Verter ${s.matched?.verter ?? 0}, Biome ${s.matched?.biome ?? 0}, tsc ${s.matched?.tsc ?? "not run"} of ${s.matched?.of ?? 0} programs.`,
     "",
   );
   push("## Pairs (a feature is decided when both of its programs are answered as tsc answers)", "");

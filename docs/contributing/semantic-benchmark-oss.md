@@ -7,7 +7,7 @@ tools to the same run — all of them, or a comma-separated subset
 
 | Tool | Section |
 |---|---|
-| `tsz`, `bamtiscript`, `ezno` | the type checkers, whole program, on the program tsc's reference answers were measured on, beside `tsc -p` |
+| `tsz`, `bamtiscript`, `ezno` | the type checkers, whole program, on the program tsc's reference answers were measured on, beside `tsc -p` and a one-shot Verter process answering the demand |
 | `biome` | semantic only: Biome has no type query, so Biome, Verter and tsc answer whether the declared type of `__Probe` is Promise-like, on a paired catalog (`--biome` alone selects just this section) |
 
 Biome cannot join the checkers' section: that section reads each tool's
@@ -77,6 +77,7 @@ suffix (see Correctness first in the main page). Its arms:
 |---|---|---|
 | `tsc-measure` | `tsc -p <tsconfig>` | the reference's own method, default (parallel) checkers; must reproduce the reference or the run fails |
 | `tsc-measure-1` | `tsc -p <tsconfig> --singleThreaded` | the same, one checker thread |
+| `verter` | the Verter probe's `run` job on the same files (no warm repeat) | the declared type of `__Probe`: the demand, not a whole-program check |
 | `oss-<tool>` | the tool's own command on the same program (`tools.json` `argv`) | the finding |
 
 A tool's output is read with the reference's own reader
@@ -93,16 +94,32 @@ whether it is `never`, and every other diagnostic's code is kept. Classes:
 | `error` / `killed` / `unverified` | an abnormal exit; the engine exhausted the cap or the deadline (a whole-program process is its engine from its start, so a kill is attributed by the `tsc -p` rule); a kill without that evidence |
 | `no-reference` | tsc gives no answer to compare with |
 
+The `verter` arm is classified by the demand section's own Verter classifier
+(`matched`, `mismatch`, `partial`, `refusal`, `beyond-tsc`, …): its type
+must equal tsc's, and no diagnostic codes are compared because Verter
+reports none for the whole program.
+
 **Timing units.** Every OSS arm is a whole-program, one-shot process, so its
 units are the supervisor's: wall time from process start to exit (process
 start, parse, bind, check and print included, for every arm alike), the
-process tree's peak memory, and CPU time. A matched row shows the tool against
-`tsc-measure` (tsc as shipped) and `tsc-measure-1` beside it.
+process tree's peak memory, and CPU time. A matched row shows the arm against
+`tsc-measure` (tsc as shipped) and `tsc-measure-1` beside it, and each
+matched tool against Verter where Verter matched too. **Against tsc -p,
+over the run** tallies each arm: how many rows it matched, and on those
+rows how often it or tsc won each metric, or neither.
 
-**Not comparable, so never shown side by side:** these figures and the
-demanded-probe arms (`verter`, `tsc-api`): a whole-program check does work a
-single demand does not (Verter exposes no whole-program pass). A warm figure
-(a one-shot CLI has no in-process repeat). A tool's self-reported timings.
+**Verter here does less work.** tsc and the checkers check the whole
+program and report every diagnostic; Verter answers the one demanded type
+(it exposes no whole-program pass). A Verter verdict in this section is
+therefore a demanded answer against a whole-program check on the same
+bytes, as a whole process — not like for like. Its process also reads its
+own OS statistics and prints the full answer, and its in-engine first type
+handle is shown apart.
+
+**Not comparable, so never shown side by side:** these whole-process
+figures and the in-engine figures of the demand section (`verter`, `tsc-api`
+there). A warm figure (a one-shot process has no in-process repeat). A
+tool's self-reported timings.
 
 ## Biome: semantic only
 
@@ -172,7 +189,28 @@ node scripts/benchmark/semantic-perf.mjs --oss                        # every to
 node scripts/benchmark/semantic-perf.mjs --oss --allow-sampled        # macOS
 node scripts/benchmark/semantic-perf.mjs --tier standard --oss tsz    # one checker
 node scripts/benchmark/semantic-perf.mjs --biome                      # the Biome section alone
+node scripts/benchmark/semantic-perf.mjs --oss --allow-sampled --no-tsc  # every tool, no tsc arm anywhere
+node scripts/benchmark/semantic-perf.mjs --only-oss --allow-sampled   # every tool, without the demand section
+node scripts/benchmark/semantic-perf.mjs --only-biome                 # the Biome section, without the demand section
 ```
+
+`--no-demand` skips the demand section (Verter vs the tsc API on each
+scenario's demanded type): its report says so, and every other selected
+section still runs, tsc included (the Verter probes are still built, since
+the sections run them). `--only-oss [tools]` is `--oss --no-demand`;
+`--only-biome` is `--biome --no-demand`.
+
+`--oss` alone already selects Biome's section as well as the checkers'.
+`--no-tsc` runs no tsc process in any section: the demand section keeps only its
+Verter arms, the checkers' section drops `tsc-measure`/`tsc-measure-1`, and
+the Biome section drops `tsc-thenable`. Every answer is still classified
+against the measured reference files, so `matched` keeps its meaning, but no
+row is timed against tsc: the checkers' head-to-head becomes a table of
+each arm's own figures with each matched tool set against Verter, and a Biome row is compared (Verter with
+Biome) when both of those arms matched. What needs a live tsc answer is lost:
+the run cannot confirm that tsc still reproduces the reference, and the main
+run cannot class an answer `beyond-tsc` or take an API answer as the
+reference by construction.
 
 The OSS arms run on the tier's cells (quick, standard, stress, or `--only`);
 the Biome catalog is small and runs whole in every tier.

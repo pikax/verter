@@ -7,28 +7,48 @@
 //
 //   tsc-measure     tsc -p <tsconfig>                  (default, parallel checkers)
 //   tsc-measure-1   tsc -p <tsconfig> --singleThreaded
+//   verter          the Verter probe as one cold process on the same files:
+//                   the declared type of `__Probe` (the demand, not a
+//                   whole-program check)
 //   oss-<tool>      the tool's own command on the same tsconfig or files
 //
 // A tool's row enters the head-to-head only when its answer MATCHED tsc's
 // measured answer (canonical type and diagnostic codes) and the tsc arm
 // reproduced the reference; wrong, unreadable, erroring or killed answers are
-// findings, never wins. These are whole-program runs: they compare with the
-// `tsc -p` arms, never with the demanded-probe arms (verter, tsc-api). The
-// whole section is absent from a run without `--oss`.
+// findings, never wins. Verter's answer is classified as the demand section
+// classifies it (the type only: Verter reports no whole-program
+// diagnostics). Every arm is timed as a whole process; the checkers and tsc
+// do more work than Verter (every diagnostic of the program), so a Verter
+// verdict is labelled as such. The whole section is absent from a run
+// without `--oss`.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { invocationEnd, runLimits, stats, supervisorDeadlineMs, verdict } from "../analyze.mjs";
+import {
+  CLASSES,
+  classifyVerterAnswer,
+  compactProbeRecord,
+  invocationEnd,
+  probeAnswer,
+  probeMetrics,
+  runLimits,
+  stats,
+  supervisorDeadlineMs,
+  verdict,
+} from "../analyze.mjs";
 import { canonicalDigest } from "../canonical.mjs";
 import { MEASURING_SUFFIX } from "../measure-expected.mjs";
 import { sha256Text } from "../provenance.mjs";
-import { referenceFor } from "../summary.mjs";
+import { probeDigest, referenceFor } from "../summary.mjs";
 import { supervisorRecordProblems } from "../supervisor.mjs";
 import { classifyOssAnswer, OSS_CLASSES, readOssAnswer, tscMeasureStatus } from "./answers.mjs";
 import { platformKey, provisioned, provisionTool } from "./provision.mjs";
 
-export const OSS_SCHEMA = 1;
+export const OSS_SCHEMA = 2;
+
+/** The Verter arm of the OSS section (its record is the demand section's probe record). */
+export const VERTER_ARM = "verter";
 
 /** The reference arms of the OSS section: tsc 7.0.2 on the measuring program. */
 export const REFERENCE_ARMS = {
@@ -42,8 +62,18 @@ export const REFERENCE_ARMS = {
   },
 };
 
+/** The reference arms a run's options select: none under `--no-tsc`. */
+export const referenceArms = (options) => (options?.noTsc ? [] : Object.keys(REFERENCE_ARMS));
+
 export const ossArm = (id) => `oss-${id}`;
 export const toolOfArm = (arm) => (arm.startsWith("oss-") ? arm.slice(4) : null);
+
+/** The arms of the OSS section for a run's options and its available tools, in schedule order. */
+export const ossArms = (options, toolIds) => [
+  ...referenceArms(options),
+  VERTER_ARM,
+  ...toolIds.map(ossArm),
+];
 
 /** The checker ids a checker list selects (every checker when the list is empty). */
 export function selectCheckers(tools, list) {
@@ -80,8 +110,26 @@ export function materializeMeasure(cellDir, scenario, tsconfigText, libText) {
   };
 }
 
+/** The Verter probe's job on one cell's measuring program: the demand only, no warm repeat. */
+export function verterJob(measureDir, libMode) {
+  return {
+    schema: 1,
+    dir: measureDir,
+    tsconfig: "tsconfig.json",
+    lib: "lib.bench.d.ts",
+    libMode: libMode ?? "root-file",
+    scenario: "scenario.ts",
+    initAlias: "__BenchInit",
+    probes: ["__Probe"],
+    warmRepeats: 0,
+    observability: false,
+  };
+}
+
 /** The command of one OSS-section arm on one cell's measuring program. */
-export function ossCommand(arm, { tscExe, tools, available, measureDir }) {
+export function ossCommand(arm, { tscExe, tools, available, measureDir, verterProbe, runBase }) {
+  if (arm === VERTER_ARM)
+    return [verterProbe, "run", "--job", `${runBase}.job.json`, "--out", `${runBase}.probe.json`];
   if (REFERENCE_ARMS[arm])
     return [tscExe, "-p", join(measureDir, "tsconfig.json"), ...REFERENCE_ARMS[arm].extra];
   const id = toolOfArm(arm);
@@ -100,7 +148,8 @@ export function ossCommand(arm, { tscExe, tools, available, measureDir }) {
  * arms (reference.mjs: the kill threshold at the budget, or the whole
  * deadline run).
  */
-export const ossInvocationEnd = (inv, limits) => invocationEnd({ ...inv, arm: "tsc-cli" }, limits);
+export const ossInvocationEnd = (inv, limits) =>
+  invocationEnd(inv.arm === VERTER_ARM ? inv : { ...inv, arm: "tsc-cli" }, limits);
 
 const ANSI = /\x1b\[[0-9;]*m/g;
 
@@ -207,7 +256,10 @@ export async function runOss(ctx) {
     log,
     jobs: ctx.jobs,
   });
-  const arms = [...Object.keys(REFERENCE_ARMS), ...ids.filter((id) => available[id]).map(ossArm)];
+  const arms = ossArms(
+    opts,
+    ids.filter((id) => available[id]),
+  );
   const cellMeta = {};
   for (const [key, cell] of cells) {
     const m = materializeMeasure(
@@ -236,8 +288,16 @@ export async function runOss(ctx) {
       tools,
       available,
       measureDir: meta.dir,
+      verterProbe: ctx.verterProbe,
+      runBase,
     });
+    if (step.arm === VERTER_ARM)
+      writeFileSync(
+        `${runBase}.job.json`,
+        JSON.stringify(verterJob(meta.dir, opts.libMode), null, 2),
+      );
     const supOut = `${runBase}.sup.json`;
+    const spawnedAtMs = Date.now();
     const result = await ctx.runSupervised(ctx.supervisor, {
       memMb: opts.memMb + opts.infraMb,
       timeoutMs: supervisorDeadlineMs(opts),
@@ -252,7 +312,10 @@ export async function runOss(ctx) {
       : null;
     const tool = toolOfArm(step.arm);
     let reading = null;
-    if (record?.launched && !record.killedBy && record.stdoutPath) {
+    // The Verter arm keeps the demand section's probe fields, so its end and
+    // answer are read by the same code.
+    const probeFields = step.arm === VERTER_ARM ? readProbeFields(`${runBase}.probe.json`) : {};
+    if (step.arm !== VERTER_ARM && record?.launched && !record.killedBy && record.stdoutPath) {
       try {
         const stdout = readFileSync(record.stdoutPath, "utf8");
         const stderr = existsSync(record.stderrPath) ? readFileSync(record.stderrPath, "utf8") : "";
@@ -279,6 +342,7 @@ export async function runOss(ctx) {
       supervisorReadError: result.readError ?? result.spawnError ?? null,
       supervisor: record,
       reading,
+      ...(step.arm === VERTER_ARM ? { spawnedAtMs, ...probeFields } : {}),
     });
     const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
     log(
@@ -294,6 +358,7 @@ export async function runOss(ctx) {
   return {
     schema: OSS_SCHEMA,
     platform: platformKey(),
+    verter: { binary: ctx.verterProbe },
     tools: status,
     toolsAfter,
     arms,
@@ -301,6 +366,27 @@ export async function runOss(ctx) {
     plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
     invocations,
   };
+}
+
+/** The probe record fields of a Verter invocation (as the demand section records them). */
+export function readProbeFields(probeOut) {
+  let phase = null;
+  let phaseHistory = null;
+  let probe = null;
+  let probeReadError = null;
+  try {
+    const marker = JSON.parse(readFileSync(`${probeOut}.phase`, "utf8"));
+    phase = marker.phase ?? null;
+    phaseHistory = marker.history ?? null;
+  } catch {
+    phase = null;
+  }
+  try {
+    probe = compactProbeRecord(JSON.parse(readFileSync(probeOut, "utf8")));
+  } catch (err) {
+    probeReadError = String(err.message ?? err);
+  }
+  return { probeOut, phase, phaseHistory, probe, probeReadError };
 }
 
 // ---------------------------------------------------------------- summary
@@ -335,8 +421,16 @@ function overBudget(inv, limits) {
   return typeof peak === "number" && peak > limits.budgetBytes;
 }
 
-/** One invocation's class (tool arms) or reference status (tsc arms). */
-export function invocationClass(inv, reference, beyond, limits) {
+/** One invocation's class (tool and Verter arms) or reference status (tsc arms). */
+export function invocationClass(inv, reference, beyond, limits, verterCtx = {}) {
+  if (inv.arm === VERTER_ARM)
+    return classifyVerterAnswer(probeAnswer(inv, limits), {
+      reference,
+      beyond,
+      probe: verterCtx.probe ?? null,
+      budgetBytes: limits.budgetBytes,
+      tscKilled: verterCtx.tscKilled ?? false,
+    });
   let end = ossInvocationEnd(inv, limits);
   if (end.kind === "exited" && overBudget(inv, limits))
     end = {
@@ -365,9 +459,15 @@ export function summarizeOss(oss, expected, scenarios, options) {
     const reference = referenceFor(expected, meta.id, meta.setting);
     const beyond = beyondDigestOf(scenario);
     const arms = {};
-    for (const [arm, invs] of Object.entries(groups.get(key) ?? {})) {
+    // The reference arms first: Verter's beyond-tsc needs tsc's kill on the demand.
+    const entries = Object.entries(groups.get(key) ?? {}).sort(
+      ([a], [b]) => Number(!REFERENCE_ARMS[a]) - Number(!REFERENCE_ARMS[b]),
+    );
+    const verterCtx = { probe: probeDigest(scenario) };
+    for (const [arm, invs] of entries) {
+      if (arm === VERTER_ARM) verterCtx.tscKilled = arms["tsc-measure"]?.status === "killed";
       const measured = invs.filter((i) => !i.warmup);
-      const results = invs.map((i) => invocationClass(i, reference, beyond, limits));
+      const results = invs.map((i) => invocationClass(i, reference, beyond, limits, verterCtx));
       const completed = measured.filter((i, k) => {
         const r = results[invs.indexOf(i)];
         return r.class === "matched" || r.status === "reference";
@@ -388,11 +488,17 @@ export function summarizeOss(oss, expected, scenarios, options) {
         s.problems = problems;
         s.detail = results.find((r) => r.detail)?.detail ?? "";
       } else {
+        const verter = arm === VERTER_ARM;
         const classes = [...new Set(results.map((r) => r.class))];
-        const worst = OSS_CLASSES.find((c) => classes.includes(c)) ?? classes[0];
+        const worst =
+          (verter ? CLASSES : OSS_CLASSES).find((c) => classes.includes(c)) ?? classes[0];
+        const answers = invs.map((i) =>
+          verter ? probeAnswer(i, limits).digest : (i.reading?.answer?.digest ?? null),
+        );
         const digests = new Set(
           invs.map(
-            (i) => i.reading?.answer?.digest?.sha256 ?? `<${i.reading?.unreadable ?? "none"}>`,
+            (i, k) =>
+              answers[k]?.sha256 ?? `<${verter ? "none" : (i.reading?.unreadable ?? "none")}>`,
           ),
         );
         s.class = worst;
@@ -402,17 +508,22 @@ export function summarizeOss(oss, expected, scenarios, options) {
         s.detail = s.repetitionsDiffer
           ? `repetitions differ (${classes.join(", ")}; ${digests.size} distinct answers): ${worstDetail}`
           : worstDetail;
-        s.answer = invs.find((i) => i.reading?.answer)?.reading.answer.digest.preview ?? null;
-        counts[toolOfArm(arm)] ??= {};
-        counts[toolOfArm(arm)][worst] = (counts[toolOfArm(arm)][worst] ?? 0) + 1;
+        s.answer = answers.find(Boolean)?.preview ?? null;
+        if (verter)
+          s.firstTypeMs = stats(completed.map((i) => probeMetrics(i)?.firstTypeMs ?? null));
+        const id = verter ? VERTER_ARM : toolOfArm(arm);
+        counts[id] ??= {};
+        counts[id][worst] = (counts[id][worst] ?? 0) + 1;
       }
       arms[arm] = s;
     }
-    // The head-to-head of each tool with the default tsc arm (and the
-    // single-threaded one beside it): only where the tool matched on every
-    // invocation and tsc reproduced the reference.
+    // The head-to-head of each tool and of Verter with the default tsc arm
+    // (and the single-threaded one beside it): only where the arm matched on
+    // every invocation and tsc reproduced the reference. Each tool is also
+    // set against Verter where both matched.
     const headline = {};
     const tscOk = (arm) => arms[arm]?.status === "reference";
+    const verterOk = arms[VERTER_ARM]?.class === "matched" && !arms[VERTER_ARM].repetitionsDiffer;
     for (const [arm, s] of Object.entries(arms)) {
       if (REFERENCE_ARMS[arm] || s.class !== "matched" || s.repetitionsDiffer) continue;
       const pick = (a, m) =>
@@ -426,6 +537,15 @@ export function summarizeOss(oss, expected, scenarios, options) {
             }
           : null;
       headline[arm] = { parallel: vs("tsc-measure"), single: vs("tsc-measure-1") };
+      // Verter first: a "verter" verdict favours Verter, a "tsc" one the tool.
+      if (arm !== VERTER_ARM)
+        headline[arm].verter = verterOk
+          ? {
+              wallMs: verdict(pick(VERTER_ARM, "wallMs"), pick(arm, "wallMs"), 1),
+              peakBytes: verdict(pick(VERTER_ARM, "peakBytes"), pick(arm, "peakBytes"), 0),
+              cpuMs: verdict(pick(VERTER_ARM, "cpuMs"), pick(arm, "cpuMs"), 1),
+            }
+          : null;
     }
     cells.push({
       key,
@@ -477,14 +597,17 @@ export function validateOss(oss, expected, scenarios, options, schedule) {
     } else if (typeof t.reason !== "string" || !/^unavailable on /.test(t.reason))
       fail(`${id} is neither available nor unavailable with a reason`);
   }
-  const wantArms = [
-    ...Object.keys(REFERENCE_ARMS),
-    ...Object.entries(oss.tools ?? {})
+  const wantArms = ossArms(
+    options,
+    Object.entries(oss.tools ?? {})
       .filter(([, t]) => t.status === "available")
-      .map(([id]) => ossArm(id)),
-  ];
+      .map(([id]) => id),
+  );
   if (stable(wantArms) !== stable(oss.arms))
-    fail("the arms are not the reference arms plus every available tool");
+    fail(
+      `the arms are not ${options?.noTsc ? "(under --no-tsc) " : "the reference arms plus "}Verter and every available tool`,
+    );
+  if (!oss.verter?.binary) fail("the section names no Verter probe");
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   for (const [key, cell] of Object.entries(oss.cells ?? {})) {
     const scenario = byId.get(cell.id);
@@ -533,7 +656,11 @@ export function validateOss(oss, expected, scenarios, options, schedule) {
     const tool = toolOfArm(inv.arm);
     if (tool && inv.command?.[0] !== oss.tools?.[tool]?.binary?.path)
       fail(`${id}: ran ${inv.command?.[0]}, not the provisioned ${tool}`);
-    if (end.kind === "exited" && !inv.reading)
+    if (inv.arm === VERTER_ARM) {
+      const job = inv.command?.[inv.command.indexOf("--job") + 1];
+      if (inv.command?.[0] !== oss.verter?.binary || inv.command?.[1] !== "run" || !job)
+        fail(`${id}: ran ${inv.command?.[0]}, not the run's Verter probe`);
+    } else if (end.kind === "exited" && !inv.reading)
       fail(`${id}: an exited run has no reading of its output`);
   });
   const recomputed = summarizeOss(oss, expected, scenarios, options);
@@ -572,6 +699,14 @@ export function ossRawFileProblems(oss, tools, scenarios) {
     delete embedded.sampleCount;
     if (stable(rest) !== stable(embedded))
       problems.push(`${id}: the supervisor record on disk differs from results.json`);
+    if (inv.arm === VERTER_ARM) {
+      if (inv.probe && inv.probeOut) {
+        const again = readProbeFields(inv.probeOut);
+        if (stable(again.probe) !== stable(inv.probe))
+          problems.push(`${id}: the probe record on disk differs from results.json`);
+      }
+      continue;
+    }
     if (!inv.reading || !sup.stdoutPath) continue;
     try {
       const stdout = readFileSync(sup.stdoutPath, "utf8");
@@ -602,6 +737,18 @@ const esc = (s) =>
   String(s ?? "")
     .replace(/\|/g, "\\|")
     .replace(/\n/g, " ");
+/** An arm's display name. */
+const armName = (oss, arm) =>
+  arm === VERTER_ARM ? "Verter" : (oss.tools?.[toolOfArm(arm)]?.name ?? arm);
+/** A Verter-vs-tool verdict (Verter first). */
+const vsVerter = (v, name) =>
+  !v || v.verdict === "n/a"
+    ? "—"
+    : v.verdict === "verter"
+      ? `Verter${v.ratio && v.ratioMeaningful !== false ? ` (×${v.ratio.toFixed(2)})` : ""}`
+      : v.verdict === "tsc"
+        ? name
+        : "overlap";
 const word = (v, name) =>
   !v || v.verdict === "n/a"
     ? "—"
@@ -622,7 +769,8 @@ export function renderOssMarkdown(oss) {
     "",
     "- Every arm checks the **same measuring program** tsc 7.0.2's reference was measured on (the scenario plus the measuring suffix, `lib.bench.d.ts` as a root file under `noLib`, the setting's tsconfig), as one fresh process under the same supervisor, cap and deadline, in its own counterbalanced schedule. `tsc-measure` runs the reference's own command; `tsc-measure-1` adds `--singleThreaded`.",
     "- A tool's answer is read exactly as the reference is (the TS2322 head line on the measuring assignment, the never check, every other diagnostic's code) and compared by canonical structure. **matched** needs the same answer and the same diagnostic codes as tsc; anything else is a finding and never enters a comparison.",
-    "- These are **whole-program** runs: wall time includes process start, parsing and checking the whole program, for every arm alike; memory is the supervisor's peak for the process tree. They compare with the `tsc -p` arms only, never with the demanded-probe arms (Verter, tsc API) of the sections above. There is no warm figure (a one-shot CLI has no in-process repeat).",
+    "- These are **whole-process** runs: wall time includes process start, parsing and answering, for every arm alike; memory is the supervisor's peak for the process tree. There is no warm figure (a one-shot process has no in-process repeat). They compare with each other only, never with the in-engine figures of the sections above.",
+    "- **Verter** runs the Verter probe once on the same files and answers the demand: the declared type of `__Probe`, classified as the demand section classifies Verter (the type must equal tsc's; Verter reports no whole-program diagnostics, so no codes are compared). It does **less work** than tsc and the checkers, which check the whole program and report every diagnostic: a Verter verdict here is a demanded answer against a whole-program check, not like for like. Its process also reads its own OS statistics and prints the full answer; its in-engine first type handle is shown apart.",
     "- A verdict names a winner only when every measured repetition of one arm beats every repetition of the other (by more than 1 ms for times); ×N is tsc's median over the tool's (above 1 favours the tool).",
     "",
   );
@@ -642,28 +790,80 @@ export function renderOssMarkdown(oss) {
   const rows = summary.cells.flatMap((c) =>
     Object.entries(c.headline ?? {}).map(([arm, h]) => ({ c, arm, h })),
   );
+  const referenceRan = (oss.arms ?? []).some((a) => REFERENCE_ARMS[a]);
   push("## Head-to-head with tsc -p (matched answers only)", "");
-  if (!rows.length)
+  if (!referenceRan) {
+    push(
+      "_No tsc -p arm ran (`--no-tsc`): every arm's answer is classified against the measured reference, and each matched tool is set against Verter only._",
+      "",
+    );
+    push(
+      "| scenario | setting | arm | answer | wall | peak MB | CPU | wall vs Verter | peak vs Verter |",
+      "|---|---|---|---|---:|---:|---:|---|---|",
+    );
+    for (const c of summary.cells)
+      for (const arm of toolArms) {
+        const t = c.arms[arm];
+        if (!t) continue;
+        const name = armName(oss, arm);
+        const h = c.headline?.[arm]?.verter;
+        push(
+          `| ${c.scenario} | ${c.setting} | ${esc(name)} | **${t.class}** | ${fmtMs(t.wallMs)} | ${fmtMb(t.peakBytes)} | ${fmtMs(t.cpuMs)} | ${vsVerter(h?.wallMs, name)} | ${vsVerter(h?.peakBytes, name)} |`,
+        );
+      }
+    push("");
+  } else if (!rows.length)
     push("_No row has a matched answer from a tool and a reproduced reference from tsc._", "");
   else {
     push(
-      "| scenario | setting | tool | tool wall | tsc wall | wall | tsc single wall | wall vs single | tool peak MB | tsc peak MB | peak | tool CPU | tsc CPU |",
-      "|---|---|---|---:|---:|---|---:|---|---:|---:|---|---:|---:|",
+      "| scenario | setting | arm | arm wall | tsc wall | wall | tsc single wall | wall vs single | arm peak MB | tsc peak MB | peak | arm CPU | tsc CPU | Verter wall | wall vs Verter | peak vs Verter |",
+      "|---|---|---|---:|---:|---|---:|---|---:|---:|---|---:|---:|---:|---|---|",
     );
     for (const { c, arm, h } of rows) {
       const t = c.arms[arm];
       const p = c.arms["tsc-measure"];
       const s = c.arms["tsc-measure-1"];
-      const name = oss.tools?.[toolOfArm(arm)]?.name ?? arm;
+      const name = armName(oss, arm);
+      const v = arm === VERTER_ARM ? null : c.arms[VERTER_ARM];
       push(
-        `| ${c.scenario} | ${c.setting} | ${esc(name)} | ${fmtMs(t.wallMs)} | ${fmtMs(p?.wallMs)} | ${word(h.parallel?.wallMs, name)} | ${fmtMs(s?.wallMs)} | ${word(h.single?.wallMs, name)} | ${fmtMb(t.peakBytes)} | ${fmtMb(p?.peakBytes)} | ${word(h.parallel?.peakBytes, name)} | ${fmtMs(t.cpuMs)} | ${fmtMs(p?.cpuMs)} |`,
+        `| ${c.scenario} | ${c.setting} | ${esc(name)} | ${fmtMs(t.wallMs)} | ${fmtMs(p?.wallMs)} | ${word(h.parallel?.wallMs, name)} | ${fmtMs(s?.wallMs)} | ${word(h.single?.wallMs, name)} | ${fmtMb(t.peakBytes)} | ${fmtMb(p?.peakBytes)} | ${word(h.parallel?.peakBytes, name)} | ${fmtMs(t.cpuMs)} | ${fmtMs(p?.cpuMs)} | ${arm === VERTER_ARM ? `first type handle ${fmtMs(t.firstTypeMs)}` : fmtMs(v?.wallMs)} | ${arm === VERTER_ARM ? "—" : vsVerter(h.verter?.wallMs, name)} | ${arm === VERTER_ARM ? "—" : vsVerter(h.verter?.peakBytes, name)} |`,
       );
     }
     push("");
   }
+  if (referenceRan) {
+    // How each arm fares against tsc -p over the whole run: its answers, and
+    // the verdicts of the rows it matched on (tsc as shipped, then single-threaded).
+    push("## Against tsc -p, over the run", "");
+    push(
+      "| arm | matched | wall vs tsc -p (arm / tsc / overlap) | peak vs tsc -p | CPU vs tsc -p | wall vs tsc -p --singleThreaded |",
+      "|---|---:|---|---|---|---|",
+    );
+    const tally = (arm, side, metric) => {
+      const t = { arm: 0, tsc: 0, overlap: 0 };
+      for (const c of summary.cells) {
+        const v = c.headline?.[arm]?.[side]?.[metric]?.verdict;
+        if (v === "verter") t.arm++;
+        else if (v === "tsc") t.tsc++;
+        else if (v === "overlap") t.overlap++;
+      }
+      return `${t.arm} / ${t.tsc} / ${t.overlap}`;
+    };
+    for (const arm of toolArms) {
+      const matched = summary.cells.filter((c) => c.arms[arm]?.class === "matched").length;
+      push(
+        `| ${esc(armName(oss, arm))} | ${matched} of ${summary.cells.length} | ${tally(arm, "parallel", "wallMs")} | ${tally(arm, "parallel", "peakBytes")} | ${tally(arm, "parallel", "cpuMs")} | ${tally(arm, "single", "wallMs")} |`,
+      );
+    }
+    push(
+      "",
+      "Each verdict counts one row where the arm matched and tsc reproduced the reference: the arm faster (or smaller), tsc, or neither by every repetition.",
+      "",
+    );
+  }
   push("## Answers (every row)", "");
   push(
-    `| scenario | setting | tsc 7.0.2 (measured) | tsc-measure | ${toolArms.map((a) => esc(oss.tools?.[toolOfArm(a)]?.name ?? a)).join(" | ")} |`,
+    `| scenario | setting | tsc 7.0.2 (measured) | tsc-measure | ${toolArms.map((a) => esc(armName(oss, a))).join(" | ")} |`,
     `|---|---|---|---|${toolArms.map(() => "---|").join("")}`,
   );
   for (const c of summary.cells) {
@@ -688,7 +888,7 @@ export function renderOssMarkdown(oss) {
   const counts = Object.entries(summary.classCounts ?? {})
     .map(
       ([id, c]) =>
-        `${oss.tools?.[id]?.name ?? id}: ${Object.entries(c)
+        `${id === VERTER_ARM ? "Verter" : (oss.tools?.[id]?.name ?? id)}: ${Object.entries(c)
           .map(([k, n]) => `${k} ${n}`)
           .join(", ")}`,
     )

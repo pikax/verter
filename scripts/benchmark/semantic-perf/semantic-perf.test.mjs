@@ -656,9 +656,15 @@ function withWarm(probe, warm) {
   return probe;
 }
 
-function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
+function syntheticRun({
+  verterText = "1",
+  tscText = "1",
+  arms = ["verter", "tsc-api"],
+  noTsc = undefined,
+} = {}) {
   const options = {
-    arms: ["verter", "tsc-api"],
+    arms,
+    ...(noTsc ? { noTsc } : {}),
     repeat: 2,
     warmup: 1,
     warmRepeats: 1,
@@ -807,6 +813,37 @@ test("a well-formed synthetic run passes and compares the matched row", () => {
   assert.ok(cell.headline, "a matched row is compared");
   // tsc's request time is its server time bounded by the round trip.
   assert.equal(cell.arms["tsc-api"].metrics.coldMs.median, 1);
+});
+
+test("under --no-tsc a Verter-only run validates, classifies against the reference and compares nothing", () => {
+  const run = syntheticRun({ arms: ["verter"], noTsc: true });
+  assert.deepEqual(validate(run).failures, []);
+  const cell = run.summary.cells[0];
+  assert.equal(cell.arms.verter.class, "matched");
+  assert.equal(cell.arms["tsc-api"], undefined);
+  assert.equal(cell.headline, null);
+  // The answer is still held to the measured reference.
+  assert.equal(
+    syntheticRun({ arms: ["verter"], noTsc: true, verterText: "2" }).summary.cells[0].arms.verter
+      .class,
+    "mismatch",
+  );
+  failsWith(syntheticRun({ noTsc: true }), /--no-tsc, yet the arms include tsc-api/);
+});
+
+test("--no-demand records an empty demand section, and only then may it be empty", () => {
+  const run = syntheticRun({ arms: [] });
+  Object.assign(run.meta.options, { noDemand: true, oss: [] });
+  resummarize(run);
+  assert.deepEqual(validate(run).failures, []);
+  delete run.meta.options.noDemand;
+  failsWith(run, /zero records/);
+  const armed = syntheticRun();
+  Object.assign(armed.meta.options, { noDemand: true, oss: [] });
+  failsWith(armed, /yet the demand section has arms verter, tsc-api/);
+  const none = syntheticRun({ arms: [] });
+  Object.assign(none.meta.options, { noDemand: true });
+  failsWith(resummarize(none), /no other section/);
 });
 
 test("a wrong tsc answer against the measured reference fails validation", () => {

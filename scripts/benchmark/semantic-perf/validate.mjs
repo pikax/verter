@@ -274,8 +274,17 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     );
   }
   for (const p of scheduleBalanceProblems(expectedPlan, opts.arms ?? [])) fail(`schedule: ${p}`);
+  if (opts.noTsc) {
+    const tscArms = (opts.arms ?? []).filter((arm) => ARMS[arm]?.tool === "tsc");
+    if (tscArms.length) fail(`--no-tsc, yet the arms include ${tscArms.join(", ")}`);
+  }
+  if (opts.noDemand) {
+    if ((opts.arms ?? []).length)
+      fail(`--no-demand, yet the demand section has arms ${opts.arms.join(", ")}`);
+    if (!opts.oss && !opts.biome) fail("--no-demand, yet no other section was selected");
+  }
   const invs = run.invocations ?? [];
-  if (!invs.length) fail("zero records: the run holds no invocation");
+  if (!invs.length && !opts.noDemand) fail("zero records: the run holds no invocation");
   const seen = new Map();
   invs.forEach((inv, position) => {
     const entry = planEntry(inv);

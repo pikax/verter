@@ -18,7 +18,15 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -252,6 +260,8 @@ export async function provisionTool(root, id, tool, options = {}) {
       const file = join(dir, name);
       writeFileSync(`${file}.tmp`, buffer);
       renameSync(`${file}.tmp`, file);
+      // A release file is the executable itself: a download carries no mode bits.
+      if (source.type === "file" && process.platform !== "win32") chmodSync(file, 0o755);
       // bsdtar (the system tar of Windows and macOS) reads both .zip and
       // .tar.gz; on Windows it is named by path, since a GNU tar earlier on
       // PATH reads no zip.

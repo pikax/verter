@@ -20,6 +20,7 @@ import { moduleText, SETTINGS, tsconfigText } from "../scenarios.mjs";
 import { classifyOssAnswer, readOssAnswer, tscMeasureStatus } from "./answers.mjs";
 import {
   BIOME_ARMS,
+  biomeArms,
   biomeInvocationClass,
   expectedFor,
   readBiomeAnswer,
@@ -29,8 +30,12 @@ import {
 import {
   measureSource,
   ossArm,
+  ossArms,
+  OSS_SCHEMA,
+  VERTER_ARM,
   readInvocation,
   REFERENCE_ARMS,
+  renderOssMarkdown,
   selectCheckers,
   summarizeOss,
   validateOss,
@@ -151,6 +156,32 @@ test("--oss and --biome are opt-in: a default run's options are unchanged", () =
   const both = parseArgs(["--oss", "--biome"]);
   assert.deepEqual([both.oss, both.biome], [[], true]);
   assert.throws(() => parseArgs(["--oss", "no-such-tool"]), /not a pinned tool/);
+  // --no-tsc drops every tsc arm from the tier's arms, and refuses one named explicitly.
+  assert.ok(plain.arms.includes("tsc-api") && !("noTsc" in plain));
+  const noTsc = parseArgs(["--tier", "stress", "--oss", "--allow-sampled", "--no-tsc"]);
+  assert.deepEqual(
+    [noTsc.arms, noTsc.oss, noTsc.biome, noTsc.noTsc],
+    [["verter", "verter-obs", "verter-counted"], [], true, true],
+  );
+  assert.throws(() => parseArgs(["--no-tsc", "--arms", "verter,tsc-cli"]), /excludes.*tsc-cli/);
+  // --no-demand skips the demand section; --only-oss / --only-biome are --oss / --biome with it.
+  const onlyOss = parseArgs(["--only-oss", "--allow-sampled"]);
+  assert.deepEqual(
+    [onlyOss.arms, onlyOss.oss, onlyOss.biome, onlyOss.noDemand],
+    [[], [], true, true],
+  );
+  const onlyTsz = parseArgs(["--only-oss", "tsz"]);
+  assert.deepEqual([onlyTsz.oss, onlyTsz.biome, onlyTsz.noDemand], [["tsz"], undefined, true]);
+  const onlyBiome = parseArgs(["--only-biome"]);
+  assert.deepEqual(
+    [onlyBiome.arms, "oss" in onlyBiome, onlyBiome.biome, onlyBiome.noDemand],
+    [[], false, true, true],
+  );
+  assert.ok(!("noDemand" in parseArgs(["--oss"])));
+  assert.throws(() => parseArgs(["--only-biome", "--arms", "verter"]), /--arms does not apply/);
+  const noDemand = parseArgs(["--oss", "--no-demand"]);
+  assert.deepEqual([noDemand.arms, noDemand.oss, noDemand.noDemand], [[], [], true]);
+  assert.throws(() => parseArgs(["--no-demand"]), /nothing to run/);
   const tools = loadTools();
   assert.deepEqual(selectCheckers(tools, []), ["tsz", "bamtiscript", "ezno"]);
   assert.deepEqual(selectCheckers(tools, ["ezno", "tsz"]), ["tsz", "ezno"]);
@@ -289,7 +320,38 @@ const EXPECTED = {
   },
 };
 
-function ossRun({ toolTuple = "[[1]]", tscTuple = "[[1]]", wall = { tool: 5, tsc: 20 } } = {}) {
+/** A Verter probe record answering `text`, as the probe writes it. */
+const verterRecord = (text) => ({
+  tool: "verter",
+  stage: "complete",
+  phases: { engineStart: 500, setup: 1000, teardown: 10 },
+  init: { micros: 100, outcome: { kind: "value" } },
+  probes: [
+    {
+      alias: "__Probe",
+      cold: { micros: 50, outcome: { kind: "value" } },
+      warm: [],
+      observeMicros: 5,
+      observation: {
+        text,
+        error: null,
+        shape: "literal",
+        unknownLeaves: 0,
+        unknownSamples: [],
+        conditionalNodes: 0,
+      },
+    },
+  ],
+  afterRequests: { metric: "private-commit", peakBytes: 50, currentBytes: 40, cpuMicros: 900 },
+});
+
+function ossRun({
+  toolTuple = "[[1]]",
+  tscTuple = "[[1]]",
+  verterText = "1",
+  wall = { tool: 5, tsc: 20, verter: 2 },
+  options = OPTIONS,
+} = {}) {
   const tools = {
     tsz: { status: "available", name: "tsz", binary: { path: "tsz.exe", sha256: "s" } },
     ezno: {
@@ -298,9 +360,29 @@ function ossRun({ toolTuple = "[[1]]", tscTuple = "[[1]]", wall = { tool: 5, tsc
       reason: "unavailable on test-x64: it does not run here",
     },
   };
-  const arms = [...Object.keys(REFERENCE_ARMS), ossArm("tsz")];
+  const arms = ossArms(options, ["tsz"]);
   const plan = schedule(["synthetic/strict"], arms, OPTIONS.repeat, OPTIONS.warmup);
   const invocations = plan.map((step, index) => {
+    if (step.arm === VERTER_ARM)
+      return {
+        index,
+        scenario: "synthetic",
+        setting: "strict",
+        arm: step.arm,
+        rep: step.rep,
+        warmup: step.warmup,
+        command: ["/bin/probe", "run", "--job", "j.json", "--out", "o.json"],
+        supervisorOut: "x.sup.json",
+        supervisorExit: 0,
+        supervisor: supervisorRecord({ exitCode: 0, wallMs: wall.verter, peakBytes: 60 }),
+        reading: null,
+        spawnedAtMs: 1000,
+        probeOut: null,
+        phase: "done",
+        phaseHistory: [{ phase: "done", atMs: 1020 }],
+        probe: verterRecord(verterText),
+        probeReadError: null,
+      };
     const tool = step.arm === "oss-tsz";
     const stdout = tscOut(tool ? toolTuple : tscTuple);
     return {
@@ -321,8 +403,9 @@ function ossRun({ toolTuple = "[[1]]", tscTuple = "[[1]]", wall = { tool: 5, tsc
     };
   });
   const oss = {
-    schema: 1,
+    schema: OSS_SCHEMA,
     platform: "test-x64",
+    verter: { binary: "/bin/probe" },
     tools,
     toolsAfter: { tsz: "s" },
     arms,
@@ -355,7 +438,77 @@ test("a matched OSS row is compared with tsc -p and a wrong one is a finding, no
   const wrong = ossRun({ toolTuple: "[[2]]" });
   assert.deepEqual(validateOss(wrong, EXPECTED, [SCENARIO], OPTIONS, schedule).failures, []);
   assert.equal(wrong.summary.cells[0].arms["oss-tsz"].class, "mismatch");
-  assert.deepEqual(wrong.summary.cells[0].headline, {});
+  assert.equal(wrong.summary.cells[0].headline["oss-tsz"], undefined);
+});
+
+test("Verter runs in the OSS section as a whole process, classified as the demand section classifies it", () => {
+  const oss = ossRun();
+  assert.deepEqual(oss.arms, ["tsc-measure", "tsc-measure-1", VERTER_ARM, ossArm("tsz")]);
+  assert.deepEqual(validateOss(oss, EXPECTED, [SCENARIO], OPTIONS, schedule).failures, []);
+  const cell = oss.summary.cells[0];
+  assert.equal(cell.arms[VERTER_ARM].class, "matched");
+  assert.ok(Math.abs(cell.arms[VERTER_ARM].firstTypeMs.median - 1.15) < 1e-9);
+  // Its whole-process figures against tsc -p, and each tool's against it.
+  assert.equal(cell.headline[VERTER_ARM].parallel.wallMs.verdict, "verter");
+  assert.equal(cell.headline["oss-tsz"].verter.wallMs.verdict, "verter");
+  assert.equal(cell.headline["oss-tsz"].verter.peakBytes.verdict, "verter");
+  const slow = ossRun({ wall: { tool: 5, tsc: 20, verter: 9 } });
+  assert.equal(slow.summary.cells[0].headline["oss-tsz"].verter.wallMs.verdict, "tsc");
+  // A wrong Verter answer is a finding: no validation failure, and no tool is set against it.
+  const wrong = ossRun({ verterText: "2" });
+  assert.deepEqual(validateOss(wrong, EXPECTED, [SCENARIO], OPTIONS, schedule).failures, []);
+  assert.equal(wrong.summary.cells[0].arms[VERTER_ARM].class, "mismatch");
+  assert.equal(wrong.summary.cells[0].headline[VERTER_ARM], undefined);
+  assert.equal(wrong.summary.cells[0].headline["oss-tsz"].verter, null);
+  const other = ossRun();
+  for (const inv of other.invocations)
+    if (inv.arm === VERTER_ARM) inv.command = ["/bin/other", ...inv.command.slice(1)];
+  assert.match(
+    validateOss(other, EXPECTED, [SCENARIO], OPTIONS, schedule).failures.join("\n"),
+    /not the run's Verter probe/,
+  );
+});
+
+test("the OSS report tallies each arm against tsc -p over the run", () => {
+  const oss = ossRun();
+  Object.assign(oss.tools.tsz, {
+    pin: "v1",
+    commit: "c".repeat(40),
+    license: "MIT",
+    source: { type: "release", sha256: "x" },
+  });
+  const md = renderOssMarkdown(oss);
+  assert.ok(md.includes("| Verter | 1 of 1 | 1 / 0 / 0 |"), md);
+  assert.ok(md.includes("| tsz | 1 of 1 | 1 / 0 / 0 |"), md);
+  const slow = ossRun({ wall: { tool: 50, tsc: 20, verter: 2 } });
+  Object.assign(slow.tools.tsz, oss.tools.tsz);
+  assert.ok(renderOssMarkdown(slow).includes("| tsz | 1 of 1 | 0 / 1 / 0 |"));
+  const noTsc = ossRun({ options: { ...OPTIONS, noTsc: true } });
+  Object.assign(noTsc.tools.tsz, oss.tools.tsz);
+  assert.ok(!renderOssMarkdown(noTsc).includes("Against tsc"));
+});
+
+test("under --no-tsc the OSS section runs only Verter and the tools and still classifies them against the reference", () => {
+  const NO_TSC = { ...OPTIONS, noTsc: true };
+  const oss = ossRun({ options: NO_TSC });
+  assert.deepEqual(oss.arms, [VERTER_ARM, ossArm("tsz")]);
+  assert.deepEqual(validateOss(oss, EXPECTED, [SCENARIO], NO_TSC, schedule).failures, []);
+  const cell = oss.summary.cells[0];
+  assert.equal(cell.arms["oss-tsz"].class, "matched");
+  assert.equal(cell.headline["oss-tsz"].parallel, null);
+  assert.equal(cell.headline["oss-tsz"].verter.wallMs.verdict, "verter");
+  const wrong = ossRun({ toolTuple: "[[2]]", options: NO_TSC });
+  assert.equal(wrong.summary.cells[0].arms["oss-tsz"].class, "mismatch");
+  // The arms must be the options': a run without its references fails a
+  // default validation, and a default run fails a --no-tsc one.
+  assert.match(
+    validateOss(oss, EXPECTED, [SCENARIO], OPTIONS, schedule).failures.join("\n"),
+    /the arms are not the reference arms/,
+  );
+  assert.match(
+    validateOss(ossRun(), EXPECTED, [SCENARIO], NO_TSC, schedule).failures.join("\n"),
+    /the arms are not \(under --no-tsc\)/,
+  );
 });
 
 test("the OSS section fails on a wrong tsc reference, a changed binary, a wrong cap or a tampered summary", () => {
@@ -447,10 +600,14 @@ test("Biome's answer is the floating-promise report on the demanded line, and no
 });
 
 const BIOME_OPTIONS = { ...OPTIONS, repeat: 2, warmup: 1 };
-function biomeRun({ biomeThenable = true, verterText = "Promise<1>" } = {}) {
+function biomeRun({
+  biomeThenable = true,
+  verterText = "Promise<1>",
+  options = BIOME_OPTIONS,
+} = {}) {
   const expected = loadThenableExpected();
   const c = thenableCases().find((x) => x.id === "alias-chain-50-yes");
-  const arms = Object.keys(BIOME_ARMS);
+  const arms = biomeArms(options);
   const plan = schedule([c.id], arms, BIOME_OPTIONS.repeat, BIOME_OPTIONS.warmup);
   const reading = (arm) =>
     arm === "biome-types"
@@ -521,6 +678,26 @@ test("a Biome row is compared only when all three arms answer as tsc; a wrong an
     { budgetBytes: 1 << 30 },
   );
   assert.equal(unreadable.class, "unreadable");
+});
+
+test("under --no-tsc the Biome section compares Verter with Biome against the measured reference", () => {
+  const NO_TSC = { ...BIOME_OPTIONS, noTsc: true };
+  const { result, expected } = biomeRun({ options: NO_TSC });
+  assert.deepEqual(result.arms, ["verter-thenable", "biome-types"]);
+  assert.deepEqual(validateBiome(result, expected, NO_TSC, schedule).failures, []);
+  assert.equal(result.summary.cells[0].headline.wallMs.verdict, "verter");
+  assert.equal(result.summary.matched.tsc, null);
+  const wrong = biomeRun({ biomeThenable: false, options: NO_TSC });
+  assert.equal(wrong.result.summary.cells[0].headline, null);
+  assert.match(
+    validateBiome(result, expected, BIOME_OPTIONS, schedule).failures.join("\n"),
+    /the arms are not every Biome-section arm/,
+  );
+  const full = biomeRun();
+  assert.match(
+    validateBiome(full.result, full.expected, NO_TSC, schedule).failures.join("\n"),
+    /the arms are not the tool arms/,
+  );
 });
 
 test("the Biome section fails on a tampered summary, a changed binary or a stale reference", () => {

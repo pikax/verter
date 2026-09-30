@@ -53,7 +53,7 @@ export function renderMarkdown(run) {
   const o = meta.options;
   const lines = [];
   const push = (...l) => lines.push(...l);
-  push("# Semantic benchmark: Verter vs tsc 7.0.2 on equivalent demands", "");
+  push("# Semantic benchmark", "");
   push(
     `Validation: **${validation?.ok ? "PASSED" : "FAILED"}**${validation?.ok ? "" : ` (${validation.failures.length} failure(s); see the end)`}`,
     "",
@@ -92,6 +92,19 @@ export function renderMarkdown(run) {
     `- Environment: ${meta.environment?.inherited ? "**inherited from the caller (tuned run)**" : `constructed for every child (${(meta.environment?.runtime?.names ?? []).join(", ")})`}${(meta.environment?.ignoredTuning ?? []).length ? `; the caller's ${meta.environment.ignoredTuning.map((n) => `\`${n}\``).join(", ")} did not reach any child` : ""}`,
     "",
   );
+  if (o.noDemand) {
+    push(
+      "_The demand section (Verter vs tsc) did not run (`--no-demand`): only the sections below were measured._",
+      "",
+    );
+    if (!validation?.ok) {
+      push("## Validation failures", "");
+      for (const f of validation.failures) push(`- ${esc(f)}`);
+      push("");
+    }
+    return lines.join("\n") + "\n";
+  }
+  push("# Demand section: Verter vs tsc 7.0.2 on equivalent demands", "");
   push("## How to read this", "");
   push(
     "- Both arms answer the same demand: the declared type of the alias `__Probe` in the same module, library and compiler options. Times are milliseconds, the median of the measured invocations with [min–max].",
@@ -106,7 +119,12 @@ export function renderMarkdown(run) {
   const cells = summary.cells;
   const matched = cells.filter((c) => c.headline);
   push("## Head-to-head (matched answers only)", "");
-  if (!matched.length) push("_No row has a matched answer from both headline arms._", "");
+  if (o.noTsc)
+    push(
+      "_No tsc arm ran (`--no-tsc`): Verter's answers are classified against the measured reference below, and nothing is compared._",
+      "",
+    );
+  else if (!matched.length) push("_No row has a matched answer from both headline arms._", "");
   else {
     push(
       "| scenario | setting | answer | Verter cold | tsc cold | cold | Verter first type handle | tsc first type handle | first type handle | Verter warm | tsc warm | Verter peak MB | tsc peak MB | peak | Verter retained MB | tsc retained MB |",

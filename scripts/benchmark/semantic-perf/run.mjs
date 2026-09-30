@@ -140,9 +140,19 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           bamtiscript, ezno, biome), each in a separate section
                           (docs/contributing/semantic-benchmark-oss.md); provisioned into target/oss-tools
                           on first use. The type checkers run whole program on the measuring program beside
-                          tsc -p; Biome, which has no type query, answers whether __Probe is Promise-like
-                          (its noFloatingPromises decision) on the thenable catalog beside Verter and tsc
+                          tsc -p and a one-shot Verter process answering the demand; Biome, which has
+                          no type query, answers whether __Probe is Promise-like (its
+                          noFloatingPromises decision) on the thenable catalog beside Verter and tsc
   --biome                 the Biome section alone (as --oss biome)
+  --no-demand             skip the demand section (Verter vs the tsc API on each scenario's demanded
+                          type); the other selected sections still run, tsc included, and the Verter
+                          probes are still built for them
+  --only-oss [a,b]        --oss --no-demand
+  --only-biome            --biome --no-demand
+  --no-tsc                run no tsc process in any section (the demand section's tsc API and tsc -p
+                          arms, the OSS section's tsc -p references, the Biome section's tsc arm):
+                          every answer is still classified against the measured reference, but
+                          nothing is timed against tsc (to skip only the demand section: --no-demand)
   --help`;
 
 export function parseArgs(argv) {
@@ -249,14 +259,24 @@ export function parseArgs(argv) {
       case "--no-skip-after-kill":
         opts.skipAfterKill = false;
         break;
-      case "--oss": {
+      case "--oss":
+      case "--only-oss": {
         // An optional list: the next argument, unless it is another option.
         const list = i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : "";
-        opts.oss = list.split(",").filter(Boolean);
+        opts.oss = [...(opts.oss ?? []), ...list.split(",").filter(Boolean)];
+        if (a === "--only-oss") opts.noDemand = true;
         break;
       }
       case "--biome":
+      case "--only-biome":
         opts.biome = true;
+        if (a === "--only-biome") opts.noDemand = true;
+        break;
+      case "--no-tsc":
+        opts.noTsc = true;
+        break;
+      case "--no-demand":
+        opts.noDemand = true;
         break;
       case "--help":
         opts.help = true;
@@ -276,6 +296,18 @@ export function parseArgs(argv) {
     startupAllowanceMs: "--startup-allowance-ms",
   };
   for (const [key, name] of Object.entries(flag)) if (!given.has(name)) opts[key] = defaults[key];
+  // --no-demand: the demand section (Verter vs tsc) runs no arm.
+  if (opts.noDemand) {
+    if (given.has("--arms"))
+      throw new Error("--no-demand runs no demand-section arm; --arms does not apply");
+    opts.arms = [];
+  }
+  if (opts.noTsc) {
+    const tscArms = opts.arms.filter((arm) => ARMS[arm].tool === "tsc");
+    if (given.has("--arms") && tscArms.length)
+      throw new Error(`--no-tsc excludes the tsc arms given with --arms: ${tscArms.join(", ")}`);
+    opts.arms = opts.arms.filter((arm) => ARMS[arm].tool !== "tsc");
+  }
   // `--oss` names the tools: every one when no list is given; Biome runs
   // its own section (it answers another form of the demand).
   if (opts.oss) {
@@ -286,6 +318,8 @@ export function parseArgs(argv) {
     else opts.oss = checkers;
     if (opts.oss) selectCheckers(loadTools(), opts.oss);
   }
+  if (opts.noDemand && !opts.oss && !opts.biome)
+    throw new Error("--no-demand leaves nothing to run: add --oss and/or --biome");
   return opts;
 }
 
@@ -819,6 +853,7 @@ export async function main(argv) {
         ...shared,
         cells,
         ids: selectCheckers(tools, opts.oss),
+        verterProbe: binaries.probe.pinned,
         typescript,
         libText,
         tsconfigText,

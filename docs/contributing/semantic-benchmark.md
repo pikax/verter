@@ -560,6 +560,11 @@ Useful options (`--help` lists all, with each tier's time): `--tier quick|standa
 `--oss [tools]` and `--biome` add opt-in comparisons with pinned open-source
 tools, each in its own section: see
 [Open-Source Comparisons](./semantic-benchmark-oss.md).
+`--no-demand` skips this demand section (Verter vs the tsc API) and runs only
+the other selected sections; `--only-oss [tools]` and `--only-biome` are
+`--oss` / `--biome` with it. `--no-tsc` runs no tsc process in any section (the Verter arms stay, classified
+against the measured reference, with nothing compared); an explicit
+`--arms` naming a tsc arm beside it is refused.
 
 ### Re-measuring the reference
 
