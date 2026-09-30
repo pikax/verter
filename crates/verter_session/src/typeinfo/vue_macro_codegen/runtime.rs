@@ -713,27 +713,9 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
     }
 }
 
-/// The abort a finished computation observed: a cancelled read, or a read of
-/// a superseded or torn view. Such a computation publishes nothing, so its
-/// refusal rows never reach a consumer.
-pub(super) fn observed_abort(
-    completeness: crate::semantic_query::ResultCompleteness,
-) -> Option<crate::semantic_query::ExecutionAbort> {
-    let reasons = completeness.reasons();
-    if reasons.contains(PartialReasonSet::CANCELLED) {
-        Some(crate::semantic_query::ExecutionAbort::Cancelled)
-    } else if reasons.contains(PartialReasonSet::SUPERSEDED_GENERATION)
-        || reasons.contains(PartialReasonSet::UNSTABLE_STATE)
-    {
-        Some(crate::semantic_query::ExecutionAbort::Superseded)
-    } else {
-        None
-    }
-}
-
 /// The typed refusal of a lane whose inputs are incomplete. An abort class
 /// the computation observed makes the whole production publish nothing
-/// ([`observed_abort`]), so it has no refusal row of its own here.
+/// ([`crate::semantic_query::ExecutionAbort::observed_in`]), so it has no refusal row of its own here.
 pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
     let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)

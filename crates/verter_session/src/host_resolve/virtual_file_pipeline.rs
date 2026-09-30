@@ -2686,17 +2686,22 @@ impl VerterHost {
     /// projection-entry half of the "one coherent projector invocation"
     /// contract. Composition never gates the response: an absent or failed
     /// component-meta output degrades to the typed `Unsupported` availability.
+    /// An aborted component-meta computation aborts the projection: it
+    /// publishes nothing.
     fn compose_component_contract(
         &self,
         canonical: &str,
         adapter_id: &verter_language::FrameworkAdapterId,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> (
-        crate::framework::ComponentContractAvailability,
-        Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
-    ) {
-        match self.get_component_meta_output_via_view_with_publication_evidence(
+    ) -> Result<
+        (
+            crate::framework::ComponentContractAvailability,
+            Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
+        ),
+        crate::semantic_query::ExecutionAbort,
+    > {
+        Ok(match self.get_component_meta_output_via_view_with_publication_evidence(
             canonical, view, fixed, false,
         ) {
             Ok(Some(output)) => {
@@ -2720,14 +2725,15 @@ impl VerterHost {
                 ),
                 None,
             ),
-            Err(error) => (
+            Err(crate::meta_resolve::ComponentMetaFailure::Output(error)) => (
                 crate::framework::public_contract::unsupported_from_output_error(
                     adapter_id.clone(),
                     &error,
                 ),
                 None,
             ),
-        }
+            Err(crate::meta_resolve::ComponentMetaFailure::Aborted(abort)) => return Err(abort),
+        })
     }
 
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
@@ -2858,8 +2864,9 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        let (contract, publication_witness) =
-            self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        let (contract, publication_witness) = self
+            .compose_component_contract(&canonical, &adapter_id, &view, &fixed)
+            .map_err(crate::PublicApiProjectionError::Aborted)?;
         Ok(Some(
             crate::framework::api_projector::ComponentApiProjection {
                 response,
@@ -3030,8 +3037,9 @@ impl VerterHost {
         // template flag. The resolve opens its own request-scoped demand for
         // exactly the files it walks; see
         // `resolve_fallthrough_surface_internal_with_overrides`.
-        let fallthrough_resolution =
-            self.resolve_fallthrough_surface_pinned(&canonical, pinned_view);
+        let fallthrough_resolution = self
+            .resolve_fallthrough_surface_pinned(&canonical, pinned_view)
+            .map_err(crate::PublicApiProjectionError::Aborted)?;
         let fallthrough_props = crate::host_resolve::fallthrough_props::project_fallthrough_props(
             fallthrough_resolution.as_ref(),
             &|child_canonical_id| self.owner_import_reference_for(&canonical, child_canonical_id),

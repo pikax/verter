@@ -783,7 +783,7 @@ impl VerterHost {
                 if job_cancellation.is_cancelled() {
                     return Err(ExecutionAbort::Cancelled);
                 }
-                match observed_abort(output.completeness) {
+                match ExecutionAbort::observed_in(output.completeness) {
                     Some(abort) => Err(abort),
                     None => Ok(output),
                 }

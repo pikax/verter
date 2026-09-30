@@ -46,6 +46,27 @@ pub enum MetaError {
     /// — never silently rendered as `Unknown`.
     #[error("output materialization error: {0}")]
     OutputMaterialization(#[from] crate::meta_resolve::ComponentMetaOutputError),
+    /// The computation was aborted (a cancelled request, a superseded view,
+    /// a shut down host): it published nothing.
+    #[error("request aborted: {0:?}")]
+    Aborted(crate::semantic_query::ExecutionAbort),
+}
+
+impl From<crate::semantic_query::ExecutionAbort> for MetaError {
+    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+        Self::Aborted(abort)
+    }
+}
+
+impl From<crate::meta_resolve::ComponentMetaFailure> for MetaError {
+    fn from(failure: crate::meta_resolve::ComponentMetaFailure) -> Self {
+        match failure {
+            crate::meta_resolve::ComponentMetaFailure::Output(error) => {
+                Self::OutputMaterialization(error)
+            }
+            crate::meta_resolve::ComponentMetaFailure::Aborted(abort) => Self::Aborted(abort),
+        }
+    }
 }
 
 /// One `get_component_meta_batch_payloads` result slot: `Ok(Some(bytes))`
@@ -672,7 +693,7 @@ impl MetaSession {
             let fixed = host.capture_batch_fixed_view(view);
             host.get_component_meta_via_view_with_fixed_store_view(canonical_or_alias, view, &fixed)
         });
-        Ok(analysis)
+        Ok(analysis?)
     }
 
     /// Batch surface for [`Self::get_component_meta`]: compute metadata
@@ -776,11 +797,12 @@ impl MetaSession {
             let fixed = host.capture_batch_fixed_view(view);
             host.batch_coordinator().run_batch(&jobs, &policy, |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
-                Ok(host.get_component_meta_via_view_with_fixed_store_view(
+                host.get_component_meta_via_view_with_fixed_store_view(
                     canonical_id.as_ref(),
                     view,
                     &fixed,
-                ))
+                )
+                .map_err(MetaError::from)
             })
         });
         Ok(results)
@@ -905,7 +927,7 @@ impl MetaSession {
         let host = self.project.host();
         let resolved = self.with_overlay_view(|view| {
             host.get_component_meta_with_resolution_via_view(canonical_or_alias, view)
-        });
+        })?;
         match resolved {
             Some((analysis, resolved)) => {
                 if let Some(err) = component_meta_resolution_budget_error(

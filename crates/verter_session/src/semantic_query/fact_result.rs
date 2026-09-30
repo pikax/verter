@@ -298,3 +298,34 @@ pub enum ExecutionAbort {
     /// The host shut down before the computation could publish.
     Shutdown,
 }
+
+impl ExecutionAbort {
+    /// Whether the view the computation read was superseded (a newer view
+    /// answers the same request), as opposed to the request being cancelled
+    /// or the host shutting down.
+    #[must_use]
+    pub const fn is_superseded(self) -> bool {
+        matches!(self, Self::Superseded)
+    }
+
+    /// The abort a finished computation observed in its accumulated
+    /// completeness: a cancelled read, or a read of a superseded or torn
+    /// view. Such a computation publishes nothing.
+    ///
+    /// A bridge: cancellation and supersession still travel through the
+    /// accumulator as reason classes until they get their own channel, and
+    /// this is the one place that reads them back as an abort.
+    #[must_use]
+    pub(crate) fn observed_in(completeness: ResultCompleteness) -> Option<Self> {
+        let reasons = completeness.reasons();
+        if reasons.contains(PartialReasonSet::CANCELLED) {
+            Some(Self::Cancelled)
+        } else if reasons.contains(PartialReasonSet::SUPERSEDED_GENERATION)
+            || reasons.contains(PartialReasonSet::UNSTABLE_STATE)
+        {
+            Some(Self::Superseded)
+        } else {
+            None
+        }
+    }
+}
