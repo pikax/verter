@@ -105,6 +105,7 @@ export default withMermaid(
               { text: "How to Contribute", link: "/contributing/" },
               { text: "Rust Setup", link: "/contributing/rust-setup" },
               { text: "Testing", link: "/contributing/testing" },
+              { text: "Semantic Benchmark", link: "/contributing/semantic-benchmark" },
               { text: "CI/CD", link: "/contributing/ci-cd" },
             ],
           },
