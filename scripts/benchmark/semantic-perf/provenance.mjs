@@ -5,10 +5,10 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 export const TYPESCRIPT_VERSION = "7.0.2";
 
@@ -47,12 +47,19 @@ function git(root, args) {
   return r.stdout;
 }
 
-/** The source tree the Verter probe was built from: HEAD plus the exact uncommitted delta. */
-export function sourceTree(root) {
+/** The paths the Verter probe binaries are built from. */
+export const BUILD_INPUTS = ["crates", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo"];
+
+/**
+ * The source tree at HEAD plus the exact uncommitted delta, over the whole
+ * checkout or, with `pathspec`, over those paths only.
+ */
+export function sourceTree(root, pathspec = []) {
   const head = git(root, ["rev-parse", "HEAD"]).trim();
   const branch = git(root, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
-  const status = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  const diff = git(root, ["diff", "HEAD", "--binary"]);
+  const scope = pathspec.length ? ["--", ...pathspec] : [];
+  const status = git(root, ["status", "--porcelain=v1", "--untracked-files=all", ...scope]);
+  const diff = git(root, ["diff", "HEAD", "--binary", ...scope]);
   const untracked = status
     .split("\n")
     .filter((line) => line.startsWith("?? "))
@@ -75,6 +82,29 @@ export function sourceTree(root) {
     diffSha256: sha256Text(diff),
     untrackedSha256: untrackedDigest.digest("hex"),
   };
+}
+
+/**
+ * sha256 of every file of the harness itself (this directory and its CLI):
+ * the methodology a run used. tsc-probe.mjs is re-read by every invocation,
+ * so the harness must not change during a run.
+ */
+export function harnessFingerprint(root) {
+  const dir = join(root, "scripts", "benchmark", "semantic-perf");
+  const files = [join(root, "scripts", "benchmark", "semantic-perf.mjs")];
+  const walk = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const path = join(d, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else files.push(path);
+    }
+  };
+  walk(dir);
+  return Object.fromEntries(
+    files
+      .map((f) => [relative(root, f).split("\\").join("/"), sha256File(f)])
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
 }
 
 export function hostInfo() {

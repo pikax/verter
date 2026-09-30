@@ -217,7 +217,10 @@ answer is never a win.
   package and `tsc -v`), a Verter probe was not built at `opt-level 3` without
   debug assertions, or with a non-production feature (`test-support`,
   `attribution`, …), a pinned binary's sha256 changed during the run, or the
-  source tree changed while the probe was built;
+  probe's build inputs (`crates/`, `Cargo.toml`, `Cargo.lock`, the toolchain
+  pin) changed while it was built;
+- the harness itself (`scripts/benchmark/semantic-perf*`) changed during the
+  run (the tsc driver is re-read by every invocation);
 - any record is missing, duplicated, out of plan order, or a planned
   (scenario, setting, arm) has zero records;
 - a child failed: non-zero exit, no or malformed probe record, missing

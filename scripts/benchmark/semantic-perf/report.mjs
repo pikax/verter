@@ -47,12 +47,15 @@ export function renderMarkdown(run) {
     `- Verter probe: release, sha256 \`${meta.binaries.probe.sha256.slice(0, 12)}\` (counted twin \`${meta.binaries.counted.sha256.slice(0, 12)}\`)`,
     `- Supervisor: \`${meta.binaries.supervisor.sha256.slice(0, 12)}\` (${meta.binaries.supervisor.origin}); cap ${o.memMb} MiB, deadline ${o.timeoutMs} ms; containment ${[
       ...new Set(
-        run.invocations.map(
-          (i) =>
-            `**${i.supervisor?.containment ?? "unknown"}** (${i.supervisor?.backend ?? "?"}${i.supervisor?.containment === "sampled" ? ", no guaranteed overshoot bound" : ""})`,
-        ),
+        run.invocations
+          .filter((i) => i.supervisor)
+          .map(
+            (i) =>
+              `**${i.supervisor.containment ?? "unknown"}** (${i.supervisor.backend ?? "?"}${i.supervisor.containment === "sampled" ? ", no guaranteed overshoot bound" : ""})`,
+          ),
       ),
     ].join(", ")}`,
+    `- Invocations: ${run.invocations.length} (${run.invocations.filter((i) => i.skipped).length} skipped after a warmup killed at the memory cap)`,
     `- Schedule: ${o.warmup} warmup + ${o.repeat} measured invocations per arm, counterbalanced (scenario order and arm order reverse on alternate rounds); ${o.warmRepeats} in-process warm repeats; settings ${o.settings}; Verter library channel ${o.libMode}`,
     `- Arms: ${o.arms.map((a) => `\`${a}\``).join(", ")}`,
     "",

@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 
 import { ARMS, compactProbeRecord, DEFAULT_ARMS } from "./analyze.mjs";
 import {
+  BUILD_INPUTS,
   buildProblems,
+  harnessFingerprint,
   buildVerterProbes,
   hostInfo,
   pinBinary,
@@ -250,6 +252,8 @@ export async function main(argv) {
 
   log(`semantic-perf: output ${outDir}`);
   const tree = sourceTree(ROOT);
+  const buildInputs = sourceTree(ROOT, BUILD_INPUTS);
+  const harness = harnessFingerprint(ROOT);
   const typescript = resolveTypeScript(opts.typescriptFrom);
   log(`semantic-perf: ${typescript.versionText} at ${typescript.exe}`);
   log("semantic-perf: building the release Verter probe binaries");
@@ -265,9 +269,9 @@ export async function main(argv) {
   binaries.counted.identity = probeIdentity(binaries.counted.pinned);
   const supervisorSource = resolveSupervisor(ROOT, opts.supervisor);
   binaries.supervisor = { ...pinBinary(supervisorSource.path, binDir, "verter-supervise"), origin: supervisorSource.origin };
-  // The tree the probe was built from, read again after the build: a change
-  // between the two reads means the binary's source is unknown.
-  const treeAfterBuild = sourceTree(ROOT);
+  // The probe's build inputs, read again after the build: a change between
+  // the two reads means the binary's source is unknown.
+  const buildInputsAfterBuild = sourceTree(ROOT, BUILD_INPUTS);
 
   const expected = loadExpected();
   const libText = readFileSync(LIB_FILE, "utf8");
@@ -380,7 +384,10 @@ export async function main(argv) {
       options: { ...opts, out: outDir },
       argv,
       tree,
-      treeAfterBuild,
+      buildInputs,
+      buildInputsAfterBuild,
+      harness,
+      harnessAfter: harnessFingerprint(ROOT),
       host: hostInfo(),
       typescript,
       build,

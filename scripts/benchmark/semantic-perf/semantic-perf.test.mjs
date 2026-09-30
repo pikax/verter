@@ -251,7 +251,10 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
       options,
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
       tree: { head: "h", diffSha256: "d", untrackedSha256: "u" },
-      treeAfterBuild: { head: "h", diffSha256: "d", untrackedSha256: "u" },
+      buildInputs: { head: "h", diffSha256: "d", untrackedSha256: "u" },
+      buildInputsAfterBuild: { head: "h", diffSha256: "d", untrackedSha256: "u" },
+      harness: { "scripts/benchmark/semantic-perf.mjs": "x" },
+      harnessAfter: { "scripts/benchmark/semantic-perf.mjs": "x" },
       typescript: { version: "7.0.2", platformVersion: "7.0.2", versionText: "Version 7.0.2", exeSha256: "t" },
       build,
       binaries: {
@@ -390,6 +393,15 @@ test("a binary that changed during the run fails validation", () => {
   const run = syntheticRun();
   run.meta.binariesAfter.probe = "other";
   failsWith(run, /the Verter probe changed/);
+});
+
+test("a build input or the harness changing during the run fails validation", () => {
+  const run = syntheticRun();
+  run.meta.buildInputsAfterBuild.diffSha256 = "other";
+  failsWith(run, /build inputs changed/);
+  const run2 = syntheticRun();
+  run2.meta.harnessAfter = { "scripts/benchmark/semantic-perf.mjs": "y" };
+  failsWith(run2, /harness changed/);
 });
 
 test("TypeScript other than 7.0.2 fails validation", () => {

@@ -73,10 +73,13 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     fail("wrong binary: the Verter probe reports debug assertions or instrumentation");
   }
   if (bins.counted?.identity?.instrumented !== true) fail("wrong binary: the counted probe does not report its instrumentation");
-  const t0 = meta.tree ?? {};
-  const t1 = meta.treeAfterBuild ?? {};
+  const t0 = meta.buildInputs ?? {};
+  const t1 = meta.buildInputsAfterBuild ?? {};
   if (!t0.head || t0.head !== t1.head || t0.diffSha256 !== t1.diffSha256 || t0.untrackedSha256 !== t1.untrackedSha256) {
-    fail("wrong binary: the source tree changed while the probe was built, so its source is unknown");
+    fail("wrong binary: the probe's build inputs changed while it was built, so its source is unknown");
+  }
+  if (!meta.harness || stable(meta.harness) !== stable(meta.harnessAfter)) {
+    fail("the harness changed during the run, so its invocations did not all run one method");
   }
   for (const name of RECORDED_PACKAGES) if (!meta.build?.packages?.[name]) fail(`wrong binary: no build record for ${name}`);
 
