@@ -337,8 +337,8 @@ enum TemplateAlternatives {
     Finite(Vec<TemplateConstituent>),
     /// Some expression does not settle; the template stays authored.
     Open,
-    /// The checker refuses the cross product (TS2590).
-    TooComplex(crate::semantic_query::CheckerDiagnostic),
+    /// The template's product exhausted its allowance (TS2590).
+    TooComplex(crate::semantic_query::checker_policy::OperationRefusal),
     /// The connected-work ledger refused the construction.
     Exhausted(crate::semantic_query::PartialReasonSet),
     /// An interpolant is neither a literal nor a placeholder type (an enum
@@ -5044,8 +5044,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // place of a nested instantiation, and counted by the checker
             // compatibility policy. The run fails with the checker's TS2589 at
             // Verter's tail budget, far past the checker's tail limit, or at
-            // once when the arguments come round again (the run can then
-            // never reach a value, so any count is certain to run out). Each step is charged to the
+            // once, as a certified divergence, when the arguments come round
+            // again. Each step is charged to the
             // connected-work ledger; a trip leaves the step's back-edge as a
             // typed partial.
             let next = build
@@ -5059,35 +5059,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )
                 })
                 .flatten();
+            use crate::semantic_query::{checker_policy, CheckerDiagnosticOperation};
             if next.is_some() && self.declares_conditional_body(build) == Some(false) {
                 // The body applies the declaration itself with no conditional
                 // type of its own deciding: the alias's declared type
                 // requires itself — the checker's TS2456, a checker error
-                // (`any`), never a step of a tail run.
-                result = crate::semantic_query::checker_policy::checker_recovery(
+                // (`any`) and a complete answer, never a step of a tail run.
+                result = checker_policy::checker_recovery(
                     self.graph(),
-                    crate::semantic_query::checker_policy::circular_type_alias(),
-                    None,
+                    checker_policy::circular_type_alias(),
                 );
             } else if let Some(next) = next {
-                let repeats = build.tail_arguments.contains(&next);
-                if repeats || !build.tail.step(self.connected_demand.tail_steps_budget()) {
-                    if !repeats {
-                        // Verter's tail budget stopped the run, not a proof:
-                        // whether it is reached depends on the budget, so
-                        // neither the recovery nor anything built from it
-                        // is kept in the memo.
-                        self.fold_into_top_build_local_taint(false, true);
-                    }
-                    result = crate::semantic_query::checker_policy::checker_recovery(
+                // A run that comes back to arguments it already took is in
+                // the state it was in then, and each step is a function of
+                // that state: it repeats forever, a certified divergence.
+                if build.tail_arguments.contains(&next) {
+                    result = checker_policy::divergence_recovery(
                         self.graph(),
-                        crate::semantic_query::CheckerDiagnostic {
-                            code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                            operation:
-                                crate::semantic_query::CheckerDiagnosticOperation::ConditionalTail,
-                        },
+                        checker_policy::CertifiedDivergence::exact_recurrence(
+                            CheckerDiagnosticOperation::ConditionalTail,
+                        ),
                         None,
                     );
+                } else if let Err(refusal) = build.tail.step(
+                    self.connected_demand.tail_steps_budget(),
+                    CheckerDiagnosticOperation::ConditionalTail,
+                ) {
+                    // Verter's tail budget stopped the run, not a proof:
+                    // whether it is reached depends on the budget, so
+                    // neither the recovery nor anything built from it is
+                    // kept in the memo.
+                    self.fold_into_top_build_local_taint(false, true);
+                    result = self.recover_at_operation_budget(refusal, None);
                 } else if let Err(reasons) = self.charge_connected_work() {
                     self.fold_local_partial_completeness(reasons);
                 } else {
@@ -14265,6 +14268,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ReturnOnly: the value flows to the caller, the memo refuses
         // admission.
         output.cache_suppress |= composite.evidence.incomplete;
+        // A refused intersection's recovery is a resource partial.
+        if composite.evidence.refusal.is_some() {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+            );
+        }
         output
     }
 
@@ -14620,7 +14629,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         diagnostic: crate::semantic_query::CheckerDiagnostic,
     ) -> SemanticNodeId {
-        crate::semantic_query::checker_policy::checker_recovery(self.graph(), diagnostic, None)
+        crate::semantic_query::checker_policy::checker_recovery(self.graph(), diagnostic)
     }
 
     /// Whether `reduced` is `relation`'s TS1062 failure for `operand` — the
@@ -15302,19 +15311,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ([`Self::lib_awaited_node`]); this read is a root. When
     /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
     /// on this path, the conditional has come back to itself with the same
-    /// argument and can never reach a value: the checker stops at its limit,
-    /// reports TS2589 and continues with its error type, which dominates
-    /// each union and branch on the way. That recovery is the answer.
+    /// argument and can never reach a value — a certified divergence: the
+    /// checker reports TS2589 and continues with its error type, which
+    /// dominates each union and branch on the way. That recovery is the
+    /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self.graph().is_same_path_claim(&application) {
-            return Some(Some(self.checker_recovery(
-                crate::semantic_query::CheckerDiagnostic {
-                    code:
-                        crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                    operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
-                },
-            )));
+            return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {
             QueryResult::Value(body) => body,
@@ -15362,9 +15366,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// or a path reaching the checker's instantiation depth (the nested walk
     /// recurses natively, which that depth bounds)
     /// ([`INSTANTIATION_DEPTH`](crate::semantic_query::checker_policy::INSTANTIATION_DEPTH))
-    /// is the TS2589 recovery. So is an application that recurs on its own
-    /// path: it can never reach a value, so the checker's count is certain
-    /// to run out there.
+    /// is the TS2589 recovery, a resource partial. So, complete, is an
+    /// application that recurs on its own path with the same argument: a
+    /// certified divergence.
     fn lib_awaited_node(&self, operand: SemanticNodeId) -> LibAwaited {
         let mut walk = LibAwaitedWalk {
             depth: crate::semantic_query::checker_policy::InstantiationDepth::entered(
@@ -15376,12 +15380,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
-    /// The TS2589 recovery of the lib conditional.
-    fn lib_awaited_too_deep(&self) -> SemanticNodeId {
-        self.checker_recovery(crate::semantic_query::CheckerDiagnostic {
-            code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-            operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
-        })
+    /// The TS2589 recovery of the lib conditional re-entering itself with
+    /// an argument it is still evaluating on this path: the same
+    /// application under the same context, so a certified divergence — a
+    /// complete answer, kept.
+    fn lib_awaited_recurs(&self) -> SemanticNodeId {
+        crate::semantic_query::checker_policy::divergence_recovery(
+            self.graph(),
+            crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+            ),
+            None,
+        )
+    }
+
+    /// The TS2589 recovery of the lib conditional after `refusal`.
+    fn lib_awaited_too_deep(
+        &self,
+        refusal: crate::semantic_query::checker_policy::OperationRefusal,
+    ) -> SemanticNodeId {
+        self.recover_at_operation_budget(refusal, None)
     }
 
     /// One TAIL RUN of the lib conditional from `operand`, entered with
@@ -15405,8 +15423,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     break self.lib_awaited_nested(value, walk, false);
                 }
                 LibStep::Next(value) => {
-                    if !tail.step(self.connected_demand.tail_steps_budget()) {
-                        break LibAwaited::Reduced(self.lib_awaited_too_deep());
+                    if let Err(refusal) = tail.step(
+                        self.connected_demand.tail_steps_budget(),
+                        crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                    ) {
+                        break LibAwaited::Reduced(self.lib_awaited_too_deep(refusal));
                     }
                     if let Err(reasons) = self.charge_connected_work() {
                         self.fold_local_partial_completeness(reasons);
@@ -15435,9 +15456,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> LibAwaited {
         let is_union = self.settled_union_arms_of(value).is_some();
         let steps = u32::from(through_callback_union) + u32::from(is_union);
-        let within = walk.depth.enter(steps);
-        let result = if !within {
-            LibAwaited::Reduced(self.lib_awaited_too_deep())
+        let within = walk.depth.enter(
+            steps,
+            crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+        );
+        let result = if let Err(refusal) = within {
+            LibAwaited::Reduced(self.lib_awaited_too_deep(refusal))
         } else if let Err(reasons) = self.charge_connected_work() {
             self.fold_local_partial_completeness(reasons);
             LibAwaited::Refused
@@ -15477,7 +15501,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep()));
+            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_recurs()));
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);
@@ -16061,12 +16085,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// The product is the checker's (`checkCrossProductUnion`), weighed on
     /// the expressions' distinct constituent counts before any
-    /// concatenation is built: at the checker's limit the template is its
-    /// TS2590 recovery, holding the authored template as the type beyond
-    /// the limit (the template itself denotes it). Below it every
-    /// concatenation built is charged to the connected-work ledger; a
-    /// refused construction is `Err` with the ledger's trip, folded into
-    /// the build's completeness.
+    /// concatenation is built: at the limit the template is its TS2590
+    /// recovery, a resource partial holding the authored template as its
+    /// origin. Below it every concatenation built is charged to the
+    /// connected-work ledger; a refused construction is `Err` with the
+    /// ledger's trip, folded into the build's completeness.
     ///
     /// The multi-result case renormalises through
     /// [`SemanticQueryKey::ReduceUnion`] so the union is canonical. Used by
@@ -16093,12 +16116,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let alternatives = match self.template_alternatives(quasis, args, eval_context) {
             TemplateAlternatives::Open => return Ok(authored()),
-            TemplateAlternatives::TooComplex(diagnostic) => {
-                return Ok(crate::semantic_query::checker_policy::checker_recovery(
-                    graph,
-                    diagnostic,
-                    Some(authored()),
-                ));
+            TemplateAlternatives::TooComplex(refusal) => {
+                return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
             }
             TemplateAlternatives::Exhausted(reasons) => {
                 self.fold_local_partial_completeness(reasons);
@@ -16236,11 +16255,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             1 => ProductFactor::Single,
             width => ProductFactor::Union(width),
         });
-        if let Err(diagnostic) = cross_product_union(
+        if let Err(refusal) = cross_product_union(
             factors,
             crate::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
         ) {
-            return TemplateAlternatives::TooComplex(diagnostic);
+            return TemplateAlternatives::TooComplex(refusal);
         }
         let text = |index: usize| {
             TemplatePiece::Text(quasis.get(index).map(|q| q.to_string()).unwrap_or_default())

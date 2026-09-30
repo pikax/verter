@@ -218,6 +218,7 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
         | FlowReturnDegradation::ConditionalVarDefinition
         | FlowReturnDegradation::UnreducedDeclaredUnion
         | FlowReturnDegradation::PartialInterior => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        FlowReturnDegradation::OperationBudget => PartialReasonSet::OPERATION_BUDGET,
     }
 }
 
@@ -995,10 +996,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// order.
     ///
     /// The combinations are the checker's ([`Self::intersection_parts`]): a
-    /// cross product the checker refuses is its TS2590 recovery, holding
-    /// the undistributed intersection as the type beyond the checker's
-    /// limit. `None` when every factor is empty, or when the connected-work
-    /// ledger stops the distribution (the demand is then partial).
+    /// cross product the checker refuses is its TS2590 recovery, a resource
+    /// partial holding the undistributed intersection as its origin. `None`
+    /// when every factor is empty, or when the connected-work ledger stops
+    /// the distribution (the demand is then partial).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1015,14 +1016,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
                 Ok(Some(parts)) => parts,
                 Ok(None) => return None,
-                Err(diagnostic) => {
-                    let beyond = self.intern_intersection_members(origin, ordered);
+                Err(refusal) => {
+                    let written = self.intern_intersection_members(origin, ordered);
                     return Some(DistributedIntersection {
-                        node: crate::semantic_query::checker_policy::checker_recovery(
-                            graph,
-                            diagnostic,
-                            Some(beyond),
-                        ),
+                        node: self.recover_at_operation_budget(refusal, Some(written)),
                         undecided,
                     });
                 }
@@ -1055,7 +1052,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// other; two or fewer take the cross product, checked against the
     /// checker's limit before a combination is formed
     /// ([`checker_policy::cross_product_union`](crate::semantic_query::checker_policy::cross_product_union)).
-    /// `Err` is the TS2590 fact; `Ok(None)` a connected-work trip, folded
+    /// `Err` is the product's TS2590 refusal; `Ok(None)` a connected-work trip, folded
     /// into the demand as partial. Every combination is charged to the
     /// connected-work ledger.
     fn intersection_parts(
@@ -1065,7 +1062,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         nullability: crate::semantic_query::NullabilityPolicy,
         ordered: bool,
         undecided: &mut bool,
-    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::CheckerDiagnostic> {
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
+    {
         use super::relation::ComparabilityVerdict;
         use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
         let graph = self.graph();
@@ -5409,9 +5407,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         #[cfg(test)]
         FLOW_EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + 1));
-        self.with_relation_environment_of(&key.function.declaration_slot.defining_canonical, || {
-            self.evaluate_flow_return_in_own_environment(key)
-        })
+        let budget_epoch = self.operation_budget_epoch.get();
+        let mut evaluated = self.with_relation_environment_of(
+            &key.function.declaration_slot.defining_canonical,
+            || self.evaluate_flow_return_in_own_environment(key),
+        );
+        // A value evaluated through an operation's recovery is a degraded
+        // success of the operation budget: usable, never sealed or kept.
+        if self.operation_budget_epoch.get() != budget_epoch {
+            if let FlowReturnPendingOutcome::EvaluatedValue(value) = &mut evaluated.outcome {
+                *value = value.clone().with_operation_budget();
+            }
+        }
+        evaluated
     }
 
     /// [`Self::evaluate_flow_return`] once the function's own relation
@@ -19319,7 +19327,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             crate::semantic_query::ProjectionMode::Expanded,
                         ),
                     )
-                    .into_complete_node()
+                    .into_usable_node()
                 {
                     Some(resolved) if resolved != concrete && !seen.contains(&resolved) => {
                         pending.push(resolved);

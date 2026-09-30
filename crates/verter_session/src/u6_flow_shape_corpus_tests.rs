@@ -170,6 +170,7 @@ pub(crate) enum Degr {
     UnreducedDeclaredUnion,
     UnresolvedValue,
     PartialInterior,
+    OperationBudget,
 }
 
 /// The flow-graph lane expectation for one row.
@@ -769,6 +770,7 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
         Some(FlowReturnDegradation::UnreducedDeclaredUnion) => Degr::UnreducedDeclaredUnion,
         Some(FlowReturnDegradation::UnresolvedValue) => Degr::UnresolvedValue,
         Some(FlowReturnDegradation::PartialInterior) => Degr::PartialInterior,
+        Some(FlowReturnDegradation::OperationBudget) => Degr::OperationBudget,
     }
 }
 

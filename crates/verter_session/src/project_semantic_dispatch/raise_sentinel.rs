@@ -228,7 +228,8 @@ mod tests {
                         crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
                     operation: crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand,
                 },
-                beyond: None,
+                basis: crate::semantic_query::RecoveryBasis::Certified,
+                origin: None,
             },
         ]
     }

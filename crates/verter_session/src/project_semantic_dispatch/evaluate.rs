@@ -306,10 +306,13 @@ struct DeferredEvaluationFrame {
     completeness: ResultCompleteness,
     cache_suppress: bool,
     stage: DeferredEvaluationStage,
+    /// The dispatcher's operation-budget epoch when the frame began: a
+    /// recovery made under it leaves the frame a resource partial.
+    budget_epoch: u64,
 }
 
 impl DeferredEvaluationFrame {
-    fn new(node: SemanticNodeId, context: ProjectionReductionContext) -> Self {
+    fn new(node: SemanticNodeId, context: ProjectionReductionContext, budget_epoch: u64) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
@@ -321,6 +324,7 @@ impl DeferredEvaluationFrame {
             completeness: ResultCompleteness::Complete,
             cache_suppress: false,
             stage: DeferredEvaluationStage::EvaluateCurrent,
+            budget_epoch,
         }
     }
 
@@ -416,6 +420,19 @@ pub(crate) enum StructuralFactDemandOutcome {
     /// carrier-stop (no fuse/ceiling/fault fired). The ONLY arm that
     /// yields a node.
     Complete(SemanticNodeId),
+    /// Resolved, except that an operation on the way exhausted its own
+    /// allowance and the node holds the checker's recovery for it — the
+    /// only reason is [`PartialReasonSet::OPERATION_BUDGET`]. A resource
+    /// partial: a fail-closed consumer treats it exactly as
+    /// [`Partial`](Self::Partial); one that reads the checker's recovery
+    /// as the checker does reads the node through
+    /// [`into_usable_node`](StructuralFactDemandOutcome::into_usable_node).
+    Recovered {
+        /// The resolved node, holding the recovery.
+        node: SemanticNodeId,
+        /// The partial reasons: exactly the operation budget.
+        reasons: PartialReasonSet,
+    },
     /// Truncated / faulted. Carries the reasons ONLY — no node.
     Partial(PartialReasonSet),
 }
@@ -432,6 +449,8 @@ struct SettledDemand<'g> {
     n: SemanticNodeId,
     exit_reasons: Option<PartialReasonSet>,
     named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)>,
+    /// The dispatcher's operation-budget epoch when the demand began.
+    budget_epoch: u64,
 }
 
 /// A demand's first half: finished outright (a trip on entry), or settled.
@@ -571,6 +590,18 @@ impl StructuralFactDemandOutcome {
     pub(crate) fn into_complete_node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Complete(node) => Some(node),
+            Self::Recovered { .. } | Self::Partial(_) => None,
+        }
+    }
+
+    /// The node the checker would continue with: the resolved node when
+    /// `Complete`, and when `Recovered` the node holding the checker's
+    /// recovery, which reads and relates as the checker's does. `None` when
+    /// `Partial`. The result it feeds stays partial whenever it is
+    /// `Recovered`: the demand already folded its reasons.
+    pub(crate) fn into_usable_node(self) -> Option<SemanticNodeId> {
+        match self {
+            Self::Complete(node) | Self::Recovered { node, .. } => Some(node),
             Self::Partial(_) => None,
         }
     }
@@ -987,6 +1018,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.fold_local_partial_completeness(reasons);
             return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(reasons));
         }
+        let budget_epoch = self.operation_budget_epoch.get();
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
         // merging the evaluation's typed completeness into the demand outcome.
@@ -1283,6 +1315,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             n,
             exit_reasons,
             named_alias_application,
+            budget_epoch,
         })
     }
 
@@ -1304,6 +1337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             mut n,
             exit_reasons,
             named_alias_application,
+            budget_epoch,
         } = settled;
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
@@ -1337,6 +1371,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if named_by_alias {
                 n = named;
             }
+        }
+        // A recovery made anywhere under the demand — a relation, a nested
+        // build, a canonical construction — is this demand's too, even
+        // where no read carried its reason here.
+        if self.operation_budget_epoch.get() != budget_epoch {
+            completeness = completeness.merge(ResultCompleteness::partial(
+                PartialReasonSet::OPERATION_BUDGET,
+            ));
         }
         // The declaration-keeping mode prints an application's arguments as
         // the checker prints them.
@@ -1373,7 +1415,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // + `peel_node_for_uninstantiated_carrier_fact_demand`) route
                 // through this one exit, so both fail closed identically.
                 self.fold_local_partial_completeness(reasons);
-                StructuralFactDemandOutcome::Partial(reasons)
+                // Stopped only by an operation's own allowance: the node
+                // holds the checker's recovery, usable but incomplete.
+                if reasons == PartialReasonSet::OPERATION_BUDGET {
+                    StructuralFactDemandOutcome::Recovered { node: n, reasons }
+                } else {
+                    StructuralFactDemandOutcome::Partial(reasons)
+                }
             }
         }
     }
@@ -1669,7 +1717,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             BuiltinMappedUtility::Homomorphic => {
                 let source = self
                     .normalize_node_for_structural_fact_demand(*args.first()?, context)
-                    .into_complete_node()?;
+                    .into_usable_node()?;
                 (!matches!(
                     self.graph().node_data(source).as_deref(),
                     Some(
@@ -1902,9 +1950,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     fn finish_deferred_evaluation_frame(
         &self,
-        frame: DeferredEvaluationFrame,
+        mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
     ) -> EvaluateDeferredOutcome {
+        // A recovery made under the evaluation — an inline relation, a
+        // canonical construction — makes it a resource partial, never a
+        // published memo entry, even where no read carried its reason here.
+        if self.operation_budget_epoch.get() != frame.budget_epoch {
+            frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                PartialReasonSet::OPERATION_BUDGET,
+            ));
+        }
         if let Some(reasons) = self.connected_demand_trip() {
             return EvaluateDeferredOutcome {
                 node: frame.entry_node,
@@ -1945,7 +2001,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
-        let mut frames = vec![DeferredEvaluationFrame::new(node, reduction_context)];
+        let mut frames = vec![DeferredEvaluationFrame::new(
+            node,
+            reduction_context,
+            self.operation_budget_epoch.get(),
+        )];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {
@@ -2205,7 +2265,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match action {
                 DeferredEvaluationAction::Continue => {}
                 DeferredEvaluationAction::Push { node, context } => {
-                    frames.push(DeferredEvaluationFrame::new(node, context));
+                    frames.push(DeferredEvaluationFrame::new(
+                        node,
+                        context,
+                        self.operation_budget_epoch.get(),
+                    ));
                 }
                 DeferredEvaluationAction::Finish(result) => {
                     let frame = frames.pop().expect("finishing an active evaluator frame");
@@ -2530,6 +2594,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(ArmWait::Resolved(arm)) => {
                     let resolved = match outcome {
                         StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                        // A name an operation's allowance stopped is the
+                        // checker's recovery, read as the checker reads it;
+                        // the reduction is partial with it.
+                        StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                            reduction.completeness = reduction
+                                .completeness
+                                .merge(ResultCompleteness::partial(reasons));
+                            node
+                        }
                         StructuralFactDemandOutcome::Partial(reasons) => {
                             reduction.completeness = reduction
                                 .completeness
@@ -2764,6 +2837,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .expect("an outcome is delivered only to a waiting walk");
             let resolved = match outcome {
                 StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                    walk.partial = Some(walk.partial.map_or(reasons, |held| held.union(reasons)));
+                    node
+                }
                 StructuralFactDemandOutcome::Partial(reasons) => {
                     walk.partial = Some(reasons);
                     return MembersStep::Done(None);
@@ -2878,7 +2955,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// read-boundary fold covers `CacheRead`-carried partials only; this is
     /// the matching funnel for evaluator-local ones.
     pub(super) fn fold_local_partial_completeness(&self, reasons: PartialReasonSet) {
+        if reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
+            self.operation_budget_epoch
+                .set(self.operation_budget_epoch.get().wrapping_add(1));
+        }
         crate::request_context::fold_result_completeness(ResultCompleteness::partial(reasons));
         self.fold_into_top_build_local_taint_with(true, true, reasons);
+    }
+
+    /// The checker's recovery after `refusal`, an operation that exhausted
+    /// its own allowance: its error type, with `origin` the operation's
+    /// authored form, if one already exists. The recovery is a resource
+    /// partial, folded here with it, so no caller can keep the recovery
+    /// while dropping its incompleteness.
+    pub(super) fn recover_at_operation_budget(
+        &self,
+        refusal: crate::semantic_query::checker_policy::OperationRefusal,
+        origin: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.fold_local_partial_completeness(PartialReasonSet::OPERATION_BUDGET);
+        crate::semantic_query::checker_policy::resource_recovery(self.graph(), refusal, origin)
     }
 }
