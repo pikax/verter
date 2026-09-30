@@ -795,3 +795,183 @@ async fn workspace_folder_updates_reach_a_hub_whose_first_establishment_is_in_fl
         engine.calls()
     );
 }
+
+fn hover_calls(provider: &MockTypeProvider) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count()
+}
+
+/// A query whose basis drifts while the engine answers is settled under a
+/// FRESH admission, never on the drifted one: an unrelated document's edit
+/// re-issues the query and serves the engine's answer, while a drift that
+/// withdraws ownership still refuses without a second engine call.
+#[tokio::test]
+async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    router.activate_carrier_members(&members).await.unwrap();
+    // The drift callbacks below need the router while it is serving a query.
+    let router = Arc::new(router);
+    let companion = members[0].companion_path.clone();
+    providers[0].set_hover(
+        &companion,
+        3,
+        Some(HoverInfo {
+            contents: "const answer: number".to_string(),
+            range_start: None,
+            range_end: None,
+            display_signature: None,
+            kind: None,
+            documentation: None,
+        }),
+    );
+
+    // An unrelated document changes while the engine answers.
+    let injecting = Arc::clone(&workspace);
+    let unrelated = format!("{}.unrelated.ts", members[2].source_path);
+    let drifting = Arc::clone(&router);
+    providers[0].set_on_query(
+        &companion,
+        Box::new(move || {
+            injecting.inject_file(unrelated, Arc::from("export {};"));
+            // Engine discovery is substituted in this fixture: carry the
+            // pre-resolved engines over to the drifted basis, as a real
+            // install's re-resolution would.
+            let drifted = ResolvedPublication::current(&drifting.host).unwrap();
+            for mut spec in drifting.engine_specs.iter_mut() {
+                spec.basis = drifted.clone();
+            }
+        }),
+    );
+    let hover = router
+        .get_hover(&companion, 3)
+        .await
+        .expect("a content-only drift must not surface as unavailable semantics");
+    assert_eq!(
+        hover.map(|info| info.contents).as_deref(),
+        Some("const answer: number")
+    );
+    assert_eq!(
+        hover_calls(&providers[0]),
+        2,
+        "the drifted answer is discarded and the query re-issued once"
+    );
+
+    // Ownership is withdrawn while the engine answers.
+    providers[0].clear_calls();
+    let publishing = Arc::clone(&workspace);
+    providers[0].set_on_query(
+        &companion,
+        Box::new(move || {
+            publishing.publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(Arc::new(
+                verter_workspace::WorkspaceSnapshot {
+                    owners_memo: Default::default(),
+                    projects: Vec::new(),
+                    resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+                    generation: SnapshotGeneration(2),
+                },
+            )));
+        }),
+    );
+    assert!(
+        router.get_hover(&companion, 3).await.is_err(),
+        "a withdrawn owner must refuse, never serve the stale answer"
+    );
+    assert_eq!(
+        hover_calls(&providers[0]),
+        1,
+        "a refused re-admission must not reach the engine again"
+    );
+}
+
+/// A generated write whose basis moves WHILE it is being admitted (an
+/// unrelated document's edit landing between the publication read and the
+/// hub binding) is re-admitted against the live basis and reaches the engine,
+/// instead of leaving the carrier without provider state until a later retry.
+#[tokio::test]
+async fn generated_write_admission_racing_a_content_edit_is_readmitted() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    let member = members[0].clone();
+    // Project `a`'s engine is cold: its establishment parks on a gate, so the
+    // write is suspended between resolving its binding and binding the hub.
+    let key = router
+        .providers
+        .iter()
+        .find(|entry| entry.key().project == member.project_file_name)
+        .map(|entry| entry.key().clone())
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine: Arc<dyn TypeProvider> = providers[0].clone();
+    router.providers.insert(
+        key,
+        Arc::new(ProviderHub::new(
+            GatedEngine {
+                engine,
+                gate: Arc::clone(&gate),
+                entered: Arc::clone(&entered),
+            },
+            Arc::new(verter_type_runtime::provider_hub::TracingNotifier),
+            crate::resilient_provider::HubPolicy::explicit(3),
+        )),
+    );
+    let router = Arc::new(router);
+    let write = tokio::spawn({
+        let router = Arc::clone(&router);
+        let member = member.clone();
+        async move {
+            router
+                .register_carrier_member(
+                    &member.source_path,
+                    &member.companion_path,
+                    "export {};",
+                    &member.project_file_name,
+                )
+                .await
+        }
+    });
+    await_until(
+        || entered.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "the write reached the cold engine's establishment",
+    )
+    .await;
+
+    workspace.inject_file(
+        format!("{}.unrelated.ts", member.source_path),
+        Arc::from("export {};"),
+    );
+    // Engine discovery is substituted in this fixture: carry the pre-resolved
+    // engines over to the drifted basis, as a real install's re-resolution would.
+    let drifted = ResolvedPublication::current(&router.host).unwrap();
+    for mut spec in router.engine_specs.iter_mut() {
+        spec.basis = drifted.clone();
+    }
+    gate.add_permits(1);
+
+    write
+        .await
+        .unwrap()
+        .expect("an admission that raced a content edit must be re-admitted");
+    assert!(
+        providers[0].calls().iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember { companion_path, .. }
+                if *companion_path == member.companion_path
+        )),
+        "the re-admitted registration must reach the owning engine"
+    );
+}

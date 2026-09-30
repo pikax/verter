@@ -166,6 +166,15 @@ re-applies idempotently (the direct shared write additionally closes its one
 path). Only a replaced publication or project generation — where the engine may
 now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
 project engine on every concurrent edit is the failure this split prevents.
+The tsserver router is the issuer that answers a basis drift with a fresh
+admission, bounded to two re-issues per operation: a query whose route expired
+`StaleBasis` while the engine answered discards that answer and is re-run under
+a fresh binding (`routed_query!`), and a generated-unit admission whose basis
+moved between the publication read and the hub binding is re-admitted before
+anything reaches the engine (`admit_current_unit`). A refusal on an unmoved
+basis, a withdrawn owner, or a spent budget is returned unchanged; a write the
+actor refused AFTER admission is not re-forwarded by the router and stays with
+the carrier sync's own retry.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

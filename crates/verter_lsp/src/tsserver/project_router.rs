@@ -32,8 +32,8 @@ use verter_type_runtime::discovery::{
     tsserver_serving_tier, ResolvedTsserver, TsserverSource,
 };
 use verter_type_runtime::provider_hub::{
-    AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation, OverlayPriority,
-    ProjectWitness,
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation,
+    OverlayPriority, ProjectWitness,
 };
 use verter_workspace::{decide_generated_unit_admission_with_basis, CanonicalPath};
 
@@ -109,6 +109,36 @@ struct RequestRoute {
     path: String,
 }
 
+/// Re-issues one query, or one generated-unit admission, may take when its
+/// basis drifts under it.
+const BASIS_DRIFT_REISSUES: usize = 2;
+
+/// Run one read-only query through its request route, settling it only under
+/// a CURRENT admission.
+///
+/// The bound basis includes the workspace content generation, so an unrelated
+/// document's edit landing while the engine answers expires the route: that
+/// answer is discarded (never delivered on a drifted basis), and the query is
+/// re-issued under a fresh binding and admission instead of surfacing a
+/// transient "semantics unavailable" the editor would show as an empty
+/// result. Bounded: a basis that keeps drifting returns the last refusal, and
+/// a re-admission that fails (ownership withdrawn, membership excluded)
+/// refuses before the engine is reached again.
+macro_rules! routed_query {
+    ($router:expr, $path:expr, |$route:ident| $query:expr) => {{
+        let mut reissues = BASIS_DRIFT_REISSUES;
+        loop {
+            let $route = $router.request_route($path, &mut reissues).await?;
+            let settled = $route.run($query).await;
+            if settled.is_err() && reissues > 0 && $route.basis_drifted() {
+                reissues -= 1;
+                continue;
+            }
+            break settled;
+        }
+    }};
+}
+
 type AdmittedCarrierBatch = (
     Arc<ProviderHub<dyn TypeProvider>>,
     Vec<(AdmittedRequest, CarrierActivation)>,
@@ -128,6 +158,21 @@ impl RequestRoute {
             })?;
         }
         Ok(())
+    }
+
+    /// Whether this route's binding or admission expired on its BASIS (the
+    /// publication or a content/project generation moved) — the refusal a
+    /// fresh admission can answer, unlike a replaced provider or epoch.
+    fn basis_drifted(&self) -> bool {
+        matches!(
+            self.hub.check_project(&self.witness),
+            Err(AdmissionRefusal::StaleBasis)
+        ) || self.admission.as_ref().is_some_and(|admission| {
+            matches!(
+                self.hub.check_admission(admission),
+                Err(AdmissionRefusal::StaleBasis)
+            )
+        })
     }
 
     async fn run<T>(
@@ -226,17 +271,11 @@ impl ProjectTsserverProvider {
     pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
         for carrier in &dropped.carriers {
             let rearm = async {
-                let (binding, published) = self.binding_for_registered_with_publication(
-                    &carrier.source_path,
-                    &carrier.companion_path,
-                    &carrier.project_file_name,
-                )?;
                 let (hub, admitted) = self
-                    .admit_generated_write(
+                    .admit_registered_unit(
                         &carrier.source_path,
-                        &binding,
-                        published,
-                        &[CanonicalPath::new(&carrier.companion_path)],
+                        &carrier.companion_path,
+                        &carrier.project_file_name,
                     )
                     .await?;
                 hub.apply_overlay(
@@ -497,6 +536,59 @@ impl ProjectTsserverProvider {
         Ok((hub, admission))
     }
 
+    /// Admit ONE generated unit against the binding `resolve` yields,
+    /// re-admitting when the basis moved DURING admission.
+    ///
+    /// The publication read, the hub binding and the membership proof are
+    /// separate steps; an unrelated document's edit landing between them
+    /// refuses the admission on a basis that is already history. Nothing has
+    /// reached the engine at that point, so the admission is simply re-run
+    /// against the live basis — bounded, and any refusal on an unmoved basis
+    /// (or once the budget is spent) is returned as is.
+    async fn admit_current_unit(
+        &self,
+        source: &str,
+        unit: &str,
+        resolve: impl Fn() -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError>,
+    ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
+        let mut reissues = BASIS_DRIFT_REISSUES;
+        loop {
+            let before = ResolvedPublication::current(&self.host);
+            let admitted = match resolve() {
+                Ok((binding, published)) => {
+                    self.admit_generated_write(
+                        source,
+                        &binding,
+                        published,
+                        &[CanonicalPath::new(unit)],
+                    )
+                    .await
+                }
+                Err(refusal) => Err(refusal),
+            };
+            match admitted {
+                Err(_) if reissues > 0 && ResolvedPublication::current(&self.host) != before => {
+                    reissues -= 1;
+                }
+                settled => return settled,
+            }
+        }
+    }
+
+    /// [`Self::admit_current_unit`] for a carrier companion registered under
+    /// its owning project.
+    async fn admit_registered_unit(
+        &self,
+        source: &str,
+        companion: &str,
+        project: &str,
+    ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
+        self.admit_current_unit(source, companion, || {
+            self.binding_for_registered_with_publication(source, companion, project)
+        })
+        .await
+    }
+
     async fn provider_for_path(
         &self,
         path: &str,
@@ -510,6 +602,27 @@ impl ProjectTsserverProvider {
             ));
         }
         Ok(provider)
+    }
+
+    /// Route one query, re-routing (within the query's shared re-issue
+    /// budget) when the basis moved WHILE the route was being bound: the
+    /// publication read and the hub binding are separate steps, and an edit
+    /// landing between them refuses the binding on a basis that is already
+    /// history. Any refusal on an unmoved basis is returned as is.
+    async fn request_route(
+        &self,
+        path: &str,
+        reissues: &mut usize,
+    ) -> Result<RequestRoute, TypeProviderError> {
+        loop {
+            let before = ResolvedPublication::current(&self.host);
+            match self.provider_for_request_path(path).await {
+                Err(_) if *reissues > 0 && ResolvedPublication::current(&self.host) != before => {
+                    *reissues -= 1;
+                }
+                routed => return routed,
+            }
+        }
     }
 
     async fn provider_for_request_path(
@@ -585,9 +698,10 @@ impl ProjectTsserverProvider {
             };
         }
         let (source, _) = self.source_for_path(path);
-        let (binding, published) = self.binding_for_path_with_publication(path)?;
         let (hub, admitted) = self
-            .admit_generated_write(&source, &binding, published, &[CanonicalPath::new(path)])
+            .admit_current_unit(&source, path, || {
+                self.binding_for_path_with_publication(path)
+            })
             .await?;
         hub.apply_overlay(
             &admitted,
@@ -957,14 +1071,11 @@ impl TypeProvider for ProjectTsserverProvider {
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(
-                        route
-                            .hub
-                            .get_completions(&path, offset, trigger_character.as_deref()),
-                    )
-                    .await
+                routed_query!(self, &path, |route| route.hub.get_completions(
+                    &path,
+                    offset,
+                    trigger_character.as_deref()
+                ))
             }
         })
     }
@@ -977,10 +1088,9 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'a, Vec<Completion>> {
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(path).await?;
-                route
-                    .run(route.hub.get_completion_details(path, offset, items))
-                    .await
+                routed_query!(self, path, |route| route
+                    .hub
+                    .get_completion_details(path, offset, items))
             }
         })
     }
@@ -989,8 +1099,7 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_hover(&path, offset)).await
+                routed_query!(self, &path, |route| route.hub.get_hover(&path, offset))
             }
         })
     }
@@ -999,8 +1108,7 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_diagnostics(&path)).await
+                routed_query!(self, &path, |route| route.hub.get_diagnostics(&path))
             }
         })
     }
@@ -1009,8 +1117,7 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_definition(&path, offset)).await
+                routed_query!(self, &path, |route| route.hub.get_definition(&path, offset))
             }
         })
     }
@@ -1023,10 +1130,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(route.hub.get_type_definition(&path, offset))
-                    .await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_type_definition(&path, offset))
             }
         })
     }
@@ -1035,8 +1141,7 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_references(&path, offset)).await
+                routed_query!(self, &path, |route| route.hub.get_references(&path, offset))
             }
         })
     }
@@ -1049,10 +1154,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(route.hub.get_rename_locations(&path, offset))
-                    .await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_rename_locations(&path, offset))
             }
         })
     }
@@ -1065,8 +1169,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_signature_help(&path, offset)).await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_signature_help(&path, offset))
             }
         })
     }
@@ -1082,14 +1187,12 @@ impl TypeProvider for ProjectTsserverProvider {
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(
-                        route
-                            .hub
-                            .get_code_actions(&path, start_offset, end_offset, &diagnostics),
-                    )
-                    .await
+                routed_query!(self, &path, |route| route.hub.get_code_actions(
+                    &path,
+                    start_offset,
+                    end_offset,
+                    &diagnostics
+                ))
             }
         })
     }
@@ -1098,8 +1201,7 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_semantic_tokens(&path)).await
+                routed_query!(self, &path, |route| route.hub.get_semantic_tokens(&path))
             }
         })
     }
@@ -1112,10 +1214,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(route.hub.get_document_highlights(&path, offset))
-                    .await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_document_highlights(&path, offset))
             }
         })
     }
@@ -1129,10 +1230,11 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route
-                    .run(route.hub.get_inlay_hints(&path, start_offset, end_offset))
-                    .await
+                routed_query!(self, &path, |route| route.hub.get_inlay_hints(
+                    &path,
+                    start_offset,
+                    end_offset
+                ))
             }
         })
     }
@@ -1145,8 +1247,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.resolve_completion(&path, data)).await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .resolve_completion(&path, data.clone()))
             }
         })
     }
@@ -1218,18 +1321,8 @@ impl TypeProvider for ProjectTsserverProvider {
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (binding, published) = self.binding_for_registered_with_publication(
-                &source_path,
-                &companion_path,
-                &project_file_name,
-            )?;
             let (hub, admitted) = self
-                .admit_generated_write(
-                    &source_path,
-                    &binding,
-                    published,
-                    &[CanonicalPath::new(&companion_path)],
-                )
+                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
                 .await?;
             hub.apply_overlay(
                 &admitted,
@@ -1257,18 +1350,8 @@ impl TypeProvider for ProjectTsserverProvider {
         project_file_name: &'a str,
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
-            let (binding, published) = self.binding_for_registered_with_publication(
-                source_path,
-                companion_path,
-                project_file_name,
-            )?;
             let (hub, admitted) = self
-                .admit_generated_write(
-                    source_path,
-                    &binding,
-                    published,
-                    &[CanonicalPath::new(companion_path)],
-                )
+                .admit_registered_unit(source_path, companion_path, project_file_name)
                 .await?;
             hub.apply_overlay(
                 &admitted,
@@ -1299,18 +1382,8 @@ impl TypeProvider for ProjectTsserverProvider {
         let companion_path = companion_path.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (binding, published) = self.binding_for_registered_with_publication(
-                &source_path,
-                &companion_path,
-                &project_file_name,
-            )?;
             let (hub, admitted) = self
-                .admit_generated_write(
-                    &source_path,
-                    &binding,
-                    published,
-                    &[CanonicalPath::new(&companion_path)],
-                )
+                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
                 .await?;
             hub.apply_overlay(
                 &admitted,
@@ -1337,17 +1410,11 @@ impl TypeProvider for ProjectTsserverProvider {
         Box::pin(async move {
             let mut batches: Vec<AdmittedCarrierBatch> = Vec::new();
             for member in members {
-                let (binding, published) = self.binding_for_registered_with_publication(
-                    &member.source_path,
-                    &member.companion_path,
-                    &member.project_file_name,
-                )?;
                 let (hub, admitted) = self
-                    .admit_generated_write(
+                    .admit_registered_unit(
                         &member.source_path,
-                        &binding,
-                        published,
-                        &[CanonicalPath::new(&member.companion_path)],
+                        &member.companion_path,
+                        &member.project_file_name,
                     )
                     .await?;
                 if let Some((_, members)) = batches
@@ -1480,8 +1547,9 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         Box::pin(async move {
             {
-                let route = self.provider_for_request_path(&path).await?;
-                route.run(route.hub.get_diagnostics_background(&path)).await
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_diagnostics_background(&path))
             }
         })
     }
