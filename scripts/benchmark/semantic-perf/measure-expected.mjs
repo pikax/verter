@@ -109,11 +109,25 @@ export function parseMeasurement(stdout, source) {
     if (!tuple.startsWith("[") || !tuple.endsWith("]")) throw new Error(`the measuring tuple did not print: ${tuple.slice(0, 200)}`);
     printed = tuple.slice(1, -1);
   }
-  // `printed` is `never`, `any` (an `any` or error-any probe makes the
-  // conditional itself `any`) or a union of one-element tuples `[X]`.
-  const bare = canonicalType(printed);
-  const text = bare === "never" || bare === "any" ? bare : canonicalUnionMembers(printed).map(singleTupleElement).join(" | ");
   const codes = [...new Set(diagnostics.filter((d) => !onMarker.includes(d) && d !== neverCheck).map((d) => d.code))].sort((a, b) => a - b);
+  // `printed` is `never`, `any` (an `any` or error-any probe makes the
+  // conditional itself `any`) or a union of one-element tuples `[X]`. tsc's
+  // printer elides a very large type even under noErrorTruncation, leaving
+  // bare `any` members among the tuples: such a print is not the answer.
+  const bare = canonicalType(printed);
+  let text = bare;
+  if (bare !== "never" && bare !== "any") {
+    const members = canonicalUnionMembers(printed);
+    const elements = [];
+    for (const member of members) {
+      try {
+        elements.push(singleTupleElement(member));
+      } catch {
+        return { truncated: true, codes };
+      }
+    }
+    text = elements.join(" | ");
+  }
   const errorAny = canonicalType(text) === "any" && codes.some((c) => RESOURCE_CODES.includes(c));
   return { text, codes, errorAny };
 }
@@ -134,16 +148,27 @@ async function main() {
       return null;
     }
   })();
-  const out = previous && only.length ? previous : { scenarios: {} };
+  const resume = process.argv.includes("--resume");
+  const out = previous && (only.length || resume) ? previous : { scenarios: {} };
+  if (previous && previous.libSha256 !== sha256Text(lib)) out.scenarios = {};
   out.schema = 1;
   out.typescript = TYPESCRIPT_VERSION;
   out.libSha256 = sha256Text(lib);
   out.measuredWith =
     "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus " +
-    "`type __BenchExpand<T> = T extends __BenchNothing ? never : [T]; declare const __bench_v: [__BenchExpand<__Probe>]; const __bench_s: [never] = __bench_v;`, read off the head of the TS2322 message inside the tuple; " +
+    "`type __BenchExpand<T> = T extends __BenchNothing ? never : [T]; declare const __bench_v: [__BenchExpand<__Probe>]; const __bench_s: [never] = __bench_v;` " +
+    "and a never check, read off the head of the TS2322 messages; a print tsc elides (bare `any` among the tuples) is recorded as truncated, a run past the cap or deadline as killed; " +
     (viaCapped ? "run under the capped tsc wrapper" : "run under verter-supervise");
+  const save = () => {
+    out.scenarios = Object.fromEntries(Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)));
+    writeFileSync(EXPECTED, JSON.stringify(out, null, 2) + "\n");
+  };
   for (const scenario of selectScenarios(only)) {
     const entry = { sourceSha256: sha256Text(scenario.source), settings: {} };
+    if (resume && out.scenarios[scenario.id]?.sourceSha256 === entry.sourceSha256) {
+      console.log(`${scenario.id}: kept (already measured on this source)`);
+      continue;
+    }
     for (const setting of SETTINGS) {
       const dir = join(work, scenario.id, setting.id);
       mkdirSync(dir, { recursive: true });
@@ -173,22 +198,36 @@ async function main() {
       }
       let result;
       if (exit === 124 || exit === 137) result = { killed: exit === 124 ? "timeout" : "memory", codes: [] };
-      else if (![0, 1, 2].includes(exit)) throw new Error(`tsc exited ${exit} for ${scenario.id}/${setting.id}`);
+      else if (![0, 1, 2].includes(exit)) result = { unmeasurable: `tsc exited ${exit}`, codes: [] };
       else {
-        const parsed = parseMeasurement(stdout, source);
-        const digest = canonicalDigest(parsed.text);
-        result = { digest, errorAny: parsed.errorAny, codes: parsed.codes };
-        if (digest.length <= 4000) result.text = parsed.text;
+        try {
+          const parsed = parseMeasurement(stdout, source);
+          if (parsed.truncated) result = { truncated: true, codes: parsed.codes };
+          else {
+            const digest = canonicalDigest(parsed.text);
+            result = { digest, errorAny: parsed.errorAny, codes: parsed.codes };
+            if (digest.length <= 4000) result.text = parsed.text;
+          }
+        } catch (err) {
+          result = { unmeasurable: String(err.message ?? err).slice(0, 300), codes: [] };
+        }
       }
       entry.settings[setting.id] = result;
-      console.log(
-        `${scenario.id}/${setting.id}: ${result.killed ? `killed (${result.killed})` : `${result.errorAny ? "error-any" : result.digest.preview.slice(0, 80)} ${result.codes.map((c) => `TS${c}`).join(",")}`}`,
-      );
+      const shown = result.killed
+        ? `killed (${result.killed})`
+        : result.truncated
+          ? "truncated print"
+          : result.unmeasurable
+            ? `unmeasurable: ${result.unmeasurable}`
+            : result.errorAny
+              ? "error-any"
+              : result.digest.preview.slice(0, 80);
+      console.log(`${scenario.id}/${setting.id}: ${shown} ${result.codes.map((c) => `TS${c}`).join(",")}`);
     }
     out.scenarios[scenario.id] = entry;
+    save();
   }
-  out.scenarios = Object.fromEntries(Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)));
-  writeFileSync(EXPECTED, JSON.stringify(out, null, 2) + "\n");
+  save();
   console.log(`wrote ${EXPECTED}`);
 }
 

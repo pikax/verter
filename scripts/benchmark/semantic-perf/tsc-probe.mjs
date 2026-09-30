@@ -104,13 +104,18 @@ async function main() {
     let observation;
     if (cold.type) {
       try {
-        const printed = project.checker.typeToString(cold.type, undefined, PRINT_FLAGS);
+        // tsc's printer elides a very large type even with NoTruncation, so
+        // a union is printed member by member (one set, whatever the order).
+        const members = cold.type.isUnionType() ? cold.type.getTypes() : null;
+        const printed = members
+          ? members.map((member) => project.checker.typeToString(member, undefined, PRINT_FLAGS)).join(" | ")
+          : project.checker.typeToString(cold.type, undefined, PRINT_FLAGS);
         observation = {
           text: printed,
           error: null,
           errorType: cold.type.isErrorType(),
           typeFlags: cold.type.flags,
-          unionMembers: cold.type.isUnionType() ? cold.type.getTypes().length : null,
+          unionMembers: members ? members.length : null,
         };
       } catch (err) {
         observation = { text: null, error: String(err?.message ?? err), errorType: null, typeFlags: null, unionMembers: null };

@@ -105,6 +105,22 @@ pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
     }
 }
 
+/// `mach_timebase_info_data_t`, bound directly: the `libc` binding is
+/// deprecated in favour of a separate crate, and this is the one call needed.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    /// libSystem's `mach_timebase_info`: the ratio converting mach
+    /// absolute-time ticks to nanoseconds.
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+}
+
 #[cfg(target_os = "macos")]
 pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
     // SAFETY: `proc_pid_rusage` fills the caller-owned, correctly sized
@@ -123,8 +139,8 @@ pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
             )));
         }
         // CPU times are in mach absolute-time units.
-        let mut timebase: libc::mach_timebase_info_data_t = std::mem::zeroed();
-        let cpu_micros = (libc::mach_timebase_info(&mut timebase) == 0 && timebase.denom != 0)
+        let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
+        let cpu_micros = (mach_timebase_info(&mut timebase) == 0 && timebase.denom != 0)
             .then(|| {
                 let ticks = u128::from(info.ri_user_time) + u128::from(info.ri_system_time);
                 (ticks * u128::from(timebase.numer) / u128::from(timebase.denom) / 1_000) as u64

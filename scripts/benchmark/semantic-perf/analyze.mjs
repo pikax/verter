@@ -28,6 +28,7 @@ export const CLASSES = ["killed", "error", "refusal", "partial", "mismatch", "no
 
 /** How an invocation ended, from the supervisor's point of view. */
 export function invocationEnd(inv) {
+  if (inv.skipped) return { kind: "killed", detail: "memory (skipped after a killed warmup)" };
   const rec = inv.supervisor;
   if (!rec) return { kind: "harness-failure", detail: inv.supervisorReadError ?? "no supervisor record" };
   if (!rec.launched) return { kind: "harness-failure", detail: `not launched: ${(rec.errors ?? []).join("; ")}` };
@@ -106,7 +107,7 @@ export function classifyVerterAnswer(answer, reference, beyondDigest, probeDiges
     return { class: "partial", detail: `the answer holds ${answer.unknownLeaves} unmaterialised leaf/leaves (${answer.unknownSamples.join(", ")})` };
   }
   if (answer.shape === "conditional") return { class: "partial", detail: "the answer is an unevaluated conditional" };
-  if (!reference || reference.killed) {
+  if (!referenceHasAnswer(reference)) {
     if (beyondDigest && answer.digest.sha256 === beyondDigest.sha256) return { class: "beyond-tsc", detail: "tsc exhausted its resources; Verter's answer is the constructed one" };
     return { class: "no-reference", detail: "tsc gives no answer to compare with" };
   }
@@ -129,11 +130,14 @@ export function classifyVerterAnswer(answer, reference, beyondDigest, probeDiges
  */
 export function tscAnswerProblem(answer, reference) {
   const end = answer.end;
-  if (end.kind === "killed") return reference && !reference.killed ? null : null;
+  if (end.kind === "killed") return null;
   if (end.kind !== "exited") return `tsc invocation failed: ${end.detail}`;
   if (answer.outcome.kind !== "value") return `tsc request outcome ${answer.outcome.kind} ${answer.outcome.detail ?? ""}`;
   if (!reference) return "no measured reference for this scenario and setting";
-  if (reference.killed) return `the reference says tsc exhausts resources (${reference.killed}) but the API answered`;
+  // A reference whose measurement tsc could not finish is judged by
+  // tscAnswerStatus instead: the API's demand can succeed where the CLI's
+  // whole-program check exhausts the cap.
+  if (!referenceHasAnswer(reference)) return null;
   if (!answer.digest) return `tsc printed no answer: ${answer.observeError ?? answer.canonicalError}`;
   if (answer.digest.sha256 !== reference.digest.sha256) {
     return `tsc answered ${answer.digest.preview}; the measured reference is ${reference.digest.preview}`;
@@ -142,6 +146,29 @@ export function tscAnswerProblem(answer, reference) {
     return `tsc's error-type flag is ${answer.errorType}; the reference says errorAny ${reference.errorAny}`;
   }
   return null;
+}
+
+/**
+ * The tsc arm's standing for one invocation:
+ *   "killed"        the supervisor killed it (a valid observation);
+ *   "reference"     it reproduces the measured reference;
+ *   "by-construction"  the CLI measurement exhausted resources, but the API
+ *                   answered, and its answer is the scenario's constructed one;
+ *   "unverified"    the CLI measurement exhausted resources and the API's
+ *                   answer cannot be checked (no constructed answer, or a
+ *                   different one): never compared;
+ *   "problem"       it contradicts the reference or failed (fails validation).
+ */
+export function tscAnswerStatus(answer, reference, beyondDigest) {
+  if (answer.end.kind === "killed") return { status: "killed" };
+  const problem = tscAnswerProblem(answer, reference);
+  if (problem) return { status: "problem", problem };
+  if (reference && !referenceHasAnswer(reference)) {
+    if (!answer.digest) return { status: "problem", problem: `tsc printed no answer: ${answer.observeError ?? answer.canonicalError}` };
+    if (!answer.errorType && beyondDigest && answer.digest.sha256 === beyondDigest.sha256) return { status: "by-construction" };
+    return { status: "unverified" };
+  }
+  return { status: "reference" };
 }
 
 export function stats(values) {
@@ -273,4 +300,18 @@ export function compactProbeRecord(record) {
       };
     }),
   };
+}
+
+/** Whether the measured reference holds tsc's answer (not killed, truncated or unmeasurable). */
+export function referenceHasAnswer(reference) {
+  return Boolean(reference && !reference.killed && !reference.truncated && !reference.unmeasurable && reference.digest);
+}
+
+/** Why a measured reference holds no answer, or null. */
+export function referenceGap(reference) {
+  if (!reference) return "no measurement";
+  if (reference.killed) return `tsc -p exhausts resources (${reference.killed})`;
+  if (reference.truncated) return "tsc prints the answer elided";
+  if (reference.unmeasurable) return `unmeasurable: ${reference.unmeasurable}`;
+  return null;
 }

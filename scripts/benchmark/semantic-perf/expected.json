@@ -1,0 +1,2471 @@
+{
+  "scenarios": {
+    "alias-chain-1000": {
+      "sourceSha256": "4723e200a48c51a00d106a6da9dd76a3781cab10bc392985a4e7209eb44fb73d",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "alias-chain-1000-1mib": {
+      "sourceSha256": "fca1003fffbdf4be4ba6c808a442214a0827fc523caef5376c388b8f85271f49",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "alias-chain-200": {
+      "sourceSha256": "21d359980fbf178335d8646f33be072aad1c37ce54710a327ee3072038496326",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "alias-chain-50": {
+      "sourceSha256": "87ae94f15eb402eaf21b7181b0e37dcd603345b3eba5c1bdbdec99bd60320d2c",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "alias-chain-500": {
+      "sourceSha256": "922baa666d9cbeda93c4780a6d58038de3d2028027bbf80af9c6f5b0c43c5de4",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f5691c06c8baf768dd8d3d5602159864ca0df13a0f8b2b27cf06a757ba89b14f",
+            "length": 16,
+            "preview": "\"ok\" | undefined"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\" | undefined"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "base-signature-1": {
+      "sourceSha256": "f0c6c14d61d1e5c7f55169b55c605220e420a9603e5dc530657c2247b1f4b3d7",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "296fe010493b400c113d12340422c3cbe71737df30dc5608abd0dc4d5215266a",
+            "length": 9,
+            "preview": "[unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown]"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "296fe010493b400c113d12340422c3cbe71737df30dc5608abd0dc4d5215266a",
+            "length": 9,
+            "preview": "[unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown]"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "296fe010493b400c113d12340422c3cbe71737df30dc5608abd0dc4d5215266a",
+            "length": 9,
+            "preview": "[unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown]"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "296fe010493b400c113d12340422c3cbe71737df30dc5608abd0dc4d5215266a",
+            "length": 9,
+            "preview": "[unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown]"
+        }
+      }
+    },
+    "base-signature-10": {
+      "sourceSha256": "5d440b48566c7adc4115fcfdceb0847542fdec614bf51f2ec7bde741f2e5686b",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ef9afd0a97194ce988038d0299d77966acc45176e97c92c76d6597828aa95c5f",
+            "length": 90,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ef9afd0a97194ce988038d0299d77966acc45176e97c92c76d6597828aa95c5f",
+            "length": 90,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ef9afd0a97194ce988038d0299d77966acc45176e97c92c76d6597828aa95c5f",
+            "length": 90,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ef9afd0a97194ce988038d0299d77966acc45176e97c92c76d6597828aa95c5f",
+            "length": 90,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        }
+      }
+    },
+    "base-signature-50": {
+      "sourceSha256": "693a20081c0dd3b0008fc50dcf55cf67c98f801de9cbef8a4ee91f9ec50dbf87",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "b3cce1c350ff53e7100739540ef7dbe04b4644d7978fc3514c84c6aa4cefe367",
+            "length": 450,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknow…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "b3cce1c350ff53e7100739540ef7dbe04b4644d7978fc3514c84c6aa4cefe367",
+            "length": 450,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknow…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "b3cce1c350ff53e7100739540ef7dbe04b4644d7978fc3514c84c6aa4cefe367",
+            "length": 450,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknow…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "b3cce1c350ff53e7100739540ef7dbe04b4644d7978fc3514c84c6aa4cefe367",
+            "length": 450,
+            "preview": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknow…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]"
+        }
+      }
+    },
+    "baseline-empty": {
+      "sourceSha256": "0a67ab2ff3604227b8cdc7ffef8ed6264ebca3e574ba1808b456b937689ba7c9",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "conditional-chain-200": {
+      "sourceSha256": "56685948ba7030b4ef392e5d1c6fa13343f24f697657c66689fcc5809d3be679",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "conditional-chain-500": {
+      "sourceSha256": "d41c1011fa60498932038c9d785112a571f90427af87945326f4b492a4fbb823",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "conditional-chain-97": {
+      "sourceSha256": "6fabcfb7d5f689381b7e2b20e1b4c4cd27d4de179ef93440baed38c907a3d4dc",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "c48b5b1a9776c84602de2306d7903a7241158a5077e7a8519af75c33441b8334",
+            "length": 4,
+            "preview": "\"ok\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"ok\""
+        }
+      }
+    },
+    "conditional-chain-98": {
+      "sourceSha256": "50a44f22ae29c827429d15b55036e28f52188891cfad126a01ca72554d9c79e5",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "contravariant-callbacks-10": {
+      "sourceSha256": "2de97766bc1811ab67fd4c4ca914f775c496ca408e58978b85efd0582280fa39",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        }
+      }
+    },
+    "contravariant-callbacks-100": {
+      "sourceSha256": "751fe724486652fb67e7618306d1943b6eeb18c6ac251ec34bf472b85adf247f",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        }
+      }
+    },
+    "contravariant-callbacks-500": {
+      "sourceSha256": "5a30a1a58c21e1fcb18c806039dc9d80f328b8d093be0a5072fa94256cd93de8",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c",
+            "length": 3,
+            "preview": "\"a\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"a\""
+        }
+      }
+    },
+    "infer-pattern-repeat-10": {
+      "sourceSha256": "17e06c3b57cf3369a9eba3180710274ca6585acf70926d8a4d09fe1c220a701d",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "9ef732ee9bfaa84ccd668d95443c20947d2d14e56c3a8f9f3d0bf09b4122b328",
+            "length": 37,
+            "preview": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "9ef732ee9bfaa84ccd668d95443c20947d2d14e56c3a8f9f3d0bf09b4122b328",
+            "length": 37,
+            "preview": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "9ef732ee9bfaa84ccd668d95443c20947d2d14e56c3a8f9f3d0bf09b4122b328",
+            "length": 37,
+            "preview": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "9ef732ee9bfaa84ccd668d95443c20947d2d14e56c3a8f9f3d0bf09b4122b328",
+            "length": 37,
+            "preview": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9"
+        }
+      }
+    },
+    "infer-pattern-repeat-100": {
+      "sourceSha256": "510f022d7fd3b156a6db2833aff574b950c384414dc5ad49f8142e4fa6a2eca5",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        }
+      }
+    },
+    "infer-pattern-repeat-1000": {
+      "sourceSha256": "7740cb638c714781be30d432f724cc0a173245abc8f903a05bf7d0fb41be8e03",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        }
+      }
+    },
+    "inference-deposits-1025": {
+      "sourceSha256": "60ae64f8af3a06437e72402f418843042f8226f3782e471beff4c92b05970cf6",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        }
+      }
+    },
+    "inference-deposits-5000": {
+      "sourceSha256": "d6feb3622399c26c15b4c3616f66c38d98694737dd41d206fd897819d94a4736",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        }
+      }
+    },
+    "library-array-map": {
+      "sourceSha256": "d5f6127feaf0b217fa1918750696e832e05026da198478dbb13423db89d06703",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "564db06d1c49ee018ad1680dd4d898c7426368fa8867c293902cd31d488677f7",
+            "length": 14,
+            "preview": "Array<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Array<boolean>"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "564db06d1c49ee018ad1680dd4d898c7426368fa8867c293902cd31d488677f7",
+            "length": 14,
+            "preview": "Array<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Array<boolean>"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "564db06d1c49ee018ad1680dd4d898c7426368fa8867c293902cd31d488677f7",
+            "length": 14,
+            "preview": "Array<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Array<boolean>"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "564db06d1c49ee018ad1680dd4d898c7426368fa8867c293902cd31d488677f7",
+            "length": 14,
+            "preview": "Array<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Array<boolean>"
+        }
+      }
+    },
+    "library-awaited": {
+      "sourceSha256": "402133dc87bf6115f421de4d3dcc2e3e161003f87f94960e4abb2c71a200de6c",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "473287f8298dba7163a897908958f7c0eae733e25d2e027992ea2edc9bed2fa8",
+            "length": 6,
+            "preview": "string"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "string"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "473287f8298dba7163a897908958f7c0eae733e25d2e027992ea2edc9bed2fa8",
+            "length": 6,
+            "preview": "string"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "string"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "473287f8298dba7163a897908958f7c0eae733e25d2e027992ea2edc9bed2fa8",
+            "length": 6,
+            "preview": "string"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "string"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "473287f8298dba7163a897908958f7c0eae733e25d2e027992ea2edc9bed2fa8",
+            "length": 6,
+            "preview": "string"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "string"
+        }
+      }
+    },
+    "library-generic-call": {
+      "sourceSha256": "02cc926754f68d0dc1a6e4fe14f41971f22521c3e361ffbd0f19c0b58003a7d6",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "12886f9d00055adf24c40579e22d31b2b45f2023f892954ffd5567beb60825f8",
+            "length": 6,
+            "preview": "number"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "number"
+        }
+      }
+    },
+    "library-map-entries": {
+      "sourceSha256": "543c18114648cf1727aea87658cd98df361e49e05d4bc5a7d66da8a78ceeba1f",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "f33f99935e281c85dc0c565aa308630c6587c474335884b1543cb82ef6304f7c",
+            "length": 23,
+            "preview": "[string, Array<number>]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[string, Array<number>]"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "f33f99935e281c85dc0c565aa308630c6587c474335884b1543cb82ef6304f7c",
+            "length": 23,
+            "preview": "[string, Array<number>]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[string, Array<number>]"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "f33f99935e281c85dc0c565aa308630c6587c474335884b1543cb82ef6304f7c",
+            "length": 23,
+            "preview": "[string, Array<number>]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[string, Array<number>]"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "f33f99935e281c85dc0c565aa308630c6587c474335884b1543cb82ef6304f7c",
+            "length": 23,
+            "preview": "[string, Array<number>]"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "[string, Array<number>]"
+        }
+      }
+    },
+    "library-promise-then": {
+      "sourceSha256": "b1a641487da790f3cefabc91b7eda04f1713f19a9bb4ddf286e92dc6c12badb4",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6d945c7f806ab07f1f82ddbda50e414c074c235c29405e89e1cbd0e0975c649d",
+            "length": 16,
+            "preview": "Promise<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Promise<boolean>"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6d945c7f806ab07f1f82ddbda50e414c074c235c29405e89e1cbd0e0975c649d",
+            "length": 16,
+            "preview": "Promise<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Promise<boolean>"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6d945c7f806ab07f1f82ddbda50e414c074c235c29405e89e1cbd0e0975c649d",
+            "length": 16,
+            "preview": "Promise<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Promise<boolean>"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6d945c7f806ab07f1f82ddbda50e414c074c235c29405e89e1cbd0e0975c649d",
+            "length": 16,
+            "preview": "Promise<boolean>"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "Promise<boolean>"
+        }
+      }
+    },
+    "overloads-1025": {
+      "sourceSha256": "786dc853876c853581b9025662a325537b67d04a871249cd19a18f42a7cd29a8",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "46a3ae93aa7a8b988080d6c9a03adc15d0518284b1fc2e498db412676d201d5a",
+            "length": 3,
+            "preview": "\"n\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"n\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "46a3ae93aa7a8b988080d6c9a03adc15d0518284b1fc2e498db412676d201d5a",
+            "length": 3,
+            "preview": "\"n\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"n\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "46a3ae93aa7a8b988080d6c9a03adc15d0518284b1fc2e498db412676d201d5a",
+            "length": 3,
+            "preview": "\"n\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"n\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "46a3ae93aa7a8b988080d6c9a03adc15d0518284b1fc2e498db412676d201d5a",
+            "length": 3,
+            "preview": "\"n\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"n\""
+        }
+      }
+    },
+    "reference-infer-aliases-100": {
+      "sourceSha256": "20bd4ef9afb8ee7999be877b4bfe9e5fecb69e329316709c227561f086382bfd",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ff308e8cf30efb9edd294c3adda5f71319b37e843fe3d9e23b7c2b4e541c8572",
+            "length": 487,
+            "preview": "0 | 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 2 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 3 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 |…"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 1 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 2 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 3 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 4 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 5 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 6 | 70 | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 7 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 8 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 9"
+        }
+      }
+    },
+    "reference-infer-aliases-1000": {
+      "sourceSha256": "564a3fc6cd97e43aef70cfe34d945c8b201aaf1ea0f4e43ac4b18bfee2d7849a",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "09dc890cae4adbe82e9cbf5c7ab0dff5cf650b17038c51351422e51c625b6af8",
+            "length": 5887,
+            "preview": "0 | 1 | 10 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 11 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 12 | 120 | 121 | 122 |…"
+          },
+          "errorAny": false,
+          "codes": []
+        }
+      }
+    },
+    "reference-infer-depth-10": {
+      "sourceSha256": "9b7becbe221416ab8ddd47bd24db07958a2bf5876beefb492ef1a7fb8e255b7b",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        }
+      }
+    },
+    "reference-infer-depth-100": {
+      "sourceSha256": "2a1e14f29554c3be913cff45525d4c90bf011b003f58aaa5397e0107819f1ff2",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        }
+      }
+    },
+    "reference-infer-depth-500": {
+      "sourceSha256": "f87277e7d39ab6f52e33d7b7c06d84277ad9c8570a183f73108a38eabd01abec",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "length": 3,
+            "preview": "\"x\""
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "\"x\""
+        }
+      }
+    },
+    "relation-aligned-1800": {
+      "sourceSha256": "dbd85afff04b37e8cd35b12a50c871aaedd362fa9d79b88de94287cd09014922",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-aligned-200": {
+      "sourceSha256": "0051c8d022ce1d784730ae8024a788814f0b3dcadfbdedd40e5217621a6306c9",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-aligned-3200": {
+      "sourceSha256": "58668af3d60d0dd1a923de8eee1c734f1f923e38b9b37a20b66ad2abbaab2c03",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-aligned-600": {
+      "sourceSha256": "b75547b90439ce42a00e38cd9fb67724fa92599b6799276ec85c20abd7b89327",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-reversed-1800": {
+      "sourceSha256": "2b773386d5b3ac5e34cebe8226522ab55e8ef8b2b29788e560c923e00f18f48a",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-reversed-200": {
+      "sourceSha256": "0c8f23c6a74fea8b36b9b64d620785eaa58e661e39584e25594cda1ee2700cd2",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "relation-reversed-2100": {
+      "sourceSha256": "172b943752b93842e877b679a0ab4587e3afd0e94a71705135aca7709a1ee422",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        }
+      }
+    },
+    "relation-reversed-3200": {
+      "sourceSha256": "e5775d28df8f4ff7438c30c863920ee7a500bdb74b9d4fe7206b6081fa229360",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "length": 1,
+            "preview": "2"
+          },
+          "errorAny": false,
+          "codes": [
+            2859
+          ],
+          "text": "2"
+        }
+      }
+    },
+    "relation-reversed-600": {
+      "sourceSha256": "ef53734bc7a91a31181115d72faa8e3e16b2f50c066909a601bc8345f432e9bd",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "length": 1,
+            "preview": "1"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "1"
+        }
+      }
+    },
+    "spread-369x271": {
+      "sourceSha256": "f56ed66cc0db17681473f78dd7d66d335b0ba94245e7092ede8b22e4e694366a",
+      "settings": {
+        "strict": {
+          "killed": "memory",
+          "codes": []
+        },
+        "snc-off": {
+          "killed": "memory",
+          "codes": []
+        },
+        "nia-off": {
+          "killed": "memory",
+          "codes": []
+        },
+        "both-off": {
+          "killed": "memory",
+          "codes": []
+        }
+      }
+    },
+    "spread-400x250": {
+      "sourceSha256": "4e436fff1bb6a685ceab84549bc0bfdbae7143198a4ff548ea033818bea9669b",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "spread3-50x50x39": {
+      "sourceSha256": "a505eec45d127bfc055ccad044bd4dc3eccc4b5103910b8490e7f288d4b315a7",
+      "settings": {
+        "strict": {
+          "killed": "memory",
+          "codes": []
+        },
+        "snc-off": {
+          "killed": "memory",
+          "codes": []
+        },
+        "nia-off": {
+          "killed": "memory",
+          "codes": []
+        },
+        "both-off": {
+          "killed": "memory",
+          "codes": []
+        }
+      }
+    },
+    "spread3-50x50x40": {
+      "sourceSha256": "f79bae5496220ea2c7583b6badc6d615f1d3ff3f6862855db13670db3048556e",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "tail-recursive-parse-1000": {
+      "sourceSha256": "45524555f344e046a36aedbc4c3ec3264908b60b06be5310b3273100eb452b6b",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2589
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "tail-recursive-parse-50": {
+      "sourceSha256": "d0fc286ab29d2e73f33a9baed48ba42bb61b360e3593320cc732f770de5beaf6",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "1a6562590ef19d1045d06c4055742d38288e9e6dcd71ccde5cee80f1d5a774eb",
+            "length": 2,
+            "preview": "50"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "50"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "1a6562590ef19d1045d06c4055742d38288e9e6dcd71ccde5cee80f1d5a774eb",
+            "length": 2,
+            "preview": "50"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "50"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "1a6562590ef19d1045d06c4055742d38288e9e6dcd71ccde5cee80f1d5a774eb",
+            "length": 2,
+            "preview": "50"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "50"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "1a6562590ef19d1045d06c4055742d38288e9e6dcd71ccde5cee80f1d5a774eb",
+            "length": 2,
+            "preview": "50"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "50"
+        }
+      }
+    },
+    "tail-recursive-parse-500": {
+      "sourceSha256": "20e2b787c0541b07405170cd0a9741b860daff2d90ba3233749f29f68e043b60",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "0604cd3138feed202ef293e062da2f4720f77a05d25ee036a7a01c9cfcdd1f0a",
+            "length": 3,
+            "preview": "500"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "500"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "0604cd3138feed202ef293e062da2f4720f77a05d25ee036a7a01c9cfcdd1f0a",
+            "length": 3,
+            "preview": "500"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "500"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "0604cd3138feed202ef293e062da2f4720f77a05d25ee036a7a01c9cfcdd1f0a",
+            "length": 3,
+            "preview": "500"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "500"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "0604cd3138feed202ef293e062da2f4720f77a05d25ee036a7a01c9cfcdd1f0a",
+            "length": 3,
+            "preview": "500"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "500"
+        }
+      }
+    },
+    "tail-recursive-parse-999": {
+      "sourceSha256": "c412a7c8b9671d386379c4ff7cd202b012617fb5545d51f4fe88b956ba3ce3eb",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "83cf8b609de60036a8277bd0e96135751bbc07eb234256d4b65b893360651bf2",
+            "length": 3,
+            "preview": "999"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "999"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "83cf8b609de60036a8277bd0e96135751bbc07eb234256d4b65b893360651bf2",
+            "length": 3,
+            "preview": "999"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "999"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "83cf8b609de60036a8277bd0e96135751bbc07eb234256d4b65b893360651bf2",
+            "length": 3,
+            "preview": "999"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "999"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "83cf8b609de60036a8277bd0e96135751bbc07eb234256d4b65b893360651bf2",
+            "length": 3,
+            "preview": "999"
+          },
+          "errorAny": false,
+          "codes": [],
+          "text": "999"
+        }
+      }
+    },
+    "template-369x271": {
+      "sourceSha256": "60c58e6ea10dada2a2d8d4e66ac29d4afd956bf6ae47728ab38ce56955593119",
+      "settings": {
+        "strict": {
+          "truncated": true,
+          "codes": []
+        },
+        "snc-off": {
+          "truncated": true,
+          "codes": []
+        },
+        "nia-off": {
+          "truncated": true,
+          "codes": []
+        },
+        "both-off": {
+          "truncated": true,
+          "codes": []
+        }
+      }
+    },
+    "template-4-spans": {
+      "sourceSha256": "1273accaabba94f3867a32f1ff65b9ea39a475d5fb13a9337708389f89b5cfe6",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "5a8c8f0929a4968af5d73bcabb4b638c0679bb32bfadb4e2f9818bd886caf5bd",
+            "length": 89997,
+            "preview": "\"0000\" | \"0001\" | \"0002\" | \"0003\" | \"0004\" | \"0005\" | \"0006\" | \"0007\" | \"0008\" | \"0009\" | \"0010\" | \"0011\" | \"0012\" | \"0013\" | \"0014\" | \"0015\" | \"0016\" | \"0017\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "5a8c8f0929a4968af5d73bcabb4b638c0679bb32bfadb4e2f9818bd886caf5bd",
+            "length": 89997,
+            "preview": "\"0000\" | \"0001\" | \"0002\" | \"0003\" | \"0004\" | \"0005\" | \"0006\" | \"0007\" | \"0008\" | \"0009\" | \"0010\" | \"0011\" | \"0012\" | \"0013\" | \"0014\" | \"0015\" | \"0016\" | \"0017\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "5a8c8f0929a4968af5d73bcabb4b638c0679bb32bfadb4e2f9818bd886caf5bd",
+            "length": 89997,
+            "preview": "\"0000\" | \"0001\" | \"0002\" | \"0003\" | \"0004\" | \"0005\" | \"0006\" | \"0007\" | \"0008\" | \"0009\" | \"0010\" | \"0011\" | \"0012\" | \"0013\" | \"0014\" | \"0015\" | \"0016\" | \"0017\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "5a8c8f0929a4968af5d73bcabb4b638c0679bb32bfadb4e2f9818bd886caf5bd",
+            "length": 89997,
+            "preview": "\"0000\" | \"0001\" | \"0002\" | \"0003\" | \"0004\" | \"0005\" | \"0006\" | \"0007\" | \"0008\" | \"0009\" | \"0010\" | \"0011\" | \"0012\" | \"0013\" | \"0014\" | \"0015\" | \"0016\" | \"0017\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        }
+      }
+    },
+    "template-400x250": {
+      "sourceSha256": "224ef185f080fe8eab1ceaea38416ac3413ec9b60ce71144a46dce4eeb4475a7",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "template-5-spans": {
+      "sourceSha256": "e0a8a757026493138e02b855035963be1b2b85846f401b8a2bbf22a5dd8e917f",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d6a7cd2a7371b1a15d543196979ff74fdb027023ebf187d5d329be11055c77fd",
+            "length": 3,
+            "preview": "any"
+          },
+          "errorAny": true,
+          "codes": [
+            2590
+          ],
+          "text": "any"
+        }
+      }
+    },
+    "template-absorption-400x250": {
+      "sourceSha256": "b0e96829790e370246587c82adda6440474f2eb6fa539964c5fdd67a6df000f4",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "d7f62b8960e585c96ba0a83220845498bdac8aaef4a8950cbc489af3163fa9dc",
+            "length": 4887,
+            "preview": "`a${number}-b0` | `a${number}-b100` | `a${number}-b101` | `a${number}-b102` | `a${number}-b103` | `a${number}-b104` | `a${number}-b105` | `a${number}-b106` | `a…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "d7f62b8960e585c96ba0a83220845498bdac8aaef4a8950cbc489af3163fa9dc",
+            "length": 4887,
+            "preview": "`a${number}-b0` | `a${number}-b100` | `a${number}-b101` | `a${number}-b102` | `a${number}-b103` | `a${number}-b104` | `a${number}-b105` | `a${number}-b106` | `a…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "d7f62b8960e585c96ba0a83220845498bdac8aaef4a8950cbc489af3163fa9dc",
+            "length": 4887,
+            "preview": "`a${number}-b0` | `a${number}-b100` | `a${number}-b101` | `a${number}-b102` | `a${number}-b103` | `a${number}-b104` | `a${number}-b105` | `a${number}-b106` | `a…"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "d7f62b8960e585c96ba0a83220845498bdac8aaef4a8950cbc489af3163fa9dc",
+            "length": 4887,
+            "preview": "`a${number}-b0` | `a${number}-b100` | `a${number}-b101` | `a${number}-b102` | `a${number}-b103` | `a${number}-b104` | `a${number}-b105` | `a${number}-b106` | `a…"
+          },
+          "errorAny": false,
+          "codes": []
+        }
+      }
+    },
+    "template-nested": {
+      "sourceSha256": "d5072657de56c20f8744161e7088ee6deefd403667fb690ebe808160448e588b",
+      "settings": {
+        "strict": {
+          "digest": {
+            "sha256": "8528d3cae1269606c10abb1b75d6f415c45afa0993e74769b61c72cd79713965",
+            "length": 8997,
+            "preview": "\"00-0\" | \"00-1\" | \"00-2\" | \"00-3\" | \"00-4\" | \"00-5\" | \"00-6\" | \"00-7\" | \"00-8\" | \"00-9\" | \"01-0\" | \"01-1\" | \"01-2\" | \"01-3\" | \"01-4\" | \"01-5\" | \"01-6\" | \"01-7\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "snc-off": {
+          "digest": {
+            "sha256": "8528d3cae1269606c10abb1b75d6f415c45afa0993e74769b61c72cd79713965",
+            "length": 8997,
+            "preview": "\"00-0\" | \"00-1\" | \"00-2\" | \"00-3\" | \"00-4\" | \"00-5\" | \"00-6\" | \"00-7\" | \"00-8\" | \"00-9\" | \"01-0\" | \"01-1\" | \"01-2\" | \"01-3\" | \"01-4\" | \"01-5\" | \"01-6\" | \"01-7\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "nia-off": {
+          "digest": {
+            "sha256": "8528d3cae1269606c10abb1b75d6f415c45afa0993e74769b61c72cd79713965",
+            "length": 8997,
+            "preview": "\"00-0\" | \"00-1\" | \"00-2\" | \"00-3\" | \"00-4\" | \"00-5\" | \"00-6\" | \"00-7\" | \"00-8\" | \"00-9\" | \"01-0\" | \"01-1\" | \"01-2\" | \"01-3\" | \"01-4\" | \"01-5\" | \"01-6\" | \"01-7\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        },
+        "both-off": {
+          "digest": {
+            "sha256": "8528d3cae1269606c10abb1b75d6f415c45afa0993e74769b61c72cd79713965",
+            "length": 8997,
+            "preview": "\"00-0\" | \"00-1\" | \"00-2\" | \"00-3\" | \"00-4\" | \"00-5\" | \"00-6\" | \"00-7\" | \"00-8\" | \"00-9\" | \"01-0\" | \"01-1\" | \"01-2\" | \"01-3\" | \"01-4\" | \"01-5\" | \"01-6\" | \"01-7\" …"
+          },
+          "errorAny": false,
+          "codes": []
+        }
+      }
+    }
+  },
+  "schema": 1,
+  "typescript": "7.0.2",
+  "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
+  "measuredWith": "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus `type __BenchExpand<T> = T extends __BenchNothing ? never : [T]; declare const __bench_v: [__BenchExpand<__Probe>]; const __bench_s: [never] = __bench_v;` and a never check, read off the head of the TS2322 messages; a print tsc elides (bare `any` among the tuples) is recorded as truncated, a run past the cap or deadline as killed; run under the capped tsc wrapper"
+}

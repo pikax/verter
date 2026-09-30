@@ -23,7 +23,10 @@ const esc = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 
 function referenceText(ref) {
   if (!ref) return "no reference";
-  if (ref.killed) return `tsc exhausts resources (${ref.killed})`;
+  if (ref.gap) return ref.gap;
+  if (ref.byConstruction) {
+    return `\`${esc(ref.digest?.preview)}\` (measurement: ${ref.measuredKilled}; the API's answer is the constructed one)`;
+  }
   const answer = ref.errorAny ? "error any" : `\`${esc(ref.digest?.preview)}\``;
   const codes = ref.codes.filter((c) => c !== 2322);
   return codes.length ? `${answer} + TS${codes.join("/TS")}` : answer;

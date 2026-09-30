@@ -186,6 +186,13 @@ wrapper). The benchmark's tsc arm must then reproduce the reference exactly —
 same canonical answer, same error-type flag — or the run fails validation:
 either the reference or the arm is wrong.
 
+The measuring `tsc -p` checks the whole file, so it can exhaust the cap on a
+program whose single demanded probe the API still answers. In that case the
+API's answer becomes the reference only when it equals the answer the
+scenario constructs (labelled "by construction" in the report); any other API
+answer is `unverified` and its row is never compared. An API arm killed at
+the cap is a valid observation ("tsc exhausts resources").
+
 Each Verter answer is classified against the reference:
 
 | Class | Meaning |
@@ -249,6 +256,13 @@ even `--repeat` each arm runs first in exactly half of its measured
 invocations. Warmups are run, recorded and validated like any other
 invocation, then excluded from the statistics. Fresh processes mean cold
 semantic caches, not cold filesystem caches.
+
+When a warmup is killed at the memory cap, the remaining invocations of that
+(scenario, setting, arm) are recorded as `skipped` rather than driving the
+machine to the cap again (a memory kill is deterministic; a timeout is not,
+and is always re-run). The validator accepts a skipped record only after such
+a kill, and the row is classified `killed`. `--no-skip-after-kill` runs every
+invocation.
 
 ## Process supervision
 

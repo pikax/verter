@@ -46,6 +46,8 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --allow-sampled         consent to a sampled (not kernel-enforced) memory cap; required on macOS
   --typescript-from <dir> directory whose node_modules resolves typescript@7.0.2 (default: repository root)
   --lib-mode <m>          how Verter reads the library: root-file (default, as tsc does) | ambient
+  --no-skip-after-kill    re-run every invocation of an arm whose warmup was killed at the memory cap
+                          (by default the rest are recorded as skipped: a memory kill is deterministic)
   --help`;
 
 function parseArgs(argv) {
@@ -63,6 +65,7 @@ function parseArgs(argv) {
     allowSampled: false,
     typescriptFrom: ROOT,
     libMode: "root-file",
+    skipAfterKill: true,
   };
   const positive = (name, value, min = 1) => {
     const n = Number(value);
@@ -124,6 +127,9 @@ function parseArgs(argv) {
         opts.libMode = v;
         break;
       }
+      case "--no-skip-after-kill":
+        opts.skipAfterKill = false;
+        break;
       case "--help":
         opts.help = true;
         break;
@@ -278,8 +284,26 @@ export async function main(argv) {
   const plan = schedule([...cells.keys()], opts.arms, opts.repeat, opts.warmup);
   const invocations = [];
   const started = Date.now();
+  // (cell, arm) pairs whose warmup was killed at the memory cap: a memory
+  // kill is deterministic, so the remaining invocations are recorded as
+  // skipped instead of driving the machine to the cap again.
+  const memoryKilled = new Map();
   for (const [index, step] of plan.entries()) {
     const cell = cells.get(step.key);
+    const cellArm = `${step.key}|${step.arm}`;
+    if (opts.skipAfterKill && memoryKilled.has(cellArm)) {
+      invocations.push({
+        index,
+        scenario: cell.scenario.id,
+        setting: cell.setting.id,
+        arm: step.arm,
+        rep: step.rep,
+        warmup: step.warmup,
+        skipped: { after: memoryKilled.get(cellArm), reason: "a warmup of this scenario and arm was killed at the memory cap" },
+      });
+      log(`[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: skipped (warmup killed at the memory cap)`);
+      continue;
+    }
     const runDir = join(outDir, "runs", cell.scenario.id, cell.setting.id, step.arm);
     mkdirSync(runDir, { recursive: true });
     const runBase = join(runDir, `${step.warmup ? "warmup" : "rep"}-${step.rep}`);
@@ -333,6 +357,7 @@ export async function main(argv) {
       probeReadError,
       cliStdout,
     });
+    if (step.warmup && record?.killedBy === "memory") memoryKilled.set(cellArm, index);
     const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
     log(
       `[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: ${end} ` +

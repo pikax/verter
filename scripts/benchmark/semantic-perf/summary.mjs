@@ -2,7 +2,7 @@
 // records and the measured reference. The validator recomputes it and fails
 // a run whose stored summary differs.
 
-import { ARMS, classifyVerterAnswer, invocationEnd, parseCli, probeAnswer, probeMetrics, stats, tscAnswerProblem, verdict } from "./analyze.mjs";
+import { ARMS, classifyVerterAnswer, invocationEnd, parseCli, probeAnswer, probeMetrics, referenceGap, stats, tscAnswerStatus, verdict } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
 
 /** The reference entry of one (scenario, setting), or null. */
@@ -57,10 +57,14 @@ function probeArmSummary(arm, invs, reference, scenario) {
     out.class = out.classes.length === 1 ? out.classes[0] : "inconsistent";
     out.detail = classes[0]?.detail ?? "";
   } else {
-    const problems = answers.map((a) => tscAnswerProblem(a, reference));
-    out.referenceProblems = [...new Set(problems.filter(Boolean))];
-    const killed = answers.every((a) => a.end.kind === "killed");
-    out.class = killed ? "killed" : out.referenceProblems.length ? "inconsistent-with-reference" : "reference";
+    const statuses = answers.map((a) => tscAnswerStatus(a, reference, beyondDigest(scenario)));
+    out.referenceProblems = [...new Set(statuses.filter((s) => s.problem).map((s) => s.problem))];
+    const kinds = [...new Set(statuses.map((s) => s.status))];
+    out.class = out.referenceProblems.length
+      ? "inconsistent-with-reference"
+      : kinds.length === 1
+        ? { killed: "killed", reference: "reference", "by-construction": "reference-by-construction", unverified: "unverified" }[kinds[0]]
+        : "inconsistent";
     out.errorType = answers[0]?.errorType ?? null;
   }
   const metrics = measured.map(probeMetrics);
@@ -133,13 +137,24 @@ export function summarize(run, expected, scenarios) {
   for (const key of Object.keys(run.meta.scenarios)) {
     const meta = run.meta.scenarios[key];
     const scenario = byId.get(meta.id);
-    const reference = referenceFor(expected, meta.id, meta.setting);
+    const measured = referenceFor(expected, meta.id, meta.setting);
+    const armInvs = groups.get(key) ?? {};
     const arms = {};
-    for (const [arm, invs] of Object.entries(groups.get(key) ?? {})) {
+    // The tsc arm first: when the CLI measurement exhausted resources but
+    // the API answered with the constructed answer, that answer is the
+    // reference the Verter arms are classified against.
+    if (armInvs["tsc-api"]) arms["tsc-api"] = probeArmSummary("tsc-api", armInvs["tsc-api"], measured, scenario);
+    const reference =
+      arms["tsc-api"]?.class === "reference-by-construction"
+        ? { digest: beyondDigest(scenario), errorAny: false, codes: [], byConstruction: true }
+        : measured;
+    for (const [arm, invs] of Object.entries(armInvs)) {
+      if (arm === "tsc-api") continue;
       arms[arm] = ARMS[arm].kind === "cli" ? cliArmSummary(invs) : probeArmSummary(arm, invs, reference, scenario);
     }
+    const comparableTsc = ["reference", "reference-by-construction"].includes(arms["tsc-api"]?.class);
     const headline =
-      arms.verter?.class === "matched" && arms["tsc-api"]?.class === "reference"
+      arms.verter?.class === "matched" && comparableTsc
         ? comparison(groups.get(key).verter, groups.get(key)["tsc-api"])
         : null;
     const obsCost =
@@ -159,7 +174,15 @@ export function summarize(run, expected, scenarios) {
       family: meta.family,
       note: meta.note,
       reference: reference
-        ? { digest: reference.digest ?? null, errorAny: reference.errorAny ?? null, codes: reference.codes ?? [], killed: reference.killed ?? null }
+        ? {
+            digest: reference.digest ?? null,
+            errorAny: reference.errorAny ?? null,
+            codes: reference.codes ?? [],
+            killed: reference.killed ?? null,
+            gap: referenceGap(reference),
+            byConstruction: reference.byConstruction ?? false,
+            measuredKilled: referenceGap(measured),
+          }
         : null,
       arms,
       headline,

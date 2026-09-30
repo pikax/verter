@@ -131,6 +131,20 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   // Each invocation.
   for (const inv of invs) {
     const id = planEntry(inv);
+    if (inv.skipped) {
+      const source = invs[inv.skipped.after];
+      const valid =
+        opts.skipAfterKill &&
+        source &&
+        source.index < inv.index &&
+        source.warmup &&
+        source.scenario === inv.scenario &&
+        source.setting === inv.setting &&
+        source.arm === inv.arm &&
+        source.supervisor?.killedBy === "memory";
+      if (!valid) fail(`${id}: skipped without a warmup of the same scenario and arm killed at the memory cap`);
+      continue;
+    }
     const sup = inv.supervisor;
     for (const p of supervisorRecordProblems(sup)) fail(`${id}: ${p}`);
     if (!sup) continue;
@@ -234,6 +248,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
 export function rawFileProblems(run) {
   const problems = [];
   for (const inv of run.invocations ?? []) {
+    if (inv.skipped) continue;
     const id = planEntry(inv);
     try {
       const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));

@@ -84,6 +84,13 @@ test("the reference parser reads the probe's members, never, and error-any, and 
   assert.equal(errorAny.text, "any");
   assert.equal(errorAny.errorAny, true);
   assert.deepEqual(errorAny.codes, [2589]);
+  // tsc's printer elides a very large type: bare `any` among the tuples is not an answer.
+  const elided = parseMeasurement(
+    `scenario.ts(${line},7): error TS2322: Type '[["a0-b0"] | ["a0-b1"] | [any] | any | [any]]' is not assignable to type '[never]'.\n` +
+      verdictLine("no"),
+    source,
+  );
+  assert.equal(elided.truncated, true);
   // Output with neither assignment's verdict (a killed or truncated run) is never read as `never`.
   assert.throws(() => parseMeasurement("", source), /never check/);
   assert.throws(() => parseMeasurement(verdictLine("no"), source), /not never/);
@@ -294,6 +301,25 @@ test("a tsc error-type flag that disagrees with the reference fails validation",
   failsWith(resummarize(run), /error-type flag/);
 });
 
+test("when the measuring tsc -p exhausts resources, an API answer equal to the constructed one becomes the reference", () => {
+  const scenario = { ...SCENARIO, beyond: "1" };
+  const killedRef = structuredClone(EXPECTED);
+  killedRef.scenarios.synthetic.settings.strict = { killed: "memory", codes: [] };
+  const run = syntheticRun();
+  run.summary = summarize(run, killedRef, [scenario]);
+  const cell = run.summary.cells[0];
+  assert.equal(cell.arms["tsc-api"].class, "reference-by-construction");
+  assert.equal(cell.arms.verter.class, "matched");
+  assert.ok(cell.headline);
+  assert.deepEqual(validateRun(run, killedRef, [scenario]).failures, []);
+  // Without a constructed answer the API's answer cannot be checked: never compared, not a failure.
+  const run2 = syntheticRun();
+  run2.summary = summarize(run2, killedRef, [SCENARIO]);
+  assert.equal(run2.summary.cells[0].arms["tsc-api"].class, "unverified");
+  assert.equal(run2.summary.cells[0].headline, null);
+  assert.deepEqual(validateRun(run2, killedRef, [SCENARIO]).failures, []);
+});
+
 test("a wrong Verter answer is a finding, never a comparison, and fails --require-all-matched", () => {
   const run = resummarize(syntheticRun({ verterText: "2" }));
   assert.deepEqual(validate(run).failures, []);
@@ -402,6 +428,31 @@ test("sampled containment without consent fails validation", () => {
   const run = syntheticRun();
   run.invocations[0].supervisor.containment = "sampled";
   failsWith(run, /without consent/);
+});
+
+test("after a warmup killed at the memory cap the rest of that arm may be skipped, and only then", () => {
+  const run = syntheticRun();
+  run.meta.options.skipAfterKill = true;
+  const warmup = run.invocations.find((i) => i.arm === "tsc-api" && i.warmup);
+  warmup.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+  warmup.supervisorExit = 137;
+  warmup.probe = null;
+  for (const inv of run.invocations) {
+    if (inv.arm === "tsc-api" && !inv.warmup) {
+      for (const key of ["command", "supervisorOut", "supervisorExit", "supervisor", "probeOut", "probe"]) delete inv[key];
+      inv.skipped = { after: warmup.index, reason: "a warmup of this scenario and arm was killed at the memory cap" };
+    }
+  }
+  resummarize(run);
+  assert.deepEqual(validate(run).failures, []);
+  assert.equal(run.summary.cells[0].arms["tsc-api"].class, "killed");
+  assert.equal(run.summary.cells[0].headline, null);
+  // A skip that no memory-killed warmup justifies fails validation.
+  const run2 = syntheticRun();
+  run2.meta.options.skipAfterKill = true;
+  const inv = run2.invocations.find((i) => i.arm === "tsc-api" && !i.warmup);
+  inv.skipped = { after: 0, reason: "made up" };
+  failsWith(resummarize(run2), /skipped without a warmup/);
 });
 
 test("a raw record on disk that differs from results.json is reported", () => {
