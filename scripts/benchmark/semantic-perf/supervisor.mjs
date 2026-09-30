@@ -51,13 +51,22 @@ export function resolveSupervisor(root, explicitPath) {
   }
   const env = { ...process.env };
   if (!env.CARGO_INCREMENTAL) env.CARGO_INCREMENTAL = "0";
-  const r = spawnSync("cargo", ["build", "--release", "-p", "verter_supervise", "--bin", "verter-supervise"], {
-    cwd: root,
-    env,
-    stdio: ["ignore", "inherit", "inherit"],
-  });
+  const r = spawnSync(
+    "cargo",
+    ["build", "--release", "-p", "verter_supervise", "--bin", "verter-supervise"],
+    {
+      cwd: root,
+      env,
+      stdio: ["ignore", "inherit", "inherit"],
+    },
+  );
   if (r.status !== 0) throw new Error(`building verter-supervise failed (exit ${r.status})`);
-  const path = join(root, "target", "release", process.platform === "win32" ? "verter-supervise.exe" : "verter-supervise");
+  const path = join(
+    root,
+    "target",
+    "release",
+    process.platform === "win32" ? "verter-supervise.exe" : "verter-supervise",
+  );
   if (!existsSync(path)) throw new Error(`verter-supervise was not built at ${path}`);
   return { path, origin: "workspace" };
 }
@@ -66,8 +75,10 @@ export function resolveSupervisor(root, explicitPath) {
 export function supervisorRecordProblems(record) {
   if (!record || typeof record !== "object") return ["no supervisor result document"];
   const problems = [];
-  for (const field of REQUIRED_FIELDS) if (!(field in record)) problems.push(`supervisor result lacks ${field}`);
-  if (record.schema !== SUPERVISOR_SCHEMA) problems.push(`supervisor result schema ${record.schema} is not ${SUPERVISOR_SCHEMA}`);
+  for (const field of REQUIRED_FIELDS)
+    if (!(field in record)) problems.push(`supervisor result lacks ${field}`);
+  if (record.schema !== SUPERVISOR_SCHEMA)
+    problems.push(`supervisor result schema ${record.schema} is not ${SUPERVISOR_SCHEMA}`);
   return problems;
 }
 
@@ -75,7 +86,10 @@ export function supervisorRecordProblems(record) {
  * Run `argv` under the supervisor; resolves with the supervisor's exit code
  * and its parsed result document (or the reason it could not be read).
  */
-export function runSupervised(supervisor, { memMb, timeoutMs, out, cwd, env = {}, argv, allowSampled }) {
+export function runSupervised(
+  supervisor,
+  { memMb, timeoutMs, out, cwd, env = {}, argv, allowSampled },
+) {
   const args = ["run", "--mem-mb", String(memMb), "--timeout-ms", String(timeoutMs), "--out", out];
   if (cwd) args.push("--cwd", cwd);
   for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
@@ -85,7 +99,9 @@ export function runSupervised(supervisor, { memMb, timeoutMs, out, cwd, env = {}
     const child = spawn(supervisor, args, { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("error", (err) => resolve({ supervisorExit: null, spawnError: String(err), record: null, stderr }));
+    child.on("error", (err) =>
+      resolve({ supervisorExit: null, spawnError: String(err), record: null, stderr }),
+    );
     child.on("close", (code, signal) => {
       let record = null;
       let readError = null;
@@ -94,7 +110,13 @@ export function runSupervised(supervisor, { memMb, timeoutMs, out, cwd, env = {}
       } catch (err) {
         readError = String(err);
       }
-      resolve({ supervisorExit: code, supervisorSignal: signal, record, readError, stderr: stderr.slice(0, 4000) });
+      resolve({
+        supervisorExit: code,
+        supervisorSignal: signal,
+        record,
+        readError,
+        stderr: stderr.slice(0, 4000),
+      });
     });
   });
 }

@@ -122,7 +122,9 @@ export function allScenarios() {
         {
           beyond: union(
             range(50).flatMap((i) =>
-              range(50).flatMap((j) => range(c).map((k) => `{ a${i}: ${i}; b${j}: ${j}; c${k}: ${k}; }`)),
+              range(50).flatMap((j) =>
+                range(c).map((k) => `{ a${i}: ${i}; b${j}: ${j}; c${k}: ${k}; }`),
+              ),
             ),
           ),
         },
@@ -134,7 +136,8 @@ export function allScenarios() {
   const digits = `type D = ${union(range(10).map((i) => `"${i}"`))};\n`;
   const digitStrings = (spans) => {
     let acc = [""];
-    for (let s = 0; s < spans; s++) acc = acc.flatMap((prefix) => range(10).map((d) => `${prefix}${d}`));
+    for (let s = 0; s < spans; s++)
+      acc = acc.flatMap((prefix) => range(10).map((d) => `${prefix}${d}`));
     return acc;
   };
   out.push(
@@ -165,7 +168,8 @@ export function allScenarios() {
         `template-${a}x${b}`,
         "products",
         `\`\${A}-\${B}\` over ${a} and ${b} string literals (${a * b} members)`,
-        `type A = ${union(range(a).map((i) => `"a${i}"`))};\n` + `type B = ${union(range(b).map((i) => `"b${i}"`))};\n`,
+        `type A = ${union(range(a).map((i) => `"a${i}"`))};\n` +
+          `type B = ${union(range(b).map((i) => `"b${i}"`))};\n`,
         "`${A}-${B}`",
         { beyond: union(range(a).flatMap((i) => range(b).map((j) => `"a${i}-b${j}"`))) },
       ),
@@ -198,7 +202,11 @@ export function allScenarios() {
         `alias-chain-${n}`,
         "depth",
         `alias chain A_i<T> = A_{i-1}<T>, ${n} links`,
-        "type A0<T> = T | undefined;\n" + range(n).map((i) => `type A${i + 1}<T> = A${i}<T>;`).join("\n") + "\n",
+        "type A0<T> = T | undefined;\n" +
+          range(n)
+            .map((i) => `type A${i + 1}<T> = A${i}<T>;`)
+            .join("\n") +
+          "\n",
         `A${n}<"ok">`,
       ),
     );
@@ -206,7 +214,12 @@ export function allScenarios() {
   {
     // The 1,000-link chain in a 1 MiB module: unrelated interfaces fill the
     // rest, so setup parses and binds a megabyte both tools must read.
-    const chain = "type A0<T> = T | undefined;\n" + range(1000).map((i) => `type A${i + 1}<T> = A${i}<T>;`).join("\n") + "\n";
+    const chain =
+      "type A0<T> = T | undefined;\n" +
+      range(1000)
+        .map((i) => `type A${i + 1}<T> = A${i}<T>;`)
+        .join("\n") +
+      "\n";
     let filler = "";
     for (let i = 0; chain.length + filler.length < 1024 * 1024; i++) {
       filler += `interface Filler${i} { id: ${i}; name: "f${i}"; next?: Filler${i}; }\n`;
@@ -227,7 +240,11 @@ export function allScenarios() {
         `conditional-chain-${n}`,
         "depth",
         `nested conditional chain E_i<X> = E_{i-1}<E0<X>>, ${n} links`,
-        "type E0<X> = X extends string ? X : never;\n" + range(n).map((i) => `type E${i + 1}<X> = E${i}<E0<X>>;`).join("\n") + "\n",
+        "type E0<X> = X extends string ? X : never;\n" +
+          range(n)
+            .map((i) => `type E${i + 1}<X> = E${i}<E0<X>>;`)
+            .join("\n") +
+          "\n",
         `E${n}<"ok">`,
         { beyond: '"ok"' },
       ),
@@ -257,7 +274,10 @@ export function allScenarios() {
         `one type parameter inferred from a ${n}-element tuple argument`,
         `declare function f<T>(xs: [${range(n)
           .map(() => "T")
-          .join(", ")}]): T;\n` + `const r = f([${range(n).map(() => "1").join(", ")}]);\n`,
+          .join(", ")}]): T;\n` +
+          `const r = f([${range(n)
+            .map(() => "1")
+            .join(", ")}]);\n`,
         "typeof r",
       ),
     );
@@ -281,7 +301,10 @@ export function allScenarios() {
         `one T inferred from ${n} callback parameters`,
         `declare function co<T>(${range(n)
           .map((i) => `f${i}: (x: T) => void`)
-          .join(", ")}): T;\n` + `const r = co(${range(n).map(() => '(x: "a") => {}').join(", ")});\n`,
+          .join(", ")}): T;\n` +
+          `const r = co(${range(n)
+            .map(() => '(x: "a") => {}')
+            .join(", ")});\n`,
         "typeof r",
       ),
     );
@@ -294,7 +317,8 @@ export function allScenarios() {
         `a conditional whose pattern repeats an infer, distributed over ${n} object members`,
         range(n)
           .map((i) => `type M${i} = { a: ${i}; b: (x: ${i}) => void };`)
-          .join("\n") + "\ntype Pat<T> = T extends { a: infer U; b: (x: infer U) => void } ? U : 0;\n",
+          .join("\n") +
+          "\ntype Pat<T> = T extends { a: infer U; b: (x: infer U) => void } ? U : 0;\n",
         `Pat<${range(n)
           .map((i) => `M${i}`)
           .join(" | ")}>`,
@@ -307,7 +331,11 @@ export function allScenarios() {
         `reference-infer-depth-${d}`,
         "inference",
         `Box<…> extends Box<infer P> through ${d} nested aliases`,
-        "interface Box<T> { v: T }\ntype N0<T> = Box<T>;\n" + range(d).map((i) => `type N${i + 1}<T> = N${i}<T>;`).join("\n") + "\n",
+        "interface Box<T> { v: T }\ntype N0<T> = Box<T>;\n" +
+          range(d)
+            .map((i) => `type N${i + 1}<T> = N${i}<T>;`)
+            .join("\n") +
+          "\n",
         `N${d}<"x"> extends Box<infer P> ? P : never`,
       ),
     );
@@ -318,7 +346,11 @@ export function allScenarios() {
         `reference-infer-aliases-${n}`,
         "inference",
         `${n} distinct aliases of Box, each inferred through once`,
-        "interface Box<T> { v: T }\n" + range(n).map((i) => `type B${i}<T> = Box<T>;`).join("\n") + "\n",
+        "interface Box<T> { v: T }\n" +
+          range(n)
+            .map((i) => `type B${i}<T> = Box<T>;`)
+            .join("\n") +
+          "\n",
         `[${range(n)
           .map((i) => `B${i}<${i}>`)
           .join(", ")}] extends Box<infer P>[] ? P : never`,
@@ -404,11 +436,13 @@ export const UNCOVERED = [
   },
   {
     family: "frame-runtime overhead on shallow common paths",
-    reason: "a Verter-against-Verter regression (baseline vs candidate commit); scripts/benchmark/signature-kernel-perf.mjs measures it",
+    reason:
+      "a Verter-against-Verter regression (baseline vs candidate commit); scripts/benchmark/signature-kernel-perf.mjs measures it",
   },
   {
     family: "recursion-detection time per shape",
-    reason: "a Verter budget/divergence property with no equivalent tsc demand; measured by its own counting tests",
+    reason:
+      "a Verter budget/divergence property with no equivalent tsc demand; measured by its own counting tests",
   },
 ];
 

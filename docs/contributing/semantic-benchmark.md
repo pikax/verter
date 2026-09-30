@@ -72,8 +72,10 @@ tsc's request times are its **server-side processing time** as it reports it
 (the API's own `collectTiming` measurement, a timer around request handling
 that excludes transport), which excludes the IPC an in-process engine does not
 pay. On Windows the server's clock is coarse (it reports 0 or about half a
-millisecond for short requests); the verdict's resolution is derived from the
-run's own smallest observed server time rather than correcting either side.
+millisecond for short requests); the verdict's resolution is calibrated
+rather than correcting either side: after its measurement every tsc probe
+times 20 trivial warm requests, and the smallest positive time among them is
+the server clock's quantum (see Verdicts).
 The round trip is recorded beside every figure.
 
 Every warm request must return the cold request's answer (the same interned
@@ -105,15 +107,28 @@ validator requires both arms' figures to be the same metric.
 exhausting it, whether or not it survived. Each process tree is contained at
 the budget plus an allowance (`--infra-mb`, 1024 by default) for the tree's
 other members — tsc's node client and the statistics reader. A kill counts
-as the **engine** exhausting a resource only with evidence: Verter's tree is
-its engine alone; for tsc, the kill must fall in a phase where the node driver
-is blocked in one synchronous request (so it holds what it held when the
-phase began — the phase marker records that, read by the same reader) and
-that memory must fit the allowance with a 64 MiB margin, so the server alone
-passed the budget. Any other kill is **unattributed** (the tsc arm is then
-`unverified`, never "tsc exhausts resources"), and a kill while observing is
-never the engine's. After a warmup whose engine exhausted the cap, the rest of
-that arm is recorded as skipped (see Schedule).
+as the **engine** exhausting a resource only with evidence:
+
+- **Memory.** Only a tree that is the engine alone — a Verter probe, a
+  `tsc -p` process — proves it, and only when the supervisor's actual kill
+  threshold (`killTriggerBytes`: on a sampled backend such as macOS it is
+  below the cap) is at least the engine budget, in an accounting of the
+  engine's own memory (a Linux cgroup also counts page cache and kernel
+  memory, so a kill there proves nothing). A `tsc-api` tree also holds the
+  node driver, whose memory during a request is not bounded by anything the
+  harness can prove, so a memory kill of that tree is **never** attributed:
+  tsc exhausting memory on a demand is established by the measuring
+  `tsc -p` run (see Correctness), not by the API arm.
+- **Deadline.** The engine was computing when the whole-invocation deadline
+  expired: any time for a single-process tree, a server phase (engine start,
+  setup, init, cold, warm) for `tsc-api`.
+- Anything killed after the probe wrote its measured record (observing,
+  calibrating, tearing down) is never the engine's demand.
+
+Any other kill is **unattributed**: the arm is `unverified`, never "exhausts
+resources", and never makes a Verter answer `beyond-tsc`. After a warmup
+whose engine exhausted the cap, the rest of that arm is recorded as skipped
+(see Schedule).
 
 The supervisor independently reports each invocation's whole-process-tree
 peak and wall time (for `tsc-api` that tree includes the node client); those
@@ -186,12 +201,16 @@ Why each probe demands the same work of both tools:
    budget, allowance and deadline, in counterbalanced order (see Schedule).
 9. **Same shipped defaults.** The harness refuses to run while runtime or
    build tuning is present — variables such as `GOGC`, `GOMEMLIMIT`,
-   `GOMAXPROCS`, `GODEBUG`, `NODE_OPTIONS`, `RUSTFLAGS`, `RUSTC`,
-   `RUSTC_WRAPPER`, `CARGO_PROFILE_*` / `CARGO_TARGET_*` / `CARGO_BUILD_*`,
+   `GOMAXPROCS`, `GODEBUG`, `NODE_OPTIONS`, `RUSTFLAGS`,
+   `RUSTC_WRAPPER`, `CARGO_PROFILE_*` / `CARGO_TARGET_*` / `CARGO_BUILD_*`
+   (except `CARGO_BUILD_JOBS`, which only sets build parallelism),
    `CC` / `CFLAGS`, `RAYON_NUM_THREADS`, `VERTER_*`, or a Cargo configuration
    file outside the repository (in an ancestor directory or `CARGO_HOME`) —
-   unless `--allow-tuning` labels the run tuned. The compiler is the
-   toolchain's own (`rustup which rustc`, fingerprinted). The probe, node and
+   unless `--allow-tuning` labels the run tuned. Names are compared
+   case-insensitively (as Windows does). The build environment is controlled,
+   not inherited: the harness sets `CARGO_INCREMENTAL=0` and binds `RUSTC` to
+   the toolchain's own compiler (`rustup which rustc`), removing any other
+   spelling of either, and records both with the compiler's sha256. The probe, node and
    the tsc package must be one architecture and that must be the hardware's
    native one (read by the probe independently of node: `IsWow64Process2` on
    Windows, `hw.optional.arm64` on macOS), so nothing runs translated.
@@ -262,8 +281,13 @@ value; union members as a set (with `true | false` as `boolean`); `T[]` as
 `Array<T>`; object properties and methods keyed by their tagged name (a
 written name — `0` and `"0"` are one property — or a computed key, never
 equal to a string); same-named overloads, call and construct signatures keep
-their order; parameter names and tuple labels are dropped, with a type
-predicate's target bound to its parameter's position. Intersection order,
+their order; tuple labels are dropped. Binders are positions in a lexical
+environment: a signature binds its type parameters and parameters (a
+`typeof` of a parameter and a type predicate's target refer to it), a
+conditional binds its `infer` names in its extends clause and true branch,
+a mapped type binds its key; a reference resolves to the innermost binding
+of its name. So consistent renaming is one type, while swapped binders, or a
+bound name against the free name it shadows, are two. Intersection order,
 tuple order, argument order and modifiers are kept.
 
 Each Verter answer is classified against the reference:
@@ -274,7 +298,7 @@ Each Verter answer is classified against the reference:
 | `beyond-tsc` | tsc stops at an established resource limit — TS2589 / TS2590 / TS2799 / TS2859 beside its answer, or both the measuring program and the demand itself exhaust the cap — and Verter's answer equals the answer the scenario constructs; reported separately, **never counted as a speed win** |
 | `mismatch` | a different answer |
 | `partial` | the answer is incomplete: an unmaterialised leaf in the production wire form (the terminal projection's `unknown`), an unevaluated top-level conditional, the probe expression handed back unevaluated, or no printable answer |
-| `unverified` | the demand completed but its answer was not observed (stopped while observing) |
+| `unverified` | the demand completed but its answer was not observed (stopped while observing), the observation lacks its completeness evidence, or the invocation was killed without evidence that its engine exhausted the resource |
 | `refusal` | a typed budget fault (Verter's own budget) |
 | `error` | any other fault, a miss, or a warm repeat that failed or answered differently |
 | `killed` | the engine exhausted the containment cap or the deadline during the demand (Verter's tree is its engine alone), or its own peak exceeded the budget |
@@ -292,8 +316,11 @@ answer is never a win.
   debug assertions, or with a non-production feature (`test-support`,
   `attribution`, …), a pinned binary or the tsc API client changed during
   the run, the tsc arm ran another executable, the probe, node and tsc are
-  not one native architecture, or the probe's build inputs (`crates/`, the
-  Cargo manifests, the toolchain pin) changed while it was built;
+  not one native architecture (the probes' own `nativeArch` reading must
+  equal their target), the build does not record its controlled environment
+  (`CARGO_INCREMENTAL=0`, `RUSTC` bound to a fingerprinted compiler), or
+  the probe's build inputs (`crates/`, the Cargo manifests, the toolchain pin)
+  changed while it was built;
 - tuning variables were set without `--allow-tuning`;
 - the harness itself (`scripts/benchmark/semantic-perf*`) changed during the
   run (the tsc driver is re-read by every invocation);
@@ -333,11 +360,16 @@ counterexamples and the schedule's balance for odd and even cell counts.
 A verdict is a descriptive rule, not a statistical test. A metric names a
 winner only when every measured repetition of one arm beats every repetition
 of the other by more than the timer resolution; otherwise the verdict is
-**overlap**. The resolution comes from the run's own evidence: tsc's server
-clock quantum is the smallest positive server time the run observed, and the
-resolution is at least 1 ms and that quantum for one request, and at least
-2 ms and three quanta for first type handle (a sum of three separately timed
-requests). The ratio shown is tsc's median over Verter's (above 1 favours
+**overlap**. The resolution is calibrated: after its measurement, every tsc
+probe times 20 trivial warm requests (`getTypeAtPosition` on
+`__BenchInit`). If any of them reads 0 ms the server clock is **coarse** (a
+request cannot take no time), so every reading is a whole number of quanta
+and the quantum is the smallest positive tsc server time in the run, from
+whichever request (about half a millisecond on Windows). Otherwise the clock
+is **fine** and the quantum is at most the smallest calibration time. The
+resolution is at least 1 ms and two quanta (a difference of two readings)
+for one request, and at least 2 ms and four quanta for first type handle (a
+sum of three separately timed requests). The ratio shown is tsc's median over Verter's (above 1 favours
 Verter), omitted when a median is below the resolution. Absolute numbers of
 both arms are always shown; nothing is baseline-subtracted.
 `baseline-empty` (a trivial module and probe) is its own row, reported alone.
@@ -355,7 +387,8 @@ invocation, then excluded from the statistics. Fresh processes mean cold
 semantic caches, not cold filesystem caches. For a baseline, keep the machine
 otherwise idle and on stable power (on a laptop: plugged in, not in a
 low-power mode); the report records the power state (`pmset` on macOS,
-`powercfg` on Windows) but does not enforce it.
+`powercfg` on Windows) at the start and at the end of the run, but does not
+enforce it.
 
 When a warmup's engine exhausted the memory cap (an attributed kill), the
 remaining invocations of that (scenario, setting, arm) are recorded as
@@ -433,7 +466,10 @@ Results land in `target/semantic-perf/<timestamp>/`:
   (`cli/` holds the whole-program arms' program);
 - `bin/` — the pinned binaries that ran.
 
-The command exits 0 only when validation passes. Re-validate any run with
+The command exits 0 only when validation passes. Standalone validation
+re-reads every raw record — the supervisor's, the probe's and the phase
+marker — and fails on any that differs from `results.json`. Re-validate any
+run with
 
 ```bash
 node scripts/benchmark/semantic-perf/validate.mjs target/semantic-perf/<timestamp>/results.json

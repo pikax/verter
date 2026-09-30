@@ -12,24 +12,41 @@ const fmtMs = (s) => {
 const fmtMb = (s) => {
   if (!s) return "—";
   const f = (v) => (v / 1048576).toFixed(1);
-  return s.n > 1 && s.max - s.min > 1048576 ? `${f(s.median)} [${f(s.min)}–${f(s.max)}]` : f(s.median);
+  return s.n > 1 && s.max - s.min > 1048576
+    ? `${f(s.median)} [${f(s.min)}–${f(s.max)}]`
+    : f(s.median);
 };
 const fmtRatio = (v) => {
   if (!v || v.verdict === "n/a") return "—";
   const word = v.verdict === "verter" ? "Verter" : v.verdict === "tsc" ? "tsc" : "overlap";
   // A median below the timer's resolution has no meaningful ratio.
-  return v.ratio != null && Number.isFinite(v.ratio) && v.ratio > 0 && v.ratioMeaningful !== false ? `${word} (×${v.ratio.toFixed(2)})` : word;
+  return v.ratio != null && Number.isFinite(v.ratio) && v.ratio > 0 && v.ratioMeaningful !== false
+    ? `${word} (×${v.ratio.toFixed(2)})`
+    : word;
 };
-const esc = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
+const esc = (s) =>
+  String(s ?? "")
+    .replace(/\|/g, "\\|")
+    .replace(/\n/g, " ");
 
 function referenceText(ref) {
   if (!ref) return "no reference";
   if (ref.gap) return ref.gap;
-  if (ref.byConstruction) return `\`${esc(ref.digest?.preview)}\` (measurement: ${ref.measuredGap}; the API's answer is the constructed one)`;
+  if (ref.byConstruction)
+    return `\`${esc(ref.digest?.preview)}\` (measurement: ${ref.measuredGap}; the API's answer is the constructed one)`;
   const answer = ref.errorAny ? "error any" : `\`${esc(ref.digest?.preview)}\``;
   const codes = ref.codes.filter((c) => c !== 2322);
   return codes.length ? `${answer} + TS${codes.join("/TS")}` : answer;
 }
+
+/** A power receipt on one line. */
+const powerText = (p) => {
+  if (!p || !Object.values(p).some(Boolean)) return "not available";
+  return Object.entries(p)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, " ").trim()}`)
+    .join("; ");
+};
 
 export function renderMarkdown(run) {
   const { meta, summary, validation } = run;
@@ -37,8 +54,17 @@ export function renderMarkdown(run) {
   const lines = [];
   const push = (...l) => lines.push(...l);
   push("# Semantic benchmark: Verter vs tsc 7.0.2 on equivalent demands", "");
-  push(`Validation: **${validation?.ok ? "PASSED" : "FAILED"}**${validation?.ok ? "" : ` (${validation.failures.length} failure(s); see the end)`}`, "");
-  if (Object.keys(meta.tuning ?? {}).length) push(`**Tuned run** (not a baseline): ${Object.entries(meta.tuning).map(([k, v]) => `\`${k}=${v}\``).join(", ")}`, "");
+  push(
+    `Validation: **${validation?.ok ? "PASSED" : "FAILED"}**${validation?.ok ? "" : ` (${validation.failures.length} failure(s); see the end)`}`,
+    "",
+  );
+  if (Object.keys(meta.tuning ?? {}).length)
+    push(
+      `**Tuned run** (not a baseline): ${Object.entries(meta.tuning)
+        .map(([k, v]) => `\`${k}=${v}\``)
+        .join(", ")}`,
+      "",
+    );
   push("## Run", "");
   const containment = [
     ...new Set(
@@ -60,6 +86,8 @@ export function renderMarkdown(run) {
     `- Invocations: ${run.invocations.length} (${run.invocations.filter((i) => i.skipped).length} skipped after a warmup killed at the memory cap)`,
     `- Schedule: ${o.warmup} warmup + ${o.repeat} measured invocations per arm, counterbalanced (scenario order reverses on alternate rounds; each cell's arm order alternates round by round, so every pair of arms runs in each order equally often in every cell); ${o.warmRepeats} in-process warm repeats; settings ${o.settings}; Verter library channel ${o.libMode}`,
     `- Arms: ${o.arms.map((a) => `\`${a}\``).join(", ")}`,
+    `- Power (recorded, not enforced): at start ${powerText(meta.host.power?.atStart)}; at end ${powerText(meta.host.power?.atEnd)}`,
+    `- Build: \`CARGO_INCREMENTAL=${meta.build.env?.CARGO_INCREMENTAL ?? "?"}\`, \`RUSTC\` bound to the toolchain's rustc (sha256 \`${String(meta.build.rustcSha256 ?? "?").slice(0, 12)}\`)`,
     "",
   );
   push("## How to read this", "");
@@ -68,7 +96,7 @@ export function renderMarkdown(run) {
     "- Engine start is reported apart and in no headline: Verter's **host construction**, tsc's **spawn** (process start, including the server's session construction; client-side) and its **initialize handshake** — they are not comparable work. **setup** opens the project. **cold**: the probe's first request (after the `__BenchInit` request absorbed one-time initialisation). **first type handle** = setup + init + cold: from opening the project to holding the demanded type's handle, the robust cross-tool figure, since each tool splits its work between opening a project and its first request differently. It claims no fully printed answer: printing is **observe**, outside every timer. **warm**: the same request repeated in the same process.",
     "- tsc's request times are the server's own processing time as it reports it (excluding IPC; its clock is coarse on Windows), with the client's round trip shown beside it.",
     "- **peak / retained**: each engine process's own OS accounting (Windows: private commit; macOS: physical footprint), read by one reader for both tools with the engine alive after the requests and **before** anything is observed; tsc's figure is the native API server, never its node client. Figures after observation are reported apart. An engine whose own peak exceeds the budget counts as exhausting it.",
-    `- A verdict is a descriptive rule, not a statistical test: it names a winner only when every measured repetition of one arm beats every repetition of the other by more than the timer resolution, taken from this run's own evidence (tsc's smallest observed server time ${summary.resolution?.tscQuantumMs ?? "n/a"} ms): ${summary.resolution?.single} ms for one request, ${summary.resolution?.sum} ms for first type handle, a sum of three; otherwise **overlap**. ×N is tsc's median over Verter's (above 1 favours Verter).`,
+    `- A verdict is a descriptive rule, not a statistical test: it names a winner only when every measured repetition of one arm beats every repetition of the other by more than the timer resolution, calibrated in this run (tsc's server clock is ${summary.resolution?.clock ?? "uncalibrated"}: ${summary.resolution?.calibrationSamples ?? 0} trivial calibration requests, ${summary.resolution?.calibrationZeroShare === null || summary.resolution?.calibrationZeroShare === undefined ? "n/a" : Math.round(100 * summary.resolution.calibrationZeroShare) + "%"} of them read 0 ms; quantum ${summary.resolution?.tscQuantumMs ?? "n/a"} ms, two quanta per reading difference): ${summary.resolution?.single} ms for one request, ${summary.resolution?.sum} ms for first type handle, a sum of three; otherwise **overlap**. ×N is tsc's median over Verter's (above 1 favours Verter).`,
     "- Only rows where Verter's answer **matched** tsc's measured answer enter the comparison. A wrong, partial, refused, unverified or killed answer is never a win; a beyond-tsc answer is reported separately and never counted as a speed win.",
     "",
   );
@@ -92,13 +120,20 @@ export function renderMarkdown(run) {
     push("");
     const tally = (metric) => {
       const t = { verter: 0, tsc: 0, overlap: 0 };
-      for (const c of matched) t[c.headline[metric].verdict] = (t[c.headline[metric].verdict] ?? 0) + 1;
+      for (const c of matched)
+        t[c.headline[metric].verdict] = (t[c.headline[metric].verdict] ?? 0) + 1;
       return `Verter ${t.verter}, tsc ${t.tsc}, overlap ${t.overlap}`;
     };
-    push(`Over ${matched.length} matched row(s) — first type handle: ${tally("firstTypeMs")}; cold: ${tally("coldMs")}; peak memory: ${tally("peakBytes")}.`, "");
+    push(
+      `Over ${matched.length} matched row(s) — first type handle: ${tally("firstTypeMs")}; cold: ${tally("coldMs")}; peak memory: ${tally("peakBytes")}.`,
+      "",
+    );
   }
 
-  push("## Phases (every row both headline arms completed; engine start is not comparable work)", "");
+  push(
+    "## Phases (every row both headline arms completed; engine start is not comparable work)",
+    "",
+  );
   push(
     "| scenario | setting | Verter host construction | tsc spawn (process + session, client-side) | tsc initialize handshake | Verter setup | tsc setup | Verter init | tsc init | Verter peak after observe MB | tsc peak after observe MB |",
     "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -125,27 +160,45 @@ export function renderMarkdown(run) {
       `| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${t?.class ?? "not run"}${t?.detail ? ` (${esc(t.detail).slice(0, 60)})` : ""} | **${v?.class ?? "not run"}** | ${esc(v?.detail).slice(0, 120)} | ${fmtMs(v?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldMs)} | ${fmtMs(t?.metrics?.coldRoundTripMs)} | ${fmtMs(v?.metrics?.observeMs)} | ${fmtMs(t?.metrics?.observeMs)} |`,
     );
   }
-  push("", `Verter classes: ${Object.entries(summary.verterClassCounts).map(([k, n]) => `${k} ${n}`).join(", ")}.`, "");
+  push(
+    "",
+    `Verter classes: ${Object.entries(summary.verterClassCounts)
+      .map(([k, n]) => `${k} ${n}`)
+      .join(", ")}.`,
+    "",
+  );
 
   const beyond = cells.filter((c) => c.arms.verter?.class === "beyond-tsc");
   if (beyond.length) {
     push("## Beyond tsc's limits (reported separately, never a speed win)", "");
-    push("| scenario | setting | tsc stops with | Verter first type handle | tsc time to its fallback (first type handle) | Verter peak MB | tsc peak MB |", "|---|---|---|---:|---:|---:|---:|");
+    push(
+      "| scenario | setting | tsc stops with | Verter first type handle | tsc time to its fallback (first type handle) | Verter peak MB | tsc peak MB |",
+      "|---|---|---|---:|---:|---:|---:|",
+    );
     for (const c of beyond) {
       const v = c.arms.verter.metrics;
       const t = c.arms["tsc-api"]?.metrics;
-      push(`| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${fmtMs(v.firstTypeMs)} | ${fmtMs(t?.firstTypeMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t?.peakBytes)} |`);
+      push(
+        `| ${c.scenario} | ${c.setting} | ${referenceText(c.reference)} | ${fmtMs(v.firstTypeMs)} | ${fmtMs(t?.firstTypeMs)} | ${fmtMb(v.peakBytes)} | ${fmtMb(t?.peakBytes)} |`,
+      );
     }
     push("");
   }
 
   if (o.arms.includes("verter-obs")) {
-    push("## Observability cost (Verter with audit, timing, footprint and metrics capture on; not compared with tsc)", "");
-    push("| scenario | setting | production cold | observability-on cold | cost | production peak MB | observability-on peak MB |", "|---|---|---:|---:|---|---:|---:|");
+    push(
+      "## Observability cost (Verter with audit, timing, footprint and metrics capture on; not compared with tsc)",
+      "",
+    );
+    push(
+      "| scenario | setting | production cold | observability-on cold | cost | production peak MB | observability-on peak MB |",
+      "|---|---|---:|---:|---|---:|---:|",
+    );
     for (const c of cells) {
       if (!c.arms["verter-obs"] || !c.arms.verter) continue;
       const cost = c.obsCost?.coldMs;
-      const word = cost?.verdict === "verter" ? "slower" : cost?.verdict === "tsc" ? "faster" : "overlap";
+      const word =
+        cost?.verdict === "verter" ? "slower" : cost?.verdict === "tsc" ? "faster" : "overlap";
       push(
         `| ${c.scenario} | ${c.setting} | ${fmtMs(c.arms.verter.metrics.coldMs)} | ${fmtMs(c.arms["verter-obs"].metrics.coldMs)} | ${cost?.ratio != null && cost.ratioMeaningful !== false ? `×${cost.ratio.toFixed(2)} (${word})` : word} | ${fmtMb(c.arms.verter.metrics.peakBytes)} | ${fmtMb(c.arms["verter-obs"].metrics.peakBytes)} |`,
       );
@@ -155,7 +208,10 @@ export function renderMarkdown(run) {
 
   if (o.arms.includes("verter-counted")) {
     push("## Verter work and allocation counts (instrumented run; its times are not compared)", "");
-    push("| scenario | setting | cold-request allocations | allocated MB | relation proofs | semantic nodes | memo entries | retention peak MB |", "|---|---|---:|---:|---:|---:|---:|---:|");
+    push(
+      "| scenario | setting | cold-request allocations | allocated MB | relation proofs | semantic nodes | memo entries | retention peak MB |",
+      "|---|---|---:|---:|---:|---:|---:|---:|",
+    );
     for (const c of cells) {
       const k = c.arms["verter-counted"];
       const r = c.arms.verter?.retention;
@@ -182,7 +238,10 @@ export function renderMarkdown(run) {
       s
         ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
         : "not run | — | — | — | — | —";
-    for (const c of cli) push(`| ${c.scenario} | ${c.setting} | ${armCells(c.arms["tsc-cli"])} | ${armCells(c.arms["tsc-cli-1"])} |`);
+    for (const c of cli)
+      push(
+        `| ${c.scenario} | ${c.setting} | ${armCells(c.arms["tsc-cli"])} | ${armCells(c.arms["tsc-cli-1"])} |`,
+      );
     push("");
   }
 

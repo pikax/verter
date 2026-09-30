@@ -25,9 +25,22 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARMS, compactProbeRecord, invocationEnd, parseCli, probeAnswer, probeRecordProblems } from "./analyze.mjs";
+import {
+  ARMS,
+  compactProbeRecord,
+  invocationEnd,
+  parseCli,
+  probeAnswer,
+  probeRecordProblems,
+} from "./analyze.mjs";
 import { sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
-import { buildProblems, RECORDED_PACKAGES, sha256File, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
+import {
+  buildProblems,
+  RECORDED_PACKAGES,
+  sha256File,
+  sha256Text,
+  TYPESCRIPT_VERSION,
+} from "./provenance.mjs";
 import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
 import { summarize } from "./summary.mjs";
@@ -35,14 +48,15 @@ import { supervisorRecordProblems } from "./supervisor.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-
 /** Plan string for an invocation. */
 function planEntry(inv) {
   return `${inv.scenario}/${inv.setting}|${inv.arm}|${inv.warmup ? "w" : "r"}${inv.rep}`;
 }
 
 function stable(value) {
-  return JSON.stringify(value, (_key, v) => (typeof v === "number" && !Number.isInteger(v) ? Number(v.toPrecision(12)) : v));
+  return JSON.stringify(value, (_key, v) =>
+    typeof v === "number" && !Number.isInteger(v) ? Number(v.toPrecision(12)) : v,
+  );
 }
 
 /**
@@ -57,44 +71,86 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
 
   // Provenance.
   const ts = meta.typescript ?? {};
-  if (ts.version !== TYPESCRIPT_VERSION || ts.platformVersion !== TYPESCRIPT_VERSION || ts.versionText !== `Version ${TYPESCRIPT_VERSION}`) {
-    fail(`wrong binary: TypeScript ${ts.version}/${ts.platformVersion} (${ts.versionText}), not ${TYPESCRIPT_VERSION}`);
+  if (
+    ts.version !== TYPESCRIPT_VERSION ||
+    ts.platformVersion !== TYPESCRIPT_VERSION ||
+    ts.versionText !== `Version ${TYPESCRIPT_VERSION}`
+  ) {
+    fail(
+      `wrong binary: TypeScript ${ts.version}/${ts.platformVersion} (${ts.versionText}), not ${TYPESCRIPT_VERSION}`,
+    );
   }
   if (!meta.build) fail("wrong binary: no Verter build record");
   else for (const p of buildProblems(meta.build)) fail(`wrong binary: ${p}`);
   const bins = meta.binaries ?? {};
   const after = meta.binariesAfter ?? {};
-  if (!bins.probe || bins.probe.sha256 !== after.probe) fail("wrong binary: the Verter probe changed during the run");
-  if (!bins.counted || bins.counted.sha256 !== after.counted) fail("wrong binary: the counted Verter probe changed during the run");
-  if (!bins.supervisor || bins.supervisor.sha256 !== after.supervisor) fail("wrong binary: the supervisor changed during the run");
+  if (!bins.probe || bins.probe.sha256 !== after.probe)
+    fail("wrong binary: the Verter probe changed during the run");
+  if (!bins.counted || bins.counted.sha256 !== after.counted)
+    fail("wrong binary: the counted Verter probe changed during the run");
+  if (!bins.supervisor || bins.supervisor.sha256 !== after.supervisor)
+    fail("wrong binary: the supervisor changed during the run");
   if (ts.exeSha256 !== after.tsc) fail("wrong binary: the native tsc changed during the run");
-  if (bins.probe?.identity?.debugAssertions !== false || bins.probe?.identity?.instrumented !== false) {
+  if (
+    bins.probe?.identity?.debugAssertions !== false ||
+    bins.probe?.identity?.instrumented !== false
+  ) {
     fail("wrong binary: the Verter probe reports debug assertions or instrumentation");
   }
-  if (bins.counted?.identity?.instrumented !== true) fail("wrong binary: the counted probe does not report its instrumentation");
+  if (bins.counted?.identity?.instrumented !== true)
+    fail("wrong binary: the counted probe does not report its instrumentation");
   const t0 = meta.buildInputs ?? {};
   const t1 = meta.buildInputsAfterBuild ?? {};
-  if (!t0.head || t0.head !== t1.head || t0.diffSha256 !== t1.diffSha256 || t0.untrackedSha256 !== t1.untrackedSha256) {
-    fail("wrong binary: the probe's build inputs changed while it was built, so its source is unknown");
+  if (
+    !t0.head ||
+    t0.head !== t1.head ||
+    t0.diffSha256 !== t1.diffSha256 ||
+    t0.untrackedSha256 !== t1.untrackedSha256
+  ) {
+    fail(
+      "wrong binary: the probe's build inputs changed while it was built, so its source is unknown",
+    );
   }
   if (!meta.harness || stable(meta.harness) !== stable(meta.harnessAfter)) {
     fail("the harness changed during the run, so its invocations did not all run one method");
   }
-  for (const name of RECORDED_PACKAGES) if (!meta.build?.packages?.[name]) fail(`wrong binary: no build record for ${name}`);
+  for (const name of RECORDED_PACKAGES)
+    if (!meta.build?.packages?.[name]) fail(`wrong binary: no build record for ${name}`);
   for (const [f, sha] of Object.entries(ts.apiSha256 ?? {})) {
-    if (after.tsApi?.[f] !== sha) fail(`wrong binary: the tsc API client ${f} changed during the run`);
+    if (after.tsApi?.[f] !== sha)
+      fail(`wrong binary: the tsc API client ${f} changed during the run`);
   }
   const host = meta.host ?? {};
   for (const [name, bin] of [
     ["the Verter probe", bins.probe],
     ["the counted probe", bins.counted],
   ]) {
-    if (!bin?.identity || !sameArchitecture(bin.identity.targetArch, host.arch) || !String(ts.platformPackage ?? "").endsWith(`-${host.arch}`)) {
-      fail(`wrong binary: ${name} (${bin?.identity?.targetArch}), node (${host.arch}) and tsc (${ts.platformPackage}) are not one native architecture`);
+    if (
+      !bin?.identity ||
+      bin.identity.nativeArch !== bin.identity.targetArch ||
+      !sameArchitecture(bin.identity.targetArch, host.arch) ||
+      !String(ts.platformPackage ?? "").endsWith(`-${host.arch}`)
+    ) {
+      fail(
+        `wrong binary: ${name} (${bin?.identity?.targetArch}), node (${host.arch}) and tsc (${ts.platformPackage}) are not one native architecture`,
+      );
     }
   }
+  const b = meta.build ?? {};
+  if (
+    !b.rustcPath ||
+    !b.rustcSha256 ||
+    b.env?.RUSTC !== b.rustcPath ||
+    b.env?.CARGO_INCREMENTAL !== "0"
+  ) {
+    fail(
+      "wrong binary: the build does not record the controlled compiler (RUSTC bound to the fingerprinted toolchain rustc, CARGO_INCREMENTAL=0)",
+    );
+  }
   if (Object.keys(meta.tuning ?? {}).length && !meta.options?.allowTuning) {
-    fail(`tuning variables were set without --allow-tuning: ${Object.keys(meta.tuning).join(", ")}`);
+    fail(
+      `tuning variables were set without --allow-tuning: ${Object.keys(meta.tuning).join(", ")}`,
+    );
   }
 
   // The reference and the inputs: every cell's files are the catalog's, and
@@ -107,23 +163,36 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${key}: not a catalog scenario and setting`);
       continue;
     }
-    if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source)) fail(`${key}: scenario.ts is not the catalog's source`);
-    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting))) fail(`${key}: tsconfig.json is not the catalog's`);
-    if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario))) fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
+    if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source))
+      fail(`${key}: scenario.ts is not the catalog's source`);
+    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting)))
+      fail(`${key}: tsconfig.json is not the catalog's`);
+    if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario)))
+      fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
     const measured = expected.scenarios?.[cell.id];
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {
-      if (measured.sourceSha256 !== sha256Text(scenario.source)) fail(`${key}: the measured reference is stale (measured on a different source)`);
-      if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"]) fail(`${key}: the measured reference used a different library`);
-      if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX)) fail(`${key}: the measured reference used a different measuring method`);
+      if (measured.sourceSha256 !== sha256Text(scenario.source))
+        fail(`${key}: the measured reference is stale (measured on a different source)`);
+      if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
+        fail(`${key}: the measured reference used a different library`);
+      if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
+        fail(`${key}: the measured reference used a different measuring method`);
       // Every cell carries its own immutable provenance: measured by the
       // file's one method, by a verified tsc 7.0.2 executable, on exactly
       // this source (plus the measuring suffix) and this tsconfig.
       const receipt = measured.settings?.[cell.setting]?.receipt;
-      if (receipt?.method !== JSON.stringify(expected.method)) fail(`${key}: the reference cell was measured by another method than the file states`);
-      if (!expected.method?.tscExeSha256 || expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`) fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
-      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting))) fail(`${key}: the reference cell was measured with another tsconfig`);
-      if (receipt?.sourceSha256 !== sha256Text(scenario.source + MEASURING_SUFFIX)) fail(`${key}: the reference cell was measured on another source`);
+      if (receipt?.method !== JSON.stringify(expected.method))
+        fail(`${key}: the reference cell was measured by another method than the file states`);
+      if (
+        !expected.method?.tscExeSha256 ||
+        expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`
+      )
+        fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
+      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting)))
+        fail(`${key}: the reference cell was measured with another tsconfig`);
+      if (receipt?.sourceSha256 !== sha256Text(scenario.source + MEASURING_SUFFIX))
+        fail(`${key}: the reference cell was measured on another source`);
     }
   }
 
@@ -132,8 +201,13 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   const cellKeys = Object.keys(meta.scenarios ?? {});
   const expectedPlan = schedule(cellKeys, opts.arms ?? [], opts.repeat ?? 0, opts.warmup ?? 0);
   const plan = meta.plan ?? [];
-  if (stable(plan) !== stable(expectedPlan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`))) {
-    fail("the recorded plan is not the counterbalanced schedule for the run's cells, arms and rounds");
+  if (
+    stable(plan) !==
+    stable(expectedPlan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`))
+  ) {
+    fail(
+      "the recorded plan is not the counterbalanced schedule for the run's cells, arms and rounds",
+    );
   }
   if ((opts.repeat ?? 0) % 2) fail(`--repeat ${opts.repeat} is odd: the arm order cannot balance`);
   for (const p of scheduleBalanceProblems(expectedPlan, opts.arms ?? [])) fail(`schedule: ${p}`);
@@ -142,10 +216,12 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   const seen = new Map();
   invs.forEach((inv, position) => {
     const entry = planEntry(inv);
-    if (inv.index !== position) fail(`record ${entry} has index ${inv.index} at position ${position}`);
+    if (inv.index !== position)
+      fail(`record ${entry} has index ${inv.index} at position ${position}`);
     if (seen.has(entry)) fail(`duplicate record ${entry}`);
     seen.set(entry, inv);
-    if (plan[position] !== entry) fail(`record ${position} is ${entry}; the plan says ${plan[position] ?? "<nothing>"}`);
+    if (plan[position] !== entry)
+      fail(`record ${position} is ${entry}; the plan says ${plan[position] ?? "<nothing>"}`);
   });
   for (const entry of plan) if (!seen.has(entry)) fail(`missing record ${entry}`);
   const perCellArm = new Map();
@@ -159,7 +235,8 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   }
   for (const [k, n] of perCellArm) {
     if (n === 0) fail(`zero records for ${k}`);
-    else if (n !== (opts.repeat ?? 0) + (opts.warmup ?? 0)) fail(`${k} has ${n} records, not ${opts.repeat} measured + ${opts.warmup} warmup`);
+    else if (n !== (opts.repeat ?? 0) + (opts.warmup ?? 0))
+      fail(`${k} has ${n} records, not ${opts.repeat} measured + ${opts.warmup} warmup`);
   }
 
   // Each invocation.
@@ -176,8 +253,11 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         source.setting === inv.setting &&
         source.arm === inv.arm &&
         source.supervisor?.killedBy === "memory" &&
-        invocationEnd(source, (opts.infraMb ?? 0) * 1024 * 1024).kind === "killed";
-      if (!valid) fail(`${id}: skipped without a warmup of the same scenario and arm whose engine exhausted the memory cap`);
+        invocationEnd(source, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 }).kind === "killed";
+      if (!valid)
+        fail(
+          `${id}: skipped without a warmup of the same scenario and arm whose engine exhausted the memory cap`,
+        );
       continue;
     }
     const sup = inv.supervisor;
@@ -187,9 +267,13 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: containment ${sup.containment} without consent (--allow-sampled)`);
     }
     const cap = ((opts.memMb ?? 0) + (opts.infraMb ?? 0)) * 1024 * 1024;
-    if (sup.memLimitBytes !== cap) fail(`${id}: containment cap ${sup.memLimitBytes} is not the run's budget plus allowance (${cap})`);
-    if (sup.timeoutMs !== opts.timeoutMs) fail(`${id}: deadline ${sup.timeoutMs} is not the run's ${opts.timeoutMs} ms`);
-    const end = invocationEnd(inv, (opts.infraMb ?? 0) * 1024 * 1024);
+    if (sup.memLimitBytes !== cap)
+      fail(
+        `${id}: containment cap ${sup.memLimitBytes} is not the run's budget plus allowance (${cap})`,
+      );
+    if (sup.timeoutMs !== opts.timeoutMs)
+      fail(`${id}: deadline ${sup.timeoutMs} is not the run's ${opts.timeoutMs} ms`);
+    const end = invocationEnd(inv, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 });
     const expectedExit = ["killed", "observe-killed", "unattributed-kill"].includes(end.kind)
       ? sup.killedBy === "timeout"
         ? 124
@@ -197,7 +281,10 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       : end.kind === "exited"
         ? sup.exitCode
         : 125;
-    if (inv.supervisorExit !== expectedExit) fail(`${id}: supervisor exit ${inv.supervisorExit} disagrees with its record (${expectedExit})`);
+    if (inv.supervisorExit !== expectedExit)
+      fail(
+        `${id}: supervisor exit ${inv.supervisorExit} disagrees with its record (${expectedExit})`,
+      );
     if (end.kind === "harness-failure") {
       fail(`${id}: failed child: ${end.detail}`);
       continue;
@@ -207,12 +294,19 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     if (end.kind === "observe-killed") {
       // The demand was measured and recorded before the kill: its record
       // must hold every demand field.
-      for (const p of probeRecordProblems(inv.probe, { tool: arm.tool, warmRepeats: opts.warmRepeats, stage: "measured" })) fail(`${id}: ${p}`);
+      for (const p of probeRecordProblems(inv.probe, {
+        tool: arm.tool,
+        warmRepeats: opts.warmRepeats,
+        stage: "measured",
+      }))
+        fail(`${id}: ${p}`);
       continue;
     }
     if (arm.kind === "cli") {
-      if (![0, 1, 2].includes(sup.exitCode)) fail(`${id}: failed child: tsc exited ${sup.exitCode}`);
-      else if (!parseCli(inv.cliStdout ?? "").complete) fail(`${id}: failed child: tsc printed no extended diagnostics`);
+      if (![0, 1, 2].includes(sup.exitCode))
+        fail(`${id}: failed child: tsc exited ${sup.exitCode}`);
+      else if (!parseCli(inv.cliStdout ?? "").complete)
+        fail(`${id}: failed child: tsc printed no extended diagnostics`);
       continue;
     }
     if (sup.exitCode !== 0) {
@@ -224,20 +318,29 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: failed child: no probe record (${inv.probeReadError})`);
       continue;
     }
-    for (const p of probeRecordProblems(r, { tool: arm.tool, warmRepeats: opts.warmRepeats })) fail(`${id}: ${p}`);
+    for (const p of probeRecordProblems(r, { tool: arm.tool, warmRepeats: opts.warmRepeats }))
+      fail(`${id}: ${p}`);
     if (arm.tool === "verter") {
-      if (r.instrumented !== (inv.arm === "verter-counted")) fail(`${id}: instrumentation flag ${r.instrumented} is wrong for ${inv.arm}`);
-      if (r.observability !== (inv.arm === "verter-obs")) fail(`${id}: observability flag ${r.observability} is wrong for ${inv.arm}`);
+      if (r.instrumented !== (inv.arm === "verter-counted"))
+        fail(`${id}: instrumentation flag ${r.instrumented} is wrong for ${inv.arm}`);
+      if (r.observability !== (inv.arm === "verter-obs"))
+        fail(`${id}: observability flag ${r.observability} is wrong for ${inv.arm}`);
       const exe = inv.arm === "verter-counted" ? bins.counted?.pinned : bins.probe?.pinned;
-      if (inv.command?.[0] !== exe) fail(`${id}: ran ${inv.command?.[0]}, not the pinned probe ${exe}`);
+      if (inv.command?.[0] !== exe)
+        fail(`${id}: ran ${inv.command?.[0]}, not the pinned probe ${exe}`);
     } else {
-      if (r.tscExe !== ts.exe) fail(`${id}: the API ran ${r.tscExe}, not the verified tsc ${ts.exe}`);
-      const dir = String(meta.scenarios?.[`${inv.scenario}/${inv.setting}`]?.dir ?? "").replace(/\\/g, "/");
+      if (r.tscExe !== ts.exe)
+        fail(`${id}: the API ran ${r.tscExe}, not the verified tsc ${ts.exe}`);
+      const dir = String(meta.scenarios?.[`${inv.scenario}/${inv.setting}`]?.dir ?? "").replace(
+        /\\/g,
+        "/",
+      );
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase());
       const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
-      if (roots.length !== 2 || want.some((w) => !roots.includes(w))) fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
+      if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
+        fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
-    const answer = probeAnswer(inv, (opts.infraMb ?? 0) * 1024 * 1024);
+    const answer = probeAnswer(inv, { budgetBytes: (opts.memMb ?? 0) * 1024 * 1024 });
     if (answer.alias && answer.alias !== "__Probe") fail(`${id}: answered ${answer.alias}`);
   }
 
@@ -247,26 +350,39 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     for (const [arm, s] of Object.entries(cell.arms)) {
       const id = `${cell.key}|${arm}`;
       if (ARMS[arm].kind === "probe") {
-        if (s.distinctAnswers > 1 || s.class === "inconsistent") fail(`${id}: inconsistent repetitions (${s.distinctAnswers} distinct answers, classes ${JSON.stringify(s.classes ?? s.class)})`);
+        if (s.distinctAnswers > 1 || s.class === "inconsistent")
+          fail(
+            `${id}: inconsistent repetitions (${s.distinctAnswers} distinct answers, classes ${JSON.stringify(s.classes ?? s.class)})`,
+          );
         if (arm === "tsc-api" && s.class === "inconsistent-with-reference") {
-          for (const p of s.referenceProblems) fail(`${id}: wrong answer against the measured reference: ${p}`);
+          for (const p of s.referenceProblems)
+            fail(`${id}: wrong answer against the measured reference: ${p}`);
         }
         if (requireAllMatched && ARMS[arm].tool === "verter" && s.class !== "matched") {
           fail(`${id}: Verter's answer is ${s.class} (${s.detail}); --require-all-matched`);
         }
       } else if (s.distinctCodeSets > 1) {
-        fail(`${id}: inconsistent repetitions (tsc -p reported ${s.distinctCodeSets} different diagnostic sets)`);
+        fail(
+          `${id}: inconsistent repetitions (tsc -p reported ${s.distinctCodeSets} different diagnostic sets)`,
+        );
       }
     }
     if (!cell.reference) warnings.push(`${cell.key}: no measured reference`);
     // Every completed measurement of both headline arms must read one metric.
-    const metricSet = new Set([...(cell.arms.verter?.memoryMetrics ?? []), ...(cell.arms["tsc-api"]?.memoryMetrics ?? [])]);
-    if (metricSet.size > 1) fail(`${cell.key}: the measurements' memory metrics differ (${[...metricSet].join(", ")})`);
+    const metricSet = new Set([
+      ...(cell.arms.verter?.memoryMetrics ?? []),
+      ...(cell.arms["tsc-api"]?.memoryMetrics ?? []),
+    ]);
+    if (metricSet.size > 1)
+      fail(`${cell.key}: the measurements' memory metrics differ (${[...metricSet].join(", ")})`);
     if (cell.headline) {
       for (const arm of ["verter", "tsc-api"]) {
         const s = cell.arms[arm];
         for (const m of ["coldMs", "firstTypeMs", "warmMs", "peakBytes", "retainedBytes"]) {
-          if (s.metrics[m]?.n !== s.measured) fail(`${cell.key}|${arm}: ${m} has ${s.metrics[m]?.n ?? 0} of ${s.measured} measured values`);
+          if (s.metrics[m]?.n !== s.measured)
+            fail(
+              `${cell.key}|${arm}: ${m} has ${s.metrics[m]?.n ?? 0} of ${s.measured} measured values`,
+            );
         }
       }
     }
@@ -280,10 +396,13 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       if (stable(s) !== stable(cell) && reported++ < 20) {
         for (const arm of Object.keys(cell.arms)) {
           if (stable(s?.arms?.[arm]) !== stable(cell.arms[arm])) {
-            fail(`${cell.key}|${arm}: the stored summary (class ${s?.arms?.[arm]?.class}) disagrees with its raw records (class ${cell.arms[arm].class})`);
+            fail(
+              `${cell.key}|${arm}: the stored summary (class ${s?.arms?.[arm]?.class}) disagrees with its raw records (class ${cell.arms[arm].class})`,
+            );
           }
         }
-        if (stable(s?.headline) !== stable(cell.headline)) fail(`${cell.key}: the stored comparison disagrees with its raw records`);
+        if (stable(s?.headline) !== stable(cell.headline))
+          fail(`${cell.key}: the stored comparison disagrees with its raw records`);
       }
     }
     if (!reported) fail("the stored summary disagrees with its raw records");
@@ -306,14 +425,26 @@ export function rawFileProblems(run) {
       const embedded = { ...inv.supervisor };
       delete embedded.samples;
       delete embedded.sampleCount;
-      if (stable(rest) !== stable(embedded)) problems.push(`${id}: the supervisor record on disk differs from results.json`);
+      if (stable(rest) !== stable(embedded))
+        problems.push(`${id}: the supervisor record on disk differs from results.json`);
     } catch (err) {
       problems.push(`${id}: cannot read ${inv.supervisorOut}: ${err.message}`);
+    }
+    if (inv.probeOut) {
+      let marker = null;
+      try {
+        marker = JSON.parse(readFileSync(`${inv.probeOut}.phase`, "utf8"));
+      } catch {
+        marker = null;
+      }
+      if ((marker?.phase ?? null) !== (inv.phase ?? null))
+        problems.push(`${id}: the phase marker on disk differs from results.json`);
     }
     if (inv.probeOut && inv.probe) {
       try {
         const probe = compactProbeRecord(JSON.parse(readFileSync(inv.probeOut, "utf8")));
-        if (stable(probe) !== stable(inv.probe)) problems.push(`${id}: the probe record on disk differs from results.json`);
+        if (stable(probe) !== stable(inv.probe))
+          problems.push(`${id}: the probe record on disk differs from results.json`);
       } catch (err) {
         problems.push(`${id}: cannot read ${inv.probeOut}: ${err.message}`);
       }
@@ -336,7 +467,9 @@ async function cli(argv) {
     failures.push("the measured reference changed since the run (expected.json digest differs)");
   }
   failures.push(...rawFileProblems(run));
-  const result = validateRun(run, expected, allScenarios(), { requireAllMatched: argv.includes("--require-all-matched") });
+  const result = validateRun(run, expected, allScenarios(), {
+    requireAllMatched: argv.includes("--require-all-matched"),
+  });
   failures.push(...result.failures);
   for (const w of result.warnings) console.log(`warning: ${w}`);
   for (const f of failures) console.log(`FAIL: ${f}`);

@@ -20,8 +20,11 @@
 //     does not matter — but overloads (same-named methods, call signatures,
 //     construct signatures) keep their order, which overload resolution
 //     observes;
-//   - parameter names and tuple labels are dropped: they are names, not part
-//     of the type's identity (optional and rest markers are kept).
+//   - binders are positions: parameter names, type-parameter names, `infer`
+//     names and mapped-type keys are replaced by their position in the
+//     lexical environment (so consistent renaming is one type, swapped names
+//     are two); tuple labels are dropped (optional and rest markers are
+//     kept).
 // Intersection order, tuple element order, argument order, modifiers and
 // everything else are significant and kept.
 
@@ -29,10 +32,44 @@ import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------- tokens
 
-const PUNCT = ["=>", "...", "(", ")", "[", "]", "{", "}", "<", ">", "|", "&", ",", ";", ":", "?", "=", ".", "+", "-"];
+const PUNCT = [
+  "=>",
+  "...",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+  "<",
+  ">",
+  "|",
+  "&",
+  ",",
+  ";",
+  ":",
+  "?",
+  "=",
+  ".",
+  "+",
+  "-",
+];
 
 function decodeString(raw, quote) {
-  const simple = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", 0: "\0", "\\": "\\", "'": "'", '"': '"', "`": "`", $: "$" };
+  const simple = {
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    b: "\b",
+    f: "\f",
+    v: "\v",
+    0: "\0",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "`": "`",
+    $: "$",
+  };
   let out = "";
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i];
@@ -69,7 +106,8 @@ function tokenize(text) {
     if (c === '"' || c === "'") {
       let j = i + 1;
       while (j < text.length && text[j] !== c) j += text[j] === "\\" ? 2 : 1;
-      if (j >= text.length) throw new Error(`unterminated string literal in ${JSON.stringify(text.slice(i, i + 60))}`);
+      if (j >= text.length)
+        throw new Error(`unterminated string literal in ${JSON.stringify(text.slice(i, i + 60))}`);
       tokens.push({ kind: "str", value: decodeString(text.slice(i + 1, j), c) });
       i = j + 1;
       continue;
@@ -106,7 +144,10 @@ function tokenize(text) {
       continue;
     }
     if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] ?? ""))) {
-      const m = /^(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*)?\.?\d[\d_]*(?:[eE][+-]?\d+)?)(n?)/.exec(text.slice(i));
+      const m =
+        /^(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*)?\.?\d[\d_]*(?:[eE][+-]?\d+)?)(n?)/.exec(
+          text.slice(i),
+        );
       tokens.push({ kind: m[2] ? "bigint" : "num", text: m[1].replace(/_/g, "") });
       i += m[0].length;
       continue;
@@ -226,7 +267,10 @@ class Parser {
       this.i += 2;
       return { k: "kw", name: "unique symbol" };
     }
-    if (this.isId("readonly") && (this.isP("[", 1) || this.isId(undefined, 1) || this.isP("(", 1) || this.isP("{", 1))) {
+    if (
+      this.isId("readonly") &&
+      (this.isP("[", 1) || this.isId(undefined, 1) || this.isP("(", 1) || this.isP("{", 1))
+    ) {
       this.i++;
       const inner = this.operator();
       if (inner.k === "array" || inner.k === "tuple") return { ...inner, readonly: true };
@@ -291,7 +335,11 @@ class Parser {
       const list = [];
       do {
         const modifiers = [];
-        while ((this.isId("in") || this.isId("out") || this.isId("const")) && this.isId(undefined, 1)) modifiers.push(this.ident());
+        while (
+          (this.isId("in") || this.isId("out") || this.isId("const")) &&
+          this.isId(undefined, 1)
+        )
+          modifiers.push(this.ident());
         const name = this.ident();
         const constraint = this.eatId("extends") ? this.type() : null;
         const dflt = this.eatP("=") ? this.type() : null;
@@ -311,7 +359,11 @@ class Parser {
       while (!this.isP(")")) {
         const rest = this.eatP("...");
         let name;
-        if (this.isId() && (this.isP(":", 1) || this.isP("?", 1) || this.isP(",", 1) || this.isP(")", 1))) name = this.ident();
+        if (
+          this.isId() &&
+          (this.isP(":", 1) || this.isP("?", 1) || this.isP(",", 1) || this.isP(")", 1))
+        )
+          name = this.ident();
         else throw new Error(`expected a parameter, found ${this.describe()}`);
         const optional = this.eatP("?");
         const type = this.eatP(":") ? this.returnType() : { k: "kw", name: "any" };
@@ -329,7 +381,8 @@ class Parser {
     const start = this.i;
     try {
       const params = this.params();
-      if (this.eatP("=>")) return { k: "function", typeParams: null, params, ret: this.returnType() };
+      if (this.eatP("=>"))
+        return { k: "function", typeParams: null, params, ret: this.returnType() };
     } catch {
       // not a parameter list
     }
@@ -369,7 +422,10 @@ class Parser {
       this.i++;
       return { k: "lit", repr: JSON.stringify(t.value) };
     }
-    const negative = t.kind === "p" && t.text === "-" && (this.peek(1)?.kind === "num" || this.peek(1)?.kind === "bigint");
+    const negative =
+      t.kind === "p" &&
+      t.text === "-" &&
+      (this.peek(1)?.kind === "num" || this.peek(1)?.kind === "bigint");
     if (t.kind === "num" || (negative && this.peek(1).kind === "num")) {
       if (negative) this.i++;
       const value = Number(this.peek().text);
@@ -428,16 +484,36 @@ class Parser {
       const args = this.isP("<") ? this.typeArgs() : [];
       return { k: "import", spec: spec.value, name, args };
     }
-    const keywords = ["any", "unknown", "never", "string", "number", "boolean", "symbol", "bigint", "object", "void", "undefined", "null", "this"];
-    if ((keywords.includes(t.text) || t.text === "true" || t.text === "false") && !this.isP(".", 1) && !this.isP("<", 1)) {
+    const keywords = [
+      "any",
+      "unknown",
+      "never",
+      "string",
+      "number",
+      "boolean",
+      "symbol",
+      "bigint",
+      "object",
+      "void",
+      "undefined",
+      "null",
+      "this",
+    ];
+    if (
+      (keywords.includes(t.text) || t.text === "true" || t.text === "false") &&
+      !this.isP(".", 1) &&
+      !this.isP("<", 1)
+    ) {
       this.i++;
       if (t.text === "true" || t.text === "false") return { k: "lit", repr: t.text };
       return { k: "kw", name: t.text };
     }
     const name = this.entityName();
     const args = this.isP("<") ? this.typeArgs() : [];
-    if (name === "Array" && args.length === 1) return { k: "array", element: args[0], readonly: false };
-    if (name === "ReadonlyArray" && args.length === 1) return { k: "array", element: args[0], readonly: true };
+    if (name === "Array" && args.length === 1)
+      return { k: "array", element: args[0], readonly: false };
+    if (name === "ReadonlyArray" && args.length === 1)
+      return { k: "array", element: args[0], readonly: true };
     return { k: "ref", name, args };
   }
 
@@ -518,7 +594,10 @@ class Parser {
       this.i++;
       const param = this.ident();
       this.i++;
-      const { constraint, as } = this.nested(() => ({ constraint: this.type(), as: this.eatId("as") ? this.type() : null }));
+      const { constraint, as } = this.nested(() => ({
+        constraint: this.type(),
+        as: this.eatId("as") ? this.type() : null,
+      }));
       this.expectP("]");
       let optional = null;
       if ((this.isP("+") || this.isP("-")) && this.isP("?", 1)) {
@@ -536,7 +615,8 @@ class Parser {
       const list = [];
       while (!this.isP("}")) {
         list.push(this.member());
-        if (!this.eatP(";") && !this.eatP(",") && !this.isP("}")) throw new Error(`expected ; or } in an object type, found ${this.describe()}`);
+        if (!this.eatP(";") && !this.eatP(",") && !this.isP("}"))
+          throw new Error(`expected ; or } in an object type, found ${this.describe()}`);
       }
       return list;
     });
@@ -559,7 +639,13 @@ class Parser {
       return { m: "construct", typeParams, params, ret: this.type() };
     }
     let readonly = false;
-    if (this.isId("readonly") && !this.isP(":", 1) && !this.isP("?", 1) && !this.isP("(", 1) && !this.isP("<", 1)) {
+    if (
+      this.isId("readonly") &&
+      !this.isP(":", 1) &&
+      !this.isP("?", 1) &&
+      !this.isP("(", 1) &&
+      !this.isP("<", 1)
+    ) {
       this.i++;
       readonly = true;
     }
@@ -572,7 +658,11 @@ class Parser {
       return { m: "index", readonly, key, type: this.type() };
     }
     // `get x(): T` / `set x(v: T)` accessors.
-    if ((this.isId("get") || this.isId("set")) && (this.isId(undefined, 1) || this.peek(1)?.kind === "str") && this.isP("(", 2)) {
+    if (
+      (this.isId("get") || this.isId("set")) &&
+      (this.isId(undefined, 1) || this.peek(1)?.kind === "str") &&
+      this.isP("(", 2)
+    ) {
       const accessor = this.ident();
       const name = this.memberName();
       const params = this.params();
@@ -596,7 +686,8 @@ export function parseType(text) {
   const parser = new Parser(tokenize(String(text)));
   if (!parser.t.length) throw new Error("an empty printed type");
   const type = parser.type();
-  if (parser.i !== parser.t.length) throw new Error(`unexpected ${parser.describe()} after a printed type`);
+  if (parser.i !== parser.t.length)
+    throw new Error(`unexpected ${parser.describe()} after a printed type`);
   return type;
 }
 
@@ -604,6 +695,15 @@ export function parseType(text) {
 
 // The canonical form is a normalised tree, compared by its serialisation:
 // rendering is for display only and never re-parsed.
+//
+// Names a type binds are replaced by positions in a lexical environment, so
+// consistent renaming is one type and swapped names are two: a signature
+// binds its type parameters and its parameters (a `typeof` of a parameter
+// and a type predicate's target refer to it by position), a conditional binds
+// the `infer` names of its extends clause (in that clause and its true
+// branch), a mapped type binds its key. A reference resolves to the innermost
+// binding of its name (shadowing), as `{ up, index }`: how many scopes out,
+// which binder there.
 
 function flatten(kind, members) {
   return members.flatMap((m) => (m.k === kind ? flatten(kind, m.members) : [m]));
@@ -611,59 +711,128 @@ function flatten(kind, members) {
 
 const keyOf = (node) => JSON.stringify(node);
 
-function normalizeParams(params) {
-  // Parameter names are dropped; a predicate names its target by position.
-  const binders = new Map();
-  params.forEach((p, i) => {
-    if (!p.isThis && p.name) binders.set(p.name, i);
+/** A scope: names of one binding kind each map to their position. */
+const scope = (entries) => ({
+  types: new Map(entries.types ?? []),
+  values: new Map(entries.values ?? []),
+});
+
+function lookup(env, space, name) {
+  for (let i = env.length - 1; i >= 0; i--) {
+    const index = env[i][space].get(name);
+    if (index !== undefined) return { up: env.length - 1 - i, index };
+  }
+  return null;
+}
+
+/** The `infer` names a conditional's extends clause declares, in order (not those of nested conditionals). */
+function inferNames(node, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (node.k === "infer") {
+    if (!out.includes(node.name)) out.push(node.name);
+    if (node.constraint) inferNames(node.constraint, out);
+    return out;
+  }
+  if (node.k === "conditional") return out;
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) value.forEach((v) => inferNames(v, out));
+    else if (value && typeof value === "object") inferNames(value, out);
+  }
+  return out;
+}
+
+function normalizeSignature(typeParams, params, ret, env) {
+  // One scope for the signature: its type parameters (visible in their own
+  // constraints and defaults) and its parameters (visible to `typeof` in
+  // later parameter types and in the return type).
+  const frame = scope({
+    types: (typeParams ?? []).map((p, i) => [p.name, i]),
+    values: params
+      .map((p, i) => [p.isThis ? "this" : p.name, i])
+      .filter(([n]) => n && n !== "this"),
   });
-  return {
-    binders,
-    params: params.map((p) => ({ this: p.isThis, rest: p.rest, optional: p.optional, type: normalize(p.type) })),
-  };
-}
-
-function normalizeTypeParams(params) {
-  return params?.length
-    ? params.map((p) => ({ name: p.name, modifiers: p.modifiers, constraint: p.constraint && normalize(p.constraint), dflt: p.dflt && normalize(p.dflt) }))
+  const inner = [...env, frame];
+  const typeParamsOut = typeParams?.length
+    ? typeParams.map((p) => ({
+        modifiers: p.modifiers,
+        constraint: p.constraint && normalize(p.constraint, inner),
+        dflt: p.dflt && normalize(p.dflt, inner),
+      }))
     : null;
+  const paramsOut = params.map((p) => ({
+    this: p.isThis,
+    rest: p.rest,
+    optional: p.optional,
+    type: normalize(p.type, inner),
+  }));
+  let retOut;
+  if (ret.k === "predicate") {
+    const target =
+      ret.name === "this"
+        ? { this: true }
+        : frame.values.has(ret.name)
+          ? { param: frame.values.get(ret.name) }
+          : { free: ret.name };
+    retOut = {
+      k: "predicate",
+      asserts: ret.asserts,
+      target,
+      type: ret.type && normalize(ret.type, inner),
+    };
+  } else retOut = normalize(ret, inner);
+  return { typeParams: typeParamsOut, params: paramsOut, ret: retOut };
 }
 
-function normalizeReturn(ret, binders) {
-  if (ret.k !== "predicate") return normalize(ret);
-  const target = ret.name === "this" ? { this: true } : binders.has(ret.name) ? { param: binders.get(ret.name) } : { free: ret.name };
-  return { k: "predicate", asserts: ret.asserts, target, type: ret.type && normalize(ret.type) };
-}
-
-function normalizeSignature(typeParams, params, ret) {
-  const { binders, params: ps } = normalizeParams(params);
-  return { typeParams: normalizeTypeParams(typeParams), params: ps, ret: normalizeReturn(ret, binders) };
-}
-
-function normalizeMember(m) {
+function normalizeMember(m, env) {
   switch (m.m) {
     case "call":
     case "construct":
-      return { m: m.m, ...normalizeSignature(m.typeParams, m.params, m.ret) };
+      return { m: m.m, ...normalizeSignature(m.typeParams, m.params, m.ret, env) };
     case "method":
-      return { m: "method", name: m.name, optional: m.optional, ...normalizeSignature(m.typeParams, m.params, m.ret) };
+      return {
+        m: "method",
+        name: m.name,
+        optional: m.optional,
+        ...normalizeSignature(m.typeParams, m.params, m.ret, env),
+      };
     case "index":
-      return { m: "index", readonly: m.readonly, key: normalize(m.key), type: normalize(m.type) };
-    case "accessor":
-      return { m: "accessor", accessor: m.accessor, name: m.name, params: normalizeParams(m.params).params, type: m.type && normalize(m.type) };
+      return {
+        m: "index",
+        readonly: m.readonly,
+        key: normalize(m.key, env),
+        type: normalize(m.type, env),
+      };
+    case "accessor": {
+      const sig = normalizeSignature(null, m.params, m.type ?? { k: "kw", name: "void" }, env);
+      return {
+        m: "accessor",
+        accessor: m.accessor,
+        name: m.name,
+        params: sig.params,
+        type: m.type ? sig.ret : null,
+      };
+    }
     case "property":
-      return { m: "property", name: m.name, optional: m.optional, readonly: m.readonly, type: normalize(m.type) };
+      return {
+        m: "property",
+        name: m.name,
+        optional: m.optional,
+        readonly: m.readonly,
+        type: normalize(m.type, env),
+      };
     default:
       throw new Error(`unknown member kind ${m.m}`);
   }
 }
 
-function normalizeObject(node) {
+function normalizeObject(node, env) {
   // Index signatures (by key), then properties, methods and accessors by
   // tagged name — keeping the order of same-named overloads — then call and
   // construct signatures in their order.
-  const members = node.members.map(normalizeMember);
-  const index = members.filter((m) => m.m === "index").sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+  const members = node.members.map((m) => normalizeMember(m, env));
+  const index = members
+    .filter((m) => m.m === "index")
+    .sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
   const named = new Map();
   for (const m of members.filter((x) => ["property", "method", "accessor"].includes(x.m))) {
     const k = keyOf(m.name);
@@ -673,24 +842,35 @@ function normalizeObject(node) {
   const names = [...named.keys()].sort();
   return {
     k: "object",
-    members: [...index, ...names.flatMap((n) => named.get(n)), ...members.filter((m) => m.m === "call"), ...members.filter((m) => m.m === "construct")],
+    members: [
+      ...index,
+      ...names.flatMap((n) => named.get(n)),
+      ...members.filter((m) => m.m === "call"),
+      ...members.filter((m) => m.m === "construct"),
+    ],
   };
 }
 
-/** The normalised form of a parsed type (see the module comment for the rules). */
-export function normalize(node) {
+/**
+ * The normalised form of a parsed type (see the module comment for the
+ * rules). `env` is the lexical environment of the enclosing binders.
+ */
+export function normalize(node, env = []) {
+  const n = (child) => normalize(child, env);
   switch (node.k) {
     case "kw":
     case "lit":
       return node;
     case "template":
-      return { k: "template", chunks: node.chunks, holes: node.holes.map(normalize) };
+      return { k: "template", chunks: node.chunks, holes: node.holes.map(n) };
     case "union": {
-      let members = flatten("union", flatten("union", node.members).map(normalize));
+      let members = flatten("union", flatten("union", node.members).map(n));
       const hasTrue = members.some((m) => m.k === "lit" && m.repr === "true");
       const hasFalse = members.some((m) => m.k === "lit" && m.repr === "false");
       if (hasTrue && hasFalse) {
-        members = members.filter((m) => !(m.k === "lit" && (m.repr === "true" || m.repr === "false")));
+        members = members.filter(
+          (m) => !(m.k === "lit" && (m.repr === "true" || m.repr === "false")),
+        );
         members.push({ k: "kw", name: "boolean" });
       }
       const unique = new Map(members.map((m) => [keyOf(m), m]));
@@ -698,44 +878,85 @@ export function normalize(node) {
       return sorted.length === 1 ? sorted[0] : { k: "union", members: sorted };
     }
     case "intersection":
-      return { k: "intersection", members: flatten("intersection", flatten("intersection", node.members).map(normalize)) };
+      return {
+        k: "intersection",
+        members: flatten("intersection", flatten("intersection", node.members).map(n)),
+      };
     case "array":
-      return { k: "array", readonly: node.readonly, element: normalize(node.element) };
+      return { k: "array", readonly: node.readonly, element: n(node.element) };
     case "tuple":
-      return { k: "tuple", readonly: node.readonly, elements: node.elements.map((e) => ({ rest: e.rest, optional: e.optional, type: normalize(e.type) })) };
+      return {
+        k: "tuple",
+        readonly: node.readonly,
+        elements: node.elements.map((e) => ({
+          rest: e.rest,
+          optional: e.optional,
+          type: n(e.type),
+        })),
+      };
     case "object":
-      return normalizeObject(node);
-    case "mapped":
+      return normalizeObject(node, env);
+    case "mapped": {
+      const inner = [...env, scope({ types: [[node.param, 0]] })];
       return {
         k: "mapped",
         readonly: node.readonly,
-        param: node.param,
-        constraint: normalize(node.constraint),
-        as: node.as && normalize(node.as),
+        constraint: n(node.constraint),
+        as: node.as && normalize(node.as, inner),
         optional: node.optional,
-        template: normalize(node.template),
+        template: normalize(node.template, inner),
       };
+    }
     case "function":
-      return { k: "function", ...normalizeSignature(node.typeParams, node.params, node.ret) };
+      return { k: "function", ...normalizeSignature(node.typeParams, node.params, node.ret, env) };
     case "constructor":
-      return { k: "constructor", abstract: node.abstract, ...normalizeSignature(node.typeParams, node.params, node.ret) };
-    case "predicate":
-      // A predicate outside a signature names a free variable.
-      return normalizeReturn(node, new Map());
-    case "conditional":
-      return { k: "conditional", check: normalize(node.check), ext: normalize(node.ext), whenTrue: normalize(node.whenTrue), whenFalse: normalize(node.whenFalse) };
-    case "infer":
-      return { k: "infer", name: node.name, constraint: node.constraint && normalize(node.constraint) };
+      return {
+        k: "constructor",
+        abstract: node.abstract,
+        ...normalizeSignature(node.typeParams, node.params, node.ret, env),
+      };
+    case "predicate": {
+      // A predicate outside a signature names whatever binds its target.
+      const bound = node.name === "this" ? null : lookup(env, "values", node.name);
+      const target =
+        node.name === "this" ? { this: true } : bound ? { bound } : { free: node.name };
+      return { k: "predicate", asserts: node.asserts, target, type: node.type && n(node.type) };
+    }
+    case "conditional": {
+      const inner = [...env, scope({ types: inferNames(node.ext).map((name, i) => [name, i]) })];
+      return {
+        k: "conditional",
+        check: n(node.check),
+        ext: normalize(node.ext, inner),
+        whenTrue: normalize(node.whenTrue, inner),
+        whenFalse: n(node.whenFalse),
+      };
+    }
+    case "infer": {
+      // Declared by the innermost conditional's scope (the name is a binder).
+      const bound = lookup(env, "types", node.name);
+      return { k: "infer", bound, constraint: node.constraint && n(node.constraint) };
+    }
     case "keyof":
-      return { k: "keyof", type: normalize(node.type) };
+      return { k: "keyof", type: n(node.type) };
     case "indexed":
-      return { k: "indexed", object: normalize(node.object), index: normalize(node.index) };
-    case "typeof":
-      return { k: "typeof", name: node.name, args: node.args.map(normalize) };
+      return { k: "indexed", object: n(node.object), index: n(node.index) };
+    case "typeof": {
+      const [head, ...path] = node.name.split(".");
+      const bound = lookup(env, "values", head);
+      return bound
+        ? { k: "typeof", bound, path, args: node.args.map(n) }
+        : { k: "typeof", name: node.name, args: node.args.map(n) };
+    }
     case "import":
-      return { k: "import", spec: node.spec, name: node.name, args: node.args.map(normalize) };
-    case "ref":
-      return { k: "ref", name: node.name, args: node.args.map(normalize) };
+      return { k: "import", spec: node.spec, name: node.name, args: node.args.map(n) };
+    case "ref": {
+      if (!node.args.length && !node.name.includes(".")) {
+        const bound = lookup(env, "types", node.name);
+        if (bound) return { k: "bound", bound };
+      }
+      return { k: "ref", name: node.name, args: node.args.map(n) };
+    }
     default:
       throw new Error(`unknown type node ${node.k}`);
   }
@@ -744,15 +965,23 @@ export function normalize(node) {
 // ---------------------------------------------------------------- display
 
 // A preview of a normalised tree, for reports only (never parsed again).
-const loose = (n) => ["function", "constructor", "conditional", "union", "intersection"].includes(n.k);
+const loose = (n) =>
+  ["function", "constructor", "conditional", "union", "intersection"].includes(n.k);
 const operand = (n) => loose(n) || ["keyof", "infer"].includes(n.k);
 const wrap = (n, test) => (test(n) ? `(${display(n)})` : display(n));
 const typeParamsText = (ps) =>
   ps?.length
-    ? `<${ps.map((p) => `${p.modifiers.length ? p.modifiers.join(" ") + " " : ""}${p.name}${p.constraint ? ` extends ${display(p.constraint)}` : ""}${p.dflt ? ` = ${display(p.dflt)}` : ""}`).join(", ")}>`
+    ? `<${ps.map((p, i) => `${p.modifiers.length ? p.modifiers.join(" ") + " " : ""}T${i}${p.constraint ? ` extends ${display(p.constraint)}` : ""}${p.dflt ? ` = ${display(p.dflt)}` : ""}`).join(", ")}>`
     : "";
-const paramsText = (ps) => `(${ps.map((p, i) => `${p.this ? "this" : `$${i}`}${p.optional ? "?" : ""}: ${p.rest ? "..." : ""}${display(p.type)}`).join(", ")})`;
-const keyText = (name) => (name.kind === "computed" ? `[${name.text}]` : /^[A-Za-z_$][\w$]*$/.test(name.text) ? name.text : JSON.stringify(name.text));
+const boundText = (b) => (b ? "$" + b.up + "." + b.index : "?");
+const paramsText = (ps) =>
+  `(${ps.map((p, i) => `${p.this ? "this" : `$${i}`}${p.optional ? "?" : ""}: ${p.rest ? "..." : ""}${display(p.type)}`).join(", ")})`;
+const keyText = (name) =>
+  name.kind === "computed"
+    ? `[${name.text}]`
+    : /^[A-Za-z_$][\w$]*$/.test(name.text)
+      ? name.text
+      : JSON.stringify(name.text);
 
 function memberText(m) {
   switch (m.m) {
@@ -778,7 +1007,17 @@ function display(n) {
     case "lit":
       return n.repr;
     case "template":
-      return "`" + n.chunks.map((c, i) => JSON.stringify(c).slice(1, -1).replace(/`/g, "\\`") + (i < n.holes.length ? "${" + display(n.holes[i]) + "}" : "")).join("") + "`";
+      return (
+        "`" +
+        n.chunks
+          .map(
+            (c, i) =>
+              JSON.stringify(c).slice(1, -1).replace(/`/g, "\\`") +
+              (i < n.holes.length ? "${" + display(n.holes[i]) + "}" : ""),
+          )
+          .join("") +
+        "`"
+      );
     case "union":
       return n.members.map((m) => wrap(m, loose)).join(" | ");
     case "intersection":
@@ -790,25 +1029,33 @@ function display(n) {
     case "object":
       return n.members.length ? `{ ${n.members.map(memberText).join("; ")}; }` : "{}";
     case "mapped":
-      return `{ ${n.readonly ? `${n.readonly}readonly ` : ""}[${n.param} in ${display(n.constraint)}${n.as ? ` as ${display(n.as)}` : ""}]${n.optional ? `${n.optional}?` : ""}: ${display(n.template)}; }`;
+      return `{ ${n.readonly ? `${n.readonly}readonly ` : ""}[K in ${display(n.constraint)}${n.as ? ` as ${display(n.as)}` : ""}]${n.optional ? `${n.optional}?` : ""}: ${display(n.template)}; }`;
     case "function":
       return `${typeParamsText(n.typeParams)}${paramsText(n.params)} => ${display(n.ret)}`;
     case "constructor":
       return `${n.abstract ? "abstract " : ""}new ${typeParamsText(n.typeParams)}${paramsText(n.params)} => ${display(n.ret)}`;
     case "predicate": {
-      const t = n.target.this ? "this" : n.target.param !== undefined ? `$${n.target.param}` : n.target.free;
+      const t = n.target.this
+        ? "this"
+        : n.target.param !== undefined
+          ? "$" + n.target.param
+          : n.target.bound
+            ? boundText(n.target.bound)
+            : n.target.free;
       return `${n.asserts ? "asserts " : ""}${t}${n.type ? ` is ${display(n.type)}` : ""}`;
     }
     case "conditional":
       return `${wrap(n.check, operand)} extends ${wrap(n.ext, (x) => x.k === "conditional" || x.k === "function")} ? ${display(n.whenTrue)} : ${display(n.whenFalse)}`;
     case "infer":
-      return `infer ${n.name}${n.constraint ? ` extends ${display(n.constraint)}` : ""}`;
+      return `infer ${boundText(n.bound)}${n.constraint ? ` extends ${display(n.constraint)}` : ""}`;
+    case "bound":
+      return boundText(n.bound);
     case "keyof":
       return `keyof ${wrap(n.type, operand)}`;
     case "indexed":
       return `${wrap(n.object, operand)}[${display(n.index)}]`;
     case "typeof":
-      return `typeof ${n.name}${n.args.length ? `<${n.args.map(display).join(", ")}>` : ""}`;
+      return `typeof ${n.bound ? boundText(n.bound) + n.path.map((p) => "." + p).join("") : n.name}${n.args.length ? `<${n.args.map(display).join(", ")}>` : ""}`;
     case "import":
       return `import(${JSON.stringify(n.spec)})${n.name ? "." + n.name : ""}${n.args.length ? `<${n.args.map(display).join(", ")}>` : ""}`;
     case "ref":

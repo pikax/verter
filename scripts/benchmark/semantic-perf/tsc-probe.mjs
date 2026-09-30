@@ -54,7 +54,8 @@ function flag(name) {
 function aliasNamePosition(text, alias) {
   const marker = `type ${alias} `;
   const at = text.indexOf(marker);
-  if (at < 0 || text.indexOf(marker, at + 1) >= 0) throw new Error(`the scenario must declare ${alias} exactly once`);
+  if (at < 0 || text.indexOf(marker, at + 1) >= 0)
+    throw new Error(`the scenario must declare ${alias} exactly once`);
   return at + "type ".length;
 }
 
@@ -70,28 +71,24 @@ async function main() {
     writeFileSync(`${path}.tmp`, text);
     renameSync(`${path}.tmp`, path);
   };
-  // The phase marker. While a demand phase runs, this client is blocked in a
-  // synchronous request and holds only what it held when the phase began:
-  // its own memory then (read by the same reader, outside every timer) is
-  // the evidence that attributes a containment kill to the server.
-  const DEMAND_PHASES = ["spawn", "engine-start", "setup", "init", "cold", "warm"];
-  const phase = (name) => {
-    let clientBytes = null;
-    if (DEMAND_PHASES.includes(name)) {
-      const r = spawnSync(job.statsExe, ["stats", "--pid", String(process.pid)], { encoding: "utf8", timeout: 30_000 });
-      if (r.status === 0) clientBytes = JSON.parse(r.stdout).currentBytes ?? null;
-    }
-    replace(`${outPath}.phase`, JSON.stringify({ phase: name, clientBytes }));
-  };
+  // The phase marker names the phase running (replaced atomically before
+  // the phase starts).
+  const phase = (name) => replace(`${outPath}.phase`, JSON.stringify({ phase: name }));
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`job schema ${job.schema} is not 1`);
   if (job.probes.length < 1) throw new Error("a job demands at least one probe");
-  const { API } = await import(pathToFileURL(join(job.tsPackageDir, "dist", "api", "sync", "api.js")).href);
+  const { API } = await import(
+    pathToFileURL(join(job.tsPackageDir, "dist", "api", "sync", "api.js")).href
+  );
 
   const dir = job.dir.replace(/\\/g, "/");
   const scenarioFile = `${dir}/${job.scenario}`;
   const text = readFileSync(scenarioFile, "utf8");
-  const serverTime = (method) => api.getTimingInfo().recentRequests.filter((r) => r.method === method).at(-1)?.serverTimeMs ?? null;
+  const serverTime = (method) =>
+    api
+      .getTimingInfo()
+      .recentRequests.filter((r) => r.method === method)
+      .at(-1)?.serverTimeMs ?? null;
 
   phase("spawn");
   let t = performance.now();
@@ -128,7 +125,11 @@ async function main() {
     }
     const roundTripMs = performance.now() - start;
     const serverMs = serverTime("getTypeAtPosition");
-    const outcome = error ? { kind: "fault", detail: error } : type ? { kind: "value" } : { kind: "miss" };
+    const outcome = error
+      ? { kind: "fault", detail: error }
+      : type
+        ? { kind: "value" }
+        : { kind: "miss" };
     return { record: { roundTripMs, serverMs, outcome }, type };
   };
 
@@ -154,7 +155,10 @@ async function main() {
   phase("stats");
   const statsErrors = [];
   const readStats = (pid, label) => {
-    const r = spawnSync(job.statsExe, ["stats", "--pid", String(pid)], { encoding: "utf8", timeout: 30_000 });
+    const r = spawnSync(job.statsExe, ["stats", "--pid", String(pid)], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
     if (r.status !== 0) {
       statsErrors.push(`${label}: stats --pid ${pid}: exit ${r.status} ${r.stderr?.trim() ?? ""}`);
       return null;
@@ -168,7 +172,15 @@ async function main() {
     tscExe: job.tscExe,
     serverPid,
     rootFiles,
-    phases: { spawnMs, engineStartMs, engineStartRoundTripMs, setupMs, setupRoundTripMs, initMs: init.serverMs, teardownMs: null },
+    phases: {
+      spawnMs,
+      engineStartMs,
+      engineStartRoundTripMs,
+      setupMs,
+      setupRoundTripMs,
+      initMs: init.serverMs,
+      teardownMs: null,
+    },
     init,
     probes,
     serverAfterRequests: readStats(serverPid, "after requests"),
@@ -185,7 +197,9 @@ async function main() {
     // member parenthesised so a function member keeps its extent.
     const members = type.isUnionType() ? type.getTypes() : null;
     const printed = members
-      ? members.map((member) => `(${project.checker.typeToString(member, undefined, PRINT_FLAGS)})`).join(" | ")
+      ? members
+          .map((member) => `(${project.checker.typeToString(member, undefined, PRINT_FLAGS)})`)
+          .join(" | ")
       : project.checker.typeToString(type, undefined, PRINT_FLAGS);
     return { printed, members: members ? members.length : null };
   };
@@ -197,12 +211,30 @@ async function main() {
       try {
         const { printed, members } = print(cold);
         coldPrint = printed;
-        probe.observation = { text: printed, error: null, errorType: cold.isErrorType(), typeFlags: cold.flags, unionMembers: members };
+        probe.observation = {
+          text: printed,
+          error: null,
+          errorType: cold.isErrorType(),
+          typeFlags: cold.flags,
+          unionMembers: members,
+        };
       } catch (err) {
-        probe.observation = { text: null, error: String(err?.message ?? err), errorType: null, typeFlags: null, unionMembers: null };
+        probe.observation = {
+          text: null,
+          error: String(err?.message ?? err),
+          errorType: null,
+          typeFlags: null,
+          unionMembers: null,
+        };
       }
     } else {
-      probe.observation = { text: null, error: "no value to observe", errorType: null, typeFlags: null, unionMembers: null };
+      probe.observation = {
+        text: null,
+        error: "no value to observe",
+        errorType: null,
+        typeFlags: null,
+        unionMembers: null,
+      };
     }
     probe.warm.forEach((record, i) => {
       const w = warm[i];
@@ -210,7 +242,10 @@ async function main() {
       else if (w.id === cold.id) record.sameAnswerAsCold = true;
       else {
         try {
-          record.sameAnswerAsCold = coldPrint !== null && print(w).printed === coldPrint && w.isErrorType() === cold.isErrorType();
+          record.sameAnswerAsCold =
+            coldPrint !== null &&
+            print(w).printed === coldPrint &&
+            w.isErrorType() === cold.isErrorType();
         } catch {
           record.sameAnswerAsCold = false;
         }
@@ -219,7 +254,22 @@ async function main() {
     probe.observeMs = performance.now() - start;
   });
   result.serverAfterObserve = readStats(serverPid, "after observe");
-  result.client = { maxRssBytes: process.resourceUsage().maxRSS * 1024, note: "the node client driving the API; not tsc's memory" };
+  result.client = {
+    maxRssBytes: process.resourceUsage().maxRSS * 1024,
+    note: "the node client driving the API; not tsc's memory",
+  };
+
+  // Timer calibration, after every measurement: a series of trivial
+  // requests (the warm `__BenchInit` request) whose server times reveal the
+  // server clock's quantum independently of the workload.
+  phase("calibrate");
+  const calibrationPosition = aliasNamePosition(text, job.initAlias);
+  const calibration = [];
+  for (let i = 0; i < 20; i++) {
+    project.checker.getTypeAtPosition(scenarioFile, calibrationPosition);
+    calibration.push(serverTime("getTypeAtPosition"));
+  }
+  result.calibration = { request: "getTypeAtPosition(__BenchInit), warm", serverMs: calibration };
 
   phase("teardown");
   t = performance.now();

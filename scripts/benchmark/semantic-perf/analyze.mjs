@@ -15,59 +15,110 @@ export { RESOURCE_CODES };
 export const ARMS = {
   verter: { tool: "verter", kind: "probe", headline: true, label: "Verter (production defaults)" },
   "tsc-api": { tool: "tsc", kind: "probe", headline: true, label: "tsc 7.0.2 native API" },
-  "verter-obs": { tool: "verter", kind: "probe", headline: false, label: "Verter, observability on (labelled; not compared)" },
-  "verter-counted": { tool: "verter", kind: "probe", headline: false, label: "Verter, counting allocator (instrumented; not compared)" },
-  "tsc-cli": { tool: "tsc", kind: "cli", headline: false, label: "tsc -p, default (parallel) checkers (whole program; reference)" },
-  "tsc-cli-1": { tool: "tsc", kind: "cli", headline: false, label: "tsc -p --singleThreaded (whole program; reference)" },
+  "verter-obs": {
+    tool: "verter",
+    kind: "probe",
+    headline: false,
+    label: "Verter, observability on (labelled; not compared)",
+  },
+  "verter-counted": {
+    tool: "verter",
+    kind: "probe",
+    headline: false,
+    label: "Verter, counting allocator (instrumented; not compared)",
+  },
+  "tsc-cli": {
+    tool: "tsc",
+    kind: "cli",
+    headline: false,
+    label: "tsc -p, default (parallel) checkers (whole program; reference)",
+  },
+  "tsc-cli-1": {
+    tool: "tsc",
+    kind: "cli",
+    headline: false,
+    label: "tsc -p --singleThreaded (whole program; reference)",
+  },
 };
 
 export const DEFAULT_ARMS = Object.keys(ARMS);
 
 /** Verter classes. */
-export const CLASSES = ["killed", "error", "refusal", "unverified", "partial", "mismatch", "no-reference", "beyond-tsc", "matched"];
+export const CLASSES = [
+  "killed",
+  "error",
+  "refusal",
+  "unverified",
+  "partial",
+  "mismatch",
+  "no-reference",
+  "beyond-tsc",
+  "matched",
+];
 
 /** The phases a probe's demand runs in. */
 export const DEMAND_PHASES = ["spawn", "engine-start", "setup", "init", "cold", "warm", "stats"];
-/** tsc phases in which the driver is blocked in one synchronous request. */
-const TSC_BLOCKED_PHASES = ["spawn", "engine-start", "setup", "init", "cold", "warm"];
-/** Headroom kept between the driver's recorded memory and the allowance. */
-const ATTRIBUTION_MARGIN_BYTES = 64 * 1024 * 1024;
+/** A finite, non-negative number. */
+const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
+
+/** tsc phases in which its server is computing the demand (the driver waits). */
+const TSC_ENGINE_PHASES = ["engine-start", "setup", "init", "cold", "warm"];
 
 /**
- * Whether a containment kill of a probe invocation is the ENGINE exhausting
- * the budget. Verter's tree is its engine alone. tsc's tree also holds the
- * node driver: a kill is the server's only while the driver was blocked in
- * a synchronous request (so held what it held when the phase began, which
- * the phase marker records) and that memory fits the allowance with margin —
- * then the server alone passed the budget. Anything else is unattributed.
+ * Whether a kill of an invocation is established as its ENGINE exhausting
+ * the resource. `limits` = { budgetBytes }.
+ *
+ * Memory: only a tree that is the engine alone (a Verter probe; a `tsc -p`
+ * process) proves it, and only when the supervisor's actual kill threshold
+ * (`killTriggerBytes`: below the cap on a sampled backend) is at least the
+ * engine budget, in an accounting of the engine's own memory (a Linux cgroup
+ * also counts page cache and kernel memory, so it proves nothing). A tsc API
+ * tree holds the node driver too, whose memory is not bounded during a
+ * request: a memory kill there is never attributed.
+ *
+ * Deadline: the engine was computing when the whole-invocation deadline
+ * expired — any time for a single-process tree, a server phase for tsc.
  */
-export function killAttributed(inv, infraBytes) {
-  if (ARMS[inv.arm]?.kind === "cli" || ARMS[inv.arm]?.tool === "verter") return true;
-  if (!TSC_BLOCKED_PHASES.includes(inv.phase)) return false;
-  const client = inv.phaseClientBytes;
-  return typeof client === "number" && typeof infraBytes === "number" && client + ATTRIBUTION_MARGIN_BYTES <= infraBytes;
+export function killAttributed(inv, limits = {}) {
+  const rec = inv.supervisor ?? {};
+  const singleProcess = ARMS[inv.arm]?.kind === "cli" || ARMS[inv.arm]?.tool === "verter";
+  if (rec.killedBy === "timeout") return singleProcess || TSC_ENGINE_PHASES.includes(inv.phase);
+  if (rec.killedBy !== "memory" || !singleProcess) return false;
+  if (String(rec.backend ?? "").startsWith("linux")) return false;
+  const trigger =
+    typeof rec.killTriggerBytes === "number" ? rec.killTriggerBytes : rec.memLimitBytes;
+  return (
+    typeof trigger === "number" &&
+    typeof limits.budgetBytes === "number" &&
+    trigger >= limits.budgetBytes
+  );
 }
 
-const finite = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
-
 /**
- * How an invocation ended. `infraBytes` is the containment allowance above
- * the engine budget (needed to attribute a tsc kill).
+ * How an invocation ended. `limits` = { budgetBytes } (the engine budget,
+ * needed to attribute a kill).
  */
-export function invocationEnd(inv, infraBytes = null) {
-  if (inv.skipped) return { kind: "killed", detail: "memory (skipped after a warmup whose engine exhausted the cap)" };
+export function invocationEnd(inv, limits = {}) {
+  if (inv.skipped)
+    return {
+      kind: "killed",
+      detail: "memory (skipped after a warmup whose engine exhausted the cap)",
+    };
   const rec = inv.supervisor;
-  if (!rec) return { kind: "harness-failure", detail: inv.supervisorReadError ?? "no supervisor record" };
-  if (!rec.launched) return { kind: "harness-failure", detail: `not launched: ${(rec.errors ?? []).join("; ")}` };
+  if (!rec)
+    return { kind: "harness-failure", detail: inv.supervisorReadError ?? "no supervisor record" };
+  if (!rec.launched)
+    return { kind: "harness-failure", detail: `not launched: ${(rec.errors ?? []).join("; ")}` };
   if (rec.killedBy === "memory" || rec.killedBy === "timeout") {
     const phase = inv.phase ?? null;
-    // Stopped after the demand was measured and recorded: the answer was
-    // being observed, which is the benchmark's machinery, not the engine.
-    if (inv.probe?.stage === "measured" && phase && !DEMAND_PHASES.includes(phase)) {
-      return { kind: "observe-killed", detail: `${rec.killedBy} during ${phase}` };
-    }
     const detail = phase ? `${rec.killedBy} during ${phase}` : rec.killedBy;
-    if (!killAttributed(inv, infraBytes)) return { kind: "unattributed-kill", detail: `${detail}, not attributable to the engine` };
+    // A record exists once the demand was measured: whatever was killed
+    // after that (observation, teardown) was not the engine's demand.
+    if (inv.probe?.stage === "measured" || inv.probe?.stage === "complete") {
+      return { kind: "observe-killed", detail: `${detail}, after the demand completed` };
+    }
+    if (!killAttributed(inv, limits))
+      return { kind: "unattributed-kill", detail: `${detail}, not attributable to the engine` };
     return { kind: "killed", detail };
   }
   if (rec.killedBy) return { kind: "harness-failure", detail: `killed by ${rec.killedBy}` };
@@ -88,76 +139,196 @@ export function probeRecordProblems(record, { tool, warmRepeats, stage = "comple
   };
   need(record?.schema === 2, `record schema ${record?.schema} is not 2`);
   need(record?.tool === tool, `record from ${record?.tool}, not ${tool}`);
-  if (stage === "complete") need(record?.stage === "complete", `record stage ${record?.stage}, not complete`);
-  else need(record?.stage === "measured" || record?.stage === "complete", `record stage ${record?.stage}`);
+  if (stage === "complete")
+    need(record?.stage === "complete", `record stage ${record?.stage}, not complete`);
+  else
+    need(
+      record?.stage === "measured" || record?.stage === "complete",
+      `record stage ${record?.stage}`,
+    );
   const probe = record?.probes?.[0];
-  need(record?.probes?.length === 1 && probe?.alias === "__Probe", `expected exactly one __Probe record, got ${record?.probes?.length ?? 0}`);
+  need(
+    record?.probes?.length === 1 && probe?.alias === "__Probe",
+    `expected exactly one __Probe record, got ${record?.probes?.length ?? 0}`,
+  );
   if (!probe) return p;
   const warm = probe.warm ?? [];
   need(warm.length === warmRepeats, `${warm.length} warm repeats, not ${warmRepeats}`);
   if (tool === "verter") {
     const ph = record.phases ?? {};
-    need(finite(ph.engineStart) && finite(ph.setup) && finite(ph.init), "a phase time is missing or invalid");
-    need(record.init?.outcome?.kind === "value" && finite(record.init?.micros), "the init request did not answer");
+    need(
+      finite(ph.engineStart) && finite(ph.setup) && finite(ph.init),
+      "a phase time is missing or invalid",
+    );
+    need(
+      record.init?.outcome?.kind === "value" && finite(record.init?.micros),
+      "the init request did not answer",
+    );
     need(finite(probe.cold?.micros), "the cold time is missing or invalid");
-    need(warm.every((w) => finite(w.micros)), "a warm time is missing or invalid");
-    need(finite(record.afterRequests?.peakBytes) && finite(record.afterRequests?.currentBytes), "no engine statistics after the requests");
-    need(ph.init === record.init?.micros, "the init time disagrees with the init request's own time");
-    need(Number.isInteger(record.pid) && record.afterRequests?.pid === record.pid, "the engine statistics are not of the probe's own process");
+    need(
+      warm.every((w) => finite(w.micros)),
+      "a warm time is missing or invalid",
+    );
+    need(
+      finite(record.afterRequests?.peakBytes) && finite(record.afterRequests?.currentBytes),
+      "no engine statistics after the requests",
+    );
+    need(
+      ph.init === record.init?.micros,
+      "the init time disagrees with the init request's own time",
+    );
+    need(
+      Number.isInteger(record.pid) && record.afterRequests?.pid === record.pid,
+      "the engine statistics are not of the probe's own process",
+    );
     statsInvariants(record.afterRequests, record.afterObserve, record.stage, need);
     if (record.stage === "complete") {
       need(finite(ph.teardown), "the teardown time is missing");
       need(finite(probe.observeMicros), "the observe time is missing");
-      need(record.afterObserve?.pid === record.pid, "the statistics after observation are not of the probe's own process");
+      need(
+        record.afterObserve?.pid === record.pid,
+        "the statistics after observation are not of the probe's own process",
+      );
     }
   } else {
     const ph = record.phases ?? {};
-    need(finite(ph.spawnMs) && finite(ph.engineStartMs) && finite(ph.setupMs) && finite(ph.setupRoundTripMs), "a phase time is missing or invalid");
-    need(record.init?.outcome?.kind === "value" && finite(record.init?.serverMs) && finite(record.init?.roundTripMs), "the init request did not answer");
-    need(finite(probe.cold?.serverMs) && finite(probe.cold?.roundTripMs), "the cold time is missing or invalid");
-    need(warm.every((w) => finite(w.serverMs) && finite(w.roundTripMs)), "a warm time is missing or invalid");
-    need(finite(record.serverAfterRequests?.peakBytes) && finite(record.serverAfterRequests?.currentBytes), "no engine statistics after the requests");
+    need(
+      finite(ph.spawnMs) &&
+        finite(ph.engineStartMs) &&
+        finite(ph.setupMs) &&
+        finite(ph.setupRoundTripMs),
+      "a phase time is missing or invalid",
+    );
+    need(
+      record.init?.outcome?.kind === "value" &&
+        finite(record.init?.serverMs) &&
+        finite(record.init?.roundTripMs),
+      "the init request did not answer",
+    );
+    need(
+      finite(probe.cold?.serverMs) && finite(probe.cold?.roundTripMs),
+      "the cold time is missing or invalid",
+    );
+    need(
+      warm.every((w) => finite(w.serverMs) && finite(w.roundTripMs)),
+      "a warm time is missing or invalid",
+    );
+    need(
+      finite(record.serverAfterRequests?.peakBytes) &&
+        finite(record.serverAfterRequests?.currentBytes),
+      "no engine statistics after the requests",
+    );
     need(finite(ph.engineStartRoundTripMs), "the engine-start round trip is missing");
-    need(ph.initMs === record.init?.serverMs, "the init time disagrees with the init request's own time");
-    need(Number.isInteger(record.serverPid) && record.serverAfterRequests?.pid === record.serverPid, "the engine statistics are not of the tsc server process");
+    need(
+      ph.initMs === record.init?.serverMs,
+      "the init time disagrees with the init request's own time",
+    );
+    need(
+      Number.isInteger(record.serverPid) && record.serverAfterRequests?.pid === record.serverPid,
+      "the engine statistics are not of the tsc server process",
+    );
     statsInvariants(record.serverAfterRequests, record.serverAfterObserve, record.stage, need);
     if (record.stage === "complete") {
       need(finite(ph.teardownMs), "the teardown time is missing");
       need(finite(probe.observeMs), "the observe time is missing");
-      need(record.serverAfterObserve?.pid === record.serverPid, "the statistics after observation are not of the tsc server process");
+      need(
+        record.serverAfterObserve?.pid === record.serverPid,
+        "the statistics after observation are not of the tsc server process",
+      );
+      const cal = record.calibration?.serverMs;
+      need(
+        Array.isArray(cal) && cal.length === 20 && cal.every(finite),
+        "the timer calibration series is missing or invalid",
+      );
     }
   }
-  need((record.statsErrors ?? []).length === 0, `statistics errors: ${(record.statsErrors ?? []).join("; ")}`);
+  need(
+    (record.statsErrors ?? []).length === 0,
+    `statistics errors: ${(record.statsErrors ?? []).join("; ")}`,
+  );
   if (record.stage === "complete" && probe.cold?.outcome?.kind === "value") {
-    need(warm.every((w) => w.outcome?.kind === "value"), "a warm repeat did not answer");
-    need(warm.every((w) => w.sameAnswerAsCold === true), "a warm repeat answered differently from the cold request");
+    need(
+      observationEvidence(tool, probe.observation),
+      "the observation lacks the evidence its tool must supply",
+    );
+  }
+  if (record.stage === "complete" && probe.cold?.outcome?.kind === "value") {
+    need(
+      warm.every((w) => w.outcome?.kind === "value"),
+      "a warm repeat did not answer",
+    );
+    need(
+      warm.every((w) => w.sameAnswerAsCold === true),
+      "a warm repeat answered differently from the cold request",
+    );
   }
   return p;
 }
 
-/** Memory-reading invariants: a named metric, current within peak, peaks non-decreasing. */
+/** A statistics reading: a named metric, finite non-negative figures, current within peak. */
+function readingValid(reading) {
+  return (
+    typeof reading?.metric === "string" &&
+    reading.metric.length > 0 &&
+    finite(reading.peakBytes) &&
+    reading.peakBytes > 0 &&
+    finite(reading.currentBytes) &&
+    reading.currentBytes <= reading.peakBytes
+  );
+}
+
+/** Memory-reading invariants: both readings valid, one metric, peaks non-decreasing. */
 function statsInvariants(afterRequests, afterObserve, stage, need) {
-  need(typeof afterRequests?.metric === "string" && afterRequests.metric.length > 0, "the engine statistics name no metric");
-  need(afterRequests?.peakBytes > 0 && afterRequests?.currentBytes <= afterRequests?.peakBytes, "the engine statistics are not a valid reading (current above peak)");
+  need(
+    readingValid(afterRequests),
+    "the engine statistics are not a valid reading (a metric, finite figures, current within peak)",
+  );
   if (stage === "complete") {
-    need(afterObserve?.metric === afterRequests?.metric, "the statistics after observation use another metric");
+    need(readingValid(afterObserve), "the statistics after observation are not a valid reading");
     need(
-      afterObserve?.peakBytes >= afterRequests?.peakBytes && afterObserve?.currentBytes <= afterObserve?.peakBytes,
-      "the statistics after observation are not a valid later reading",
+      afterObserve?.metric === afterRequests?.metric,
+      "the statistics after observation use another metric",
+    );
+    need(
+      afterObserve?.peakBytes >= afterRequests?.peakBytes,
+      "the peak after observation is below the peak before it",
     );
   }
 }
 
+/** Whether an observation carries the evidence its tool must supply. */
+export function observationEvidence(tool, obs) {
+  if (!obs || typeof obs !== "object") return false;
+  const textual =
+    typeof obs.text === "string" || obs.textElided === true || typeof obs.error === "string";
+  if (!textual) return false;
+  if (tool === "tsc") return typeof obs.errorType === "boolean" || typeof obs.error === "string";
+  return (
+    Number.isInteger(obs.unknownLeaves) &&
+    obs.unknownLeaves >= 0 &&
+    Array.isArray(obs.unknownSamples) &&
+    Number.isInteger(obs.conditionalNodes) &&
+    (typeof obs.shape === "string" || obs.shape === null)
+  );
+}
+
 /** The observed answer of one probe invocation (arm kind "probe"). */
-export function probeAnswer(inv, infraBytes = null) {
-  let end = invocationEnd(inv, infraBytes);
-  if (end.kind === "exited" && end.exitCode !== 0) end = { kind: "child-failure", detail: `exit ${end.exitCode}` };
+export function probeAnswer(inv, limits = {}) {
+  let end = invocationEnd(inv, limits);
+  if (end.kind === "exited" && end.exitCode !== 0)
+    end = { kind: "child-failure", detail: `exit ${end.exitCode}` };
   if (end.kind !== "exited" && end.kind !== "observe-killed") return { end };
   const result = inv.probe;
-  if (!result) return { end: { kind: "child-failure", detail: inv.probeReadError ?? "no probe record" } };
+  if (!result)
+    return { end: { kind: "child-failure", detail: inv.probeReadError ?? "no probe record" } };
   const probe = result.probes?.[0];
   if (!probe || result.probes.length !== 1) {
-    return { end: { kind: "child-failure", detail: `expected exactly one probe record, got ${result.probes?.length ?? 0}` } };
+    return {
+      end: {
+        kind: "child-failure",
+        detail: `expected exactly one probe record, got ${result.probes?.length ?? 0}`,
+      },
+    };
   }
   const obs = probe.observation ?? {};
   let digest = null;
@@ -183,6 +354,7 @@ export function probeAnswer(inv, infraBytes = null) {
     digest,
     canonicalError,
     observeError: probe.observation ? (obs.error ?? null) : "the answer was not observed",
+    evidence: observationEvidence(result.tool, probe.observation),
     errorType: obs.errorType ?? null,
     unknownLeaves: obs.unknownLeaves ?? 0,
     unknownSamples: obs.unknownSamples ?? [],
@@ -201,7 +373,9 @@ export function referenceHasAnswer(reference) {
 }
 
 const overBudget = (answer, budgetBytes) =>
-  typeof budgetBytes === "number" && typeof answer.enginePeakBytes === "number" && answer.enginePeakBytes > budgetBytes;
+  typeof budgetBytes === "number" &&
+  typeof answer.enginePeakBytes === "number" &&
+  answer.enginePeakBytes > budgetBytes;
 
 const mib = (bytes) => `${(bytes / 1048576).toFixed(0)} MiB`;
 
@@ -212,46 +386,77 @@ const mib = (bytes) => `${(bytes / 1048576).toFixed(0)} MiB`;
  * `tscKilled` (the tsc arm was killed on this demand).
  */
 export function classifyVerterAnswer(answer, ctx = {}) {
-  const { reference = null, beyond = null, probe = null, budgetBytes = null, tscKilled = false } = ctx;
+  const {
+    reference = null,
+    beyond = null,
+    probe = null,
+    budgetBytes = null,
+    tscKilled = false,
+  } = ctx;
   const end = answer.end;
   if (end.kind === "killed") return { class: "killed", detail: end.detail };
   if (end.kind === "unattributed-kill") return { class: "unverified", detail: end.detail };
-  if (end.kind !== "exited" && end.kind !== "observe-killed") return { class: "error", detail: end.detail };
+  if (end.kind !== "exited" && end.kind !== "observe-killed")
+    return { class: "error", detail: end.detail };
   if (answer.outcome.kind === "fault") {
     return isBudgetFault(answer.outcome.detail)
       ? { class: "refusal", detail: answer.outcome.detail }
       : { class: "error", detail: answer.outcome.detail };
   }
-  if (answer.outcome.kind !== "value") return { class: "error", detail: `request outcome ${answer.outcome.kind}` };
-  if (answer.warmKinds.some((k) => k !== "value")) return { class: "error", detail: "a warm repeat did not answer" };
+  if (answer.outcome.kind !== "value")
+    return { class: "error", detail: `request outcome ${answer.outcome.kind}` };
+  if (answer.warmKinds.some((k) => k !== "value"))
+    return { class: "error", detail: "a warm repeat did not answer" };
   if (overBudget(answer, budgetBytes)) {
-    return { class: "killed", detail: `the engine's peak ${mib(answer.enginePeakBytes)} exceeds the ${mib(budgetBytes)} budget` };
+    return {
+      class: "killed",
+      detail: `the engine's peak ${mib(answer.enginePeakBytes)} exceeds the ${mib(budgetBytes)} budget`,
+    };
   }
-  if (end.kind === "observe-killed") return { class: "unverified", detail: `stopped while its answer was observed (${end.detail})` };
-  if (answer.warmSame.some((s) => s !== true)) return { class: "error", detail: "a warm repeat answered differently" };
+  if (end.kind === "observe-killed")
+    return { class: "unverified", detail: `stopped while its answer was observed (${end.detail})` };
+  if (answer.warmSame.some((s) => s !== true))
+    return { class: "error", detail: "a warm repeat answered differently" };
+  if (!answer.evidence)
+    return { class: "unverified", detail: "the observation lacks its completeness evidence" };
   if (answer.observeError) return { class: "partial", detail: answer.observeError };
   if (answer.unknownLeaves > 0) {
-    return { class: "partial", detail: `the answer holds ${answer.unknownLeaves} unmaterialised leaf/leaves (${answer.unknownSamples.join(", ")})` };
+    return {
+      class: "partial",
+      detail: `the answer holds ${answer.unknownLeaves} unmaterialised leaf/leaves (${answer.unknownSamples.join(", ")})`,
+    };
   }
-  if (answer.shape === "conditional") return { class: "partial", detail: "the answer is an unevaluated conditional" };
-  if (!answer.digest) return { class: "partial", detail: answer.canonicalError ?? "no printable answer" };
+  if (answer.shape === "conditional")
+    return { class: "partial", detail: "the answer is an unevaluated conditional" };
+  if (!answer.digest)
+    return { class: "partial", detail: answer.canonicalError ?? "no printable answer" };
   if (!referenceHasAnswer(reference)) {
     // Beyond tsc only where tsc's exhaustion is established on the demand
     // itself: the measuring program ran out and so did the API arm.
     if (reference?.killed && tscKilled && beyond && answer.digest.sha256 === beyond.sha256) {
-      return { class: "beyond-tsc", detail: "tsc exhausts the cap on this demand; Verter's answer is the constructed one" };
+      return {
+        class: "beyond-tsc",
+        detail: "tsc exhausts the cap on this demand; Verter's answer is the constructed one",
+      };
     }
     return { class: "no-reference", detail: reference?.gap ?? "no measured reference" };
   }
   const limitCodes = reference.codes.filter((c) => RESOURCE_CODES.includes(c));
   if (!reference.errorAny && answer.digest.sha256 === reference.digest.sha256) {
-    return { class: "matched", detail: limitCodes.length ? "equal to tsc's answer at its resource limit" : "" };
+    return {
+      class: "matched",
+      detail: limitCodes.length ? "equal to tsc's answer at its resource limit" : "",
+    };
   }
   if (limitCodes.length && beyond && answer.digest.sha256 === beyond.sha256) {
     return { class: "beyond-tsc", detail: `tsc stops with TS${limitCodes.join("/TS")}` };
   }
-  if (probe && answer.digest.sha256 === probe.sha256) return { class: "partial", detail: "the answer is the probe expression, unevaluated" };
-  return { class: "mismatch", detail: `answered ${answer.digest.preview}, tsc ${reference.errorAny ? "error-any" : reference.digest.preview}` };
+  if (probe && answer.digest.sha256 === probe.sha256)
+    return { class: "partial", detail: "the answer is the probe expression, unevaluated" };
+  return {
+    class: "mismatch",
+    detail: `answered ${answer.digest.preview}, tsc ${reference.errorAny ? "error-any" : reference.digest.preview}`,
+  };
 }
 
 /**
@@ -269,33 +474,64 @@ export function tscAnswerStatus(answer, reference, beyond, budgetBytes = null) {
   const end = answer.end;
   if (end.kind === "killed") return { status: "killed", detail: end.detail };
   if (end.kind === "unattributed-kill") return { status: "unverified", detail: end.detail };
-  if (end.kind !== "exited" && end.kind !== "observe-killed") return { status: "problem", problem: `tsc invocation failed: ${end.detail}` };
-  if (answer.outcome.kind !== "value") return { status: "problem", problem: `tsc request outcome ${answer.outcome.kind} ${answer.outcome.detail ?? ""}` };
-  if (answer.warmKinds.some((k) => k !== "value")) return { status: "problem", problem: "a warm tsc request did not answer" };
+  if (end.kind !== "exited" && end.kind !== "observe-killed")
+    return { status: "problem", problem: `tsc invocation failed: ${end.detail}` };
+  if (answer.outcome.kind !== "value")
+    return {
+      status: "problem",
+      problem: `tsc request outcome ${answer.outcome.kind} ${answer.outcome.detail ?? ""}`,
+    };
+  if (answer.warmKinds.some((k) => k !== "value"))
+    return { status: "problem", problem: "a warm tsc request did not answer" };
   if (overBudget(answer, budgetBytes)) {
-    return { status: "killed", detail: `the engine's peak ${mib(answer.enginePeakBytes)} exceeds the ${mib(budgetBytes)} budget` };
+    return {
+      status: "killed",
+      detail: `the engine's peak ${mib(answer.enginePeakBytes)} exceeds the ${mib(budgetBytes)} budget`,
+    };
   }
-  if (end.kind === "observe-killed") return { status: "unverified", detail: `stopped while its answer was observed (${end.detail})` };
-  if (answer.warmSame.some((s) => s !== true)) return { status: "problem", problem: "a warm tsc request answered differently" };
-  if (!reference) return { status: "problem", problem: "no measured reference for this scenario and setting" };
-  if (!answer.digest) return { status: "problem", problem: `tsc printed no answer: ${answer.observeError ?? answer.canonicalError}` };
+  if (end.kind === "observe-killed")
+    return {
+      status: "unverified",
+      detail: `stopped while its answer was observed (${end.detail})`,
+    };
+  if (answer.warmSame.some((s) => s !== true))
+    return { status: "problem", problem: "a warm tsc request answered differently" };
+  if (!answer.evidence)
+    return { status: "problem", problem: "the tsc observation lacks its error-type evidence" };
+  if (!reference)
+    return { status: "problem", problem: "no measured reference for this scenario and setting" };
+  if (!answer.digest)
+    return {
+      status: "problem",
+      problem: `tsc printed no answer: ${answer.observeError ?? answer.canonicalError}`,
+    };
   if (!referenceHasAnswer(reference)) {
-    if (!answer.errorType && beyond && answer.digest.sha256 === beyond.sha256) return { status: "by-construction" };
+    if (!answer.errorType && beyond && answer.digest.sha256 === beyond.sha256)
+      return { status: "by-construction" };
     return { status: "unverified", detail: reference.gap };
   }
   if (answer.digest.sha256 !== reference.digest.sha256) {
-    return { status: "problem", problem: `tsc answered ${answer.digest.preview}; the measured reference is ${reference.digest.preview}` };
+    return {
+      status: "problem",
+      problem: `tsc answered ${answer.digest.preview}; the measured reference is ${reference.digest.preview}`,
+    };
   }
   if (Boolean(answer.errorType) !== Boolean(reference.errorAny)) {
-    return { status: "problem", problem: `tsc's error-type flag is ${answer.errorType}; the reference says errorAny ${reference.errorAny}` };
+    return {
+      status: "problem",
+      problem: `tsc's error-type flag is ${answer.errorType}; the reference says errorAny ${reference.errorAny}`,
+    };
   }
   return { status: "reference" };
 }
 
 export function stats(values) {
-  const xs = values.filter((v) => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
+  const xs = values
+    .filter((v) => typeof v === "number" && Number.isFinite(v))
+    .sort((a, b) => a - b);
   if (!xs.length) return null;
-  const median = xs.length % 2 ? xs[(xs.length - 1) / 2] : (xs[xs.length / 2 - 1] + xs[xs.length / 2]) / 2;
+  const median =
+    xs.length % 2 ? xs[(xs.length - 1) / 2] : (xs[xs.length / 2 - 1] + xs[xs.length / 2]) / 2;
   return { n: xs.length, min: xs[0], median, max: xs.at(-1) };
 }
 
@@ -312,7 +548,8 @@ export function probeMetrics(inv) {
   const r = inv.probe;
   const p = r?.probes?.[0];
   if (!p) return null;
-  const sum = (...xs) => (xs.every((x) => typeof x === "number") ? xs.reduce((a, b) => a + b, 0) : null);
+  const sum = (...xs) =>
+    xs.every((x) => typeof x === "number") ? xs.reduce((a, b) => a + b, 0) : null;
   if (r.tool === "verter") {
     const ms = (us) => (typeof us === "number" ? us / 1000 : null);
     const setup = ms(r.phases?.setup);
@@ -330,7 +567,8 @@ export function probeMetrics(inv) {
       peakBytes: r.afterRequests?.peakBytes ?? null,
       retainedBytes: r.afterRequests?.currentBytes ?? null,
       observePeakBytes: r.afterObserve?.peakBytes ?? null,
-      cpuMs: typeof r.afterRequests?.cpuMicros === "number" ? r.afterRequests.cpuMicros / 1000 : null,
+      cpuMs:
+        typeof r.afterRequests?.cpuMicros === "number" ? r.afterRequests.cpuMicros / 1000 : null,
       memoryMetric: r.afterRequests?.metric ?? null,
       allocations: p.coldAllocations ?? null,
       retention: r.retention ?? null,
@@ -356,7 +594,10 @@ export function probeMetrics(inv) {
     peakBytes: r.serverAfterRequests?.peakBytes ?? null,
     retainedBytes: r.serverAfterRequests?.currentBytes ?? null,
     observePeakBytes: r.serverAfterObserve?.peakBytes ?? null,
-    cpuMs: typeof r.serverAfterRequests?.cpuMicros === "number" ? r.serverAfterRequests.cpuMicros / 1000 : null,
+    cpuMs:
+      typeof r.serverAfterRequests?.cpuMicros === "number"
+        ? r.serverAfterRequests.cpuMicros / 1000
+        : null,
     memoryMetric: r.serverAfterRequests?.metric ?? null,
   };
 }
@@ -370,7 +611,9 @@ export function parseCli(stdout) {
     return m[2] === "K" ? value * 1024 : m[2] === "s" ? value * 1000 : value;
   };
   return {
-    codes: [...new Set([...stdout.matchAll(/error TS(\d+)/g)].map((m) => Number(m[1])))].sort((a, b) => a - b),
+    codes: [...new Set([...stdout.matchAll(/error TS(\d+)/g)].map((m) => Number(m[1])))].sort(
+      (a, b) => a - b,
+    ),
     memoryUsedBytes: num("Memory used"),
     checkMs: num("Check time"),
     totalMs: num("Total time"),

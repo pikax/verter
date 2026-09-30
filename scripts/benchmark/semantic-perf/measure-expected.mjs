@@ -66,7 +66,11 @@ function runCapped(wrapper, tscArgs, cwd, memMb, timeoutMs) {
   return new Promise((done) => {
     const child = spawn(process.execPath, [wrapper, ...tscArgs], {
       cwd,
-      env: { ...process.env, TSC_MEM_GB: String(memMb / 1024), TSC_TIMEOUT_SEC: String(Math.ceil(timeoutMs / 1000)) },
+      env: {
+        ...process.env,
+        TSC_MEM_GB: String(memMb / 1024),
+        TSC_TIMEOUT_SEC: String(Math.ceil(timeoutMs / 1000)),
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -93,9 +97,11 @@ export function parseMeasurement(stdout, source) {
     // Elaboration lines (indented) belong to the diagnostic above; only the
     // head line carries the printed type.
     if (m) diagnostics.push({ file: m[1], line: Number(m[2]), code: Number(m[4]), message: m[5] });
-    else if (/^error TS(\d+):/.test(line)) diagnostics.push({ file: "", line: 0, code: Number(/TS(\d+)/.exec(line)[1]), message: line });
+    else if (/^error TS(\d+):/.test(line))
+      diagnostics.push({ file: "", line: 0, code: Number(/TS(\d+)/.exec(line)[1]), message: line });
   }
-  const inScenario = (d, line) => d.file.endsWith("scenario.ts") && d.line === line && d.code === 2322;
+  const inScenario = (d, line) =>
+    d.file.endsWith("scenario.ts") && d.line === line && d.code === 2322;
   const onMarker = diagnostics.filter((d) => inScenario(d, markerLine));
   const neverCheck = diagnostics.find((d) => inScenario(d, neverLine));
   const verdict = /^Type '"yes"' is not assignable/.test(neverCheck?.message ?? "")
@@ -103,23 +109,32 @@ export function parseMeasurement(stdout, source) {
     : /^Type '"no"' is not assignable/.test(neverCheck?.message ?? "")
       ? false
       : null;
-  if (verdict === null) throw new Error(`the never check printed no verdict: ${(neverCheck?.message ?? "<no diagnostic>").slice(0, 200)}`);
+  if (verdict === null)
+    throw new Error(
+      `the never check printed no verdict: ${(neverCheck?.message ?? "<no diagnostic>").slice(0, 200)}`,
+    );
   // Only `[never]` is assignable to `[never]` (`any` is not assignable to
   // `never`), so the two assignments must agree.
-  if (!onMarker.length && !verdict) throw new Error("the measuring assignment reported no TS2322 but the probe is not never");
-  if (onMarker.length && verdict) throw new Error("the measuring assignment failed but the probe is never");
+  if (!onMarker.length && !verdict)
+    throw new Error("the measuring assignment reported no TS2322 but the probe is not never");
+  if (onMarker.length && verdict)
+    throw new Error("the measuring assignment failed but the probe is never");
   let printed = null;
   if (onMarker.length) {
     const message = onMarker[0].message;
     const end = message.lastIndexOf("' is not assignable to type '[never]'");
-    if (!message.startsWith("Type '") || end < 0) throw new Error(`unexpected TS2322 message: ${message.slice(0, 200)}`);
+    if (!message.startsWith("Type '") || end < 0)
+      throw new Error(`unexpected TS2322 message: ${message.slice(0, 200)}`);
     const tuple = message.slice("Type '".length, end).trim();
-    if (!tuple.startsWith("[") || !tuple.endsWith("]")) throw new Error(`the measuring tuple did not print: ${tuple.slice(0, 200)}`);
+    if (!tuple.startsWith("[") || !tuple.endsWith("]"))
+      throw new Error(`the measuring tuple did not print: ${tuple.slice(0, 200)}`);
     printed = tuple.slice(1, -1);
   }
-  const codes = [...new Set(diagnostics.filter((d) => !onMarker.includes(d) && d !== neverCheck).map((d) => d.code))].sort(
-    (a, b) => a - b,
-  );
+  const codes = [
+    ...new Set(
+      diagnostics.filter((d) => !onMarker.includes(d) && d !== neverCheck).map((d) => d.code),
+    ),
+  ].sort((a, b) => a - b);
   return { never: verdict, printed, codes };
 }
 
@@ -164,7 +179,9 @@ async function main() {
     "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus the measuring suffix " +
     "(a distributive one-element-tuple wrapper that filters no member, and a never check); the raw print inside the outer tuple of the TS2322 head line is recorded";
   const save = () => {
-    out.scenarios = Object.fromEntries(Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)));
+    out.scenarios = Object.fromEntries(
+      Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)),
+    );
     writeFileSync(EXPECTED, JSON.stringify(out, null, 1) + "\n");
   };
   for (const scenario of selectScenarios(only)) {
@@ -196,8 +213,14 @@ async function main() {
           argv: [typescript.exe, ...tscArgs],
           allowSampled: process.argv.includes("--allow-sampled"),
         });
-        if (r.supervisorExit === 125 || !r.record?.launched) throw new Error(`supervisor failed for ${scenario.id}/${setting.id}: ${r.stderr}`);
-        exit = r.record.killedBy === "timeout" ? 124 : r.record.killedBy === "memory" ? 137 : r.record.exitCode;
+        if (r.supervisorExit === 125 || !r.record?.launched)
+          throw new Error(`supervisor failed for ${scenario.id}/${setting.id}: ${r.stderr}`);
+        exit =
+          r.record.killedBy === "timeout"
+            ? 124
+            : r.record.killedBy === "memory"
+              ? 137
+              : r.record.exitCode;
         stdout = readFileSync(r.record.stdoutPath, "utf8");
       }
       const receipt = {
@@ -209,15 +232,21 @@ async function main() {
         method: methodKey,
       };
       let result;
-      if (exit === 124 || exit === 137) result = { killed: exit === 124 ? "timeout" : "memory", codes: [], receipt };
-      else if (![0, 1, 2].includes(exit)) result = { unmeasurable: `tsc exited ${exit}`, codes: [], receipt };
+      if (exit === 124 || exit === 137)
+        result = { killed: exit === 124 ? "timeout" : "memory", codes: [], receipt };
+      else if (![0, 1, 2].includes(exit))
+        result = { unmeasurable: `tsc exited ${exit}`, codes: [], receipt };
       else {
         try {
           const parsed = parseMeasurement(stdout, source);
           result = { never: parsed.never, codes: parsed.codes, receipt };
           if (parsed.printed !== null) {
             if (parsed.printed.length <= MAX_STORED_PRINT) result.printed = parsed.printed;
-            else result.printedOversize = { sha256: sha256Text(parsed.printed), length: parsed.printed.length };
+            else
+              result.printedOversize = {
+                sha256: sha256Text(parsed.printed),
+                length: parsed.printed.length,
+              };
           }
         } catch (err) {
           result = { unmeasurable: String(err.message ?? err).slice(0, 300), codes: [], receipt };
@@ -231,7 +260,9 @@ async function main() {
       } catch (err) {
         shown = `uninterpretable: ${err.message}`;
       }
-      console.log(`${scenario.id}/${setting.id}: ${shown} ${result.codes.map((c) => `TS${c}`).join(",")}`);
+      console.log(
+        `${scenario.id}/${setting.id}: ${shown} ${result.codes.map((c) => `TS${c}`).join(",")}`,
+      );
     }
     out.scenarios[scenario.id] = entry;
     save();

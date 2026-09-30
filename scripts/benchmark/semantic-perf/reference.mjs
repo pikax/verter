@@ -19,13 +19,21 @@ export const RESOURCE_CODES = [2589, 2590, 2799, 2859];
  */
 export function interpretMeasurement(result) {
   const codes = result.codes ?? [];
-  if (result.killed) return { gap: `tsc -p exhausts resources (${result.killed})`, killed: result.killed, codes };
-  if (result.unmeasurable) return { gap: `unmeasurable: ${result.unmeasurable}`, unmeasurable: result.unmeasurable, codes };
-  if (result.printedOversize) return { gap: "tsc's print is too large to record", truncated: true, codes };
+  if (result.killed)
+    return { gap: `tsc -p exhausts resources (${result.killed})`, killed: result.killed, codes };
+  if (result.unmeasurable)
+    return {
+      gap: `unmeasurable: ${result.unmeasurable}`,
+      unmeasurable: result.unmeasurable,
+      codes,
+    };
+  if (result.printedOversize)
+    return { gap: "tsc's print is too large to record", truncated: true, codes };
   let answer;
   if (result.never) answer = { k: "kw", name: "never" };
   else {
-    if (typeof result.printed !== "string") return { gap: "no print recorded", unmeasurable: "no print", codes };
+    if (typeof result.printed !== "string")
+      return { gap: "no print recorded", unmeasurable: "no print", codes };
     const whole = normalize(parseType(result.printed));
     if (isKeyword(whole, "any") || isKeyword(whole, "never")) answer = whole;
     else {
@@ -34,7 +42,11 @@ export function interpretMeasurement(result) {
       // leaving bare members (`any`) among the tuples: not the answer.
       const elements = [];
       for (const member of unionMemberNodes(result.printed)) {
-        const single = member.k === "tuple" && member.elements.length === 1 && !member.elements[0].rest && !member.elements[0].optional;
+        const single =
+          member.k === "tuple" &&
+          member.elements.length === 1 &&
+          !member.elements[0].rest &&
+          !member.elements[0].optional;
         if (!single) return { gap: "tsc prints the answer elided", truncated: true, codes };
         elements.push(member.elements[0].type);
       }

@@ -80,7 +80,8 @@ function parseArgs(argv) {
   };
   const positive = (name, value, min = 1) => {
     const n = Number(value);
-    if (!Number.isInteger(n) || n < min) throw new Error(`${name} must be an integer >= ${min}, got ${value}`);
+    if (!Number.isInteger(n) || n < min)
+      throw new Error(`${name} must be an integer >= ${min}, got ${value}`);
     return n;
   };
   for (let i = 0; i < argv.length; i++) {
@@ -104,13 +105,17 @@ function parseArgs(argv) {
       }
       case "--arms": {
         const arms = next().split(",").filter(Boolean);
-        for (const arm of arms) if (!ARMS[arm]) throw new Error(`unknown arm ${arm}; arms: ${DEFAULT_ARMS.join(", ")}`);
+        for (const arm of arms)
+          if (!ARMS[arm]) throw new Error(`unknown arm ${arm}; arms: ${DEFAULT_ARMS.join(", ")}`);
         opts.arms = arms;
         break;
       }
       case "--repeat":
         opts.repeat = positive(a, next(), 2);
-        if (opts.repeat % 2) throw new Error("--repeat must be even: each arm runs first in exactly half the measured rounds");
+        if (opts.repeat % 2)
+          throw new Error(
+            "--repeat must be even: each arm runs first in exactly half the measured rounds",
+          );
         break;
       case "--warmup":
         opts.warmup = positive(a, next(), 0);
@@ -141,7 +146,8 @@ function parseArgs(argv) {
         break;
       case "--lib-mode": {
         const v = next();
-        if (!["root-file", "ambient"].includes(v)) throw new Error(`--lib-mode must be root-file or ambient`);
+        if (!["root-file", "ambient"].includes(v))
+          throw new Error(`--lib-mode must be root-file or ambient`);
         opts.libMode = v;
         break;
       }
@@ -159,7 +165,8 @@ function parseArgs(argv) {
 }
 
 function loadExpected() {
-  if (!existsSync(EXPECTED_FILE)) throw new Error(`the measured reference ${EXPECTED_FILE} is missing; run measure-expected.mjs`);
+  if (!existsSync(EXPECTED_FILE))
+    throw new Error(`the measured reference ${EXPECTED_FILE} is missing; run measure-expected.mjs`);
   return JSON.parse(readFileSync(EXPECTED_FILE, "utf8"));
 }
 
@@ -212,13 +219,19 @@ export function scheduleBalanceProblems(plan, arms) {
       }
     }
   }
-  for (const [c, n] of counts) if (n !== 0) problems.push(`unbalanced order ${c} (${n > 0 ? "first" : "second"} by ${Math.abs(n)})`);
+  for (const [c, n] of counts)
+    if (n !== 0)
+      problems.push(`unbalanced order ${c} (${n > 0 ? "first" : "second"} by ${Math.abs(n)})`);
   return problems;
 }
 
-/** Runtime and build variables that tune either tool away from its shipped defaults. */
+/**
+ * Runtime and build variables that tune either tool away from its shipped
+ * defaults. RUSTC and CARGO_INCREMENTAL are not among them: the build sets
+ * both itself (see buildVerterProbes); CARGO_BUILD_JOBS changes only build
+ * parallelism.
+ */
 export const TUNING_VARIABLES = [
-  "RUSTC",
   "RUSTC_WRAPPER",
   "RUSTC_WORKSPACE_WRAPPER",
   "RUSTC_BOOTSTRAP",
@@ -246,7 +259,16 @@ export const TUNING_VARIABLES = [
 export function tuningEnvironment(env) {
   return Object.fromEntries(
     Object.entries(env)
-      .filter(([k]) => TUNING_VARIABLES.includes(k) || /^CARGO_(PROFILE|TARGET|BUILD)_/.test(k) || /^VERTER_/.test(k))
+      .filter(([k]) => {
+        // Environment names are case-insensitive on Windows.
+        const name = k.toUpperCase();
+        if (name === "CARGO_BUILD_JOBS") return false;
+        return (
+          TUNING_VARIABLES.includes(name) ||
+          /^CARGO_(PROFILE|TARGET|BUILD)_/.test(name) ||
+          /^VERTER_/.test(name)
+        );
+      })
       .sort(([a], [b]) => a.localeCompare(b)),
   );
 }
@@ -285,7 +307,8 @@ export function powerReceipt() {
     const out = spawnSync(cmd, args, { encoding: "utf8", timeout: 10_000 });
     return out.status === 0 ? out.stdout.trim().split("\n").slice(0, 4).join(" / ") : null;
   };
-  if (process.platform === "darwin") return { battery: run("pmset", ["-g", "batt"]), thermal: run("pmset", ["-g", "therm"]) };
+  if (process.platform === "darwin")
+    return { battery: run("pmset", ["-g", "batt"]), thermal: run("pmset", ["-g", "therm"]) };
   if (process.platform === "win32") return { scheme: run("powercfg", ["/getactivescheme"]) };
   return {};
 }
@@ -341,32 +364,79 @@ function commandFor(arm, ctx, runBase) {
   switch (arm) {
     case "verter":
       return {
-        argv: [binaries.probe.pinned, "run", "--job", writeJob(`${runBase}.job.json`, { ...baseJob, observability: false }), "--out", probeOut],
+        argv: [
+          binaries.probe.pinned,
+          "run",
+          "--job",
+          writeJob(`${runBase}.job.json`, { ...baseJob, observability: false }),
+          "--out",
+          probeOut,
+        ],
         probeOut,
       };
     case "verter-obs":
       return {
-        argv: [binaries.probe.pinned, "run", "--job", writeJob(`${runBase}.job.json`, { ...baseJob, observability: true }), "--out", probeOut],
+        argv: [
+          binaries.probe.pinned,
+          "run",
+          "--job",
+          writeJob(`${runBase}.job.json`, { ...baseJob, observability: true }),
+          "--out",
+          probeOut,
+        ],
         probeOut,
       };
     case "verter-counted":
       return {
-        argv: [binaries.counted.pinned, "run", "--job", writeJob(`${runBase}.job.json`, { ...baseJob, observability: false }), "--out", probeOut],
+        argv: [
+          binaries.counted.pinned,
+          "run",
+          "--job",
+          writeJob(`${runBase}.job.json`, { ...baseJob, observability: false }),
+          "--out",
+          probeOut,
+        ],
         probeOut,
       };
     case "tsc-api": {
       const { libMode: _unused, ...shared } = baseJob;
-      const job = { ...shared, tsPackageDir: typescript.packageDir, tscExe: typescript.exe, statsExe: binaries.probe.pinned };
+      const job = {
+        ...shared,
+        tsPackageDir: typescript.packageDir,
+        tscExe: typescript.exe,
+        statsExe: binaries.probe.pinned,
+      };
       return {
-        argv: [process.execPath, join(HERE, "tsc-probe.mjs"), "--job", writeJob(`${runBase}.job.json`, job), "--out", probeOut],
+        argv: [
+          process.execPath,
+          join(HERE, "tsc-probe.mjs"),
+          "--job",
+          writeJob(`${runBase}.job.json`, job),
+          "--out",
+          probeOut,
+        ],
         probeOut,
       };
     }
     case "tsc-cli":
-      return { argv: [typescript.exe, "-p", join(scenarioDir, "cli", "tsconfig.json"), "--extendedDiagnostics"], probeOut: null };
+      return {
+        argv: [
+          typescript.exe,
+          "-p",
+          join(scenarioDir, "cli", "tsconfig.json"),
+          "--extendedDiagnostics",
+        ],
+        probeOut: null,
+      };
     case "tsc-cli-1":
       return {
-        argv: [typescript.exe, "-p", join(scenarioDir, "cli", "tsconfig.json"), "--extendedDiagnostics", "--singleThreaded"],
+        argv: [
+          typescript.exe,
+          "-p",
+          join(scenarioDir, "cli", "tsconfig.json"),
+          "--extendedDiagnostics",
+          "--singleThreaded",
+        ],
         probeOut: null,
       };
     default:
@@ -391,6 +461,7 @@ export async function main(argv) {
       `tuning variables are set (${Object.keys(tuning).join(", ")}): the benchmark measures both tools as shipped. Unset them, or pass --allow-tuning to run a labelled tuned benchmark.`,
     );
   }
+  const powerAtStart = powerReceipt();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = opts.out ?? join(ROOT, "target", "semantic-perf", stamp);
   mkdirSync(outDir, { recursive: true });
@@ -405,11 +476,16 @@ export async function main(argv) {
   log("semantic-perf: building the release Verter probe binaries");
   const build = buildVerterProbes(ROOT);
   const problems = buildProblems(build);
-  if (problems.length) throw new Error(`the Verter probe is not a production build:\n  ${problems.join("\n  ")}`);
+  if (problems.length)
+    throw new Error(`the Verter probe is not a production build:\n  ${problems.join("\n  ")}`);
   const binDir = join(outDir, "bin");
   const binaries = {
     probe: pinBinary(build.executables.semantic_perf_probe, binDir, "semantic_perf_probe"),
-    counted: pinBinary(build.executables.semantic_perf_probe_counted, binDir, "semantic_perf_probe_counted"),
+    counted: pinBinary(
+      build.executables.semantic_perf_probe_counted,
+      binDir,
+      "semantic_perf_probe_counted",
+    ),
   };
   binaries.probe.identity = probeIdentity(binaries.probe.pinned);
   binaries.counted.identity = probeIdentity(binaries.counted.pinned);
@@ -428,7 +504,10 @@ export async function main(argv) {
     }
   }
   const supervisorSource = resolveSupervisor(ROOT, opts.supervisor);
-  binaries.supervisor = { ...pinBinary(supervisorSource.path, binDir, "verter-supervise"), origin: supervisorSource.origin };
+  binaries.supervisor = {
+    ...pinBinary(supervisorSource.path, binDir, "verter-supervise"),
+    origin: supervisorSource.origin,
+  };
   // The probe's build inputs, read again after the build: a change between
   // the two reads means the binary's source is unknown.
   const buildInputsAfterBuild = sourceTree(ROOT, BUILD_INPUTS);
@@ -441,7 +520,11 @@ export async function main(argv) {
   for (const scenario of scenarios) {
     for (const setting of settings) {
       const key = `${scenario.id}/${setting.id}`;
-      cells.set(key, { scenario, setting, ...materialize(outDir, scenario, setting, opts, libText) });
+      cells.set(key, {
+        scenario,
+        setting,
+        ...materialize(outDir, scenario, setting, opts, libText),
+      });
     }
   }
 
@@ -463,15 +546,24 @@ export async function main(argv) {
         arm: step.arm,
         rep: step.rep,
         warmup: step.warmup,
-        skipped: { after: memoryKilled.get(cellArm), reason: "a warmup of this scenario and arm was killed at the memory cap" },
+        skipped: {
+          after: memoryKilled.get(cellArm),
+          reason: "a warmup of this scenario and arm was killed at the memory cap",
+        },
       });
-      log(`[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: skipped (warmup killed at the memory cap)`);
+      log(
+        `[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: skipped (warmup killed at the memory cap)`,
+      );
       continue;
     }
     const runDir = join(outDir, "runs", cell.scenario.id, cell.setting.id, step.arm);
     mkdirSync(runDir, { recursive: true });
     const runBase = join(runDir, `${step.warmup ? "warmup" : "rep"}-${step.rep}`);
-    const { argv: command, probeOut } = commandFor(step.arm, { binaries, typescript, scenarioDir: cell.dir, baseJob: cell.baseJob }, runBase);
+    const { argv: command, probeOut } = commandFor(
+      step.arm,
+      { binaries, typescript, scenarioDir: cell.dir, baseJob: cell.baseJob },
+      runBase,
+    );
     const supOut = `${runBase}.sup.json`;
     const t0 = Date.now();
     const result = await runSupervised(binaries.supervisor.pinned, {
@@ -487,12 +579,10 @@ export async function main(argv) {
     let probe = null;
     let probeReadError = null;
     let phase = null;
-    let phaseClientBytes = null;
     if (probeOut) {
       try {
         const marker = JSON.parse(readFileSync(`${probeOut}.phase`, "utf8"));
         phase = marker.phase ?? null;
-        phaseClientBytes = marker.clientBytes ?? null;
       } catch {
         phase = null;
       }
@@ -508,12 +598,15 @@ export async function main(argv) {
         cliStdout = readFileSync(result.record.stdoutPath, "utf8");
         // tsc -p prints its diagnostics then its extended diagnostics; keep
         // both ends of an oversized output.
-        if (cliStdout.length > 1 << 20) cliStdout = cliStdout.slice(0, 1 << 19) + "\n…\n" + cliStdout.slice(-(1 << 19));
+        if (cliStdout.length > 1 << 20)
+          cliStdout = cliStdout.slice(0, 1 << 19) + "\n…\n" + cliStdout.slice(-(1 << 19));
       } catch {
         cliStdout = null;
       }
     }
-    const record = result.record ? { ...result.record, samples: undefined, sampleCount: result.record.samples?.length ?? 0 } : null;
+    const record = result.record
+      ? { ...result.record, samples: undefined, sampleCount: result.record.samples?.length ?? 0 }
+      : null;
     invocations.push({
       index,
       scenario: cell.scenario.id,
@@ -529,14 +622,18 @@ export async function main(argv) {
       supervisor: record,
       probeOut,
       phase,
-      phaseClientBytes,
       probe,
       probeReadError,
       cliStdout,
     });
     // Skip the rest of an arm only after its ENGINE exhausted the cap.
     const last = invocations.at(-1);
-    if (step.warmup && record?.killedBy === "memory" && invocationEnd(last, opts.infraMb * 1024 * 1024).kind === "killed") memoryKilled.set(cellArm, index);
+    if (
+      step.warmup &&
+      record?.killedBy === "memory" &&
+      invocationEnd(last, { budgetBytes: opts.memMb * 1024 * 1024 }).kind === "killed"
+    )
+      memoryKilled.set(cellArm, index);
     const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
     log(
       `[${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: ${end} ` +
@@ -549,7 +646,9 @@ export async function main(argv) {
     counted: sha256File(binaries.counted.pinned),
     supervisor: sha256File(binaries.supervisor.pinned),
     tsc: sha256File(typescript.exe),
-    tsApi: Object.fromEntries(Object.keys(typescript.apiSha256).map((f) => [f, sha256File(join(typescript.packageDir, f))])),
+    tsApi: Object.fromEntries(
+      Object.keys(typescript.apiSha256).map((f) => [f, sha256File(join(typescript.packageDir, f))]),
+    ),
   };
 
   const run = {
@@ -564,17 +663,29 @@ export async function main(argv) {
       buildInputsAfterBuild,
       harness,
       harnessAfter: harnessFingerprint(ROOT),
-      host: { ...hostInfo(), power: powerReceipt() },
+      host: { ...hostInfo(), power: { atStart: powerAtStart, atEnd: powerReceipt() } },
       tuning,
       typescript,
       build,
       binaries,
       binariesAfter,
-      expected: { file: EXPECTED_FILE, sha256: sha256File(EXPECTED_FILE), schema: expected.schema, measuredWith: expected.measuredWith },
+      expected: {
+        file: EXPECTED_FILE,
+        sha256: sha256File(EXPECTED_FILE),
+        schema: expected.schema,
+        measuredWith: expected.measuredWith,
+      },
       scenarios: Object.fromEntries(
         [...cells.entries()].map(([key, cell]) => [
           key,
-          { id: cell.scenario.id, family: cell.scenario.family, note: cell.scenario.note, setting: cell.setting.id, inputs: cell.inputs, dir: cell.dir },
+          {
+            id: cell.scenario.id,
+            family: cell.scenario.family,
+            note: cell.scenario.note,
+            setting: cell.setting.id,
+            inputs: cell.inputs,
+            dir: cell.dir,
+          },
         ]),
       ),
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
@@ -588,8 +699,9 @@ export async function main(argv) {
   writeFileSync(join(outDir, "results.md"), renderMarkdown(run));
   log(`\nsemantic-perf: results ${join(outDir, "results.json")}`);
   log(`semantic-perf: report  ${join(outDir, "results.md")}`);
-  log(`semantic-perf: validation ${validation.ok ? "PASSED" : "FAILED"} (${validation.failures.length} failure(s))`);
+  log(
+    `semantic-perf: validation ${validation.ok ? "PASSED" : "FAILED"} (${validation.failures.length} failure(s))`,
+  );
   for (const failure of validation.failures.slice(0, 40)) log(`  - ${failure}`);
   return validation.ok ? 0 : 1;
 }
-

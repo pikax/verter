@@ -14,7 +14,14 @@ export const TYPESCRIPT_VERSION = "7.0.2";
 
 /** Features no production build enables; a probe built with one is not the production library. */
 export const FORBIDDEN_FEATURES = {
-  verter_session: ["test-support", "test-util", "oracle-gen", "oracle-lift", "attribution", "currency_probe"],
+  verter_session: [
+    "test-support",
+    "test-util",
+    "oracle-gen",
+    "oracle-lift",
+    "attribution",
+    "currency_probe",
+  ],
   verter_audit: ["attribution"],
   verter_workspace: ["currency_probe"],
   verter_bench: ["attribution", "currency_probe", "hotpath", "hotpath-alloc"],
@@ -139,7 +146,9 @@ export function resolveTypeScript(fromDir) {
   const tsPackageDir = dirname(tsPackageJson);
   const tsPackage = JSON.parse(readFileSync(tsPackageJson, "utf8"));
   if (tsPackage.version !== TYPESCRIPT_VERSION) {
-    throw new Error(`typescript at ${tsPackageDir} is ${tsPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`);
+    throw new Error(
+      `typescript at ${tsPackageDir} is ${tsPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`,
+    );
   }
   const platformName = `@typescript/typescript-${process.platform}-${process.arch}`;
   const requireTs = createRequire(tsPackageJson);
@@ -147,19 +156,25 @@ export function resolveTypeScript(fromDir) {
   try {
     platformJson = requireTs.resolve(`${platformName}/package.json`);
   } catch {
-    throw new Error(`cannot resolve ${platformName} from ${tsPackageDir}: the native tsc for this platform is not installed`);
+    throw new Error(
+      `cannot resolve ${platformName} from ${tsPackageDir}: the native tsc for this platform is not installed`,
+    );
   }
   const platformDir = dirname(platformJson);
   const platformPackage = JSON.parse(readFileSync(platformJson, "utf8"));
   if (platformPackage.version !== TYPESCRIPT_VERSION) {
-    throw new Error(`${platformName} is ${platformPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`);
+    throw new Error(
+      `${platformName} is ${platformPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`,
+    );
   }
   const exe = join(platformDir, "lib", process.platform === "win32" ? "tsc.exe" : "tsc");
   if (!existsSync(exe)) throw new Error(`the native tsc is missing at ${exe}`);
   const version = spawnSync(exe, ["-v"], { encoding: "utf8", timeout: 30_000 });
   const versionText = (version.stdout ?? "").trim();
   if (version.status !== 0 || versionText !== `Version ${TYPESCRIPT_VERSION}`) {
-    throw new Error(`${exe} -v answered ${JSON.stringify(versionText)} (exit ${version.status}), not Version ${TYPESCRIPT_VERSION}`);
+    throw new Error(
+      `${exe} -v answered ${JSON.stringify(versionText)} (exit ${version.status}), not Version ${TYPESCRIPT_VERSION}`,
+    );
   }
   const apiFiles = ["dist/api/sync/api.js", "dist/api/sync/client.js", "dist/api/syncChannel.js"];
   return {
@@ -192,8 +207,19 @@ export function buildVerterProbes(root) {
     "semantic_perf_probe_counted",
     "--message-format=json-render-diagnostics",
   ];
-  const env = { ...process.env };
-  if (!env.CARGO_INCREMENTAL) env.CARGO_INCREMENTAL = "0";
+  // A controlled build environment: cargo is bound to the toolchain's own
+  // compiler (fingerprinted below) and incremental compilation is off,
+  // whatever the caller's environment says (names compared case-insensitively,
+  // as Windows does).
+  const rustcPath =
+    (
+      spawnSync("rustup", ["which", "rustc"], { cwd: root, encoding: "utf8" }).stdout ?? ""
+    ).trim() || null;
+  const controlled = { CARGO_INCREMENTAL: "0", ...(rustcPath ? { RUSTC: rustcPath } : {}) };
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !(k.toUpperCase() in controlled)),
+  );
+  Object.assign(env, controlled);
   const r = spawnSync("cargo", args, {
     cwd: root,
     encoding: "utf8",
@@ -210,7 +236,10 @@ export function buildVerterProbes(root) {
     if (msg.reason !== "compiler-artifact") continue;
     const name = msg.target?.name;
     const pkgName = msg.package_id?.match(/([A-Za-z0-9_-]+)(?:@|#)[^#@]*$/)?.[1] ?? null;
-    if (msg.executable && (name === "semantic_perf_probe" || name === "semantic_perf_probe_counted")) {
+    if (
+      msg.executable &&
+      (name === "semantic_perf_probe" || name === "semantic_perf_probe_counted")
+    ) {
       executables[name] = msg.executable;
     }
     const lib = msg.target?.kind?.some((k) => k === "lib" || k === "rlib");
@@ -233,15 +262,13 @@ export function buildVerterProbes(root) {
     cargoArgs: args,
     executables,
     packages,
-    cargoIncremental: env.CARGO_INCREMENTAL,
-    rustc: tool("rustc", ["-vV"]),
-    // The toolchain's own compiler (RUSTC and wrappers are refused as tuning,
-    // so this is the one cargo invokes), identified by content.
-    rustcPath: tool("rustup", ["which", "rustc"]),
+    env: controlled,
+    rustc: rustcPath ? tool(rustcPath, ["-vV"]) : null,
+    // The compiler cargo was bound to (RUSTC), identified by content.
+    rustcPath,
     rustcSha256: (() => {
-      const path = tool("rustup", ["which", "rustc"]);
       try {
-        return path ? sha256File(path) : null;
+        return rustcPath ? sha256File(rustcPath) : null;
       } catch {
         return null;
       }
@@ -259,11 +286,13 @@ export function buildProblems(build) {
       problems.push(`cargo reported no build record for ${name}`);
       continue;
     }
-    if (String(pkg.profile?.opt_level) !== "3") problems.push(`${name} built at opt-level ${pkg.profile?.opt_level}, not 3`);
+    if (String(pkg.profile?.opt_level) !== "3")
+      problems.push(`${name} built at opt-level ${pkg.profile?.opt_level}, not 3`);
     if (pkg.profile?.debug_assertions) problems.push(`${name} built with debug assertions`);
     if (pkg.profile?.test) problems.push(`${name} built as a test target`);
     for (const feature of FORBIDDEN_FEATURES[name] ?? []) {
-      if (pkg.features.includes(feature)) problems.push(`${name} built with the non-production feature ${feature}`);
+      if (pkg.features.includes(feature))
+        problems.push(`${name} built with the non-production feature ${feature}`);
     }
   }
   return problems;
@@ -276,7 +305,8 @@ export function pinBinary(path, dir, label) {
   const ext = process.platform === "win32" ? ".exe" : "";
   const pinned = join(dir, `${label}-${sha256.slice(0, 16)}${ext}`);
   if (!existsSync(pinned)) copyFileSync(path, pinned);
-  if (sha256File(pinned) !== sha256) throw new Error(`the pinned copy of ${basename(path)} differs from its source`);
+  if (sha256File(pinned) !== sha256)
+    throw new Error(`the pinned copy of ${basename(path)} differs from its source`);
   return { source: path, pinned, sha256 };
 }
 
