@@ -4974,7 +4974,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             env,
             substitutions,
             tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
-            tail_arguments: vec![Arc::clone(args)],
+            tail_arguments: std::iter::once(Arc::clone(args)).collect(),
             generic,
             suspend,
             body: BodyLowering::Ready(base),
@@ -5031,10 +5031,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // whose selected branch is this declaration applied to OTHER
             // arguments is the next step of one tail run, evaluated here in
             // place of a nested instantiation, and counted by the checker
-            // compatibility policy. The run fails with TS2589 at the
-            // checker's tail limit, or at once when the arguments come round
-            // again (the run can then never reach a value, so the checker's
-            // count is certain to run out). Each step is charged to the
+            // compatibility policy. The run fails with the checker's TS2589 at
+            // Verter's tail budget, far past the checker's tail limit, or at
+            // once when the arguments come round again (the run can then
+            // never reach a value, so any count is certain to run out). Each step is charged to the
             // connected-work ledger; a trip leaves the step's back-edge as a
             // typed partial.
             let next = build
@@ -5049,7 +5049,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
                 .flatten();
             if let Some(next) = next {
-                if build.tail_arguments.contains(&next) || !build.tail.step() {
+                if build.tail_arguments.contains(&next)
+                    || !build.tail.step(self.connected_demand.tail_steps_budget())
+                {
                     result = crate::semantic_query::checker_policy::checker_recovery(
                         self.graph(),
                         crate::semantic_query::CheckerDiagnostic {
@@ -5062,7 +5064,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if let Err(reasons) = self.charge_connected_work() {
                     self.fold_local_partial_completeness(reasons);
                 } else {
-                    build.tail_arguments.push(Arc::clone(&next));
+                    build.tail_arguments.insert(Arc::clone(&next));
                     build.substitutions.clear();
                     let (next_env, _) = self.bind_instantiate_arguments(build, &next);
                     build.env = next_env;
@@ -16514,10 +16516,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// The conditional's recursion into `Awaited<V>` is evaluated the way
     /// the checker evaluates it and stops where the checker stops, counted
-    /// by the checker compatibility policy: a tail run reaching the
-    /// conditional tail limit
-    /// ([`CONDITIONAL_TAIL_STEPS`](crate::semantic_query::checker_policy::CONDITIONAL_TAIL_STEPS))
-    /// or a path reaching the instantiation depth
+    /// by the checker compatibility policy: a tail run reaching Verter's
+    /// tail budget, far past the checker's
+    /// ([`ConditionalTail`](crate::semantic_query::checker_policy::ConditionalTail)),
+    /// or a path reaching the checker's instantiation depth (the nested walk
+    /// recurses natively, which that depth bounds)
     /// ([`INSTANTIATION_DEPTH`](crate::semantic_query::checker_policy::INSTANTIATION_DEPTH))
     /// is the TS2589 recovery. So is an application that recurs on its own
     /// path: it can never reach a value, so the checker's count is certain
@@ -16528,6 +16531,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 LIB_AWAITED_ENTRY_DEPTH,
             ),
             path: Vec::new(),
+            on_path: rustc_hash::FxHashSet::default(),
         };
         self.lib_awaited_run(operand, &mut walk, 0)
     }
@@ -16543,7 +16547,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// One TAIL RUN of the lib conditional from `operand`, entered with
     /// `tail_start` steps already counted: each application whose recursion
     /// is a single `Awaited<V>` over a non-union `V` continues the run, and
-    /// the run fails at the checker's tail limit. Every step is charged to
+    /// the run fails at Verter's tail budget. Every step is charged to
     /// the connected-work budget, whose trip is a typed partial.
     fn lib_awaited_run(
         &self,
@@ -16561,7 +16565,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     break self.lib_awaited_nested(value, walk, false);
                 }
                 LibStep::Next(value) => {
-                    if !tail.step() {
+                    if !tail.step(self.connected_demand.tail_steps_budget()) {
                         break LibAwaited::Reduced(self.lib_awaited_too_deep());
                     }
                     if let Err(reasons) = self.charge_connected_work() {
@@ -16572,7 +16576,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         };
-        walk.path.truncate(mark);
+        for left in walk.path.drain(mark..) {
+            walk.on_path.remove(&left);
+        }
         result
     }
 
@@ -16630,10 +16636,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.settled_non_thenable(resolved) {
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
-        if walk.path.contains(&resolved) {
+        if walk.on_path.contains(&resolved) {
             return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep()));
         }
         walk.path.push(resolved);
+        walk.on_path.insert(resolved);
         let Some(data) = self.graph().node_data(resolved) else {
             return LibStep::Done(LibAwaited::Refused);
         };
@@ -18534,9 +18541,11 @@ struct LibAwaitedWalk {
     /// The checker's instantiation depth along the path: every nested
     /// (non-tail) step enters it one level deeper.
     depth: crate::semantic_query::checker_policy::InstantiationDepth,
-    /// The applications on the path, for the recurrence that never reaches
-    /// a value.
+    /// The applications on the path, in order, for the recurrence that
+    /// never reaches a value.
     path: Vec<SemanticNodeId>,
+    /// The same applications, to look one up in constant time.
+    on_path: rustc_hash::FxHashSet<SemanticNodeId>,
 }
 
 /// The lib conditional's `then` branch over one object surface.
@@ -18623,7 +18632,9 @@ pub(super) struct InstantiateBuild {
     env: FxHashMap<String, SemanticNodeId>,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     tail: crate::semantic_query::checker_policy::ConditionalTail,
-    tail_arguments: Vec<Arc<[SemanticNodeId]>>,
+    /// Every argument list the tail run has taken, for the recurrence that
+    /// never reaches a value.
+    tail_arguments: rustc_hash::FxHashSet<Arc<[SemanticNodeId]>>,
     generic: bool,
     suspend: bool,
     body: BodyLowering,
