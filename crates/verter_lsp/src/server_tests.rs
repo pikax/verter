@@ -16221,6 +16221,88 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     );
 }
 
+/// DISCRIMINATING: a pending carrier whose sync failed while the provider was
+/// unavailable (a replacement gap between epochs) must be re-driven by the
+/// drain's own bounded successor chain once the provider serves again. After
+/// startup's last scanner pass no external drain exists to retry it, so a
+/// queue-only contract strands the source with no diagnostics. RED-before: the
+/// retained entry is never re-synced (the editor-neutral contract observed
+/// `publishDiagnostics` never settling for exactly these sources). GREEN-after:
+/// the successor pass re-syncs through the recovered provider and dequeues.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_snapshot_provider_sync_redrives_transiently_failed_source_after_recovery() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_fail_file_ops(true);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    ));
+    let provider_sync_states: DashMap<String, crate::provider_sync::ProviderSyncState> =
+        DashMap::new();
+    let provider_sync_states = Arc::new(provider_sync_states);
+    let pending_snapshot_provider_sync: DashSet<String> = DashSet::new();
+    let pending_snapshot_provider_sync = Arc::new(pending_snapshot_provider_sync);
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    let drain = Arc::new(PendingSyncDrain {
+        project_sync: Some(sync),
+        documents: Arc::clone(&documents),
+        vfs_workspace: Arc::clone(&vfs_workspace),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+        is_tsgo: false,
+        mru_canonical_ids: None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+        redrive_armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    // Fast schedule: 5ms successors with no backoff, enough attempts to cross
+    // the recovery point the test controls explicitly.
+    let redrive = PendingSyncRedrive {
+        initial_delay_ms: 5,
+        backoff_factor: 1,
+        max_attempts: 50,
+    };
+    drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
+
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "the pass against the failed provider must retain the entry (fail closed)"
+    );
+
+    // The provider recovers (its replacement now serves).
+    provider.set_fail_file_ops(false);
+
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        drained,
+        "the bounded successor chain must re-drive the transiently failed source after recovery"
+    );
+    assert!(
+        provider_sync_states.get("/workspace/src/App.vue").is_some(),
+        "the re-driven sync should commit owner-aware provider state"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
     // Gap (a) — production-path coverage for the background-drain no-owner branch.

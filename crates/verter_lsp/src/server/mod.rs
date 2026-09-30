@@ -169,7 +169,14 @@ pub(crate) use self::server_utils::{
 
 #[path = "../background_drain.rs"]
 mod background_drain;
+#[cfg(test)]
 pub(crate) use background_drain::drain_pending_snapshot_provider_sync;
+#[cfg(test)]
+pub(crate) use background_drain::PendingSyncRedrive;
+pub(crate) use background_drain::{
+    arm_pending_sync_redrive_once, drain_pending_snapshot_provider_sync_owned, PendingSyncDrain,
+    PENDING_SYNC_REDRIVE,
+};
 #[path = "../background_drain_decl_closure.rs"]
 mod background_drain_decl_closure;
 #[path = "../background_init.rs"]

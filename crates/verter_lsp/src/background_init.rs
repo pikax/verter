@@ -1,8 +1,7 @@
 use super::*;
 
-use super::background_drain::{
-    drain_pending_snapshot_provider_sync, resync_aliased_imports_for_open_files,
-};
+use super::background_drain::resync_aliased_imports_for_open_files;
+use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDING_SYNC_REDRIVE};
 
 // ── Background initialization ───────────────────────────────────────────
 
@@ -330,16 +329,21 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         canonical_roots.len()
     );
 
-    drain_pending_snapshot_provider_sync(
-        project_sync.as_ref(),
-        &documents,
-        &vfs_workspace,
-        &provider_sync_states,
-        &pending_snapshot_provider_sync,
-        is_tsgo,
-        Some(&mru_canonical_ids),
-        carrier_publish_coordinator.as_ref(),
-        &carrier_transaction_coordinator,
+    drain_pending_snapshot_provider_sync_owned(
+        Arc::new(PendingSyncDrain {
+            project_sync: project_sync.clone(),
+            documents: Arc::clone(&documents),
+            vfs_workspace: Arc::clone(&vfs_workspace),
+            provider_sync_states: Arc::clone(&provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+            is_tsgo,
+            mru_canonical_ids: Some(Arc::clone(&mru_canonical_ids)),
+            carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+            carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+            redrive_armed: std::sync::atomic::AtomicBool::new(false),
+        }),
+        PENDING_SYNC_REDRIVE,
+        1,
     )
     .await;
 
@@ -485,16 +489,21 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             // The scanner may enqueue owner-aware carrier retries after the
             // pre-scan drain above. Settle those retries before announcing the
             // provider frontier; a non-empty queue means level 2 is not true yet.
-            drain_pending_snapshot_provider_sync(
-                project_sync.as_ref(),
-                &documents,
-                &vfs_workspace,
-                &provider_sync_states,
-                &pending_snapshot_provider_sync,
-                is_tsgo,
-                Some(&mru_canonical_ids),
-                carrier_publish_coordinator.as_ref(),
-                &carrier_transaction_coordinator,
+            drain_pending_snapshot_provider_sync_owned(
+                Arc::new(PendingSyncDrain {
+                    project_sync: project_sync.clone(),
+                    documents: Arc::clone(&documents),
+                    vfs_workspace: Arc::clone(&vfs_workspace),
+                    provider_sync_states: Arc::clone(&provider_sync_states),
+                    pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+                    is_tsgo,
+                    mru_canonical_ids: Some(Arc::clone(&mru_canonical_ids)),
+                    carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+                    carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+                    redrive_armed: std::sync::atomic::AtomicBool::new(false),
+                }),
+                PENDING_SYNC_REDRIVE,
+                1,
             )
             .await;
 

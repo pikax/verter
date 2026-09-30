@@ -842,6 +842,24 @@ async fn coordinator_loop(
         std::collections::HashSet::new();
     let (pull_done_tx, mut pull_done_rx) = mpsc::unbounded_channel::<tokio::task::Id>();
 
+    // The coordinator's own pending-redrive context: transiently refused syncs
+    // (a provider replacement gap, a superseded commit, cold bootstrap) park in
+    // the pending snapshot queue with no editor signal of their own, and after
+    // startup's last scanner pass no external drain exists to retry them. One
+    // long-lived context keeps at most one bounded successor chain armed.
+    let pending_redrive = Arc::new(crate::server::PendingSyncDrain {
+        project_sync: deps.project_sync.clone(),
+        documents: Arc::clone(&deps.documents),
+        vfs_workspace: Arc::clone(&deps.vfs_workspace),
+        provider_sync_states: Arc::clone(&deps.provider_sync_states),
+        pending_snapshot_provider_sync: Arc::clone(&deps.pending_snapshot_provider_sync),
+        is_tsgo: matches!(deps.type_provider_kind, crate::TypeProviderKind::Tsgo),
+        mru_canonical_ids: None,
+        carrier_publish_coordinator: deps.carrier_publish_coordinator.clone(),
+        carrier_transaction_coordinator: Arc::clone(&deps.carrier_transaction_coordinator),
+        redrive_armed: std::sync::atomic::AtomicBool::new(false),
+    });
+
     loop {
         // Calculate next deadline from pending files. With every pull slot
         // taken nothing is dispatchable, so no timer is armed at all: the loop
@@ -873,6 +891,16 @@ async fn coordinator_loop(
                 .map(|(_, (t, _))| *t + debounce)
                 .min()
         };
+
+        // Transiently refused syncs parked in the pending snapshot queue get
+        // the queue's own bounded redrive chain — checked here, before the
+        // loop parks, because the signals that queued them are already spent.
+        if !deps.pending_snapshot_provider_sync.is_empty() {
+            crate::server::arm_pending_sync_redrive_once(
+                &pending_redrive,
+                crate::server::PENDING_SYNC_REDRIVE,
+            );
+        }
 
         tokio::select! {
             wake = wake_rx.recv() => {
@@ -1508,7 +1536,7 @@ async fn sync_file(
     // overwrite it with an IDE-path state and break did_close cleanup.
     if let Some(file_language) = crate::server::self_file_language_for(canonical_id) {
         if let Some(uri) = deps.documents.canonical_id_to_uri(canonical_id) {
-            crate::server::sync_self_file_shadow_state(
+            let delivered = crate::server::sync_self_file_shadow_state(
                 &deps.documents,
                 project_sync,
                 &deps.provider_sync_states,
@@ -1519,6 +1547,14 @@ async fn sync_file(
                 deps.type_provider_kind.requires_explicit_source_graph(),
             )
             .await;
+            if !delivered {
+                // A transient delivery failure (e.g. the provider's epoch was
+                // retired mid-write) must not strand an OPEN self-file with no
+                // provider buffer: no editor signal follows startup, so the
+                // bounded pending-queue redrive is its only re-drive.
+                deps.pending_snapshot_provider_sync
+                    .insert(canonical_id.to_string());
+            }
         } else if snapshot.ownership_ready {
             // A genuinely non-open rune module is removed once ready.
             clear_provider_sync_state(

@@ -86,6 +86,134 @@ pub(super) struct CarrierPublishCtx<'a> {
     pub(super) ownership_ready: bool,
 }
 
+/// The shared state one pending-sync drain pass needs, held behind `Arc`s so
+/// a bounded successor pass can outlive the caller that armed it. The fields
+/// are the same shared owners the server, background init, and the scanner
+/// drain through — nothing here is drain-private state.
+pub(crate) struct PendingSyncDrain {
+    pub(crate) project_sync: Option<ProjectSync>,
+    pub(crate) documents: Arc<DocumentRegistry>,
+    pub(crate) vfs_workspace:
+        Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    pub(crate) provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    pub(crate) pending_snapshot_provider_sync: Arc<DashSet<String>>,
+    pub(crate) is_tsgo: bool,
+    pub(crate) mru_canonical_ids: Option<Arc<parking_lot::Mutex<Vec<String>>>>,
+    pub(crate) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    pub(crate) carrier_transaction_coordinator:
+        Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    /// Single-flight guard for this context's successor chain: at most one
+    /// bounded chain runs per context at a time. Cleared when the chain ends,
+    /// so a later signal can arm a fresh bounded chain.
+    pub(crate) redrive_armed: std::sync::atomic::AtomicBool,
+}
+
+/// The production redrive schedule: a pass that leaves entries queued arms one
+/// successor pass after a backoff delay, up to `max_attempts` generations.
+///
+/// A transiently refused carrier sync (the provider is between epochs after a
+/// replacement, a commit was superseded, compilation was transiently cold) has
+/// no later external drain after startup's last scanner pass — the queue's
+/// documented contract is "retried on a later drain", so the drain itself must
+/// arm that later pass while entries remain. The chain is bounded: it stops at
+/// the attempt cap or an empty queue, whichever comes first, and every external
+/// drain (scanner pass, background init) keeps working unchanged.
+pub(crate) const PENDING_SYNC_REDRIVE: PendingSyncRedrive = PendingSyncRedrive {
+    initial_delay_ms: 500,
+    backoff_factor: 2,
+    max_attempts: 6,
+};
+
+/// Knobs of the bounded successor-pass chain. The delay before successor
+/// `attempt` (2-based) is `initial_delay_ms * backoff_factor^(attempt-2)`.
+#[derive(Clone, Copy)]
+pub(crate) struct PendingSyncRedrive {
+    pub(crate) initial_delay_ms: u64,
+    pub(crate) backoff_factor: u32,
+    pub(crate) max_attempts: u32,
+}
+
+impl PendingSyncRedrive {
+    fn delay_for_successor(&self, attempt: u32) -> std::time::Duration {
+        let scale = self
+            .backoff_factor
+            .saturating_pow(attempt.saturating_sub(2));
+        std::time::Duration::from_millis(self.initial_delay_ms.saturating_mul(scale as u64))
+    }
+}
+
+/// Drain the pending snapshot queue through the shared pass, then arm the
+/// bounded successor chain while entries remain. `attempt` is 1 for the
+/// immediate pass; each successor increments it.
+pub(crate) async fn drain_pending_snapshot_provider_sync_owned(
+    drain: Arc<PendingSyncDrain>,
+    redrive: PendingSyncRedrive,
+    attempt: u32,
+) {
+    drain_pending_snapshot_provider_sync(
+        drain.project_sync.as_ref(),
+        &drain.documents,
+        &drain.vfs_workspace,
+        &drain.provider_sync_states,
+        &drain.pending_snapshot_provider_sync,
+        drain.is_tsgo,
+        drain.mru_canonical_ids.as_deref(),
+        drain.carrier_publish_coordinator.as_ref(),
+        &drain.carrier_transaction_coordinator,
+    )
+    .await;
+    if attempt >= redrive.max_attempts || drain.pending_snapshot_provider_sync.is_empty() {
+        return;
+    }
+    arm_pending_sync_redrive_once(&drain, redrive);
+}
+
+/// Arm this context's bounded successor chain unless one is already running.
+/// The chain re-runs the shared drain pass after a backoff delay while entries
+/// remain, and clears the guard when it ends (empty queue or attempt cap), so
+/// a later signal can arm a fresh chain.
+pub(crate) fn arm_pending_sync_redrive_once(
+    drain: &Arc<PendingSyncDrain>,
+    redrive: PendingSyncRedrive,
+) {
+    use std::sync::atomic::Ordering;
+    if drain.redrive_armed.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let successor = Arc::clone(drain);
+    tokio::spawn(async move {
+        let mut attempt = 1u32;
+        loop {
+            tokio::time::sleep(redrive.delay_for_successor(attempt + 1)).await;
+            // An external drain (scanner pass, background init) may have
+            // emptied the queue while this successor slept; the re-check keeps
+            // the chain from issuing pointless provider work.
+            if successor.pending_snapshot_provider_sync.is_empty() {
+                break;
+            }
+            drain_pending_snapshot_provider_sync(
+                successor.project_sync.as_ref(),
+                &successor.documents,
+                &successor.vfs_workspace,
+                &successor.provider_sync_states,
+                &successor.pending_snapshot_provider_sync,
+                successor.is_tsgo,
+                successor.mru_canonical_ids.as_deref(),
+                successor.carrier_publish_coordinator.as_ref(),
+                &successor.carrier_transaction_coordinator,
+            )
+            .await;
+            if attempt + 1 >= redrive.max_attempts
+                || successor.pending_snapshot_provider_sync.is_empty()
+            {
+                break;
+            }
+            attempt += 1;
+        }
+        successor.redrive_armed.store(false, Ordering::Relaxed);
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_snapshot_provider_sync(
     project_sync: Option<&ProjectSync>,
@@ -1471,6 +1599,13 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     let Some(source) = documents.host().get_source(canonical_id) else {
         return false;
     };
+    // Bump diagnostics_generation for the same reason the carrier pass does:
+    // the re-synced shadow buffer must look NEW to the diagnostics cache and
+    // to any receipt the open document still owes — otherwise an incomplete
+    // publication from before this pass (e.g. its provider query failed while
+    // the engine was between epochs) is never re-driven, because the receipt
+    // was not outdated by the pass that repaired its input.
+    documents.host().bump_diagnostics_generation(canonical_id);
     // Framework carriers never sync to the provider as raw scripts.
     let Some(file_language) =
         crate::provider_sync::provider_script_language(&documents.host(), canonical_id)

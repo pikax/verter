@@ -588,16 +588,25 @@ async fn scanner_loop(
                 pending = config.pending_snapshot_provider_sync.len(),
                 "workspace_scanner: draining carrier-phase provider retries"
             );
-            crate::server::drain_pending_snapshot_provider_sync(
-                config.project_sync.as_ref(),
-                &config.documents,
-                &config.vfs_workspace,
-                &config.provider_sync_states,
-                &config.pending_snapshot_provider_sync,
-                config.is_tsgo,
-                None,
-                config.carrier_publish_coordinator.as_ref(),
-                &config.carrier_transaction_coordinator,
+            crate::server::drain_pending_snapshot_provider_sync_owned(
+                std::sync::Arc::new(crate::server::PendingSyncDrain {
+                    project_sync: config.project_sync.clone(),
+                    documents: std::sync::Arc::clone(&config.documents),
+                    vfs_workspace: std::sync::Arc::clone(&config.vfs_workspace),
+                    provider_sync_states: std::sync::Arc::clone(&config.provider_sync_states),
+                    pending_snapshot_provider_sync: std::sync::Arc::clone(
+                        &config.pending_snapshot_provider_sync,
+                    ),
+                    is_tsgo: config.is_tsgo,
+                    mru_canonical_ids: None,
+                    carrier_publish_coordinator: config.carrier_publish_coordinator.clone(),
+                    carrier_transaction_coordinator: std::sync::Arc::clone(
+                        &config.carrier_transaction_coordinator,
+                    ),
+                    redrive_armed: std::sync::atomic::AtomicBool::new(false),
+                }),
+                crate::server::PENDING_SYNC_REDRIVE,
+                1,
             )
             .await;
         }
