@@ -1335,14 +1335,32 @@ fn build_tsserver_router(
 ) -> Result<(Arc<dyn TypeProvider>, Option<String>), TsserverSpawnError> {
     let probe = project_router::probe_workspace_tsserver(workspace_root, tsdk);
     let advisory = tsserver_route_decision(workspace_root, &probe)?;
-    let router = ProjectTsserverProvider::new(
-        Arc::clone(host),
-        tsdk.map(str::to_string),
-        plugin_path.map(str::to_string),
-        Arc::clone(client_cell),
-    )
-    .map_err(|error| TsserverSpawnError::Unavailable(error.to_string()))?;
-    Ok((Arc::new(router) as Arc<dyn TypeProvider>, advisory))
+    let router = Arc::new(
+        ProjectTsserverProvider::new(
+            Arc::clone(host),
+            tsdk.map(str::to_string),
+            plugin_path.map(str::to_string),
+            Arc::clone(client_cell),
+        )
+        .map_err(|error| TsserverSpawnError::Unavailable(error.to_string()))?,
+    );
+    // The recovery re-arm: a replacement engine drops the old epoch's admitted
+    // generated state, and the router re-publishes it through fresh admission.
+    // Weak, so a discarded router's hubs never resurrect it; spawned, so the
+    // hub's install path never waits on the re-publication.
+    {
+        let weak = Arc::downgrade(&router);
+        router.install_admitted_state_rearm(Arc::new(move |dropped| {
+            let Some(router) = weak.upgrade() else {
+                return;
+            };
+            let dropped = dropped.clone();
+            tokio::spawn(async move {
+                router.rearm_admitted_state(&dropped).await;
+            });
+        }));
+    }
+    Ok((router as Arc<dyn TypeProvider>, advisory))
 }
 
 /// The tsserver ROUTE decision taken from a completed probe — pure: no host, no

@@ -11,8 +11,10 @@
 //! → [`ProjectBinding`](verter_session::external_ts::ProjectBinding) →
 //! [`BoundProject`](verter_session::external_ts::BoundProject) witness. Non-bound states
 //! fail closed to the feature's empty external answer; they never reach an engine's
-//! inferred-project self-discovery. Feature admissions are generation-scoped through
-//! [`CarrierAdmissionCache`].
+//! inferred-project self-discovery. The SHARED route's engagement and every
+//! generated-unit write carry witnesses issued by the overlay's
+//! [`ProviderHub`](verter_type_runtime::provider_hub::ProviderHub) — the one
+//! admission authority of the shared route.
 //!
 //! **Serving order.** For a bound carrier, an armed editor rendezvous is established,
 //! synchronized, and live-revalidated first. Diagnostics and every read-only feature use
@@ -30,7 +32,8 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use verter_semantic::resolver_core::normalize_canonical_id;
@@ -42,9 +45,7 @@ use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
 use verter_workspace::traits::WorkspaceRead;
 use verter_workspace::workspace_snapshot::ProjectPayload;
-use verter_workspace::{
-    AdmittedGeneratedUnits, CanonicalPath, GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason,
-};
+use verter_workspace::{CanonicalPath, GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason};
 
 use verter_tsgo_api::control::Advertisement;
 use verter_type_runtime::protocol::{
@@ -52,14 +53,17 @@ use verter_type_runtime::protocol::{
     InlayHint, ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp,
     TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation, TypeProviderError,
 };
+use verter_type_runtime::provider_hub::{
+    HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
+};
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
 use crate::tsgo::overlay_core::{
-    GeneratedUnitWritePermit, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport,
+    GeneratedUnitWritePermit, HubAdmittedTransport, LazyOverlayCore, OverlayPriority,
+    OverlaySyncState, OverlayTransport, ServingTransport,
 };
-use crate::tsgo::project_binding::{self, AdmissionEpoch, BoundCarrier, CarrierAdmissionCache};
+use crate::tsgo::project_binding::{self, AdmissionEpoch};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
-use verter_type_runtime::provider_hub::EstablishedTransport;
 use verter_type_runtime::provider_hub::ProviderEpoch;
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
@@ -115,8 +119,8 @@ pub struct SharedRendezvous {
 ///
 /// Cheap to clone (one `Arc`).
 #[derive(Clone)]
-pub struct SharedTsgoOverlay {
-    inner: Arc<OverlayInner>,
+pub struct SharedTsgoOverlay<P: SharedAttach = TsgoSharedProvider> {
+    inner: Arc<OverlayInner<P>>,
 }
 
 /// The typed terminal reason an armed SHARED route refused to engage. Every refusal
@@ -187,11 +191,80 @@ impl std::fmt::Display for SharedEngageFailure {
     }
 }
 
+/// The provider-side surface of a shared attach: what the overlay's
+/// [`ProviderHub`] establishes and the composite serves through. ONE
+/// production implementation ([`TsgoSharedProvider`] — the relay-shim
+/// control channel + directly-connected `--api` checker); test doubles
+/// implement the same contract so the REAL gates (establishment door,
+/// hub-issued admission, epoch fencing) run against a real hub in tests.
+pub trait SharedAttach: TypeProvider + Sized + Send + Sync + 'static {
+    /// Attach to the editor's already-running engine using the pre-resolved
+    /// demand (the non-owning handshake; fails closed to the OWNED baseline).
+    fn establish_shared_attach<'a>(
+        params: EstablishSharedParams<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, crate::tsgo::shared::EstablishError>> + Send + 'a>>;
+
+    /// Re-decide the serve mode for a per-query resolved binding at the
+    /// current generation through the live controller.
+    fn redecide_for_binding(
+        &self,
+        binding: &ProjectBinding,
+        generated_units: GeneratedUnitAdmissionFact,
+        generation: u64,
+    ) -> verter_session::external_ts::LiveDecision;
+
+    /// The project-bound `--api` diagnostics oracle for a carrier in its OWN
+    /// per-query resolved configured project.
+    fn overlay_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        tsconfig: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>>;
+
+    /// Whether the attach is still live (the hub watcher's death signal).
+    fn attach_is_alive(&self) -> bool;
+}
+
+impl SharedAttach for TsgoSharedProvider {
+    fn establish_shared_attach<'a>(
+        params: EstablishSharedParams<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, crate::tsgo::shared::EstablishError>> + Send + 'a>>
+    {
+        Box::pin(TsgoSharedProvider::establish_shared(params))
+    }
+
+    fn redecide_for_binding(
+        &self,
+        binding: &ProjectBinding,
+        generated_units: GeneratedUnitAdmissionFact,
+        generation: u64,
+    ) -> verter_session::external_ts::LiveDecision {
+        TsgoSharedProvider::redecide_for_binding(self, binding, generated_units, generation)
+    }
+
+    fn overlay_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        tsconfig: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        Box::pin(TsgoSharedProvider::overlay_diagnostics_in_project(
+            self, path, tsconfig,
+        ))
+    }
+
+    fn attach_is_alive(&self) -> bool {
+        TsgoSharedProvider::is_alive(self)
+    }
+}
+
 /// A provider that passed the exact-epoch synchronization and live project-binding
 /// decision barriers, plus the witnesses needed if the following diagnostics operation
 /// itself refuses.
-struct EngagedSharedProvider {
-    provider: Arc<TsgoSharedProvider>,
+struct EngagedSharedProvider<P: SharedAttach> {
+    provider: Arc<P>,
+    /// The hub that owns the serving incarnation — diagnostics settle against
+    /// its serving epoch, feature calls route through its guarded forwarding.
+    hub: Arc<ProviderHub<P>>,
     source: String,
     config: String,
     generation: u64,
@@ -199,21 +272,26 @@ struct EngagedSharedProvider {
     sync_state: OverlaySyncState,
 }
 
-/// A feature route selected after admission. SHARED retains the exact transport
-/// epoch and overlay core until the feature call finishes; returning only the
-/// provider Arc would discard that witness and reopen a select→invoke race.
-enum FeatureProviderSelection {
+/// A feature route selected after admission. SHARED retains the owning hub and
+/// the exact serving epoch until the feature call finishes; the hub settles
+/// the call against that epoch, so a replacement landing mid-call can neither
+/// attribute a stale answer to the fresh incarnation nor serve one from a
+/// retired one.
+enum FeatureProviderSelection<P: SharedAttach> {
     Managed(Arc<dyn TypeProvider>),
     Shared {
-        provider: Arc<dyn TypeProvider>,
+        /// The owning hub: invoking features through it guards the query
+        /// (crash quarantine) and settles the answer against the serving
+        /// epoch the selection captured.
+        hub: Arc<ProviderHub<P>>,
         managed: Arc<dyn TypeProvider>,
-        core: Arc<OverlayInner>,
+        core: Arc<OverlayInner<P>>,
         provider_path: String,
         transport_epoch: ProviderEpoch,
     },
 }
 
-impl FeatureProviderSelection {
+impl<P: SharedAttach> FeatureProviderSelection<P> {
     async fn invoke<R, F, Fut>(self, invoke: F) -> Result<R, TypeProviderError>
     where
         F: Fn(Arc<dyn TypeProvider>) -> Fut,
@@ -222,64 +300,51 @@ impl FeatureProviderSelection {
         match self {
             Self::Managed(provider) => invoke(provider).await,
             Self::Shared {
-                provider,
+                hub,
                 managed,
                 core,
                 provider_path,
                 transport_epoch,
             } => {
-                invoke_epoch_bound(
-                    &core.core,
-                    &provider_path,
-                    transport_epoch,
-                    || invoke(provider),
-                    || invoke(managed),
-                )
-                .await
+                let still_serving = || hub.serving_epoch() == Some(transport_epoch);
+                // The pre-call check closes replacements that land after
+                // selection: content must be confirmed synced into the exact
+                // captured epoch AND that epoch must still be the hub's
+                // serving one.
+                if !core
+                    .core
+                    .sync_state_for_epoch(&provider_path, transport_epoch)
+                    .is_synced()
+                    || !still_serving()
+                {
+                    return invoke(managed).await;
+                }
+                let hub_handle: Arc<dyn TypeProvider> = hub.clone();
+                let shared_result = invoke(hub_handle).await;
+                // A settled answer the captured epoch still owns is returned
+                // as-is (an engine error propagates exactly as before); any
+                // replacement or content desync converts success OR error
+                // into the managed fallback.
+                if still_serving()
+                    && core
+                        .core
+                        .sync_state_for_epoch(&provider_path, transport_epoch)
+                        .is_synced()
+                {
+                    shared_result
+                } else {
+                    invoke(managed).await
+                }
             }
         }
     }
 }
 
-/// Invoke one shared feature only while the selected transport epoch remains the
-/// active, content-synchronized epoch. The pre-call check closes reconnects that
-/// land after selection; the post-call check converts a stale success OR stale
-/// error into managed fallback when replacement happens during the shared await.
-async fn invoke_epoch_bound<T, R, SharedCall, SharedFuture, ManagedCall, ManagedFuture>(
-    core: &LazyOverlayCore<T>,
-    provider_path: &str,
-    transport_epoch: ProviderEpoch,
-    shared_call: SharedCall,
-    managed_call: ManagedCall,
-) -> Result<R, TypeProviderError>
-where
-    T: OverlayTransport,
-    SharedCall: FnOnce() -> SharedFuture,
-    SharedFuture: Future<Output = Result<R, TypeProviderError>>,
-    ManagedCall: FnOnce() -> ManagedFuture,
-    ManagedFuture: Future<Output = Result<R, TypeProviderError>>,
-{
-    if !core
-        .sync_state_for_epoch(provider_path, transport_epoch)
-        .is_synced()
-    {
-        return managed_call().await;
-    }
-    let shared_result = shared_call().await;
-    if core
-        .sync_state_for_epoch(provider_path, transport_epoch)
-        .is_synced()
-    {
-        shared_result
-    } else {
-        managed_call().await
-    }
-}
-
-/// Run one shared operation only while its selected transport epoch remains the
-/// exact content-synchronized epoch. Unlike [`invoke_epoch_bound`], this helper
-/// returns the stale sync witness to callers that need to construct a typed
-/// refusal before activating their own fallback policy.
+/// Run one shared diagnostics operation only while its selected epoch remains
+/// the exact content-synchronized epoch. Returns the stale sync witness to
+/// callers that need to construct a typed refusal before activating their own
+/// fallback policy. The hub-epoch settle (a replacement landing mid-call) is
+/// the caller's — it holds the owning hub.
 async fn observe_epoch_bound<T, R, SharedCall, SharedFuture>(
     core: &LazyOverlayCore<T>,
     provider_path: &str,
@@ -304,66 +369,202 @@ where
     }
 }
 
-struct OverlayInner {
+struct OverlayInner<P: SharedAttach> {
     /// The host — the live published-snapshot + per-project R21 env-dims authority
     /// the per-query binding resolution reads from.
     host: Arc<VerterHost>,
-    /// The rendezvous evidence the transport is lazily established from.
+    /// The rendezvous evidence the attach is lazily established from.
     rendezvous: SharedRendezvous,
     /// The lazy overlay core: the per-carrier content cache lifecycle records
-    /// into OFF the critical path, plus the lazily-established relay-attach transport
-    /// cell the QUERY path establishes + injects into. The transport is a singleflight,
-    /// bounded, re-arming, liveness-evicting cell (established once on the first bound
-    /// carrier DIAGNOSTICS query; reused after). The STATE lock is never held across the
-    /// establishment I/O, a slow/broken attach is bounded by [`SHARED_ESTABLISH_TIMEOUT`]
-    /// (fail-closed to managed), and a failed attach re-arms on a fresh advertisement/editor
-    /// OR workspace/config generation (never poisoned by a carrier's transient
-    /// non-binding). The observed engine version — the witness the per-query
-    /// `BoundProject` mint and the `--api` snapshot rail key on — is read FROM the
-    /// established transport (the attach version gate), never a hardcoded literal.
-    core: LazyOverlayCore<TsgoSharedProvider>,
+    /// into OFF the critical path, plus the per-carrier synchronization state
+    /// the query path drives against the hub-owned serving incarnation. The
+    /// serving identity itself — establishment, replacement, and the serving
+    /// epoch — belongs to [`OverlayInner::hub`] below, never to the core.
+    core: LazyOverlayCore<HubAdmittedTransport<P>>,
+    /// The ProviderHub that OWNS the shared attach: it establishes lazily
+    /// through its discriminant re-arm door, mints the serving epoch every
+    /// witness and admitted request binds to, retires the epoch fail-closed
+    /// when the attach dies, and enforces generated-unit admission on every
+    /// provider-visible write. This is the ONE serving/lifecycle/admission
+    /// authority of the shared route — there is no second transport cell,
+    /// epoch mint, or admission cache beside it.
+    hub: Arc<ProviderHub<P>>,
+    /// The latest bound demand the query path captured for the establisher:
+    /// the pre-resolved carrier binding (+ admission fact + generation) the
+    /// attach is established with. Written immediately before each
+    /// establishment demand; the singleflight reuses the first caller's
+    /// demand, exactly as concurrent demands previously joined one
+    /// establishment.
+    attach_demand: Arc<StdMutex<Option<SharedAttachDemand>>>,
     /// The source-resolution half of [`SharedTsgoOverlay::injection_is_shadow_safe`],
     /// per SOURCE for ONE workspace content generation. A carrier's companions (IDE,
     /// API, testing, sidecar) share their source's answer, and resolving project
     /// ownership is the expensive half; the generation is what any change of answer
     /// advances, so an older generation's entries are dropped wholesale.
     source_shadow_safety: parking_lot::Mutex<(u64, std::collections::HashMap<String, bool>)>,
-    /// The epoch-scoped owning-project resolution for every carrier a sweep considers —
-    /// the queried carrier's neighbours included. The same memo of the ONE shared
-    /// resolver the feature gate uses; never a second binding engine.
-    admission: CarrierAdmissionCache,
     /// The monotonic sweep generation: it advances whenever the host's admission epoch
     /// (the published root by identity, the content generation, the project generation)
     /// differs from the last one observed. Every per-unit write decision the overlay core
     /// caches is keyed on it, so a changed `include`/`files`/`exclude`, a changed owner,
     /// or a changed file set re-decides every unit.
     sweep_generation: parking_lot::Mutex<(Option<AdmissionEpoch>, u64)>,
-    /// Per carrier SOURCE, the generated-unit admission proof decided for ONE sweep
-    /// generation (`None`: no bound project, or the write set is not admitted).
-    admitted_units: parking_lot::Mutex<(u64, AdmittedUnitsBySource)>,
     /// The carriers whose admission refusal was already reported at ONE sweep generation.
     reported_refusals: parking_lot::Mutex<(u64, std::collections::HashSet<String>)>,
 }
 
-/// Carrier source → its generated-unit admission proof, if any.
-type AdmittedUnitsBySource = std::collections::HashMap<String, Option<Arc<AdmittedGeneratedUnits>>>;
+/// The pre-resolved binding evidence one SHARED attach establishment runs with.
+#[derive(Clone)]
+struct SharedAttachDemand {
+    binding: ProjectBinding,
+    generated_units: GeneratedUnitAdmissionFact,
+    generation: u64,
+}
 
-impl SharedTsgoOverlay {
-    /// Build the overlay over the host and the rendezvous evidence. The transport is
-    /// established lazily on the first bound carrier DIAGNOSTICS query (never the
-    /// lifecycle path); the observed engine version is taken from the attach gate at
-    /// that point.
+/// How often the attach liveness watcher polls the serving incarnation — the
+/// signal path from a dead attach (control `verter/fatal` / a closed pipe) to
+/// the hub's crash signal. The hub retires the epoch fail-closed on the
+/// signal; the re-arm door holds re-establishment until a fresh generation
+/// discriminant (a reconnect).
+const SHARED_LIVENESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The SHARED attach establishment strategy for the overlay's
+/// [`ProviderHub`]: it attaches to the editor's already-running engine using
+/// the LATEST bound demand the query path captured (a binding resolved BEFORE
+/// any hub interaction — a non-binding carrier never demands an attach), and
+/// wires the attach's liveness into the hub's crash signal.
+struct SharedAttachBackend<P: SharedAttach> {
+    rendezvous: SharedRendezvous,
+    demand: Arc<StdMutex<Option<SharedAttachDemand>>>,
+    attach: std::marker::PhantomData<fn() -> P>,
+}
+
+impl<P: SharedAttach> ProviderEstablisher<P> for SharedAttachBackend<P> {
+    fn log_name(&self) -> &'static str {
+        "TSGO(shared attach)"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "tsgo (editor-owned)"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "the editor-owned tsgo attach is re-arming"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
+    fn establish<'a>(
+        &'a self,
+        crash_signal: Arc<tokio::sync::Notify>,
+    ) -> verter_type_runtime::provider_hub::EstablishFuture<'a, P> {
+        let Some(demand) = self.demand.lock().unwrap().clone() else {
+            return Box::pin(async {
+                Err(TypeProviderError::new(
+                    "no bound carrier demand captured for the shared attach",
+                ))
+            });
+        };
+        let rendezvous = &self.rendezvous;
+        Box::pin(async move {
+            let tsconfig_path = demand.binding.tsconfig_uri().to_string();
+            let params = EstablishSharedParams {
+                control_dir: &rendezvous.control_dir,
+                session_key: &rendezvous.session_key,
+                workspace_root: &rendezvous.workspace_root,
+                tsconfig_path: &tsconfig_path,
+                resolution: CarrierOwnershipResolution::Bound(demand.binding.clone()),
+                generated_units: demand.generated_units,
+                config_generation: demand.generation,
+                client_label: SHARED_CLIENT_LABEL,
+            };
+            let provider = P::establish_shared_attach(params).await.map_err(|error| {
+                TypeProviderError::new(format!(
+                    "SHARED editor route not established ({error}); managed fallback is \
+                         eligible"
+                ))
+            })?;
+            let provider = Arc::new(provider);
+            // Liveness → crash signal: the hub that owns this incarnation owns
+            // its death detection. The watcher exits once it observes death
+            // (the signal it raises is inert for an already-replaced epoch).
+            let watched = Arc::clone(&provider);
+            tokio::spawn(async move {
+                loop {
+                    if !P::attach_is_alive(watched.as_ref()) {
+                        crash_signal.notify_one();
+                        return;
+                    }
+                    tokio::time::sleep(SHARED_LIVENESS_POLL_INTERVAL).await;
+                }
+            });
+            Ok(provider)
+        })
+    }
+}
+
+impl<P: SharedAttach> SharedTsgoOverlay<P> {
+    /// Build the overlay over the host and the rendezvous evidence. The
+    /// shared attach is established lazily on the first bound carrier query
+    /// (never the lifecycle path) through the overlay's [`ProviderHub`];
+    /// the observed engine version is taken from the attach gate at that
+    /// point.
+    ///
+    /// Must be called on a tokio runtime: the hub spawns its single-writer
+    /// actor at construction.
     #[must_use]
     pub fn new(host: Arc<VerterHost>, rendezvous: SharedRendezvous) -> Self {
+        let attach_demand: Arc<StdMutex<Option<SharedAttachDemand>>> =
+            Arc::new(StdMutex::new(None));
+        let hub = Arc::new(ProviderHub::new(
+            SharedAttachBackend::<P> {
+                rendezvous: rendezvous.clone(),
+                demand: Arc::clone(&attach_demand),
+                attach: std::marker::PhantomData,
+            },
+            // Logging-only notifications: the shared route's wire contract
+            // attests its managed fallback stays cold until an observed
+            // attach failure, and the editor-owned attach has no child pid
+            // to announce — the attach itself stays off the
+            // `$/verter/typeProviderStarted` channel.
+            Arc::new(TracingNotifier),
+            HubPolicy::lazy_attach(SHARED_ESTABLISH_TIMEOUT),
+        ));
         Self {
             inner: Arc::new(OverlayInner {
                 host,
                 rendezvous,
                 core: LazyOverlayCore::new(),
+                hub,
+                attach_demand,
                 source_shadow_safety: parking_lot::Mutex::default(),
-                admission: CarrierAdmissionCache::new(),
                 sweep_generation: parking_lot::Mutex::default(),
-                admitted_units: parking_lot::Mutex::default(),
+                reported_refusals: parking_lot::Mutex::default(),
+            }),
+        }
+    }
+
+    /// Build the overlay over a TEST attach hub: every production gate
+    /// (establishment door, hub-issued admission, epoch fencing) runs against
+    /// the given [`ProviderHub`], whose establisher hands back the test's
+    /// [`SharedAttach`] double. The rendezvous is a stub the tests never
+    /// attach through (they establish the hub directly).
+    #[cfg(test)]
+    pub(crate) fn over_test_hub(host: Arc<VerterHost>, hub: Arc<ProviderHub<P>>) -> Self {
+        Self {
+            inner: Arc::new(OverlayInner {
+                host,
+                rendezvous: SharedRendezvous {
+                    control_dir: PathBuf::from("/test/no-relay"),
+                    session_key: "test-session".to_string(),
+                    workspace_root: "/test".to_string(),
+                },
+                core: LazyOverlayCore::new(),
+                hub,
+                attach_demand: Arc::new(StdMutex::new(None)),
+                source_shadow_safety: parking_lot::Mutex::default(),
+                sweep_generation: parking_lot::Mutex::default(),
                 reported_refusals: parking_lot::Mutex::default(),
             }),
         }
@@ -385,19 +586,25 @@ impl SharedTsgoOverlay {
     }
 
     /// Retract a carrier overlay off the managed `close_file` critical path — drop its
-    /// recorded content and, if the SHARED transport is already established, issue the
+    /// recorded content and, if a serving incarnation exists, issue the
     /// retract bounded + fail-closed (a slow/dead relay cannot hang or delay the managed
-    /// close; the transport is torn down / evicted anyway). The retract never triggers —
-    /// or head-of-line-blocks on — an establishment (the non-establishing `current`
-    /// accessor), and routes through the transport's ordered per-carrier gate so it is
+    /// close; a dead attach is retired by its hub anyway). The retract never triggers —
+    /// or head-of-line-blocks on — an establishment (the non-establishing hub
+    /// `serving()` read), and routes through the per-carrier gate so it is
     /// correctly ordered w.r.t. any in-flight injection.
     async fn feed_close(&self, provider_path: &str) {
         if carrier_source_of(provider_path).is_none() {
             return;
         }
+        let hub = Arc::clone(&self.inner.hub);
         self.inner
             .core
-            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT)
+            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT, move || {
+                hub.serving().map(|(provider, _)| {
+                    Arc::new(HubAdmittedTransport::new(provider, Arc::clone(&hub)))
+                        as Arc<HubAdmittedTransport<P>>
+                })
+            })
             .await;
     }
 
@@ -408,15 +615,15 @@ impl SharedTsgoOverlay {
     ///
     /// The carrier binding is passed in PRE-RESOLVED (the composite gate resolved it
     /// ONCE via the shared [`project_binding`] helper): SHARED reuses the SAME binding
-    /// (for its per-query re-decision + transport), the SAME generation (for the
-    /// transport re-arm), and the SAME already-minted `BoundProject`
+    /// (for its per-query re-decision + the attach), the SAME generation (for the
+    /// re-arm discriminant), and the SAME already-minted `BoundProject`
     /// (`carrier.bound().project()` — the version-independent owning tsconfig) for the
     /// `--api` overlay target. There is NO second resolution and NO witness re-mint.
     async fn engage_provider(
         &self,
         provider_path: &str,
-        carrier: &BoundCarrier,
-    ) -> Result<EngagedSharedProvider, SharedEngageFailure> {
+        carrier: &project_binding::BoundCarrier,
+    ) -> Result<EngagedSharedProvider<P>, SharedEngageFailure> {
         let source = carrier_source_of(provider_path).unwrap_or_else(|| provider_path.to_string());
         let config = carrier.binding().tsconfig_uri().to_string();
         let generation = carrier.generation();
@@ -428,21 +635,24 @@ impl SharedTsgoOverlay {
             transport_epoch,
             sync_state,
         };
-        // FIRST, before the transport is established or a single overlay is written:
+        // FIRST, before the attach is established or a single overlay is written:
         // prove that EVERY generated unit this serve would write is admitted to the
-        // carrier's owning configured project. Owning the carrier source is not that
+        // carrier's owning configured project — the resolver-side gate, over the exact
+        // snapshot the binding was resolved at. Owning the carrier source is not that
         // proof — `src/**/*.vue` owns `Foo.vue` and admits no `Foo.vue.tsx` — and an
         // unadmitted unit written into the editor's engine lands in an inferred project.
         // A missing proof selects the managed route here, with its reason, rather than
-        // after a SHARED attempt that already wrote.
+        // after a SHARED attempt that already wrote. (The HUB-issued admission that
+        // authorizes each physical write is minted per unit by the write gate below,
+        // against the serving epoch the attach lands under.)
         let sweep_generation = self.sweep_generation();
-        let generated_units = self.queried_generated_unit_admission(
-            &self.inner.core,
-            carrier,
-            &source,
-            sweep_generation,
-        );
-        let admission_refusal = match &generated_units {
+        let generated_units = Self::recorded_units_of(&self.inner.core, &source);
+        let resolver_admission = if generated_units.is_empty() {
+            None
+        } else {
+            Some(carrier.admit_generated_units(&generated_units))
+        };
+        let admission_refusal = match &resolver_admission {
             None => Some(SharedEngageFailureKind::GeneratedUnitAdmissionUnproven),
             Some(GeneratedUnitAdmission::NotAdmitted(not_admitted)) => {
                 Some(SharedEngageFailureKind::GeneratedUnitsNotAdmitted {
@@ -458,9 +668,8 @@ impl SharedTsgoOverlay {
         };
         if let Some(kind) = admission_refusal {
             // Units a PREVIOUS admission wrote (the membership narrowed since) leave the
-            // editor's engine now. Non-establishing: no transport, nothing to withdraw.
-            self.withdraw_unadmitted(&self.inner.core, &source, sweep_generation)
-                .await;
+            // editor's engine now. Non-establishing: no attach, nothing to withdraw.
+            self.withdraw_unadmitted(&source, sweep_generation).await;
             if self.first_refusal_report(&source, sweep_generation) {
                 tracing::info!(
                     source = %source,
@@ -473,24 +682,22 @@ impl SharedTsgoOverlay {
             }
             return Err(refusal(kind, None, None));
         }
-        let generated_units_fact = generated_units
-            .as_ref()
-            .map_or(GeneratedUnitAdmissionFact::Unproven, |admission| {
+        let generated_units_fact = match &resolver_admission {
+            Some(admission @ GeneratedUnitAdmission::Admitted(_)) => {
                 GeneratedUnitAdmissionFact::from_admission(admission)
-            });
+            }
+            // NotAdmitted was refused above; an unproven write set attaches
+            // with the fail-closed fact.
+            _ => GeneratedUnitAdmissionFact::Unproven,
+        };
 
-        // Lazily establish (once) the SHARED relay-attach transport for the
-        // ALREADY-resolved binding — at QUERY time, off the managed lifecycle critical
-        // path (SHARED is never fabricated; the binding is the gate's resolved one). The
-        // identity-bound object is retained so injection is attributed to THIS transport
-        // instance's epoch (never a re-read of the overlay's current active epoch).
+        // Lazily establish (once) the SHARED attach through the overlay's hub —
+        // at QUERY time, off the managed lifecycle critical path (SHARED is never
+        // fabricated; the binding is the gate's resolved one). The hub mints the
+        // serving epoch every witness and admitted request below binds to.
         let engage_started = std::time::Instant::now();
         let established = self
-            .ensure_transport(
-                carrier.binding().clone(),
-                generated_units_fact,
-                carrier.generation(),
-            )
+            .ensure_serving(carrier, generated_units_fact)
             .await
             .ok_or_else(|| refusal(SharedEngageFailureKind::TransportUnavailable, None, None))?;
         let transport_ready = engage_started.elapsed();
@@ -499,7 +706,7 @@ impl SharedTsgoOverlay {
         // snapshot/config generation, reusing the SAME binding and the admission fact
         // proven above — BEFORE any overlay is written, so a not-SHARED decision admits
         // managed having written nothing.
-        let decision = established.transport.redecide_for_binding(
+        let decision = established.transport.provider().redecide_for_binding(
             carrier.binding(),
             generated_units_fact,
             carrier.generation(),
@@ -509,7 +716,7 @@ impl SharedTsgoOverlay {
                 SharedEngageFailureKind::LiveDecisionNotShared {
                     reason: format!("{:?}", decision.decision().owned_reason()),
                 },
-                Some(established.identity.epoch),
+                Some(established.epoch),
                 None,
             ));
         }
@@ -525,7 +732,7 @@ impl SharedTsgoOverlay {
             provider_path,
             transport_ms = transport_ready.as_millis() as u64,
             total_ms = engage_started.elapsed().as_millis() as u64,
-            "shared engage: transport ensured and editor-demand overlays injected"
+            "shared engage: attach ensured and editor-demand overlays injected"
         );
 
         // Admit managed when the queried carrier's current content is not
@@ -535,21 +742,22 @@ impl SharedTsgoOverlay {
         let sync_state = self
             .inner
             .core
-            .sync_state_for_epoch(provider_path, established.identity.epoch);
+            .sync_state_for_epoch(provider_path, established.epoch);
         if !sync_state.is_synced() {
             return Err(refusal(
                 SharedEngageFailureKind::QueriedCarrierNotSynced,
-                Some(established.identity.epoch),
+                Some(established.epoch),
                 Some(sync_state),
             ));
         }
 
         Ok(EngagedSharedProvider {
-            provider: established.transport,
+            provider: Arc::clone(established.transport.provider()),
+            hub: Arc::clone(&self.inner.hub),
             source,
             config,
             generation,
-            transport_epoch: established.identity.epoch,
+            transport_epoch: established.epoch,
             sync_state,
         })
     }
@@ -581,107 +789,100 @@ impl SharedTsgoOverlay {
             .collect()
     }
 
-    /// Decide the QUERIED carrier's generated-unit admission over its recorded write set,
-    /// against the snapshot its binding was resolved at, and remember a positive proof for
-    /// this sweep generation so the sweep writes the family under the SAME proof. `None`
-    /// when nothing is recorded for the carrier: no write set, nothing proven.
-    fn queried_generated_unit_admission<T: OverlayTransport>(
-        &self,
-        core: &LazyOverlayCore<T>,
-        carrier: &BoundCarrier,
-        source: &str,
-        sweep_generation: u64,
-    ) -> Option<GeneratedUnitAdmission> {
-        let units = Self::recorded_units_of(core, source);
-        if units.is_empty() {
-            return None;
-        }
-        let admission = carrier.admit_generated_units(&units);
-        let proof = match &admission {
-            GeneratedUnitAdmission::Admitted(admitted) => Some(Arc::new(admitted.clone())),
-            GeneratedUnitAdmission::NotAdmitted(_) => None,
-        };
-        self.remember_admitted_units(source, sweep_generation, proof);
-        Some(admission)
-    }
-
-    fn remember_admitted_units(
-        &self,
-        source: &str,
-        sweep_generation: u64,
-        proof: Option<Arc<AdmittedGeneratedUnits>>,
-    ) {
-        let mut memo = self.inner.admitted_units.lock();
-        if memo.0 < sweep_generation {
-            *memo = (sweep_generation, AdmittedUnitsBySource::new());
-        }
-        // Only an answer for the generation it was computed under is kept.
-        if memo.0 == sweep_generation {
-            memo.1.insert(source.to_string(), proof);
-        }
-    }
-
-    /// The admission proof covering `unit` for the carrier `source`, deciding it on a
-    /// miss: resolve the source's OWN owning configured project (the epoch-scoped memo of
-    /// the ONE shared resolver) and ask whether that project admits the carrier's whole
-    /// recorded write set. A carrier with no bound project has no proof.
+    /// The HUB-ISSUED write gate of the sweep: a [`GeneratedUnitWritePermit`]
+    /// carrying the ProviderHub's [`AdmittedRequest`] for the `companion`'s
+    /// carrier's whole recorded write set, or `None` — the unit is skipped
+    /// and, if a prior sweep wrote it, retracted.
     ///
-    /// A remembered proof that does not cover `unit` was decided before `unit` was
-    /// recorded; it is re-decided over the grown write set rather than stretched.
-    fn admitted_units_covering<T: OverlayTransport>(
-        &self,
-        core: &LazyOverlayCore<T>,
-        source: &str,
-        unit: &CanonicalPath,
-        sweep_generation: u64,
-    ) -> Option<Arc<AdmittedGeneratedUnits>> {
-        {
-            let memo = self.inner.admitted_units.lock();
-            if memo.0 == sweep_generation {
-                match memo.1.get(source) {
-                    Some(Some(admitted)) if admitted.covers(unit) => {
-                        return Some(Arc::clone(admitted));
-                    }
-                    // Not admitted at this generation: a larger write set cannot be.
-                    Some(None) => return None,
-                    _ => {}
-                }
-            }
-        }
-        let proof = self
-            .inner
-            .admission
-            .admit(&self.inner.host, source)
-            .bound_carrier()
-            .and_then(|carrier| {
-                match carrier.admit_generated_units(&Self::recorded_units_of(core, source)) {
-                    GeneratedUnitAdmission::Admitted(admitted) => Some(Arc::new(admitted)),
-                    GeneratedUnitAdmission::NotAdmitted(_) => None,
-                }
-            });
-        self.remember_admitted_units(source, sweep_generation, proof.clone());
-        proof.filter(|admitted| admitted.covers(unit))
-    }
-
-    /// The write gate of the sweep: a [`GeneratedUnitWritePermit`] for the recorded
-    /// `companion` IFF it is shadow-safe ([`Self::injection_is_shadow_safe`]) AND its
-    /// carrier's whole recorded write set is admitted to that carrier's owning configured
-    /// project. The permit can only be minted from the admission proof, so the queried
-    /// carrier, its companions, and every neighbour the sweep reaches are held to the
-    /// same rule — a recorded carrier is never written on the strength of its priority.
+    /// The gate composes THREE independent refusals, each fail-closed:
+    ///
+    /// 1. **Shadow-safety** ([`Self::injection_is_shadow_safe`]) — no real
+    ///    user file is displaced. A workspace-side fact, memoized per source
+    ///    per content generation.
+    /// 2. **Project binding** — the carrier source's owning configured
+    ///    project, bound to the serving epoch and the exact publication
+    ///    basis through [`ProviderHub::bind_project`]. A warm current
+    ///    witness is reused ([`ProviderHub::bound_project`]); a drifted or
+    ///    absent one re-resolves through the ONE shared resolver and
+    ///    re-binds. This is the ONLY binding/witness warmth — the hub owns
+    ///    it; no admission cache survives beside it.
+    /// 3. **Generated-unit admission** — the workspace membership proof that
+    ///    EVERY unit of the carrier's write set is a member of the owning
+    ///    project, consumed by the hub ([`ProviderHub::admit_request_with`])
+    ///    which validates the proof's project, publication identity, and
+    ///    exact unit set. The hub's request cache is the one warm admission
+    ///    authority; a publication, membership change, or provider
+    ///    replacement invalidates it.
+    ///
+    /// The permit can only be minted from the hub's admitted request, so the
+    /// queried carrier, its companions, and every neighbour the sweep reaches
+    /// are held to the same rule — a recorded carrier is never written on the
+    /// strength of its priority or a stale epoch's authorization.
     fn generated_unit_write_permit<T: OverlayTransport>(
         &self,
         core: &LazyOverlayCore<T>,
         companion: &str,
-        sweep_generation: u64,
     ) -> Option<GeneratedUnitWritePermit> {
         if !self.injection_is_shadow_safe(companion) {
             return None;
         }
         let source = carrier_source_of(companion)?;
-        let unit = CanonicalPath::new(companion);
-        let admitted = self.admitted_units_covering(core, &source, &unit, sweep_generation)?;
-        GeneratedUnitWritePermit::for_admitted_unit(&admitted, companion)
+        let units = Self::recorded_units_of(core, &source);
+        if units.is_empty() {
+            return None;
+        }
+        let witness = match self
+            .inner
+            .hub
+            .bound_project(&normalize_canonical_id(&source))
+        {
+            Some(witness) => witness,
+            None => self.bind_carrier_witness(&source)?,
+        };
+        let admission = self
+            .inner
+            .hub
+            .admit_request_with(&witness, &units, || {
+                // Cold path: a membership query needs the resolver's bound
+                // carrier (the snapshot basis + the owning tsconfig). A
+                // fail-closed resolution (no owner) fails the write closed —
+                // never a fabricated proof.
+                match project_binding::resolve_carrier_bound(&self.inner.host, &source).into_bound()
+                {
+                    Some(carrier) => {
+                        carrier.admit_generated_units(&Self::recorded_units_of(core, &source))
+                    }
+                    None => GeneratedUnitAdmission::unresolved_owner(&units),
+                }
+            })
+            .ok()?;
+        Some(GeneratedUnitWritePermit::admitted(admission))
+    }
+
+    /// Resolve the carrier `source`'s owning project through the ONE shared
+    /// resolver and bind it to the hub's serving incarnation — the cold path
+    /// of [`Self::generated_unit_write_permit`]'s binding gate. `None` when
+    /// the resolver fails closed (no snapshot, no project, ambiguous,
+    /// scratch, or a mint refusal): no witness, no write.
+    fn bind_carrier_witness(
+        &self,
+        source: &str,
+    ) -> Option<verter_type_runtime::provider_hub::ProjectWitness> {
+        let host = &self.inner.host;
+        let (resolution, _, published) = project_binding::resolve_carrier_with_publication(
+            host.as_ref(),
+            source,
+            Arc::from(""),
+            project_binding::OwnershipReadinessMode::PresentSnapshotAuthoritative,
+        )?;
+        match resolution {
+            CarrierOwnershipResolution::Bound(binding) => {
+                let input = project_binding::hub_binding_input(host, source, &binding, published);
+                self.inner.hub.bind_project(input).ok()
+            }
+            // Every non-bound resolution is a fail-closed no-witness state.
+            _ => None,
+        }
     }
 
     /// Inject the recorded content of the EDITOR-DEMAND carrier set into `established`.
@@ -715,7 +916,7 @@ impl SharedTsgoOverlay {
     async fn inject_editor_demand<T: OverlayTransport>(
         &self,
         core: &LazyOverlayCore<T>,
-        established: &EstablishedTransport<T>,
+        established: &ServingTransport<T>,
         provider_path: &str,
         sweep_generation: u64,
     ) {
@@ -727,29 +928,36 @@ impl SharedTsgoOverlay {
                 priority >= OverlayPriority::Normal
                     || carrier_source_of(companion) == queried_source
             },
-            |companion| self.generated_unit_write_permit(core, companion, sweep_generation),
+            |companion| self.generated_unit_write_permit(core, companion),
         )
         .await;
     }
 
-    /// Withdraw the carrier `source`'s units from an ALREADY-established transport after
-    /// its write set stopped being admitted. Never establishes: with no live transport
-    /// nothing was written, so there is nothing to withdraw. The sweep's own no-permit arm
-    /// does the work — it retracts exactly the units a previous sweep committed.
-    async fn withdraw_unadmitted<T: OverlayTransport>(
-        &self,
-        core: &LazyOverlayCore<T>,
-        source: &str,
-        sweep_generation: u64,
-    ) {
-        let Some(established) = core.current_established().await else {
+    /// Withdraw the carrier `source`'s units from a live serving incarnation after
+    /// its write set stopped being admitted. Never establishes: with no serving
+    /// incarnation nothing was written, so there is nothing to withdraw. The sweep's
+    /// own no-permit arm does the work — it retracts exactly the units a previous
+    /// sweep committed.
+    async fn withdraw_unadmitted(&self, source: &str, sweep_generation: u64) {
+        // Non-establishing: the hub's serving read never demands an attach —
+        // with no serving incarnation nothing was written, so there is
+        // nothing to withdraw.
+        let Some((provider, epoch)) = self.inner.hub.serving() else {
             return;
+        };
+        let core = &self.inner.core;
+        let established = ServingTransport {
+            transport: Arc::new(HubAdmittedTransport::new(
+                provider,
+                Arc::clone(&self.inner.hub),
+            )),
+            epoch,
         };
         core.inject_all_dirty(
             &established,
             sweep_generation,
             |companion, _| carrier_source_of(companion).as_deref() == Some(source),
-            |companion| self.generated_unit_write_permit(core, companion, sweep_generation),
+            |companion| self.generated_unit_write_permit(core, companion),
         )
         .await;
     }
@@ -771,7 +979,7 @@ impl SharedTsgoOverlay {
     async fn engage_diagnostics(
         &self,
         provider_path: &str,
-        carrier: &BoundCarrier,
+        carrier: &project_binding::BoundCarrier,
     ) -> Result<Vec<TypeDiagnostic>, SharedEngageFailure> {
         let engaged = self.engage_provider(provider_path, carrier).await?;
         let diagnostics_result = observe_epoch_bound(
@@ -785,6 +993,15 @@ impl SharedTsgoOverlay {
             },
         )
         .await
+        // Settle against the owning hub: an attach replaced mid-call never
+        // serves its answer as the fresh incarnation's.
+        .and_then(|diagnostics| match self.inner.hub.serving_epoch() {
+            Some(epoch) if epoch == engaged.transport_epoch => Ok(diagnostics),
+            active => Err(OverlaySyncState::TransportEpochMismatch {
+                expected: engaged.transport_epoch,
+                active: active.unwrap_or(engaged.transport_epoch),
+            }),
+        })
         .map_err(|sync_state| SharedEngageFailure {
             kind: SharedEngageFailureKind::QueriedCarrierNotSynced,
             source: engaged.source.clone(),
@@ -896,54 +1113,59 @@ impl SharedTsgoOverlay {
         safe
     }
 
-    /// Lazily establish (once) the SHARED relay-attach transport for the carrier's
-    /// ALREADY-resolved `binding` (resolved once by the composite gate at
-    /// `generation`), through the singleflight + bounded + re-arming [`LazyTransport`]
-    /// cell. Only a bound carrier reaches here (the gate resolved the binding before
-    /// calling [`Self::engage_diagnostics`]), so the cell is never entered — nor its
-    /// `Unavailable` slot poisoned — by a transient non-binding
-    /// ([`LazyTransport::get_or_establish_bound`]). Concurrent queries reuse the ONE
-    /// in-flight establishment; a slow/broken attach is bounded by
-    /// [`SHARED_ESTABLISH_TIMEOUT`] (then managed is admitted, never a stall); a failed
-    /// ATTACH re-arms on a fresh advertisement/editor generation OR a fresh
-    /// workspace/config generation.
+    /// Lazily establish (once) the SHARED attach for the carrier's ALREADY-resolved
+    /// binding (resolved once by the composite gate at `generation`) through the
+    /// overlay's [`ProviderHub`] — the singleflight, bounded, discriminant-re-arming,
+    /// retire-on-death authority that OWNS the serving epoch. Only a bound carrier
+    /// reaches here (the gate resolved the binding before calling
+    /// [`Self::engage_diagnostics`]), so a transient non-binding carrier never poisons
+    /// the re-arm gate. Concurrent queries reuse the ONE in-flight establishment; a
+    /// slow/broken attach is bounded by [`SHARED_ESTABLISH_TIMEOUT`] (then managed is
+    /// admitted, never a stall); a failed ATTACH re-arms on a fresh advertisement/editor
+    /// generation OR a fresh workspace/config generation — never a retry storm within
+    /// one discriminant; a dead attach retires the epoch fail-closed.
     ///
-    /// The re-arm discriminant is BOTH the shim advertisement nonce (a cheap FS read
-    /// — a reconnect republishes a fresh advertisement with a new nonce) AND the
-    /// workspace/config generation the binding resolved at (a fresh published snapshot
-    /// advances it): a prior failed establishment re-attempts on the new nonce OR the
-    /// new generation, while within one (nonce, generation) a failure does not retry
-    /// per query (no handshake retry-storm).
-    async fn ensure_transport(
+    /// On success the core OBSERVES the hub-minted serving epoch (a re-attachment
+    /// resets the injection markers so the open set replays into the fresh
+    /// incarnation), and the identity-bound [`ServingTransport`] is returned so
+    /// injection is attributed to the EXACT serving epoch, not a re-read of the core's
+    /// active epoch.
+    async fn ensure_serving(
         &self,
-        binding: ProjectBinding,
+        carrier: &project_binding::BoundCarrier,
         generated_units: GeneratedUnitAdmissionFact,
-        generation: u64,
-    ) -> Option<EstablishedTransport<TsgoSharedProvider>> {
-        // The binding is pre-resolved (bound) — pass it straight to the cell. The core
-        // supplies the live-death eviction predicate; a no-binding carrier never
-        // reaches here, so the cell is never poisoned by a transient non-binding. The
-        // identity-bound object is returned so the injection path attributes work to the
-        // exact transport instance's epoch.
-        self.inner
-            .core
-            .ensure(
-                Some((binding, generation)),
-                |generation| self.probe_establishment_discriminant(generation),
-                |binding, generation| {
-                    self.establish_transport(binding, generated_units, generation)
-                },
-                SHARED_ESTABLISH_TIMEOUT,
-            )
+    ) -> Option<ServingTransport<HubAdmittedTransport<P>>> {
+        let generation = carrier.generation();
+        *self.inner.attach_demand.lock().unwrap() = Some(SharedAttachDemand {
+            binding: carrier.binding().clone(),
+            generated_units,
+            generation,
+        });
+        let hub = Arc::clone(&self.inner.hub);
+        let epoch = hub
+            .establish_rearming(|| self.probe_establishment_discriminant(generation))
             .await
+            .ok()?;
+        let (provider, serving_epoch) = hub.serving()?;
+        // Observe the serving epoch BEFORE handing the incarnation to the
+        // injection path — a re-attachment (new epoch) resets the markers so
+        // the open set replays into it.
+        self.inner.core.observe_serving_epoch(serving_epoch);
+        if epoch != serving_epoch {
+            return None;
+        }
+        Some(ServingTransport {
+            transport: Arc::new(HubAdmittedTransport::new(provider, hub)),
+            epoch: serving_epoch,
+        })
     }
 
     /// The re-arm discriminant for a failed SHARED establishment at config
     /// `generation`: BOTH the shim advertisement nonce (a cheap FS read) AND the
     /// workspace/config generation, composed by [`compose_establishment_discriminant`].
     /// `None` when no advertisement is observable (a flapping / absent shim never
-    /// storms establishment — [`LazyTransport::get_or_establish`]'s missing-generation
-    /// rule then holds the fail-closed state).
+    /// storms establishment — the hub's re-arm door holds the fail-closed state
+    /// while no discriminant is observable).
     fn probe_establishment_discriminant(&self, generation: u64) -> Option<String> {
         let nonce = Advertisement::find_for_session_key(
             &self.inner.rendezvous.control_dir,
@@ -952,43 +1174,6 @@ impl SharedTsgoOverlay {
         .ok()
         .map(|(_, adv)| adv.nonce)?;
         Some(compose_establishment_discriminant(&nonce, generation))
-    }
-
-    /// Run the SHARED attach establishment ONCE for the PRE-RESOLVED carrier
-    /// `binding` (resolved at config `generation` BEFORE the cell was entered) — the
-    /// body the [`LazyTransport`] cell drives under its singleflight + bounded
-    /// timeout. The bootstrap `ts_version` the binding was resolved with is used ONLY
-    /// to gate establishment (the witness + `--api` op key on the transport's
-    /// gate-observed version downstream). Returns `None` for a failed / not-SHARED
-    /// establishment (managed serves); a `None` here is an actual attach
-    /// attempt outcome, so recording `Unavailable` is correct — the no-binding case
-    /// is gated out before the cell and never reaches here.
-    async fn establish_transport(
-        &self,
-        binding: ProjectBinding,
-        generated_units: GeneratedUnitAdmissionFact,
-        generation: u64,
-    ) -> Option<Arc<TsgoSharedProvider>> {
-        let tsconfig_path = binding.tsconfig_uri().to_string();
-        let params = EstablishSharedParams {
-            control_dir: &self.inner.rendezvous.control_dir,
-            session_key: &self.inner.rendezvous.session_key,
-            workspace_root: &self.inner.rendezvous.workspace_root,
-            tsconfig_path: &tsconfig_path,
-            resolution: CarrierOwnershipResolution::Bound(binding),
-            generated_units,
-            config_generation: generation,
-            client_label: SHARED_CLIENT_LABEL,
-        };
-        match TsgoSharedProvider::establish_shared(params).await {
-            Ok(transport) => Some(Arc::new(transport)),
-            Err(e) => {
-                tracing::info!(
-                    "SHARED editor route not established ({e}); managed fallback is eligible"
-                );
-                None
-            }
-        }
     }
 }
 
@@ -1152,10 +1337,10 @@ pub struct TsgoCompositeProvider {
     /// Live published-snapshot + per-project R21 env-dims authority.
     host: Arc<VerterHost>,
     /// Exact editor-session route, present only with rendezvous evidence.
+    /// Its [`ProviderHub`] is the ONE hub authority of the shared route: a
+    /// bound carrier's feature engagement and every generated-unit write
+    /// carry its witnesses.
     shared: Option<SharedTsgoOverlay>,
-    /// Generation-scoped carrier feature admission cache. It memoizes the one shared
-    /// resolver per `(source, generation)`; it is not a second binding engine.
-    admission: CarrierAdmissionCache,
     /// Compiler-lifted file-check directive for each generated companion.
     /// The configured-project diagnostics API is not available for every
     /// generated JSX root, so the fallback must retain the authored override
@@ -1203,7 +1388,6 @@ impl TsgoCompositeProvider {
             managed,
             host,
             shared,
-            admission: CarrierAdmissionCache::new(),
             file_check_directives: dashmap::DashMap::new(),
         }
     }
@@ -1255,15 +1439,15 @@ impl TsgoCompositeProvider {
         &self,
         feature: ProviderFeature,
         path: &str,
-    ) -> Option<FeatureProviderSelection> {
+    ) -> Option<FeatureProviderSelection<TsgoSharedProvider>> {
         // NON-carrier path (plain `.ts`/`.tsx`): not gated. In a carrier-only LSP
         // client this is not normally queried; an explicit request uses managed.
         let Some(source) = carrier_source_of(path) else {
             return Some(FeatureProviderSelection::Managed(Arc::clone(&self.managed)));
         };
 
-        let admission = self.admission.admit(&self.host, &source);
-        let Some(carrier) = admission.bound_carrier() else {
+        let carrier = project_binding::resolve_carrier_bound(&self.host, &source).into_bound();
+        let Some(carrier) = carrier else {
             tracing::trace!(
                 feature = feature.name(),
                 source = %source,
@@ -1276,7 +1460,7 @@ impl TsgoCompositeProvider {
         if let Some(shared) = &self.shared {
             match tokio::time::timeout(
                 SHARED_OVERLAY_TIMEOUT,
-                shared.engage_provider(path, carrier),
+                shared.engage_provider(path, &carrier),
             )
             .await
             {
@@ -1291,9 +1475,8 @@ impl TsgoCompositeProvider {
                         source = %source,
                         "editor-owned tsgo served carrier feature"
                     );
-                    let provider: Arc<dyn TypeProvider> = engaged.provider;
                     return Some(FeatureProviderSelection::Shared {
-                        provider,
+                        hub: engaged.hub,
                         managed: Arc::clone(&self.managed),
                         core: Arc::clone(&shared.inner),
                         provider_path: path.to_string(),
@@ -2107,16 +2290,16 @@ impl TypeProvider for TsgoCompositeProvider {
     }
 }
 
-impl SharedTsgoOverlay {
-    /// Tear the SHARED transport down (best-effort), then let managed shutdown remain the
-    /// composite authority. Bounded: a slow/dead SHARED teardown must never block past
-    /// this bound; on elapse the
-    /// teardown is abandoned (the transport is dropped/evicted anyway). Uses the
-    /// non-establishing `current` accessor, so shutdown never triggers an establishment.
+impl<P: SharedAttach> SharedTsgoOverlay<P> {
+    /// Tear the SHARED attach down (best-effort) through its hub, then let
+    /// managed shutdown remain the composite authority. Bounded: a slow/dead
+    /// SHARED teardown must never block past this bound; on elapse the
+    /// teardown is abandoned (a dead attach is retired by its hub anyway).
+    /// The hub's shutdown is non-establishing, so this never triggers an
+    /// attach.
     async fn shutdown(&self) {
-        if let Some(transport) = self.inner.core.current().await {
-            let _ = tokio::time::timeout(SHARED_CLOSE_TIMEOUT, transport.teardown()).await;
-        }
+        use verter_type_runtime::traits::TypeProvider as _;
+        let _ = tokio::time::timeout(SHARED_CLOSE_TIMEOUT, self.inner.hub.shutdown()).await;
     }
 }
 

@@ -16,6 +16,7 @@
 //! actionable install message from [`resolve_tsserver`] and NEVER borrows another
 //! project's engine.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,9 +31,17 @@ use verter_type_runtime::discovery::{
     detect_ts_version, resolve_tsserver, tsserver_native_family_major, tsserver_serving_advisory,
     tsserver_serving_tier, ResolvedTsserver, TsserverSource,
 };
+use verter_type_runtime::provider_hub::{
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation,
+    OverlayPriority, ProjectWitness,
+};
+use verter_workspace::{decide_generated_unit_admission_with_basis, CanonicalPath};
 
 use crate::external_ts::TsserverEngineBackend;
-use crate::tsgo::project_binding::{resolve_carrier, OwnershipReadinessMode};
+use crate::tsgo::project_binding::{
+    hub_binding_input, resolve_carrier_with_publication, OwnershipReadinessMode,
+    ResolvedPublication,
+};
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{
     CarrierActivation, CarrierScriptKind, ProviderFuture, TypeProvider,
@@ -67,20 +76,20 @@ struct ProjectEngineSpec {
     default_lib_count: usize,
 }
 
-/// A cached per-project engine resolution, fenced on the published-snapshot
-/// generation it was taken at.
+/// A cached per-project engine resolution, fenced on the exact publication and
+/// workspace generations it was taken at.
 ///
 /// Resolution walks the filesystem (ancestor `node_modules` probes, a
 /// `canonicalize`, a `read_dir` of the install's `lib/`) and, on a total miss,
 /// shells out to `npm root -g`. Doing that on every hover would be a per-request
 /// filesystem storm, so both the success and the refusal are cached. The
-/// generation fence releases the cache whenever the workspace project graph is
+/// basis fence releases the cache whenever the workspace project graph is
 /// republished (a tsconfig edit, a config-file change, a workspace-folder
 /// change), so a project-graph change re-resolves; a bare `node_modules`
 /// mutation that publishes no new snapshot still needs a server reload.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CachedEngineSpec {
-    generation: u64,
+    basis: ResolvedPublication,
     outcome: Result<ProjectEngineSpec, String>,
 }
 
@@ -90,6 +99,91 @@ struct CachedEngineSpec {
 struct RegisteredRoute {
     source: String,
     project: String,
+}
+
+/// The hub witness stays with the query until its answer is settled.
+struct RequestRoute {
+    hub: Arc<ProviderHub<dyn TypeProvider>>,
+    witness: ProjectWitness,
+    admission: Option<AdmittedRequest>,
+    path: String,
+}
+
+/// Re-issues one query, or one generated-unit admission, may take when its
+/// basis drifts under it.
+const BASIS_DRIFT_REISSUES: usize = 2;
+
+/// Run one read-only query through its request route, settling it only under
+/// a CURRENT admission.
+///
+/// The bound basis includes the workspace content generation, so an unrelated
+/// document's edit landing while the engine answers expires the route: that
+/// answer is discarded (never delivered on a drifted basis), and the query is
+/// re-issued under a fresh binding and admission instead of surfacing a
+/// transient "semantics unavailable" the editor would show as an empty
+/// result. Bounded: a basis that keeps drifting returns the last refusal, and
+/// a re-admission that fails (ownership withdrawn, membership excluded)
+/// refuses before the engine is reached again.
+macro_rules! routed_query {
+    ($router:expr, $path:expr, |$route:ident| $query:expr) => {{
+        let mut reissues = BASIS_DRIFT_REISSUES;
+        loop {
+            let $route = $router.request_route($path, &mut reissues).await?;
+            let settled = $route.run($query).await;
+            if settled.is_err() && reissues > 0 && $route.basis_drifted() {
+                reissues -= 1;
+                continue;
+            }
+            break settled;
+        }
+    }};
+}
+
+type AdmittedCarrierBatch = (
+    Arc<ProviderHub<dyn TypeProvider>>,
+    Vec<(AdmittedRequest, CarrierActivation)>,
+);
+
+impl RequestRoute {
+    fn check(&self) -> Result<(), TypeProviderError> {
+        self.hub.check_project(&self.witness).map_err(|reason| {
+            project_refusal(&self.path, &format!("request binding expired: {reason:?}"))
+        })?;
+        if let Some(admission) = &self.admission {
+            self.hub.check_admission(admission).map_err(|reason| {
+                project_refusal(
+                    &self.path,
+                    &format!("generated admission expired: {reason:?}"),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether this route's binding or admission expired on its BASIS (the
+    /// publication or a content/project generation moved) — the refusal a
+    /// fresh admission can answer, unlike a replaced provider or epoch.
+    fn basis_drifted(&self) -> bool {
+        matches!(
+            self.hub.check_project(&self.witness),
+            Err(AdmissionRefusal::StaleBasis)
+        ) || self.admission.as_ref().is_some_and(|admission| {
+            matches!(
+                self.hub.check_admission(admission),
+                Err(AdmissionRefusal::StaleBasis)
+            )
+        })
+    }
+
+    async fn run<T>(
+        &self,
+        future: impl Future<Output = Result<T, TypeProviderError>>,
+    ) -> Result<T, TypeProviderError> {
+        self.check()?;
+        let result = future.await;
+        self.check()?;
+        result
+    }
 }
 
 /// A project-bound pool of hub-managed tsserver engines.
@@ -110,6 +204,19 @@ pub struct ProjectTsserverProvider {
     engine_specs: DashMap<String, CachedEngineSpec>,
     providers: DashMap<ProjectEngineKey, Arc<ProviderHub<dyn TypeProvider>>>,
     routes: DashMap<String, RegisteredRoute>,
+    /// The recovery re-arm handed to every hub this router creates: a
+    /// replacement install drops the old epoch's admitted generated state, and
+    /// this hook re-publishes it through fresh admission. Installed after
+    /// construction (the hook needs this router behind its `Arc`), before the
+    /// first hub can exist — hubs are created lazily on first demand.
+    admitted_state_rearm:
+        parking_lot::RwLock<Option<crate::resilient_provider::AdmittedStateRearm>>,
+    /// Fired every time one of this pool's engines begins serving (each hub
+    /// created by [`Self::hub_for_binding`] notifies it on its initial start
+    /// and every crash replacement). Exposed through
+    /// [`TypeProvider::provider_restart_pulse`] so the pending provider-sync
+    /// re-drive can treat an engine (re)start as its retry signal.
+    restart_pulse: Arc<tokio::sync::Notify>,
 }
 
 impl ProjectTsserverProvider {
@@ -138,7 +245,86 @@ impl ProjectTsserverProvider {
             engine_specs: DashMap::new(),
             providers: DashMap::new(),
             routes: DashMap::new(),
+            admitted_state_rearm: parking_lot::RwLock::new(None),
+            restart_pulse: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+
+    /// Install the recovery re-arm for every hub this router creates. Called
+    /// once, immediately after the router is put behind its `Arc` and before
+    /// any hub can have been created (hubs are lazy on first demand).
+    pub fn install_admitted_state_rearm(
+        &self,
+        rearm: Arc<dyn Fn(&DroppedAdmittedState) + Send + Sync>,
+    ) {
+        *self.admitted_state_rearm.write() = Some(rearm);
+    }
+
+    /// Re-publish admitted generated state a replacement engine dropped,
+    /// through FRESH admission against the epoch that now serves. Each carrier
+    /// re-registers its metadata and, when its last explicit activation was
+    /// recorded, re-activates with that exact parsing mode — mirroring the
+    /// desired-state replay order for non-admitted carriers. A refusal (the
+    /// configuration changed, the project moved, the publication raced) skips
+    /// that carrier fail-closed: the ordinary carrier-sync path owns its
+    /// re-drive, exactly as before the crash.
+    pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
+        for carrier in &dropped.carriers {
+            let rearm = async {
+                let (hub, admitted) = self
+                    .admit_registered_unit(
+                        &carrier.source_path,
+                        &carrier.companion_path,
+                        &carrier.project_file_name,
+                    )
+                    .await?;
+                hub.apply_overlay(
+                    &admitted,
+                    OverlayMutation::RegisterCarrierMetadata {
+                        source_path: carrier.source_path.clone(),
+                        companion_path: carrier.companion_path.clone(),
+                        content: carrier.content.clone(),
+                        project_file_name: carrier.project_file_name.clone(),
+                    },
+                )
+                .await
+                .map_err(|reason| {
+                    TypeProviderError::new(format!(
+                        "recovery re-arm registration refused: {reason:?}"
+                    ))
+                })?;
+                if let Some(script_kind) = carrier.script_kind {
+                    hub.apply_overlay(
+                        &admitted,
+                        OverlayMutation::ActivateCarrier {
+                            source_path: carrier.source_path.clone(),
+                            companion_path: carrier.companion_path.clone(),
+                            project_file_name: carrier.project_file_name.clone(),
+                            script_kind,
+                        },
+                    )
+                    .await
+                    .map_err(|reason| {
+                        TypeProviderError::new(format!(
+                            "recovery re-arm activation refused: {reason:?}"
+                        ))
+                    })?;
+                }
+                self.register_route(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    &carrier.project_file_name,
+                );
+                Ok::<(), TypeProviderError>(())
+            };
+            if let Err(error) = rearm.await {
+                tracing::warn!(
+                    companion = %carrier.companion_path,
+                    "tsserver recovery re-arm skipped (fail-closed; the ordinary \
+                     carrier sync re-drives it): {error}"
+                );
+            }
+        }
     }
 
     fn normalized(path: &str) -> String {
@@ -161,15 +347,26 @@ impl ProjectTsserverProvider {
     }
 
     /// Resolve one provider path to its owning configured project's binding and
-    /// the published-snapshot generation the decision was taken at.
+    /// exact publication basis.
     ///
     /// Every non-`Bound` state is a DISTINCT fail-closed refusal — never an
     /// inferred project and never another project's engine.
-    fn binding_for_path(&self, path: &str) -> Result<(ProjectBinding, u64), TypeProviderError> {
+    fn binding_for_path_with_publication(
+        &self,
+        path: &str,
+    ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
         let (source, registered_project) = self.source_for_path(path);
-        let Some((resolution, generation)) = resolve_carrier(
+        self.binding_for_source_with_expected(&source, registered_project.as_deref())
+    }
+
+    fn binding_for_source_with_expected(
+        &self,
+        source: &str,
+        expected_project: Option<&str>,
+    ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
+        let Some((resolution, _, resolved)) = resolve_carrier_with_publication(
             self.host.as_ref(),
-            &source,
+            source,
             Arc::from(""),
             // A PRESENT published snapshot is authoritative — the same gate the
             // OWNED tsgo carrier-diagnostics path uses. The bootstrap-absent case
@@ -178,7 +375,7 @@ impl ProjectTsserverProvider {
             OwnershipReadinessMode::PresentSnapshotAuthoritative,
         ) else {
             return Err(project_refusal(
-                &source,
+                source,
                 "the configured-project snapshot is not published yet",
             ));
         };
@@ -186,40 +383,46 @@ impl ProjectTsserverProvider {
             CarrierOwnershipResolution::Bound(binding) => binding,
             CarrierOwnershipResolution::NotReady => {
                 return Err(project_refusal(
-                    &source,
+                    source,
                     "configured-project ownership is not ready yet",
                 ));
             }
             CarrierOwnershipResolution::NoProject => {
                 return Err(project_refusal(
-                    &source,
+                    source,
                     "no owning tsconfig.json or jsconfig.json was resolved",
                 ));
             }
             CarrierOwnershipResolution::Ambiguous { cause, .. } => {
                 return Err(project_refusal(
-                    &source,
+                    source,
                     &format!("configured-project ownership is ambiguous: {cause:?}"),
                 ));
             }
         };
-        if let Some(expected) = registered_project {
+        if let Some(expected) = expected_project {
             if Self::normalized(binding.tsconfig_uri()) != expected {
                 return Err(project_refusal(
-                    &source,
+                    source,
                     "the live ProjectBinding no longer matches the registered owning project",
                 ));
             }
         }
-        Ok((binding, generation))
+        if ResolvedPublication::current(&self.host).as_ref() != Some(&resolved) {
+            return Err(project_refusal(
+                source,
+                "project binding raced a workspace change",
+            ));
+        }
+        Ok((binding, resolved))
     }
 
     /// Mint the operation's [`BoundProject`] witness and resolve the owning
-    /// project's engine, reusing the generation-fenced cached resolution.
+    /// project's engine, reusing the publication-fenced cached resolution.
     fn engine_for_binding(
         &self,
         binding: &ProjectBinding,
-        generation: u64,
+        basis: &ResolvedPublication,
     ) -> Result<(BoundProject, ProjectEngineSpec), TypeProviderError> {
         // The witness is minted on EVERY operation (never cached): the
         // project-bound contract requires a live `BoundProject` for each
@@ -227,7 +430,7 @@ impl ProjectTsserverProvider {
         let bound = ensure_bound(&self.witness_backend, binding)?;
         let project = Self::normalized(binding.tsconfig_uri());
         if let Some(cached) = self.engine_specs.get(&project) {
-            if cached.generation == generation {
+            if cached.basis == *basis {
                 return cached
                     .outcome
                     .clone()
@@ -239,7 +442,7 @@ impl ProjectTsserverProvider {
         self.engine_specs.insert(
             project,
             CachedEngineSpec {
-                generation,
+                basis: basis.clone(),
                 outcome: outcome.clone(),
             },
         );
@@ -248,12 +451,12 @@ impl ProjectTsserverProvider {
             .map_err(TypeProviderError::new)
     }
 
-    async fn provider_for_binding(
+    async fn hub_for_binding(
         &self,
         binding: &ProjectBinding,
-        generation: u64,
-    ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
-        let (_bound, spec) = self.engine_for_binding(binding, generation)?;
+        basis: &ResolvedPublication,
+    ) -> Result<Arc<ProviderHub<dyn TypeProvider>>, TypeProviderError> {
+        let (_bound, spec) = self.engine_for_binding(binding, basis)?;
         // One hub per engine identity: concurrent cold demands for the same
         // project join ONE establishment, a failed establishment is retried by
         // the next demand, and a crashed engine is recovered by its hub.
@@ -270,6 +473,8 @@ impl ProjectTsserverProvider {
                     ),
                     Arc::clone(&self.client),
                     3,
+                    self.admitted_state_rearm.read().clone(),
+                    Arc::clone(&self.restart_pulse),
                 ))
             })
             .clone();
@@ -287,15 +492,230 @@ impl ProjectTsserverProvider {
                 )))
             }
         }
-        Ok(hub as Arc<dyn TypeProvider>)
+        Ok(hub)
+    }
+
+    async fn provider_for_binding(
+        &self,
+        binding: &ProjectBinding,
+        basis: &ResolvedPublication,
+    ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
+        Ok(self.hub_for_binding(binding, basis).await? as Arc<dyn TypeProvider>)
+    }
+
+    /// Proof for the complete generated write set, decided against the SAME
+    /// publication that resolved the source binding. A republish or provider
+    /// replacement refuses before the actor can forward a write.
+    async fn admit_generated_write(
+        &self,
+        source: &str,
+        binding: &ProjectBinding,
+        resolved: ResolvedPublication,
+        units: &[CanonicalPath],
+    ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
+        let hub = self.hub_for_binding(binding, &resolved).await?;
+        let input = hub_binding_input(&self.host, source, binding, resolved.clone());
+        let witness = hub.bind_project(input).map_err(|reason| {
+            project_refusal(source, &format!("hub project binding refused: {reason:?}"))
+        })?;
+        let admission = hub
+            .admit_request_with(&witness, units, || {
+                decide_generated_unit_admission_with_basis(
+                    resolved.published.snapshot.as_ref(),
+                    &CanonicalPath::new(binding.tsconfig_uri()),
+                    units,
+                    crate::external_ts::carrier_membership_basis,
+                )
+            })
+            .map_err(|reason| {
+                project_refusal(
+                    source,
+                    &format!("hub generated-unit admission refused: {reason:?}"),
+                )
+            })?;
+        Ok((hub, admission))
+    }
+
+    /// Admit ONE generated unit against the binding `resolve` yields,
+    /// re-admitting when the basis moved DURING admission.
+    ///
+    /// The publication read, the hub binding and the membership proof are
+    /// separate steps; an unrelated document's edit landing between them
+    /// refuses the admission on a basis that is already history. Nothing has
+    /// reached the engine at that point, so the admission is simply re-run
+    /// against the live basis — bounded, and any refusal on an unmoved basis
+    /// (or once the budget is spent) is returned as is.
+    async fn admit_current_unit(
+        &self,
+        source: &str,
+        unit: &str,
+        resolve: impl Fn() -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError>,
+    ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
+        let mut reissues = BASIS_DRIFT_REISSUES;
+        loop {
+            let before = ResolvedPublication::current(&self.host);
+            let admitted = match resolve() {
+                Ok((binding, published)) => {
+                    self.admit_generated_write(
+                        source,
+                        &binding,
+                        published,
+                        &[CanonicalPath::new(unit)],
+                    )
+                    .await
+                }
+                Err(refusal) => Err(refusal),
+            };
+            match admitted {
+                Err(_) if reissues > 0 && ResolvedPublication::current(&self.host) != before => {
+                    reissues -= 1;
+                }
+                settled => return settled,
+            }
+        }
+    }
+
+    /// [`Self::admit_current_unit`] for a carrier companion registered under
+    /// its owning project.
+    async fn admit_registered_unit(
+        &self,
+        source: &str,
+        companion: &str,
+        project: &str,
+    ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
+        self.admit_current_unit(source, companion, || {
+            self.binding_for_registered_with_publication(source, companion, project)
+        })
+        .await
     }
 
     async fn provider_for_path(
         &self,
         path: &str,
     ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
-        let (binding, generation) = self.binding_for_path(path)?;
-        self.provider_for_binding(&binding, generation).await
+        let (binding, resolved) = self.binding_for_path_with_publication(path)?;
+        let provider = self.provider_for_binding(&binding, &resolved).await?;
+        if ResolvedPublication::current(&self.host).as_ref() != Some(&resolved) {
+            return Err(project_refusal(
+                path,
+                "provider selection raced a workspace change",
+            ));
+        }
+        Ok(provider)
+    }
+
+    /// Route one query, re-routing (within the query's shared re-issue
+    /// budget) when the basis moved WHILE the route was being bound: the
+    /// publication read and the hub binding are separate steps, and an edit
+    /// landing between them refuses the binding on a basis that is already
+    /// history. Any refusal on an unmoved basis is returned as is.
+    async fn request_route(
+        &self,
+        path: &str,
+        reissues: &mut usize,
+    ) -> Result<RequestRoute, TypeProviderError> {
+        loop {
+            let before = ResolvedPublication::current(&self.host);
+            match self.provider_for_request_path(path).await {
+                Err(_) if *reissues > 0 && ResolvedPublication::current(&self.host) != before => {
+                    *reissues -= 1;
+                }
+                routed => return routed,
+            }
+        }
+    }
+
+    async fn provider_for_request_path(
+        &self,
+        path: &str,
+    ) -> Result<RequestRoute, TypeProviderError> {
+        if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
+            let (source, _) = self.source_for_path(path);
+            let (binding, published) = self.binding_for_path_with_publication(path)?;
+            let hub = self.hub_for_binding(&binding, &published).await?;
+            let witness = hub
+                .bind_project(hub_binding_input(&self.host, &source, &binding, published))
+                .map_err(|reason| {
+                    project_refusal(path, &format!("hub binding refused: {reason:?}"))
+                })?;
+            return Ok(RequestRoute {
+                hub,
+                witness,
+                admission: None,
+                path: path.to_string(),
+            });
+        }
+        let (source, _) = self.source_for_path(path);
+        let (binding, published) = self.binding_for_path_with_publication(path)?;
+        let (hub, admission) = self
+            .admit_generated_write(&source, &binding, published, &[CanonicalPath::new(path)])
+            .await?;
+        Ok(RequestRoute {
+            hub,
+            witness: admission.project_witness().clone(),
+            admission: Some(admission),
+            path: path.to_string(),
+        })
+    }
+
+    async fn apply_file_write(
+        &self,
+        path: &str,
+        content: &str,
+        kind: OverlayFileKind,
+        priority: OverlayPriority,
+    ) -> Result<(), TypeProviderError> {
+        if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
+            let provider = self.provider_for_path(path).await?;
+            return match (kind, priority) {
+                (OverlayFileKind::Open, OverlayPriority::Foreground) => {
+                    provider.open_file(path, content).await
+                }
+                (OverlayFileKind::Load, OverlayPriority::Foreground) => {
+                    provider.load_file(path, content).await
+                }
+                (OverlayFileKind::Update, OverlayPriority::Foreground) => {
+                    provider.update_file(path, content).await
+                }
+                (OverlayFileKind::Open, OverlayPriority::Normal) => {
+                    provider.open_file_normal(path, content).await
+                }
+                (OverlayFileKind::Load, OverlayPriority::Normal) => {
+                    provider.load_file_normal(path, content).await
+                }
+                (OverlayFileKind::Update, OverlayPriority::Normal) => {
+                    provider.update_file_normal(path, content).await
+                }
+                (OverlayFileKind::Open, OverlayPriority::Background) => {
+                    provider.open_file_background(path, content).await
+                }
+                (OverlayFileKind::Load, OverlayPriority::Background) => {
+                    provider.load_file_background(path, content).await
+                }
+                (OverlayFileKind::Update, OverlayPriority::Background) => {
+                    provider.update_file_background(path, content).await
+                }
+            };
+        }
+        let (source, _) = self.source_for_path(path);
+        let (hub, admitted) = self
+            .admit_current_unit(&source, path, || {
+                self.binding_for_path_with_publication(path)
+            })
+            .await?;
+        hub.apply_overlay(
+            &admitted,
+            OverlayMutation::File {
+                path: path.to_string(),
+                content: content.to_string(),
+                kind,
+                priority,
+            },
+        )
+        .await
+        .map_err(|reason| {
+            TypeProviderError::new(format!("hub generated-unit write refused: {reason:?}"))
+        })
     }
 
     fn register_route(&self, source: &str, companion: &str, project: &str) {
@@ -307,15 +727,21 @@ impl ProjectTsserverProvider {
         self.routes.insert(Self::normalized(companion), route);
     }
 
-    /// Register a publish-path route and resolve its binding in one step.
-    fn binding_for_registered(
+    fn binding_for_registered_with_publication(
         &self,
         source: &str,
         companion: &str,
         project: &str,
-    ) -> Result<(ProjectBinding, u64), TypeProviderError> {
-        self.register_route(source, companion, project);
-        self.binding_for_path(source)
+    ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
+        let (binding, published) = self.binding_for_source_with_expected(source, None)?;
+        if Self::normalized(binding.tsconfig_uri()) != Self::normalized(project) {
+            return Err(project_refusal(
+                source,
+                "the registered project does not own the source",
+            ));
+        }
+        let _ = companion;
+        Ok((binding, published))
     }
 
     /// Every hub this router has ALLOCATED — including one whose first
@@ -580,6 +1006,10 @@ impl TypeProvider for ProjectTsserverProvider {
         "tsserver"
     }
 
+    fn provider_restart_pulse(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(Arc::clone(&self.restart_pulse))
+    }
+
     fn supports_completion_resolve(&self) -> bool {
         true
     }
@@ -588,10 +1018,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .open_file(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Open,
+                OverlayPriority::Foreground,
+            )
+            .await
         })
     }
 
@@ -599,10 +1032,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .load_file(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Load,
+                OverlayPriority::Foreground,
+            )
+            .await
         })
     }
 
@@ -610,10 +1046,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .update_file(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Update,
+                OverlayPriority::Foreground,
+            )
+            .await
         })
     }
 
@@ -631,10 +1070,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_completions(&path, offset, trigger_character.as_deref())
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_completions(
+                    &path,
+                    offset,
+                    trigger_character.as_deref()
+                ))
+            }
         })
     }
 
@@ -645,40 +1087,38 @@ impl TypeProvider for ProjectTsserverProvider {
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         Box::pin(async move {
-            self.provider_for_path(path)
-                .await?
-                .get_completion_details(path, offset, items)
-                .await
+            {
+                routed_query!(self, path, |route| route
+                    .hub
+                    .get_completion_details(path, offset, items))
+            }
         })
     }
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_hover(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_hover(&path, offset))
+            }
         })
     }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_diagnostics(&path)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_diagnostics(&path))
+            }
         })
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_definition(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_definition(&path, offset))
+            }
         })
     }
 
@@ -689,20 +1129,20 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_type_definition(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_type_definition(&path, offset))
+            }
         })
     }
 
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_references(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_references(&path, offset))
+            }
         })
     }
 
@@ -713,10 +1153,11 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_rename_locations(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_rename_locations(&path, offset))
+            }
         })
     }
 
@@ -727,10 +1168,11 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_signature_help(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_signature_help(&path, offset))
+            }
         })
     }
 
@@ -744,20 +1186,23 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_code_actions(&path, start_offset, end_offset, &diagnostics)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_code_actions(
+                    &path,
+                    start_offset,
+                    end_offset,
+                    &diagnostics
+                ))
+            }
         })
     }
 
     fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_semantic_tokens(&path)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_semantic_tokens(&path))
+            }
         })
     }
 
@@ -768,10 +1213,11 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_document_highlights(&path, offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_document_highlights(&path, offset))
+            }
         })
     }
 
@@ -783,10 +1229,13 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_inlay_hints(&path, start_offset, end_offset)
-                .await
+            {
+                routed_query!(self, &path, |route| route.hub.get_inlay_hints(
+                    &path,
+                    start_offset,
+                    end_offset
+                ))
+            }
         })
     }
 
@@ -797,10 +1246,11 @@ impl TypeProvider for ProjectTsserverProvider {
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .resolve_completion(&path, data)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .resolve_completion(&path, data.clone()))
+            }
         })
     }
 
@@ -871,17 +1321,24 @@ impl TypeProvider for ProjectTsserverProvider {
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (binding, generation) =
-                self.binding_for_registered(&source_path, &companion_path, &project_file_name)?;
-            self.provider_for_binding(&binding, generation)
-                .await?
-                .register_carrier_member(
-                    &source_path,
-                    &companion_path,
-                    &content,
-                    &project_file_name,
-                )
-                .await
+            let (hub, admitted) = self
+                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
+                .await?;
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::RegisterCarrier {
+                    source_path: source_path.clone(),
+                    companion_path: companion_path.clone(),
+                    content,
+                    project_file_name: project_file_name.clone(),
+                },
+            )
+            .await
+            .map_err(|reason| {
+                TypeProviderError::new(format!("hub carrier registration refused: {reason:?}"))
+            })?;
+            self.register_route(&source_path, &companion_path, &project_file_name);
+            Ok(())
         })
     }
 
@@ -893,12 +1350,24 @@ impl TypeProvider for ProjectTsserverProvider {
         project_file_name: &'a str,
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
-            let (binding, generation) =
-                self.binding_for_registered(source_path, companion_path, project_file_name)?;
-            self.provider_for_binding(&binding, generation)
-                .await?
-                .register_carrier_metadata(source_path, companion_path, content, project_file_name)
-                .await
+            let (hub, admitted) = self
+                .admit_registered_unit(source_path, companion_path, project_file_name)
+                .await?;
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::RegisterCarrierMetadata {
+                    source_path: source_path.to_string(),
+                    companion_path: companion_path.to_string(),
+                    content: content.to_string(),
+                    project_file_name: project_file_name.to_string(),
+                },
+            )
+            .await
+            .map_err(|reason| {
+                TypeProviderError::new(format!("hub carrier metadata refused: {reason:?}"))
+            })?;
+            self.register_route(source_path, companion_path, project_file_name);
+            Ok(())
         })
     }
 
@@ -913,17 +1382,24 @@ impl TypeProvider for ProjectTsserverProvider {
         let companion_path = companion_path.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (binding, generation) =
-                self.binding_for_registered(&source_path, &companion_path, &project_file_name)?;
-            self.provider_for_binding(&binding, generation)
-                .await?
-                .activate_carrier_member(
-                    &source_path,
-                    &companion_path,
-                    &project_file_name,
+            let (hub, admitted) = self
+                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
+                .await?;
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::ActivateCarrier {
+                    source_path: source_path.clone(),
+                    companion_path: companion_path.clone(),
+                    project_file_name: project_file_name.clone(),
                     script_kind,
-                )
-                .await
+                },
+            )
+            .await
+            .map_err(|reason| {
+                TypeProviderError::new(format!("hub carrier activation refused: {reason:?}"))
+            })?;
+            self.register_route(&source_path, &companion_path, &project_file_name);
+            Ok(())
         })
     }
 
@@ -932,27 +1408,43 @@ impl TypeProvider for ProjectTsserverProvider {
         members: &'a [CarrierActivation],
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
-            let mut batches: Vec<(Arc<dyn TypeProvider>, Vec<CarrierActivation>)> = Vec::new();
+            let mut batches: Vec<AdmittedCarrierBatch> = Vec::new();
             for member in members {
-                let (binding, generation) = self.binding_for_registered(
-                    &member.source_path,
-                    &member.companion_path,
-                    &member.project_file_name,
-                )?;
-                let provider = self.provider_for_binding(&binding, generation).await?;
+                let (hub, admitted) = self
+                    .admit_registered_unit(
+                        &member.source_path,
+                        &member.companion_path,
+                        &member.project_file_name,
+                    )
+                    .await?;
                 if let Some((_, members)) = batches
                     .iter_mut()
-                    .find(|(existing, _)| Arc::ptr_eq(existing, &provider))
+                    .find(|(existing, _)| Arc::ptr_eq(existing, &hub))
                 {
-                    members.push(member.clone());
+                    members.push((admitted, member.clone()));
                 } else {
-                    batches.push((provider, vec![member.clone()]));
+                    batches.push((hub, vec![(admitted, member.clone())]));
                 }
             }
             // Preserve each engine's input order and its single-refresh bulk
             // activation contract. Scalar editor opens keep their separate path.
-            for (provider, members) in batches {
-                provider.activate_carrier_members(&members).await?;
+            for (hub, members) in batches {
+                let routes: Vec<_> = members
+                    .iter()
+                    .map(|(_, member)| {
+                        (
+                            member.source_path.clone(),
+                            member.companion_path.clone(),
+                            member.project_file_name.clone(),
+                        )
+                    })
+                    .collect();
+                hub.apply_overlay_batch(members).await.map_err(|reason| {
+                    TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
+                })?;
+                for (source, companion, project) in routes {
+                    self.register_route(&source, &companion, &project);
+                }
             }
             Ok(())
         })
@@ -1003,10 +1495,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .open_file_background(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Open,
+                OverlayPriority::Background,
+            )
+            .await
         })
     }
 
@@ -1014,10 +1509,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .load_file_background(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Load,
+                OverlayPriority::Background,
+            )
+            .await
         })
     }
 
@@ -1025,10 +1523,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .update_file_background(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Update,
+                OverlayPriority::Background,
+            )
+            .await
         })
     }
 
@@ -1045,10 +1546,11 @@ impl TypeProvider for ProjectTsserverProvider {
     fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path = path.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .get_diagnostics_background(&path)
-                .await
+            {
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_diagnostics_background(&path))
+            }
         })
     }
 
@@ -1072,10 +1574,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .open_file_normal(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Open,
+                OverlayPriority::Normal,
+            )
+            .await
         })
     }
 
@@ -1083,10 +1588,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .load_file_normal(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Load,
+                OverlayPriority::Normal,
+            )
+            .await
         })
     }
 
@@ -1094,10 +1602,13 @@ impl TypeProvider for ProjectTsserverProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.provider_for_path(&path)
-                .await?
-                .update_file_normal(&path, &content)
-                .await
+            self.apply_file_write(
+                &path,
+                &content,
+                OverlayFileKind::Update,
+                OverlayPriority::Normal,
+            )
+            .await
         })
     }
 

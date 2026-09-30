@@ -7,12 +7,18 @@
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tower_lsp_server::Client;
-use verter_type_runtime::provider_hub::EngineStart;
+use verter_type_runtime::provider_hub::{DroppedAdmittedState, EngineStart};
 
 // Re-export the shared lifecycle owner.
 pub(crate) use verter_type_runtime::provider_hub::{
     EstablishFuture, HubPolicy, ProviderEstablisher, ProviderHub,
 };
+
+/// The recovery re-arm for admitted generated state: invoked with everything a
+/// replacement install dropped, AFTER the replacement serves, so the tier that
+/// minted the admissions can re-publish them through a fresh admission bound
+/// to the new serving epoch (never an unproven replay).
+pub(crate) type AdmittedStateRearm = Arc<dyn Fn(&DroppedAdmittedState) + Send + Sync>;
 
 /// LSP-specific notifier that uses `client.show_message()` / `client.log_message()`.
 pub(crate) struct LspNotifier {

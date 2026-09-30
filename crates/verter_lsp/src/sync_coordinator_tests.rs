@@ -6044,3 +6044,110 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
         "nothing was delivered, so nothing is recorded"
     );
 }
+
+/// DISCRIMINATING: the engine-restart pulse listener is spawned for the
+/// lifetime of [`coordinator_loop`] — when the loop returns (every wake sender
+/// dropped), the listener must stop with it. RED-before: the listener leaked
+/// past shutdown holding the pending-redrive context (and through it the
+/// document registry and sync owners), so a late pulse armed a drain chain on
+/// the retired coordinator — observable here as provider file ops starting
+/// after the loop exited.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let pulse = Arc::new(tokio::sync::Notify::new());
+    provider.set_restart_pulse(Some(Arc::clone(&pulse)));
+    // The pending queue stays EMPTY while the loop lives: the loop's own
+    // plain arm would drain a queued entry (the provider is healthy) and the
+    // post-shutdown pulse would have nothing left to discriminate on. The
+    // entry is queued only after the loop has exited.
+    let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    let deps = Arc::new(SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            "/workspace",
+            Some("/workspace/tsconfig.app.json"),
+        )),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    });
+
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let semantic_ready_rx = documents.subscribe_semantic_ready();
+    let diagnostics_refresh_rx = documents.subscribe_diagnostics_refresh();
+    let receipts = CoordinatorReceipts::default();
+    // `loop_tick` is a `notify_waiters` receipt (no stored permit), so the
+    // interest is enabled BEFORE the loop spawns and one wake is sent to walk
+    // it through a full iteration — proving the loop (and the pulse listener
+    // it spawns first) is up.
+    let tick = receipts.loop_tick.notified();
+    tokio::pin!(tick);
+    tick.as_mut().enable();
+    let loop_task = tokio::spawn(coordinator_loop(
+        wake_rx,
+        semantic_ready_rx,
+        diagnostics_refresh_rx,
+        CoordinatorShared {
+            inbox: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            scanning: Arc::default(),
+        },
+        deps,
+        receipts.clone(),
+    ));
+    wake_tx.send(()).await.unwrap();
+    tick.await;
+
+    // Shutdown: closing the wake channel is the loop's all-handles-dropped
+    // exit path; the spawned task finishing proves it returned.
+    drop(wake_tx);
+    let exited = tokio::time::timeout(Duration::from_secs(2), loop_task)
+        .await
+        .is_ok();
+    assert!(
+        exited,
+        "coordinator_loop must return once its wake channel closes"
+    );
+
+    // A late engine-start pulse must not start drain passes on the retired
+    // coordinator. RED-before: the leaked listener armed the successor chain
+    // for the freshly queued entry, which attempted provider file ops after
+    // the production initial delay.
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+    let calls_before = provider.file_sync_calls().len();
+    pulse.notify_one();
+    tokio::time::sleep(Duration::from_millis(
+        crate::server::PENDING_SYNC_REDRIVE.initial_delay_ms + 400,
+    ))
+    .await;
+    assert_eq!(
+        provider.file_sync_calls().len(),
+        calls_before,
+        "a restart pulse after coordinator shutdown must not start drain passes"
+    );
+}

@@ -171,8 +171,9 @@ pub use fact_read_set::{
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 pub use generated_unit_admission::{
-    decide_generated_unit_admission, AdmittedGeneratedUnits, GeneratedUnitAdmission,
-    GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmission, GeneratedUnitNonAdmissionReason,
+    decide_generated_unit_admission, decide_generated_unit_admission_with_basis,
+    AdmittedGeneratedUnits, GeneratedUnitAdmission, GeneratedUnitAdmissionFingerprint,
+    GeneratedUnitNonAdmission, GeneratedUnitNonAdmissionReason,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use intrinsic_library::NativeIntrinsicLibrary;

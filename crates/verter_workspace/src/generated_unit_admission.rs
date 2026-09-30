@@ -1,22 +1,28 @@
 //! Generated-unit admission: is a SET of off-disk generated units a member of
 //! ONE configured project?
 //!
-//! Authored-source ownership and generated-unit admission are SEPARATE facts. A
-//! configured project can OWN a carrier source (`src/**/*.vue` claims
-//! `Foo.vue`) while NOT admitting the units Verter generates for it
-//! (`Foo.vue.tsx` matches no `*.vue` glob). An engine handed an unadmitted unit
-//! roots it in an inferred project — wrong compiler options, and extra load on
-//! whoever owns that engine. Anything that writes generated units into an
-//! engine it does not own must therefore hold THIS proof first; carrier
-//! ownership alone proves nothing about the units.
+//! A generated unit reaches an engine as a member of the configured project
+//! that admits its MEMBERSHIP BASIS — the carrier source the unit projects
+//! from, or the unit itself when it derives from no carrier. Serving a unit
+//! whose basis that project does not admit roots it in an inferred project —
+//! wrong compiler options, and extra load on whoever owns that engine — so
+//! anything that writes generated units into an engine it does not own must
+//! hold THIS proof first; observing that some ownership record names the
+//! source proves nothing about the units.
 //!
 //! The query CONSUMES the existing membership authority — it never builds a
-//! second membership model. Each unit is tested against the owning project's
+//! second membership model. A unit is a member when the owning project's
 //! compiled [`StaticMembershipSpec`](verter_semantic::resolver_core::StaticMembershipSpec)
-//! (`files` exact and exclude-immune; `include` minus `exclude`;
-//! extension-specific globs match only their extension; the JS family is
-//! present only under `allowJs`/`checkJs`), and its default configured owner is
-//! resolved through the SAME tsgo-faithful walk carrier sources use
+//! matches the unit DIRECTLY (`files` exact and exclude-immune; `include`
+//! minus `exclude`; extension-specific globs match only their extension; the
+//! JS family is present only under `allowJs`/`checkJs`), or — when the unit
+//! itself matches no include — matches the unit's basis: an extension-specific
+//! `src/**/*.vue` owns `Foo.vue` and thereby admits the `Foo.vue.tsx`
+//! projected from it, because the engine maps a companion through its source's
+//! project. A config that EXCLUDES the unit's own form (`exclude:
+//! ["src/**/*.vue.tsx"]`) refuses the unit even when its basis is admitted.
+//! Each unit's default configured owner is then resolved through the SAME
+//! tsgo-faithful walk carrier sources use
 //! ([`WorkspaceSnapshot::default_configured_owner_for_generated_unit`]), so a
 //! second configured project that would win the unit is a non-admission.
 //!
@@ -41,14 +47,17 @@ pub enum GeneratedUnitNonAdmissionReason {
     /// The snapshot holds no configured project with the intended tsconfig.
     NoSuchConfiguredProject,
     /// The unit is neither a `files` entry nor matched by any `include` glob of
-    /// the intended project (the extension-specific-include shape:
-    /// `src/**/*.vue` owns the carrier and matches no `.vue.tsx`).
+    /// the intended project — directly NOR through its membership basis (the
+    /// carrier source it projects from; the extension-specific-include shape
+    /// where neither `src/**/*.vue.tsx` nor its `src/**/*.vue` basis matches).
     NotMatchedByIncludeOrFiles,
-    /// An `include` glob matches the unit and an `exclude` glob removes it.
+    /// An `include` glob matches the unit (or its basis) and an `exclude` glob
+    /// removes it — including a config that excludes the unit's own companion
+    /// form while admitting its carrier source.
     Excluded,
-    /// The intended project's spec matches the unit, but the default-owner walk
-    /// resolves the unit to a DIFFERENT configured project — an engine would
-    /// serve it under that project's options, not the intended one's.
+    /// The intended project's spec admits the unit, but the default-owner walk
+    /// resolves it to a DIFFERENT configured project — an engine would serve it
+    /// under that project's options, not the intended one's.
     OwnedByDifferentProject,
 }
 
@@ -58,7 +67,9 @@ pub enum GeneratedUnitNonAdmissionReason {
 /// determining configuration; any change to `include`/`files`/`exclude`, to the
 /// unit set, or to which projects claim a unit changes it.
 ///
-/// In-process only (it keys in-memory caches); never persisted.
+/// In-process only (it keys in-memory caches); never persisted. A separate
+/// snapshot pointer on the admitted proof ties it to the immutable membership
+/// snapshot for provider-hub admission; the fingerprint alone is not authority.
 ///
 /// A fingerprint is an IDENTITY, not a proof: it names which admission a cached
 /// decision was made under. The proof that units may be written is
@@ -90,6 +101,10 @@ pub struct AdmittedGeneratedUnits {
     /// Sorted, de-duplicated.
     units: Vec<CanonicalPath>,
     fingerprint: GeneratedUnitAdmissionFingerprint,
+    /// In-process identity of the immutable membership snapshot that minted
+    /// this proof. A retained publication prevents address reuse while the
+    /// proof is used to admit a provider write.
+    snapshot_identity: usize,
 }
 
 impl AdmittedGeneratedUnits {
@@ -115,6 +130,11 @@ impl AdmittedGeneratedUnits {
     #[must_use]
     pub fn fingerprint(&self) -> GeneratedUnitAdmissionFingerprint {
         self.fingerprint
+    }
+
+    #[must_use]
+    pub fn snapshot_identity(&self) -> usize {
+        self.snapshot_identity
     }
 }
 
@@ -149,19 +169,62 @@ pub enum GeneratedUnitAdmission {
     NotAdmitted(GeneratedUnitNonAdmission),
 }
 
+impl GeneratedUnitAdmission {
+    /// The fail-closed admission for units whose owning configured project
+    /// could not be resolved (no bound owner): nothing is admitted, every
+    /// unit offends with [`GeneratedUnitNonAdmissionReason::NoSuchConfiguredProject`].
+    /// The same answer the membership query gives for a tsconfig the snapshot
+    /// does not hold; a caller that resolved NO owner uses it to fail its
+    /// write closed rather than fabricate a proof.
+    #[must_use]
+    pub fn unresolved_owner(units: &[CanonicalPath]) -> Self {
+        Self::NotAdmitted(GeneratedUnitNonAdmission {
+            offending: units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit.clone(),
+                        GeneratedUnitNonAdmissionReason::NoSuchConfiguredProject,
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
 /// Decide whether EVERY unit of `units` is admitted to the configured project
 /// whose tsconfig is `owning_tsconfig`.
 ///
 /// A unit is admitted when (a) that project's compiled membership spec matches
-/// it AND (b) the default-owner walk resolves it to that SAME project. `units`
-/// are off-disk paths; order and duplicates in the input do not affect the
-/// result. An empty `units` is vacuously admitted — a caller that needs a
-/// non-empty write set checks that itself.
+/// the unit directly, or — when it does not — matches the unit's membership
+/// BASIS (`membership_basis_of(unit)`: the carrier source a companion projects
+/// from, or the unit itself for a unit that derives from no carrier), and (b)
+/// the default-owner walk over the matched path resolves it to that SAME
+/// project. `units` are off-disk paths; order and duplicates in the input do
+/// not affect the result. An empty `units` is vacuously admitted — a caller
+/// that needs a non-empty write set checks that itself.
 #[must_use]
 pub fn decide_generated_unit_admission(
     snapshot: &WorkspaceSnapshot,
     owning_tsconfig: &CanonicalPath,
     units: &[CanonicalPath],
+) -> GeneratedUnitAdmission {
+    decide_generated_unit_admission_with_basis(snapshot, owning_tsconfig, units, |unit| {
+        unit.clone()
+    })
+}
+
+/// [`decide_generated_unit_admission`] with the membership-basis derivation
+/// supplied by the caller: the lower workspace layer cannot see the companion
+/// naming that maps a generated unit back to its carrier source, so the
+/// verter_lsp call sites hand that mapping in as data (the typed neutral facts
+/// the hub consumes). The proof still names and covers exactly `units`.
+#[must_use]
+pub fn decide_generated_unit_admission_with_basis(
+    snapshot: &WorkspaceSnapshot,
+    owning_tsconfig: &CanonicalPath,
+    units: &[CanonicalPath],
+    membership_basis_of: impl Fn(&CanonicalPath) -> CanonicalPath,
 ) -> GeneratedUnitAdmission {
     let mut units: Vec<CanonicalPath> = units.to_vec();
     units.sort();
@@ -189,6 +252,7 @@ pub fn decide_generated_unit_admission(
                 tsconfig_path: owning_tsconfig.clone(),
                 units,
                 fingerprint: GeneratedUnitAdmissionFingerprint(hasher.finish()),
+                snapshot_identity: std::ptr::from_ref(snapshot) as usize,
             });
         }
         return GeneratedUnitAdmission::NotAdmitted(GeneratedUnitNonAdmission {
@@ -211,12 +275,29 @@ pub fn decide_generated_unit_admission(
 
     let mut offending = Vec::new();
     for unit in &units {
+        let basis = membership_basis_of(unit);
         unit.as_str().hash(&mut hasher);
-        if let Some(reason) = spec_refusal(&membership.spec, unit) {
+        basis.as_str().hash(&mut hasher);
+        // Membership precedence: the unit's own form first (a config that
+        // includes — or excludes — the companion path decides for itself),
+        // then the carrier-source basis the engine maps the unit through.
+        let (probe, refusal) = match spec_refusal(&membership.spec, unit) {
+            None => (unit, None),
+            Some(GeneratedUnitNonAdmissionReason::Excluded) => {
+                (unit, Some(GeneratedUnitNonAdmissionReason::Excluded))
+            }
+            Some(GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles) => {
+                (&basis, spec_refusal(&membership.spec, &basis))
+            }
+            // `spec_refusal` never returns the remaining two variants for a
+            // path the spec already refused to match.
+            Some(reason) => (unit, Some(reason)),
+        };
+        if let Some(reason) = refusal {
             offending.push((unit.clone(), reason));
             continue;
         }
-        let resolved = snapshot.default_configured_owner_for_generated_unit(unit);
+        let resolved = snapshot.default_configured_owner_for_generated_unit(probe);
         hash_owner(snapshot, resolved, &mut hasher);
         if resolved != Some(owner_id) {
             offending.push((
@@ -231,6 +312,7 @@ pub fn decide_generated_unit_admission(
             tsconfig_path: owning_tsconfig.clone(),
             units,
             fingerprint: GeneratedUnitAdmissionFingerprint(hasher.finish()),
+            snapshot_identity: std::ptr::from_ref(snapshot) as usize,
         })
     } else {
         GeneratedUnitAdmission::NotAdmitted(GeneratedUnitNonAdmission { offending })

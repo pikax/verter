@@ -36,6 +36,7 @@ verter_language = { path = "../verter_language" }
 # vscode-jsonrpc transport + typed checker client this crate would otherwise
 # duplicate.
 verter_tsgo_api = { path = "../verter_tsgo_api" }
+verter_workspace = { path = "../verter_workspace" }
 
 [dev-dependencies]
 blake3 = { workspace = true }

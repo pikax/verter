@@ -46,3 +46,19 @@ pub use membership_reconciler::{
     CompanionFingerprint, DesiredMembership, MembershipReconciler, PendingProviderReady,
     ProviderGeneration, ProviderReadyReceipt, ReconcileErr, ReconcileOutcome, ReconcileReason,
 };
+
+/// The membership BASIS of a generated unit: the carrier source it projects
+/// from (through the registry's reverse companion map), or the unit itself
+/// when it derives from no carrier. The workspace's generated-unit admission
+/// consumes this as data — the lower layer cannot see the companion naming —
+/// so an extension-specific `src/**/*.vue` include that owns `Foo.vue` also
+/// admits the `Foo.vue.tsx` projected from it, exactly as the serving engine
+/// maps a companion through its source's project.
+pub(crate) fn carrier_membership_basis(
+    unit: &verter_workspace::CanonicalPath,
+) -> verter_workspace::CanonicalPath {
+    match verter_session::framework::descriptor::classify_carrier_companion(unit.as_str()) {
+        Some(companion) => verter_workspace::CanonicalPath::new(&companion.source),
+        None => unit.clone(),
+    }
+}

@@ -34,6 +34,17 @@ filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_car
 # that actually fires and reports its diagnostic message. 60s x 6 = 360s.
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# The 10,000-deep semantic cases can exceed the default 180-second process
+# backstop on a loaded builder. Keep their assertions and give the existing
+# process isolation enough time to produce a result.
+[[profile.default.overrides]]
+filter = 'test(/project_semantic_dispatch::deep_input_tests::.*_nested_10000_deep_/)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
+[[profile.ci.overrides]]
+filter = 'test(/project_semantic_dispatch::deep_input_tests::.*_nested_10000_deep_/)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # ── The real-JS request boundary addon ──────────────────────────────────────
 # `cases::real_js_host_request_boundary` loads a test-only Node addon to put
 # the native host compile request in front of live V8 objects. The addon is a

@@ -12,8 +12,9 @@ use tokio::sync::Notify;
 use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::traits::ProviderFuture;
 
+use super::ServingTransport;
 use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport};
-use verter_type_runtime::provider_hub::EstablishedTransport;
+use verter_type_runtime::provider_hub::ProviderEpoch;
 
 /// A transport double: records each injection/retraction and reports controllable
 /// liveness. No real relay/engine. `inject_fails` models a barrier error (a failed
@@ -101,7 +102,12 @@ impl FakeTransport {
 }
 
 impl OverlayTransport for FakeTransport {
-    fn inject(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+    fn inject(
+        &self,
+        path: &str,
+        content: &str,
+        _permit: &super::GeneratedUnitWritePermit,
+    ) -> ProviderFuture<'_, ()> {
         let fails = self.inject_fails.load(Ordering::SeqCst);
         let gated = self.inject_gated.load(Ordering::SeqCst);
         let yields = self.inject_yields.load(Ordering::SeqCst);
@@ -149,116 +155,22 @@ impl OverlayTransport for FakeTransport {
             Ok(())
         })
     }
-
-    fn is_live(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
-    }
-
-    fn teardown(&self) -> ProviderFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
-    }
 }
 
-/// The OWNED lifecycle content record must NOT block on the (up-to-15s) SHARED
-/// establishment: it is OFF the OWNED critical path. A slow/never-establishing
-/// transport does not delay `record_content`.
-///
-/// RED before the fix: the lifecycle established the SHARED transport inline (the
-/// composite's `open_file` awaited `feed_open` → `ensure_transport`), so opting into
-/// SHARED tripped the OWNED file-lifecycle timing — a `record_content` routed through
-/// establishment BLOCKS behind an in-flight (singleflight) establishment.
-#[tokio::test]
-async fn lifecycle_record_does_not_block_on_establishment() {
-    let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
-    let establishing = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-
-    // A background QUERY-path establishment that BLOCKS (models a slow/never-init
-    // editor tsgo). It holds the singleflight establishment for up to 30s.
-    let bg = {
-        let core = Arc::clone(&core);
-        let establishing = Arc::clone(&establishing);
-        let release = Arc::clone(&release);
-        tokio::spawn(async move {
-            core.ensure(
-                Some(((), 1u64)),
-                |_g| Some("nonce-1".to_string()),
-                move |(), _g| {
-                    let establishing = Arc::clone(&establishing);
-                    let release = Arc::clone(&release);
-                    async move {
-                        establishing.notify_one();
-                        release.notified().await; // block "establishing"
-                        Some(Arc::new(FakeTransport::alive()))
-                    }
-                },
-                Duration::from_secs(30),
-            )
-            .await
-        })
-    };
-    // Wait until the establishment is in flight (blocked).
-    establishing.notified().await;
-
-    // Causal proof, not a timing sample: `record_content` is a sync map insert
-    // that MUST return while establishment is still blocked. If it joined the
-    // in-flight `ensure`, it would not return until `release` fires — and this
-    // assertion would be unreachable. Averaging 2,000 calls hid a first-call
-    // join behind later cheap inserts.
-    core.record_content("/ws/Foo.vue.tsx", "v0");
-    assert!(
-        !bg.is_finished(),
-        "record_content must not complete the blocked SHARED establishment"
-    );
-    assert!(
-        core.current().await.is_none(),
-        "record_content must not establish a transport (off the OWNED critical path)"
-    );
-
-    // Let the background establishment finish so the test task exits cleanly.
-    release.notify_one();
-    let _ = bg.await.unwrap();
-}
-
-/// The query path establishes the transport lazily (never the lifecycle path) and
-/// injects the LATEST recorded content. SHARED appears on the diagnostics query once
-/// established; until then the composite fails closed to OWNED.
+/// The lifecycle records content off-path (a sync map insert -- the core owns NO
+/// establishment path at all; the hub does), and the query path injects the LATEST
+/// recorded content. SHARED appears on the diagnostics query once the hub serves;
+/// until then the composite fails closed to OWNED.
 #[tokio::test]
 async fn query_path_establishes_and_injects_latest_recorded_content() {
     let core = LazyOverlayCore::<FakeTransport>::new();
-    let establishes = Arc::new(AtomicUsize::new(0));
 
-    // The OWNED lifecycle records content (off-path); an edit updates it. No establish.
     core.record_content("/ws/Foo.vue.tsx", "content-v1");
     core.record_content("/ws/Foo.vue.tsx", "content-v2");
-    assert_eq!(
-        establishes.load(Ordering::SeqCst),
-        0,
-        "recording content never establishes the transport (off the OWNED critical path)"
-    );
 
-    // The QUERY path establishes (bounded) + injects the LATEST recorded content.
-    let est = Arc::clone(&establishes);
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            move |(), _g| {
-                let est = Arc::clone(&est);
-                async move {
-                    est.fetch_add(1, Ordering::SeqCst);
-                    Some(Arc::new(FakeTransport::alive()))
-                }
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("query-time establishment");
-    assert_eq!(
-        establishes.load(Ordering::SeqCst),
-        1,
-        "the query path establishes the transport"
-    );
+    // The hub hands the core a serving incarnation; the query path injects the
+    // LATEST recorded content.
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
     assert_eq!(
@@ -281,15 +193,7 @@ async fn late_background_record_cannot_overwrite_interactive_content() {
         OverlayPriority::Background,
     );
 
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_generation| Some("nonce-1".to_string()),
-            |(), _generation| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("query-time establishment");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
     core.inject_dirty(&established, "/ws/App.vue.tsx", 1).await;
 
     assert_eq!(
@@ -306,15 +210,7 @@ async fn late_background_record_cannot_overwrite_interactive_content() {
 async fn unchanged_content_is_not_reinjected_but_edits_are() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/A.vue.tsx", "v1");
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     // First query injects; a second query with UNCHANGED content does NOT re-inject.
     core.inject_dirty(&established, "/ws/A.vue.tsx", 1).await;
@@ -352,15 +248,7 @@ async fn inject_all_dirty_injects_the_whole_open_carrier_set() {
     // The carrier + its script companion (same carrier source), both open.
     core.record_content("/ws/Widget.vue.tsx", "carrier");
     core.record_content("/ws/Widget.vue.verter.ts", "companion");
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     // A single diagnostics query injects the WHOLE open set — so the carrier's import
     // of its companion resolves, not just the queried carrier.
@@ -412,15 +300,7 @@ async fn an_editor_demand_sweep_is_not_charged_with_the_background_bulk() {
             OverlayPriority::Background,
         );
     }
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     core.inject_all_dirty(
         &established,
@@ -467,15 +347,7 @@ async fn the_queried_carrier_family_is_in_scope_even_on_the_background_lane() {
         OverlayPriority::Background,
     );
     core.record_content_at_priority("/ws/Other.vue.tsx", "other", OverlayPriority::Background);
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     // The composite's predicate shape: editor lanes OR the queried carrier's own source.
     core.inject_all_dirty(
@@ -520,15 +392,7 @@ async fn the_queried_carrier_family_is_in_scope_even_on_the_background_lane() {
 async fn failed_dirty_injection_is_not_synced_so_query_fails_closed() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     // An unrecorded carrier is never synced.
     assert!(
@@ -555,7 +419,7 @@ async fn failed_dirty_injection_is_not_synced_so_query_fails_closed() {
          SHARED against the stale prior slot"
     );
     assert_eq!(
-        core.sync_state_for_epoch("/ws/Foo.vue.tsx", established.identity.epoch),
+        core.sync_state_for_epoch("/ws/Foo.vue.tsx", established.epoch),
         OverlaySyncState::NeverInjected,
         "the engagement refusal exposes the failed dirty barrier as typed sync state"
     );
@@ -580,25 +444,23 @@ async fn failed_dirty_injection_is_not_synced_so_query_fails_closed() {
 async fn retract_is_bounded_when_the_relay_close_never_answers() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let _transport = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async {
-                let t = FakeTransport::alive();
-                t.set_retract_hangs(true);
-                Some(Arc::new(t))
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    // The hub hands the core a serving incarnation whose retract NEVER answers.
+    let transport = Arc::new({
+        let t = FakeTransport::alive();
+        t.set_retract_hangs(true);
+        t
+    });
+    let _established = serve(&core, Arc::clone(&transport), 1);
 
     // The retract never answers; `retract_bounded` must return at its SHORT
     // bound on the paused clock — exact Instant, not a wall-clock ceiling.
     let bound = Duration::from_millis(150);
     let start = tokio::time::Instant::now();
-    core.retract_bounded("/ws/Foo.vue.tsx", bound).await;
+    let current_transport = Arc::clone(&transport);
+    core.retract_bounded("/ws/Foo.vue.tsx", bound, move || {
+        Some(Arc::clone(&current_transport))
+    })
+    .await;
     assert_eq!(
         tokio::time::Instant::now(),
         start + bound,
@@ -623,15 +485,7 @@ async fn inject_all_dirty_skips_shadow_unsafe_carriers() {
     // A genuine generated companion + a real-user-file shadow at a companion path.
     core.record_content("/ws/Genuine.vue.tsx", "genuine");
     core.record_content("/ws/Shadow.vue.tsx", "real-user-file");
-    let established = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establishes");
+    let established = serve(&core, Arc::new(FakeTransport::alive()), 1);
 
     // The shadow-safety predicate ADMITS the genuine companion, REJECTS the shadow.
     core.inject_all_dirty(
@@ -649,45 +503,31 @@ async fn inject_all_dirty_skips_shadow_unsafe_carriers() {
     );
 }
 
-/// Establish a fresh ALIVE transport at `(generation, nonce)` through the query path,
-/// returning the identity-bound object (its epoch keys the injection attribution).
-async fn establish_alive(
+/// Hand the core a HUB-MINTED serving incarnation at `epoch`: observe the
+/// epoch (a fresh, higher epoch resets the injection markers — exactly what
+/// the production composite does right after its ProviderHub establishes or
+/// re-establishes the shared attach) and return the identity-bound serving
+/// transport whose epoch keys the injection attribution.
+fn serve(
     core: &LazyOverlayCore<FakeTransport>,
-    generation: u64,
-    nonce: &str,
-) -> EstablishedTransport<FakeTransport> {
-    let nonce = nonce.to_string();
-    core.ensure(
-        Some(((), generation)),
-        move |_g| Some(nonce.clone()),
-        |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("establishes")
+    transport: Arc<FakeTransport>,
+    epoch: u64,
+) -> ServingTransport<FakeTransport> {
+    core.observe_serving_epoch(ProviderEpoch(epoch));
+    ServingTransport {
+        transport,
+        epoch: ProviderEpoch(epoch),
+    }
 }
 
-/// Re-establish a fresh ALIVE transport after the prior one died — driving demands at
-/// advancing generations until the dead-live eviction + re-arm mints a new transport
-/// (robust to whether eviction re-establishes in the same demand or a later one).
-async fn reestablish_after_death(
+/// Establish a fresh ALIVE transport at `epoch` through the observed-serving
+/// path, returning the identity-bound object (its epoch keys the injection
+/// attribution).
+async fn establish_alive(
     core: &LazyOverlayCore<FakeTransport>,
-) -> EstablishedTransport<FakeTransport> {
-    for g in 2u64..=6 {
-        let nonce = format!("nonce-{g}");
-        if let Some(t) = core
-            .ensure(
-                Some(((), g)),
-                move |_g| Some(nonce.clone()),
-                |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
-                Duration::from_secs(5),
-            )
-            .await
-        {
-            return t;
-        }
-    }
-    panic!("re-establishment did not mint a fresh transport");
+    epoch: u64,
+) -> ServingTransport<FakeTransport> {
+    serve(core, Arc::new(FakeTransport::alive()), epoch)
 }
 
 /// A transport RE-established under a NEW identity/epoch replays the whole open
@@ -705,7 +545,7 @@ async fn reestablished_transport_replays_open_carrier_set() {
     core.record_content("/ws/B.vue.tsx", "b");
 
     // Establish transport A (epoch 1) and inject the whole open set.
-    let est_a = establish_alive(&core, 1, "nonce-1").await;
+    let est_a = establish_alive(&core, 1).await;
     let transport_a = Arc::clone(&est_a.transport);
     core.inject_all_dirty(&est_a, 1, |_, _| true, |_| true)
         .await;
@@ -725,10 +565,9 @@ async fn reestablished_transport_replays_open_carrier_set() {
         "a warm re-inject into the SAME transport is a no-op"
     );
 
-    // The transport dies; a reconnect mints transport B at an ADVANCED generation
-    // (epoch 2).
-    transport_a.set_dead();
-    let est_b = reestablish_after_death(&core).await;
+    // The attach is replaced (its hub retires the epoch); the re-attachment
+    // mints transport B at an ADVANCED epoch.
+    let est_b = establish_alive(&core, 2).await;
     let transport_b = Arc::clone(&est_b.transport);
     assert!(
         !Arc::ptr_eq(&transport_a, &transport_b),
@@ -763,18 +602,18 @@ async fn diagnostics_then_hover_requires_the_exact_transport_epoch() {
     core.record_content_at_priority(carrier, "const count = 1", OverlayPriority::Interactive);
 
     // Diagnostics establishes A and completes the carrier barrier.
-    let diagnostics_epoch = establish_alive(&core, 1, "editor-session-a").await;
+    let diagnostics_epoch = establish_alive(&core, 1).await;
     core.inject_all_dirty(&diagnostics_epoch, 1, |_, _| true, |_| true)
         .await;
     assert_eq!(
-        core.sync_state_for_epoch(carrier, diagnostics_epoch.identity.epoch),
+        core.sync_state_for_epoch(carrier, diagnostics_epoch.epoch),
         OverlaySyncState::Synced,
         "diagnostics is allowed to serve from its exact barrier-synced epoch"
     );
 
-    // The editor reconnects. B replays and barrier-syncs the same single-project carrier.
-    diagnostics_epoch.transport.set_dead();
-    let hover_epoch = reestablish_after_death(&core).await;
+    // The editor reconnects (the hub retires A). B replays and barrier-syncs the
+    // same single-project carrier.
+    let hover_epoch = establish_alive(&core, 2).await;
     core.inject_all_dirty(&hover_epoch, 1, |_, _| true, |_| true)
         .await;
     assert!(
@@ -782,17 +621,17 @@ async fn diagnostics_then_hover_requires_the_exact_transport_epoch() {
         "the global overlay is healthy and synced on the replacement transport"
     );
     assert_eq!(
-        core.sync_state_for_epoch(carrier, hover_epoch.identity.epoch),
+        core.sync_state_for_epoch(carrier, hover_epoch.epoch),
         OverlaySyncState::Synced,
         "a hover that captured the replacement provider may engage"
     );
 
     // Discriminating assertion: B's healthy marker cannot authorize a stale A handle.
     assert_eq!(
-        core.sync_state_for_epoch(carrier, diagnostics_epoch.identity.epoch),
+        core.sync_state_for_epoch(carrier, diagnostics_epoch.epoch),
         OverlaySyncState::TransportEpochMismatch {
-            expected: diagnostics_epoch.identity.epoch,
-            active: hover_epoch.identity.epoch,
+            expected: diagnostics_epoch.epoch,
+            active: hover_epoch.epoch,
         },
         "hover must refuse with a typed exact-epoch mismatch instead of serving from A"
     );
@@ -817,19 +656,7 @@ async fn stale_inflight_injection_cannot_mark_new_epoch_synced() {
         t.arm_inject_gate();
         t
     });
-    let a_for_est = Arc::clone(&a);
-    let established_a = core
-        .ensure(
-            Some(((), 1u64)),
-            |_g| Some("nonce-1".to_string()),
-            move |(), _g| {
-                let a = Arc::clone(&a_for_est);
-                async move { Some(a) }
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("establish A");
+    let established_a = serve(&core, Arc::clone(&a), 1);
     assert!(Arc::ptr_eq(&established_a.transport, &a));
 
     // Begin the A-injection on a task; it captures A's epoch (EA) and BLOCKS in the gate.
@@ -846,7 +673,7 @@ async fn stale_inflight_injection_cannot_mark_new_epoch_synced() {
     // The transport dies; a reconnect mints transport B (epoch 2) — observing epoch 2
     // resets the injected markers.
     a.set_dead();
-    let established_b = reestablish_after_death(&core).await;
+    let established_b = establish_alive(&core, 2).await;
 
     // Release the stale A-injection; it now commits AFTER epoch 2 was observed.
     a.release_inject();
@@ -867,40 +694,32 @@ async fn stale_inflight_injection_cannot_mark_new_epoch_synced() {
     );
 }
 
-/// An editor fires several requests at once for the file it just opened, and each
-/// one sweeps the SAME dirty set. The shadow-safety predicate resolves project
-/// ownership per carrier, so repeating it per request multiplied a project-wide
-/// sweep by the number of requests in flight — tens of seconds in which nothing was
-/// injected at all. Concurrent sweeps evaluate each carrier once between them.
+/// An editor fires several requests at once for the file it just opened, and
+/// each one sweeps the SAME dirty set. The concurrent sweeps must not multiply
+/// the WORK: every carrier is physically injected EXACTLY ONCE (the carrier
+/// gates order same-path work and the first committed marker clears the dirty
+/// candidate for the later sweeps), and every carrier ends synced. The
+/// per-sweep write gate always runs for a candidate (a hub-issued admission
+/// binds the live serving epoch and basis, so it is never replayed from a
+/// prior sweep's decision), but a carrier already content-synced at the
+/// current generation never re-enters the sweep.
 #[tokio::test]
-async fn concurrent_sweeps_evaluate_shadow_safety_once_per_carrier() {
+async fn concurrent_sweeps_inject_each_carrier_exactly_once() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     let carriers = 12;
     for index in 0..carriers {
         core.record_content(&format!("/ws/C{index}.vue.tsx"), "v1");
     }
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     established.transport.set_inject_yields(true);
-    let calls = Arc::new(AtomicUsize::new(0));
 
-    let sweep = || {
-        let calls = Arc::clone(&calls);
-        core.inject_all_dirty(
-            &established,
-            1,
-            |_, _| true,
-            move |_| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                true
-            },
-        )
-    };
+    let sweep = || core.inject_all_dirty(&established, 1, |_, _| true, |_| true);
     tokio::join!(sweep(), sweep(), sweep(), sweep(), sweep(), sweep());
 
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        established.transport.ops().len(),
         carriers,
-        "six concurrent sweeps must not each re-evaluate every carrier"
+        "six concurrent sweeps physically inject each carrier EXACTLY once"
     );
     for index in 0..carriers {
         assert!(core.is_synced(&format!("/ws/C{index}.vue.tsx")));
@@ -915,7 +734,7 @@ async fn concurrent_sweeps_evaluate_shadow_safety_once_per_carrier() {
 async fn inject_all_dirty_skips_shadow_predicate_for_clean_cached_generation() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
 
     let calls = Arc::new(AtomicUsize::new(0));
 
@@ -970,7 +789,7 @@ async fn inject_all_dirty_skips_shadow_predicate_for_clean_cached_generation() {
 async fn shadow_generation_advance_rechecks_clean_carriers() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
 
     let calls = Arc::new(AtomicUsize::new(0));
 
@@ -1016,7 +835,7 @@ async fn shadow_generation_advance_rechecks_clean_carriers() {
 async fn shadow_generation_flip_to_unsafe_clears_synced_marker() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
 
     // Inject SAFE at shadow generation 1.
     core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
@@ -1048,7 +867,7 @@ async fn shadow_generation_flip_to_unsafe_clears_synced_marker() {
 async fn shadow_flip_to_unsafe_retracts_previously_injected_carrier() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     // Inject SAFE at shadow generation 1 (the transport records the inject).
@@ -1115,7 +934,7 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
 
     // Establish (epoch 1) and inject v1 at shadow generation 1 — the carrier is now
     // SAFE and PREVIOUSLY INJECTED (a later flip-to-unsafe must retract it).
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
     core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
         .await;
@@ -1132,9 +951,9 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
     // the gate, HOLDING the carrier gate.
     let inj = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_all_dirty(&est, 1, |_, _| true, |_| true).await;
@@ -1147,9 +966,9 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
     // then blocks on the carrier gate held by run 1 — so it is spawned, not awaited inline.
     let flip = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
@@ -1202,9 +1021,9 @@ async fn cached_unsafe_carrier_is_not_synced_even_with_a_set_injected_marker() {
 
     // Establish (epoch 1) and inject v1 SAFE at generation 1 — the carrier is SAFE,
     // PREVIOUSLY INJECTED, and synced (marker set, content + epoch match).
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
-    let run_epoch = established.identity.epoch;
+    let run_epoch = established.epoch;
     core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
         .await;
     assert!(
@@ -1255,13 +1074,13 @@ async fn stale_injection_into_dead_transport_cannot_mark_new_epoch_synced() {
     core.record_content("/ws/Foo.vue.tsx", "content");
 
     // Establish transport A (epoch 1) and retain the identity-bound object.
-    let est_a = establish_alive(&core, 1, "nonce-1").await;
+    let est_a = establish_alive(&core, 1).await;
     let transport_a = Arc::clone(&est_a.transport);
 
     // A dies; a reconnect mints transport B (epoch 2) BEFORE the stale A-inject —
     // observing epoch 2 resets the injected markers and advances `active_epoch` to EB.
     transport_a.set_dead();
-    let est_b = reestablish_after_death(&core).await;
+    let est_b = establish_alive(&core, 2).await;
     let transport_b = Arc::clone(&est_b.transport);
     assert!(
         !Arc::ptr_eq(&transport_a, &transport_b),
@@ -1314,7 +1133,7 @@ async fn first_injection_physical_overlay_is_retracted_when_flipped_unsafe() {
 
     // Establish (epoch 1) with an ARMED inject gate: the first injection blocks
     // mid-flight (physically landed, marker NOT yet committed).
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
     transport.arm_inject_gate();
 
@@ -1322,9 +1141,9 @@ async fn first_injection_physical_overlay_is_retracted_when_flipped_unsafe() {
     // in the gate BEFORE committing — a concurrent sweep sees no committed marker for it.
     let inj = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_dirty(&est, "/ws/Foo.vue.tsx", 1).await;
@@ -1336,9 +1155,9 @@ async fn first_injection_physical_overlay_is_retracted_when_flipped_unsafe() {
     // then blocks on the carrier gate held by the in-flight first injection.
     let sweep = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
@@ -1379,7 +1198,7 @@ async fn first_injection_physical_overlay_is_retracted_when_flipped_unsafe() {
 async fn reinject_error_retracts_prior_committed_overlay_not_leaks_it() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     // Inject + commit v1 at generation 1: the overlay physically LANDS and the marker is SET.
@@ -1429,7 +1248,7 @@ async fn reinject_error_retracts_prior_committed_overlay_not_leaks_it() {
 async fn superseded_unsafe_sweep_after_newer_safe_commit_is_inert() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     // Inject SAFE at generation 1 → marker committed, shadow {1, safe:true}, synced.
@@ -1477,9 +1296,9 @@ async fn superseded_unsafe_sweep_after_newer_safe_commit_is_inert() {
 async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
-    let run_epoch = established.identity.epoch;
+    let run_epoch = established.epoch;
 
     // Inject SAFE at gen 1 → marker set, synced.
     core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
@@ -1493,9 +1312,9 @@ async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
     // retract (fail-closed through the physical retract), then the retract BLOCKS in the gate.
     let flip = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
@@ -1530,7 +1349,7 @@ async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
     );
 }
 
-/// `observe_transport_identity` is MONOTONIC: it adopts the epoch and resets the injection
+/// `observe_serving_epoch` is MONOTONIC: it adopts the epoch and resets the injection
 /// markers only when `active_epoch` is `None` OR the observed epoch is STRICTLY GREATER than
 /// the current one. A stale, delayed observe of an OLDER epoch (a runtime worker preempted
 /// between `ensure`'s establish-return and the synchronous observe, while another worker
@@ -1546,11 +1365,11 @@ async fn stale_observe_of_older_epoch_does_not_regress_active_epoch_or_reset_mar
     core.record_content("/ws/Foo.vue.tsx", "v1");
 
     // Establish transport A (epoch E1), then kill it and reconnect to transport B (epoch E2).
-    let est_a = establish_alive(&core, 1, "nonce-1").await;
-    let e1 = est_a.identity.epoch;
+    let est_a = establish_alive(&core, 1).await;
+    let e1 = est_a.epoch;
     est_a.transport.set_dead();
-    let est_b = reestablish_after_death(&core).await;
-    let e2 = est_b.identity.epoch;
+    let est_b = establish_alive(&core, 2).await;
+    let e2 = est_b.epoch;
     assert_ne!(e1, e2, "B is a genuinely fresh epoch");
 
     // Commit a marker under epoch E2 (active_epoch == E2, the carrier is synced).
@@ -1567,7 +1386,7 @@ async fn stale_observe_of_older_epoch_does_not_regress_active_epoch_or_reset_mar
 
     // A STALE, delayed observe of the OLDER epoch E1 arrives (a preempted worker's late
     // synchronous observe). It must NOT regress active_epoch E2→E1 nor reset the markers.
-    core.observe_transport_identity(e1);
+    core.observe_serving_epoch(e1);
 
     assert_eq!(
         core.state.lock().active_epoch,
@@ -1596,7 +1415,7 @@ async fn stale_observe_of_older_epoch_does_not_regress_active_epoch_or_reset_mar
 async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     // Inject v1 so there is an overlay + a live transport for the close path.
@@ -1613,9 +1432,13 @@ async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
     // (held) carrier gate.
     let close = {
         let core = Arc::clone(&core);
+        let current = Arc::clone(&transport);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
-                .await;
+            let current = current;
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+                Some(Arc::clone(&current))
+            })
+            .await;
         })
     };
 
@@ -1681,7 +1504,7 @@ async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
 async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reopen() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     // Inject + commit v1 at generation 1: the overlay physically LANDS and the marker is SET.
@@ -1694,9 +1517,13 @@ async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reo
     let held = gate.lock().await;
     let close = {
         let core = Arc::clone(&core);
+        let current = Arc::clone(&transport);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
-                .await;
+            let current = current;
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+                Some(Arc::clone(&current))
+            })
+            .await;
         })
     };
     // Wait until the close's content removal has run — the close is parked on the held gate.
@@ -1714,9 +1541,9 @@ async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reo
     core.record_content("/ws/Foo.vue.tsx", "reopened");
     let sweep = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
@@ -1756,14 +1583,17 @@ async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reo
 async fn retract_bounded_retracts_the_committed_overlay_when_not_reopened() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
 
-    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
-        .await;
+    let current = Arc::clone(&transport);
+    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+        Some(Arc::clone(&current))
+    })
+    .await;
 
     assert_eq!(
         transport.ops(),
@@ -1794,7 +1624,7 @@ async fn retract_bounded_retracts_the_committed_overlay_when_not_reopened() {
 async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
 
     core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
@@ -1805,9 +1635,13 @@ async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close
     let held = gate.lock().await;
     let close = {
         let core = Arc::clone(&core);
+        let current = Arc::clone(&transport);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
-                .await;
+            let current = current;
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+                Some(Arc::clone(&current))
+            })
+            .await;
         })
     };
     let mut spins = 0;
@@ -1828,7 +1662,7 @@ async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close
             .expect("the reopened record is present");
         rec.injected = Some(InjectedRecord {
             content: Arc::from("v2-reopened"),
-            epoch: established.identity.epoch,
+            epoch: established.epoch,
         });
     }
 
@@ -1858,19 +1692,26 @@ async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close
 async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let est_a = establish_alive(&core, 1, "nonce-1").await;
+    let est_a = establish_alive(&core, 1).await;
     let transport_a = Arc::clone(&est_a.transport);
     core.inject_dirty(&est_a, "/ws/Foo.vue.tsx", 1).await;
     assert_eq!(transport_a.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
 
     // Park the close between its marker erase and its gated revalidation.
+    // The close's `current` reads a shared cell — the hub's serving
+    // instance, which a mid-park re-attachment replaces (A → B).
+    let serving_cell: Arc<SyncMutex<Option<Arc<FakeTransport>>>> =
+        Arc::new(SyncMutex::new(Some(Arc::clone(&transport_a))));
     let gate = core.carrier_gate("/ws/Foo.vue.tsx");
     let held = gate.lock().await;
     let close = {
         let core = Arc::clone(&core);
+        let serving_cell = Arc::clone(&serving_cell);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
-                .await;
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+                serving_cell.lock().clone()
+            })
+            .await;
         })
     };
     let mut spins = 0;
@@ -1880,11 +1721,12 @@ async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
         assert!(spins < 100_000, "the close's content removal did not run");
     }
 
-    // While the close is parked, transport A dies and a reconnect mints transport B (a newer
-    // epoch); a reopen re-inserts the content (uncommitted — no new overlay yet).
-    transport_a.set_dead();
-    let est_b = reestablish_after_death(&core).await;
+    // While the close is parked, the attach is replaced and the hub serves
+    // transport B (a newer epoch); a reopen re-inserts the content
+    // (uncommitted — no new overlay yet).
+    let est_b = establish_alive(&core, 2).await;
     let transport_b = Arc::clone(&est_b.transport);
+    *serving_cell.lock() = Some(Arc::clone(&transport_b));
     core.record_content("/ws/Foo.vue.tsx", "v2-reopened");
 
     drop(held);
@@ -1919,7 +1761,7 @@ async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
 async fn retract_bounded_respects_the_close_deadline_when_the_gate_is_held() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
 
     // Hold the carrier gate FOREVER — a concurrent close can never acquire it.
@@ -1931,7 +1773,9 @@ async fn retract_bounded_respects_the_close_deadline_when_the_gate_is_held() {
     let close = {
         let core = Arc::clone(&core);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", bound).await;
+            let current = Arc::clone(&established.transport);
+            core.retract_bounded("/ws/Foo.vue.tsx", bound, move || Some(Arc::clone(&current)))
+                .await;
         })
     };
     // Watchdog: 2s virtual. A correct impl returns at the 150ms Instant
@@ -1970,18 +1814,18 @@ async fn inflight_inject_commit_veto_retracts_exactly_once_on_direct_unsafe_cach
 
     // Establish (epoch 1) with an ARMED inject gate: the inject blocks AFTER it physically
     // enters the transport but BEFORE its commit classification.
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
     let transport = Arc::clone(&established.transport);
-    let run_epoch = established.identity.epoch;
+    let run_epoch = established.epoch;
     transport.arm_inject_gate();
 
     // The inject begins on a task; it physically lands the overlay and blocks in the gate
     // BEFORE committing.
     let inj = {
         let core = Arc::clone(&core);
-        let est = EstablishedTransport {
+        let est = ServingTransport {
             transport: Arc::clone(&transport),
-            identity: established.identity.clone(),
+            epoch: established.epoch,
         };
         tokio::spawn(async move {
             core.inject_dirty(&est, "/ws/Foo.vue.tsx", 1).await;
@@ -2025,7 +1869,7 @@ async fn inflight_inject_commit_veto_retracts_exactly_once_on_direct_unsafe_cach
 async fn take_content_prunes_dead_carrier_gate_entries() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/A.vue.tsx", "v1");
-    let established = establish_alive(&core, 1, "nonce-1").await;
+    let established = establish_alive(&core, 1).await;
 
     // An inject mints a carrier gate and drops it at the end of the transaction, leaving a
     // DEAD weak entry in the registry.
