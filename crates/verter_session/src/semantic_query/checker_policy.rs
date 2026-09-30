@@ -30,22 +30,6 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// deep fails with TS2589.
 pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 
-/// The checker's limit on one TAIL run of a conditional type
-/// (`getConditionalType`'s `tailCount`): the run fails with TS2589 at its
-/// 1000th tail step.
-///
-/// Measured on TypeScript 7.0.2 over `type Build<N extends number, Acc
-/// extends unknown[] = []> = Acc["length"] extends N ? Acc["length"] :
-/// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
-/// settings agree): `Build<998>` is `998`, `Build<999>` is `999`, and
-/// `Build<1000>` is `any` under TS2589.
-///
-/// Known diagnostic gap: a generic alias whose body applies itself
-/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker (TS2456,
-/// and `any`); Verter reaches this tail limit instead and reports TS2589,
-/// with the same `any`.
-pub(crate) const CONDITIONAL_TAIL_STEPS: u32 = 1000;
-
 /// The checker's `checkCrossProductUnion` limit: an intersection
 /// distributed over unions, a template literal over union spans, or an
 /// object spread over union operands whose cross product has at least this
@@ -180,6 +164,28 @@ pub(crate) fn resource_recovery(
     }))
 }
 
+/// The checker's TS2456 for a type alias whose declared type requires
+/// itself: the alias's body applies the alias — directly, or through other
+/// aliases — where the checker instantiates eagerly, with no conditional
+/// type of the declaration deciding on the way. Through a conditional type's
+/// branch the same application is the next step of the tail loop instead,
+/// and a position the checker defers (an object member, an array or tuple
+/// element) is a lazy reference. A checker error, not a resource limit:
+/// the alias is `any` however large the budgets.
+///
+/// Measured on TypeScript 7.0.2, all four `strictNullChecks` ×
+/// `noImplicitAny` settings: `type G<T> = G<[T]>`, `type G<T> = G<T>`,
+/// `type G<T> = H<T>; type H<T> = G<[T]>` and `type G<T> = H<[T]>; type H<T>
+/// = T extends any ? G<T> : never` report TS2456 and `G<string>` is `any`;
+/// `type G<T> = { a: G<[T]> }` and `type G<T> = G<[T]>[]` report nothing;
+/// `type G<T> = T extends never ? never : G<[T]>` is TS2589.
+pub(crate) const fn circular_type_alias() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::CircularTypeAlias,
+        operation: CheckerDiagnosticOperation::TypeAliasDeclaration,
+    }
+}
+
 /// The checker's error type after `diagnostic`, a diagnostic the types
 /// themselves decide (never a resource limit): the typed recovery carrier,
 /// a complete answer.
@@ -236,8 +242,17 @@ impl InstantiationDepth {
     }
 }
 
-/// One tail run of a conditional type (`tailCount`). Reaching
-/// [`CONDITIONAL_TAIL_STEPS`] refuses the run with TS2589.
+/// One tail run of a conditional type, counted as the checker counts it
+/// (`getConditionalType`'s `tailCount`) against a budget: the run fails
+/// with TS2589 at its budget's step. The checker's own budget is 1,000 —
+/// measured on TypeScript 7.0.2 over `type Build<N extends number, Acc
+/// extends unknown[] = []> = Acc["length"] extends N ? Acc["length"] :
+/// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
+/// settings agree), `Build<999>` is `999` and `Build<1000>` is `any`
+/// under TS2589 — and Verter runs to its own, far larger one, reporting
+/// the same TS2589 there. A body applying its own alias with no conditional
+/// type deciding is not a tail run but a circular declaration
+/// ([`circular_type_alias`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalTail {
     steps: u32,
@@ -250,13 +265,14 @@ impl ConditionalTail {
     }
 
     /// Take one more tail step of `operation`: its refusal when the run
-    /// reaches the limit there.
+    /// reaches `budget` there.
     pub(crate) fn step(
         &mut self,
+        budget: u32,
         operation: CheckerDiagnosticOperation,
     ) -> Result<(), OperationRefusal> {
         self.steps += 1;
-        if self.steps < CONDITIONAL_TAIL_STEPS {
+        if self.steps < budget {
             return Ok(());
         }
         Err(OperationRefusal::of(
@@ -420,23 +436,26 @@ mod tests {
         assert_eq!(RELATION_COMPARISONS, 2_000_000);
     }
 
-    /// A tail run fails at its 1000th step; a run resumed with steps already
-    /// counted fails that many steps sooner.
+    /// A tail run fails at its budget's step — the checker's at its
+    /// 1000th; a run resumed with steps already counted fails that many
+    /// steps sooner.
     #[test]
-    fn a_tail_run_fails_at_the_checker_step() {
+    fn a_tail_run_fails_at_its_budget_step() {
         const TAIL: CheckerDiagnosticOperation = CheckerDiagnosticOperation::ConditionalTail;
-        let mut run = ConditionalTail::resumed(0);
-        assert!((1..CONDITIONAL_TAIL_STEPS).all(|_| run.step(TAIL).is_ok()));
-        assert_eq!(
-            run.step(TAIL).map_err(OperationRefusal::diagnostic),
-            Err(CheckerDiagnostic {
-                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-                operation: TAIL,
-            })
-        );
-        let mut resumed = ConditionalTail::resumed(1);
-        assert!((2..CONDITIONAL_TAIL_STEPS).all(|_| resumed.step(TAIL).is_ok()));
-        assert!(resumed.step(TAIL).is_err());
+        for budget in [1000, 5] {
+            let mut run = ConditionalTail::resumed(0);
+            assert!((1..budget).all(|_| run.step(budget, TAIL).is_ok()));
+            assert_eq!(
+                run.step(budget, TAIL).map_err(OperationRefusal::diagnostic),
+                Err(CheckerDiagnostic {
+                    code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: TAIL,
+                })
+            );
+            let mut resumed = ConditionalTail::resumed(1);
+            assert!((2..budget).all(|_| resumed.step(budget, TAIL).is_ok()));
+            assert!(resumed.step(budget, TAIL).is_err());
+        }
     }
 
     /// A path fails on the level that reaches depth 100, and leaving levels
@@ -457,8 +476,8 @@ mod tests {
     fn every_refusal_is_a_resource_diagnostic() {
         let refusals = [
             instantiation_budget(false).unwrap_err(),
-            ConditionalTail::resumed(CONDITIONAL_TAIL_STEPS)
-                .step(CheckerDiagnosticOperation::ConditionalTail)
+            ConditionalTail::resumed(4)
+                .step(5, CheckerDiagnosticOperation::ConditionalTail)
                 .unwrap_err(),
             cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
             with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())

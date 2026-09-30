@@ -111,9 +111,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
+        ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         if let SemanticNodeData::InstantiationRef { base, args } = data {
-            return self.finish_application_projection(node, context, base, args, memo);
+            return self.finish_application_projection(node, context, base, args, memo, ancestors);
         }
         ProjectionFinish::Node(self.finish_projection_structure(
             node,
@@ -135,6 +136,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: &crate::semantic_query::DeclIdentity,
         args: &Arc<[SemanticNodeId]>,
         memo: &ViewMemo,
+        ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         let graph = self.graph();
         let argument_context = context.into_structural_provenance();
@@ -202,11 +204,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             base.canonical_id.as_ref(),
             base.owner,
             base.decl_name.as_ref(),
-        ) {
+        ) && self.in_deferred_position(ancestors)
+        {
             // An application of the declaration an enclosing
-            // `build_instantiate` frame is still materialising is its
-            // recursive back-edge, recording the instantiation it
-            // stands for — the same rule as a 0-arg `DeclRef`.
+            // `build_instantiate` frame is still materialising, in a
+            // position the checker defers, is its recursive back-edge,
+            // recording the instantiation it stands for — the same rule as
+            // a 0-arg `DeclRef`. In a position the checker instantiates
+            // eagerly it is instantiated below.
             ProjectionFinish::Node(self.recursive_ref_sentinel(base, projected_args))
         } else {
             ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(

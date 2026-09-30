@@ -196,6 +196,7 @@ test("the committed allowlist is exactly the known standalone targets", () => {
     "verter_compiler::allocator_canaries::crates/verter_compiler/tests/allocator_canaries.rs",
     "verter_compiler::compile_type_info_routes::crates/verter_compiler/tests/compile_type_info_routes.rs",
     "verter_lsp::lsp_audit_trace_out_env_var::crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",
+    "verter_semantic::allocator_canaries::crates/verter_semantic/tests/allocator_canaries.rs",
     "verter_semantic::type_info_non_flow::crates/verter_semantic/tests/type_info_non_flow.rs",
     "verter_semantic::type_info_privacy::crates/verter_semantic/tests/ui/type_info_privacy.rs",
     "verter_session::allocator_canaries::crates/verter_session/tests/allocator_canaries.rs",
@@ -206,7 +207,7 @@ test("the committed allowlist is exactly the known standalone targets", () => {
     actual,
     expected,
     "the integration-test-layout allowlist drifted from the known standalone targets " +
-      "(allocator_canaries x2 + lsp_audit_trace_out_env_var + the five C2 charter-pinned homes). " +
+      "(allocator_canaries x3 + lsp_audit_trace_out_env_var + the five C2 charter-pinned homes). " +
       "Adding/removing an exception is an architecture decision: update this pin AND " +
       "scripts/integration-test-layout-allowlist.json, and justify the standalone target.",
   );

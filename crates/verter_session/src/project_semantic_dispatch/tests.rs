@@ -925,8 +925,12 @@ fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
     );
 }
 
+/// An `infer` at an object's index signature value or at a call or
+/// construct signature's return infers through the relation like a
+/// property's (TypeScript 7.0.2: `{ [k: string]: string } extends { [k:
+/// string]: infer U }`, and the call and construct forms, are `string`).
 #[test]
-fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_positions() {
+fn conditional_infer_reaches_object_index_call_and_construct_positions() {
     use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
 
     let host = host();
@@ -1004,7 +1008,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
         spans: Default::default(),
         declaration_origin: None,
     };
-    let unsupported = [
+    let positions = [
         (
             "index",
             object(
@@ -1051,14 +1055,11 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             ),
         ),
     ];
-    for (label, source, target) in unsupported {
+    for (label, source, target) in positions {
         let result = reverse_test_conditional(&dispatch, source, target, infer, never);
-        assert!(
-            matches!(
-                graph.node_data(result).as_deref(),
-                Some(SemanticNodeData::Conditional { .. })
-            ),
-            "an object {label}-signature infer position is deliberately unsupported and must stay deferred, never select true with an unresolved Infer"
+        assert_eq!(
+            result, string,
+            "an object {label}-signature infer position infers the source's type"
         );
     }
 }
@@ -2087,10 +2088,21 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         ),
         readonly: true,
     });
+    // The capture keeps labels, optionality and rest and is never readonly
+    // (TypeScript 7.0.2, every setting: `readonly [head?: string, ...tail:
+    // number[]] extends readonly [...infer R] ? R : never` is `[head?:
+    // string, ...tail: number[]]`).
+    let captured = graph.intern_node(SemanticNodeData::Tuple {
+        elements: match graph.node_data(concrete).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+            _ => unreachable!("a tuple"),
+        },
+        readonly: false,
+    });
     assert_eq!(
         reverse_test_conditional(&dispatch, concrete, pattern, infer, never),
-        concrete,
-        "covariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "covariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 
     let signature = |param_ty| {
@@ -2123,8 +2135,8 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             infer,
             never,
         ),
-        concrete,
-        "contravariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "contravariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 }
 
@@ -29734,27 +29746,23 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     );
 }
 
-#[test]
-fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
-    // GROWING-GENERIC discriminator. A recursive generic whose every
-    // instantiation mints a FRESH node id (`type Grow<T> = Grow<[T]>` — each step
-    // wraps the arg in a new tuple, so `Grow<string>` → `Grow<[string]>` →
-    // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
-    // can NEVER match) DEFEATS visited-ID cycle detection. Under a ledger too
-    // small for the checker's tail run the regrowth is bounded by the
-    // connected-demand work budget (`PROJECTION_WORK_LIMIT`) — NOT the
-    // `visited`-ID guard (`SAME_PATH_RECURSION`), which would only fire if the
-    // growth had FOLDED — and types `Partial`, never a fabricated concrete
-    // type, never a hang. The demand runs inside an enclosing taint frame, so
-    // the operational truncation ALSO refuses warm admission
-    // (`result_is_partial` + `cache_suppress`). Under the production ledger,
-    // sized above the checker's limits, the checker's tail limit is reached
-    // first and `Grow<string>` is the checker's recovery.
+/// `Grow<string>` over `source`'s `Grow`, demanded at `Navigate` under a
+/// connected-work budget of `work` (the production caps when `None`)
+/// inside an enclosing taint frame: the demand's outcome, the frame's
+/// partial and suppression rails, and the node its instantiation answers.
+fn grow_string_demand(
+    source: &str,
+    work: Option<usize>,
+) -> (
+    StructuralFactDemandOutcome,
+    bool,
+    bool,
+    Option<SemanticNodeData>,
+) {
     let host = host();
-    upsert_ts(&host, "/grow.ts", "export type Grow<T> = Grow<[T]>;\n");
+    upsert_ts(&host, "/grow.ts", source);
     let dispatch = ProjectSemanticDispatch::new(&host);
     let navigate = ProjectionReductionContext::published(ProjectionMode::Navigate);
-
     let string_ref = verter_type_expr::TypeExpr::Ref {
         name: Arc::from("string"),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -29766,48 +29774,116 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     let carrier = dispatch
         .lower_type_expr_in_scope_with_context("/grow.ts", &grow_ref, navigate)
         .expect("Grow<string> lowers to a carrier");
-    // Precondition: the raw node is genuinely an uninstantiated
-    // `InstantiationRef` carrier (the growth happens at instantiation, not in
-    // the raw node) — so the demand exercises the growing-instantiation path.
-    assert!(
-        matches!(
-            host.project_type_store()
-                .semantic_graph()
-                .node_data(carrier)
-                .as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    // Precondition: the raw node is an uninstantiated `InstantiationRef`
+    // carrier, so the demand exercises the instantiation path.
+    let (base, args) = match graph.node_data(carrier).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
+    };
+    let (work, depth) = match work {
+        Some(work) => (work, super::connected_demand::MAX_CONNECTED_QUERY_DEPTH),
+        None => (
+            super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+            super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
         ),
-        "FIXTURE INVALID: Grow<string> must lower to an InstantiationRef carrier, got {:?}",
-        host.project_type_store()
-            .semantic_graph()
-            .node_data(carrier)
-            .as_deref()
-    );
-
-    // THE LEDGER BOUNDS THE GROWTH. Each tail step mints a fresh
-    // `Grow<[…]>` node id, which the demand loop's `visited`-ID cycle
-    // detection never matches, so under a ledger too small for the checker's
-    // tail run only the connected work budget stops it.
+    };
     let guard =
         crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
-    dispatch.set_connected_limits_for_tests(256, 24);
+    dispatch.set_connected_limits_for_tests(work, depth);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
     let frame = guard.finish();
+    let slot = dispatch.type_slot_for(
+        Arc::clone(&base.canonical_id),
+        base.owner,
+        Arc::clone(&base.decl_name),
+    );
+    let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
+    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot, args, context),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
+            graph.node_data(value).as_deref().cloned()
+        }
+        _ => None,
+    };
+    (
+        outcome,
+        frame.result_is_partial,
+        frame.cache_suppress,
+        instantiated,
+    )
+}
 
+#[test]
+fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
+    // `type Grow<T> = Grow<[T]>` applies itself with no conditional type
+    // deciding: its declared type requires itself. That is the checker's
+    // TS2456 — a checker ERROR, not a resource limit — so `Grow<string>` is
+    // its recovery (`any`) under a starved ledger and the production ledger
+    // alike, complete, never a budget partial.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): TS2456 "Type
+    // alias 'Grow' circularly references itself.", and `Grow<string>` is
+    // `any`.
+    let is_ts2456 = |data: &Option<SemanticNodeData>| {
+        matches!(
+            data,
+            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            })) if diagnostic.code == crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
+        )
+    };
+    for work in [Some(256), None] {
+        let (outcome, partial, suppressed, instantiated) =
+            grow_string_demand("export type Grow<T> = Grow<[T]>;\n", work);
+        assert!(
+            matches!(outcome, StructuralFactDemandOutcome::Complete(_)),
+            "a circular alias is a checker error, never a budget partial (work {work:?})"
+        );
+        assert!(
+            !partial && !suppressed,
+            "the checker's TS2456 does not taint the enclosing build (work {work:?})"
+        );
+        assert!(
+            is_ts2456(&instantiated),
+            "Grow<string> is the checker's TS2456 recovery (work {work:?}), got {instantiated:?}"
+        );
+    }
+}
+
+#[test]
+fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
+    // GROWING-GENERIC discriminator. A conditional generic whose every
+    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
+    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
+    // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
+    // visited-ID cycle detection. Under a ledger too small for its tail run
+    // the regrowth is bounded by the connected-demand work budget
+    // (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
+    // (`SAME_PATH_RECURSION`), which would only fire if the growth had
+    // FOLDED — and types `Partial`, never a fabricated concrete type, never
+    // a hang. The demand runs inside an enclosing taint frame, so the
+    // operational truncation ALSO refuses warm admission (`result_is_partial`
+    // + `cache_suppress`). Under a ledger with room, the run reaches its tail
+    // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
+    // tail budget than production's stands in on the same path.
+    //
+    // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
+    // is `any` under TS2589.
+    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => reasons,
         StructuralFactDemandOutcome::Complete(node) => panic!(
-            "a fresh-node growing generic MUST type Partial (bounded by the fuse / recursion \
-             guard), got Complete({:?})",
-            dispatch.graph().node_data(node).as_deref()
+            "a fresh-node growing generic MUST type Partial under a starved ledger, got \
+             Complete({node:?})"
         ),
     };
-    // The fresh-node regrowth is bounded by the connected-demand work budget
-    // (`PROJECTION_WORK_LIMIT`), NOT by the `visited`-ID cycle guard: the
-    // ids never repeat (proven distinct above), so `SAME_PATH_RECURSION` must
-    // NOT be the reason — its presence would mean visited-ID CAUGHT the loop, the
-    // OPPOSITE of the fresh-node-growth class this test characterises.
     assert!(
         reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
         "the growing-generic truncation MUST be bounded by PROJECTION_WORK_LIMIT — \
@@ -29816,61 +29892,29 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     assert!(
         !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
         "fresh-node growth defeats the visited-ID guard, so the reason MUST NOT be \
-         SAME_PATH_RECURSION (that would mean visited-ID caught it — not fresh-node growth), \
-         got {reasons:?}"
+         SAME_PATH_RECURSION, got {reasons:?}"
     );
     assert!(
-        frame.result_is_partial && frame.cache_suppress,
+        partial && suppressed,
         "the build-enclosed growing-generic partial MUST refuse warm admission \
          (result_is_partial + cache_suppress on the frame)"
     );
 
-    // THE CHECKER'S FACT UNDER THE PRODUCTION LEDGER. Instantiated there,
-    // `Grow<string>` applies itself once per tail step until the checker's
-    // tail limit, and is the checker's recovery, which reads as `any`.
-    // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
-    // is `any` (the checker reports the alias circular, TS2456).
-    dispatch.set_connected_limits_for_tests(
-        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
-        super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
-    );
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let (base0, args0) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
-        other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
-    };
-    let slot0 = dispatch.type_slot_for(
-        Arc::clone(&base0.canonical_id),
-        base0.owner,
-        Arc::clone(&base0.decl_name),
-    );
-    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
-    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
-    )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-        other => panic!("Grow<string> must instantiate to the checker's answer, got {other:?}"),
-    };
+    let _budget = super::connected_demand::TailBudgetForTests::install(200);
+    let (_, _, _, instantiated) = grow_string_demand(GROW, None);
     assert!(
         matches!(
-            graph.node_data(instantiated).as_deref(),
+            &instantiated,
             Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
                 diagnostic,
                 ..
-            })) if diagnostic.recovery() == Some(PrimitiveKind::Any)
+            })) if diagnostic.code
+                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                && diagnostic.recovery() == Some(PrimitiveKind::Any)
         ),
-        "Grow<string> is the checker's recovery, read as `any`, got {:?}",
-        graph.node_data(instantiated).as_deref()
+        "Grow<string> reaches the tail budget as the checker's TS2589 recovery, got \
+         {instantiated:?}"
     );
-
-    // SCOPE (honest): this characterises fresh-node growth at the DEMAND-PRIMITIVE
-    // layer (`normalize_node_for_structural_fact_demand`'s Instantiate loop),
-    // where the pure-recursion `Grow<T> = Grow<[T]>` grows through the top-level
-    // carrier. The union-base variant `Grow<T> = T | Grow<[T]>` terminates the
-    // demand's top-level carrier at the `Union` (Complete), so it does NOT
-    // exercise growth HERE. The CRASH-SCALE `Grow<T> = T | Grow<[[[[T]]]]>`
-    // fresh-node-growth proof over the Instantiate / projection publication path
-    // is owned by the deep-recursion crash-regression suite, not this unit test.
 }
 
 #[test]

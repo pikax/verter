@@ -305,7 +305,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
-        match self.plan_carrier_finish(continuation, type_args) {
+        // Outside a projection run the reference's position is not known:
+        // it keeps the declaration-level back-edge.
+        match self.plan_carrier_finish(continuation, type_args, &|| true) {
             CarrierFinish::Node(node) => node,
             CarrierFinish::Instantiate(key) => self.instantiated_node(key),
         }
@@ -313,10 +315,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// How a resolved head finishes over its lowered arguments: a carrier or
     /// reduced node, or the instantiation whose node it is.
+    /// `in_deferred_position` answers whether the reference sits where the
+    /// checker defers instantiating it; it is asked only for an application
+    /// of a declaration an enclosing build is materialising.
     pub(super) fn plan_carrier_finish(
         &self,
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
+        in_deferred_position: &dyn Fn() -> bool,
     ) -> CarrierFinish {
         match continuation {
             CarrierArgsContinuation::Intern { head, name, scope } => {
@@ -387,17 +393,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ))
             }
             CarrierArgsContinuation::Instantiate { identity, context } => {
-                // The same back-edge rule as a 0-arg head: an application of
-                // a declaration an enclosing `build_instantiate` frame is
-                // still materialising is its recursive reference, recording
-                // the instantiation it stands for (`G<[T]>` inside the body
-                // of `G<string>` is the back-edge to `G<[string]>`), never an
-                // eager re-entry of the declaration being built.
+                // An application of a declaration an enclosing
+                // `build_instantiate` frame is still materialising, in a
+                // position the checker defers, is its recursive reference,
+                // recording the instantiation it stands for (`G<[T]>` in a
+                // member of `G<string>`'s body is the back-edge to
+                // `G<[string]>`). In a position the checker instantiates
+                // eagerly it is instantiated: over the same arguments the
+                // memo's same-path claim answers it, over others it is the
+                // next instantiation, bounded by the instantiation budget.
                 if self.is_instantiate_active(
                     identity.canonical_id.as_ref(),
                     identity.owner,
                     identity.decl_name.as_ref(),
-                ) {
+                ) && in_deferred_position()
+                {
                     return CarrierFinish::Node(self.recursive_ref_sentinel(&identity, type_args));
                 }
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(

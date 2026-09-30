@@ -6519,28 +6519,43 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
     )
 }
 
-/// The lib conditional's TAIL runs stop where the checker's do.
+/// The lib conditional's TAIL runs go on past the checker's limit to their
+/// value, and stop with the checker's TS2589 at Verter's tail budget —
+/// counted as the checker counts, a run entered through a callback union
+/// starting with one step counted. A far lower budget than production's
+/// stands in for it on the same path, so the chains stay short.
 ///
 /// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
 /// chains of distinct thenables: 999 tail steps are `number` and 1000 are
-/// `any` under TS2589 at the `Awaited` reference. A run entered through a
-/// callback union starts with one step counted: one nested step then 998
-/// tail steps are `number`, then 999 are `any` under TS2589.
+/// `any` under TS2589 at the `Awaited` reference, where Verter's full
+/// answer is `number`. A run entered through a callback union starts with
+/// one step counted: one nested step then 998 tail steps are `number`, then
+/// 999 are `any` under TS2589, where Verter's full answer is `number`.
 #[test]
-fn lib_awaited_tail_runs_stop_at_the_checker_limit() {
+fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+    const BUDGET: usize = 120;
     let tails = |count: usize| "t".repeat(count);
+    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+    assert_eq!(lib_awaited_probe(&thenable_chain(&tails(1000))), number());
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&tails(999))),
-        SemanticNodeData::Primitive(PrimitiveKind::Number)
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(999)))),
+        number()
     );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(1000)))));
+    let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(998)))),
-        SemanticNodeData::Primitive(PrimitiveKind::Number)
+        lib_awaited_probe(&thenable_chain(&tails(BUDGET - 1))),
+        number()
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(
+        BUDGET
+    )))));
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(BUDGET - 2)))),
+        number()
     );
     assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
         "n{}",
-        tails(999)
+        tails(BUDGET - 1)
     )))));
 }
 

@@ -1,14 +1,16 @@
 //! A conditional alias whose selected branch applies the alias again runs
 //! as the checker's tail loop (`getConditionalType`): each step is the
 //! alias over the next arguments, evaluated in place rather than as a
-//! nested instantiation, and a run fails with TS2589 at the checker's tail
-//! limit of 1,000 steps. An application with arguments of its own (`A8<Eat<I>>`)
+//! nested instantiation. The checker fails a run with TS2589 at its tail
+//! limit of 1,000 steps; Verter runs on to the answer and reports the same
+//! TS2589 only at its own, far larger tail budget. An application with
+//! arguments of its own (`A8<Eat<I>>`)
 //! evaluates them before the step; arguments that come round again can never
 //! reach a value, a certified divergence: TS2589 at once, a complete answer.
 //! The TS2589 recovery is the checker's error type: it relates as `any`
 //! does (assignable to everything but `never`) and, as a conditional's
-//! check or extends type, is the conditional's answer. At the tail limit
-//! it is a resource partial, never kept.
+//! check or extends type, is the conditional's answer. At Verter's tail
+//! budget it is a resource partial, never kept.
 //!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on [`FIXTURE`], each probe read off a
@@ -77,15 +79,31 @@ fn a_tail_recursive_conditional_runs_to_its_value() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A tail run fails at the checker's 1,000th step: `Rep<999>` builds its
-/// 999 elements and `Rep<1000>` is the TS2589 recovery.
+/// A tail run goes on past the checker's 1,000th step to its answer, and
+/// fails with the checker's TS2589 only at Verter's own tail budget. Three
+/// points on one alias: the checker's limit, where Verter answers; just
+/// inside Verter's budget, where it still answers; and at the budget's
+/// step, the checker's TS2589. A lower budget than production's stands in
+/// for it on the same path, so the run stays quick.
 ///
-/// Measured: `Len<Rep<999>>` is `999`; `Rep<1000>` is `any` under TS2589.
+/// Measured: `Len<Rep<999>>` is `999`; `Rep<1000>` is `any` under TS2589,
+/// the checker's limit, where Verter's full answer has 1,000 elements.
 #[test]
-fn a_tail_run_fails_with_ts2589_at_the_checker_step() {
-    let failures = mismatches(FIXTURE, &[("Len<Rep<999>>", "999")]);
+fn a_tail_run_answers_past_the_checker_step_and_fails_at_verters_budget() {
+    const BUDGET: u32 = 1_100;
+    let failures = mismatches(
+        FIXTURE,
+        &[("Len<Rep<999>>", "999"), ("Len<Rep<1000>>", "1000")],
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_ts2589(FIXTURE, "Rep<1000>", RecoveryBasis::Budget);
+    let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET);
+    let inside = BUDGET - 1;
+    let failures = mismatches(
+        FIXTURE,
+        &[(&format!("Len<Rep<{inside}>>"), &inside.to_string())],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_ts2589(FIXTURE, &format!("Rep<{BUDGET}>"), RecoveryBasis::Budget);
 }
 
 /// A run whose arguments come round again is in a state it already left,
@@ -95,11 +113,13 @@ fn a_tail_run_fails_with_ts2589_at_the_checker_step() {
 ///
 /// Measured (all four settings agree): `Same<0>`, `Pair<0, 0>` for `type
 /// Pair<A, B> = A extends 0 ? Pair<B, A> : 1`, and `Loop<0>` are `any`
-/// under TS2589 (`Loop`'s arguments grow, and it reaches the tail limit);
-/// `Same<1>` is `1`.
+/// under TS2589 (`Loop`'s arguments grow, and it reaches the tail limit —
+/// Verter's tail budget here, a lower one than production's standing in on
+/// the same path); `Same<1>` is `1`.
 #[test]
 fn a_run_that_cannot_reach_a_value_is_ts2589() {
     assert_ts2589(FIXTURE, "Same<0>", RecoveryBasis::Certified);
+    let _budget = super::connected_demand::TailBudgetForTests::install(1_100);
     assert_ts2589(FIXTURE, "Loop<0>", RecoveryBasis::Budget);
 }
 
@@ -226,3 +246,67 @@ fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
         RecoveryBasis::Budget => with_recovered_probe(source, probe, check),
     }
 }
+
+/// The lib `Awaited<T>` conditional's tail run goes on past the checker's
+/// 1,000th step to its answer.
+///
+/// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
+/// settings, over [`THENABLES`]: `Awaited<P<999>>` is `"done"` and
+/// `Awaited<P<1000>>` is `any` under TS2589, the checker's limit, where
+/// Verter's full answer is `"done"`.
+#[test]
+fn an_awaited_tail_run_answers_past_the_checker_step() {
+    let failures = mismatches(
+        THENABLES,
+        &[
+            ("Awaited<P<999>>", r#""done""#),
+            ("Awaited<P<1000>>", r#""done""#),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The lib `Awaited<T>` conditional's tail run takes Verter's tail budget:
+/// just inside it the run answers, and at the budget's step it is the
+/// checker's TS2589. A far lower budget than production's stands in for it
+/// on the same path, so the runs stay quick.
+///
+/// TypeScript 7.0.2, over [`THENABLES`]: `Awaited<P<K>>` is `"done"` for
+/// every `K` below the checker's limit of 1,000.
+#[test]
+fn an_awaited_tail_run_fails_at_verters_budget() {
+    const BUDGET: u32 = 200;
+    let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET);
+    let inside = BUDGET - 1;
+    let failures = mismatches(
+        THENABLES,
+        &[(&format!("Awaited<P<{inside}>>"), r#""done""#)],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    with_recovered_probe(
+        THENABLES,
+        &format!("Awaited<P<{BUDGET}>>"),
+        |dispatch, node| {
+            let data = dispatch.graph().node_data(node);
+            assert!(
+                matches!(
+                    data.as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                        diagnostic,
+                        basis: RecoveryBasis::Budget,
+                        ..
+                    }))
+                        if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                            && diagnostic.operation == CheckerDiagnosticOperation::LibAwaited
+                ),
+                "`Awaited<P<{BUDGET}>>` must be the TS2589 recovery, measured {data:?}"
+            );
+        },
+    );
+}
+
+/// A thenable whose `then` hands on the next one, `K` of them before
+/// `"done"`: `Awaited` over it runs one tail step per thenable.
+const THENABLES: &str = r#"
+type P<K extends number, N extends unknown[] = []> = N["length"] extends K ? "done" : { then(f: (v: P<K, [...N, 0]>) => any): any };
+"#;

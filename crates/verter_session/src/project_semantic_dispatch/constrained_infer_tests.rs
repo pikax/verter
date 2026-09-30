@@ -81,3 +81,43 @@ export function d2<T>() { return null! as (T extends `${infer N extends number}p
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// An `infer` that declares no constraint takes the one its position
+/// implies (`getInferredTypeParameterConstraint`): a reference's type
+/// argument the constraint of the reference's type parameter (`{ v: 1 }`
+/// against `B<infer U>` over `type B<X extends string>` fixes `string` and
+/// fails; an uninferred one is `string`), a rest element or rest parameter
+/// `unknown[]` (a rest capture is a mutable slice, which it accepts), a
+/// template literal hole `string`.
+#[test]
+fn an_infer_takes_the_constraint_its_position_implies() {
+    let source = r##"
+type B<X extends string> = { v: X };
+interface IB<X extends string> { v: X }
+"##;
+    let failures = Matrix::new(source).settings(&ALL).types(&[
+        ("{ v: 1 } extends B<infer U> ? U : 0", "0"),
+        (r#"B<"a"> extends B<infer U> ? U : 0"#, r#""a""#),
+        (r#"{ v: "a" } extends B<infer U> ? U : 0"#, r#""a""#),
+        ("{} extends { v?: B<infer U> } ? U : 0", "string"),
+        (r#"IB<"a"> extends IB<infer U> ? U : 0"#, r#""a""#),
+        ("[] extends [B<infer U>?] ? U : 0", "string"),
+        (
+            "{} extends { f?: (...a: infer R) => void } ? R : 0",
+            "unknown[]",
+        ),
+        ("{} extends { t?: `${infer S}` } ? S : 0", "string"),
+        ("{} extends { r?: [1, ...infer T] } ? T : 0", "unknown[]"),
+        // A rest capture is a mutable slice, so a readonly source passes
+        // the implied `unknown[]`.
+        (
+            "readonly [1, 2] extends readonly [1, ...infer R] ? R : never",
+            "[2]",
+        ),
+        (
+            "((...a: readonly [1]) => void) extends (...a: infer R) => void ? R : never",
+            "[1]",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

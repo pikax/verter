@@ -44,6 +44,7 @@ impl CheckerDiagnostic {
     pub const fn recovery(self) -> Option<PrimitiveKind> {
         match self.code {
             CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+            | CheckerDiagnosticCode::CircularTypeAlias
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
             | CheckerDiagnosticCode::TupleTooLarge => Some(PrimitiveKind::Any),
@@ -65,6 +66,12 @@ pub enum CheckerDiagnosticCode {
     /// evaluating, whose instantiation never terminates — or nested past
     /// Verter's own instantiation budget.
     ExcessivelyDeepInstantiation,
+    /// TS2456: a type alias whose declared type requires itself — its body
+    /// applies the alias, directly or through other aliases, where the
+    /// checker instantiates eagerly rather than deferring
+    /// ([`checker_policy::circular_type_alias`](super::checker_policy::circular_type_alias)).
+    /// A checker error, not a resource limit: the alias is `any`.
+    CircularTypeAlias,
     /// TS2590: a cross product over unions has at least the checker's
     /// product limit of constituents, checked before one is built
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
@@ -108,7 +115,8 @@ impl CheckerDiagnosticCode {
             | Self::UnionTooComplex
             | Self::TupleTooLarge
             | Self::RelationTooComplex => true,
-            Self::RecursiveFulfillmentCallback
+            Self::CircularTypeAlias
+            | Self::RecursiveFulfillmentCallback
             | Self::ArgumentNotAssignable
             | Self::ArgumentCount
             | Self::ArgumentCountAtLeast => false,
@@ -120,6 +128,7 @@ impl CheckerDiagnosticCode {
     pub const fn code(self) -> u32 {
         match self {
             Self::ExcessivelyDeepInstantiation => 2589,
+            Self::CircularTypeAlias => 2456,
             Self::UnionTooComplex => 2590,
             Self::TupleTooLarge => 2799,
             Self::RelationTooComplex => 2859,
@@ -137,6 +146,7 @@ impl CheckerDiagnosticCode {
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }
+            Self::CircularTypeAlias => "Type alias '{0}' circularly references itself.",
             Self::UnionTooComplex => {
                 "Expression produces a union type that is too complex to represent."
             }
@@ -187,6 +197,9 @@ pub enum CheckerDiagnosticOperation {
     /// An instantiation nested past Verter's own instantiation budget,
     /// which lies far past the checker's depth limit.
     InstantiationBudget,
+    /// A type alias's declared type (`getDeclaredTypeOfTypeAlias`), whose
+    /// body requires the alias itself.
+    TypeAliasDeclaration,
 }
 
 /// Why a checker recovery is the answer: what the recovery proves.

@@ -2340,3 +2340,250 @@ fn twelve_sibling_world_writes_in_flight_never_refuse_a_route() {
     );
     assert_eq!(restarts, 0, "in-flight compatible writes cost no restart");
 }
+
+// ── A checkout landing inside one resolution attempt ──
+
+/// Where a checkout lands inside the demanded resolution's attempt.
+#[derive(Clone, Copy, Debug)]
+enum CheckoutPoint {
+    /// Between two input rounds: the attempt read some inputs before the
+    /// checkout and reads the rest after it.
+    BetweenInputRounds,
+    /// After every read, before the admission check.
+    BeforeAdmission,
+}
+
+/// A fresh workspace holding `files`, in which `importer`'s `specifier`
+/// resolves with no concurrent writer: the single-world answer.
+fn single_world_answer(
+    files: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+) -> Option<String> {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    for (path, source) in files {
+        ws.inject_file((*path).to_string(), Arc::from(*source));
+    }
+    ws.resolve_import(importer, specifier, context)
+        .map(|result| result.source_id)
+}
+
+/// Resolve `importer`'s `specifier` in a workspace holding `before`, with
+/// `checkout` applied by another thread at `point` of the first attempt;
+/// returns the outcome and whether the checkout landed where asked.
+fn resolve_across_checkout(
+    before: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+    checkout: Vec<WorkspaceChange>,
+    point: CheckoutPoint,
+) -> (crate::resolution_currency::ResolutionOutcome, bool) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    for (path, source) in before {
+        ws.inject_file((*path).to_string(), Arc::from(*source));
+    }
+    let hook_ws = Arc::clone(&ws);
+    let landed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_landed = Arc::clone(&landed);
+    let mut checkout = Some(checkout);
+    let mut rounds = 0usize;
+    let outcome = resolution_test_hooks::with_every_phase_hook(
+        move |phase| {
+            let due = match (point, phase) {
+                (CheckoutPoint::BetweenInputRounds, ResolutionPhase::DriverRound) => {
+                    rounds += 1;
+                    rounds == 2
+                }
+                (CheckoutPoint::BeforeAdmission, ResolutionPhase::PreAdmissionValidation) => true,
+                _ => false,
+            };
+            if !due {
+                return;
+            }
+            let Some(changes) = checkout.take() else {
+                return;
+            };
+            let ws = Arc::clone(&hook_ws);
+            std::thread::spawn(move || {
+                ws.apply_changes(changes);
+            })
+            .join()
+            .expect("the checkout applies");
+            hook_landed.store(true, std::sync::atomic::Ordering::Release);
+        },
+        || ws.resolve_import_outcome(importer, specifier, context),
+    );
+    (outcome, landed.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// The attempt's outcome after a checkout it straddled: never an answer from
+/// the world before it, and never a mix of the two. A cacheable answer is
+/// the single-world answer of the world AFTER the checkout (the attempt was
+/// restarted into it, or its reads still hold there).
+fn assert_checkout_never_admits_a_torn_answer(
+    before: &[(&str, &str)],
+    after: &[(&str, &str)],
+    importer: &str,
+    specifier: &str,
+    context: ResolutionContext,
+    checkout: Vec<WorkspaceChange>,
+    point: CheckoutPoint,
+) {
+    let old = single_world_answer(before, importer, specifier, context);
+    let new = single_world_answer(after, importer, specifier, context);
+    assert_ne!(
+        old, new,
+        "precondition: the checkout must change the single-world answer"
+    );
+    let (outcome, landed) =
+        resolve_across_checkout(before, importer, specifier, context, checkout, point);
+    assert!(landed, "precondition: the checkout must land at {point:?}");
+    let answer = outcome.result().map(|result| result.source_id.clone());
+    assert!(
+        outcome.is_cacheable(),
+        "a checkout is a real edit: the attempt restarts into the new world \
+         and is admitted there, {point:?}: {:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(
+        answer, new,
+        "the admitted answer belongs wholly to the world after the checkout \
+         (before: {old:?}), {point:?}"
+    );
+}
+
+const CHECKOUT_TYPE_IMPORT: ResolutionContext = ResolutionContext {
+    phase: ResolvePhase::CodegenBlocker,
+    kind: ResolveRequestKind::TypeImport,
+};
+
+const CHECKOUT_ESM_IMPORT: ResolutionContext = ResolutionContext {
+    phase: ResolvePhase::CodegenBlocker,
+    kind: ResolveRequestKind::EsmImport,
+};
+
+/// The files before a checkout, the files after it, and the checkout.
+type Checkout<const FILES: usize> = (
+    [(&'static str, &'static str); FILES],
+    [(&'static str, &'static str); FILES],
+    Vec<WorkspaceChange>,
+);
+
+/// A checkout swapping `mod.ts` for `mod.tsx`: two inputs the attempt probes
+/// (the two candidate extensions), both changed.
+fn module_swap() -> Checkout<2> {
+    (
+        [
+            ("d:/p/src/main.ts", "import { a } from './mod'\n"),
+            ("d:/p/src/mod.ts", "export const a = 1\n"),
+        ],
+        [
+            ("d:/p/src/main.ts", "import { a } from './mod'\n"),
+            ("d:/p/src/mod.tsx", "export const a = 2\n"),
+        ],
+        vec![
+            WorkspaceChange::FileDeleted {
+                canonical_id: "d:/p/src/mod.ts".to_string(),
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/src/mod.tsx".to_string(),
+                source: Some(Arc::from("export const a = 2\n")),
+            },
+        ],
+    )
+}
+
+/// A checkout on a package: the manifest the attempt read points elsewhere
+/// and its old target disappears.
+fn package_checkout() -> Checkout<3> {
+    (
+        [
+            ("d:/p/src/main.ts", "import { a } from 'pkg'\n"),
+            (
+                "d:/p/node_modules/pkg/package.json",
+                r#"{"module":"dist/old.js"}"#,
+            ),
+            ("d:/p/node_modules/pkg/dist/old.js", "export const a = 1;"),
+        ],
+        [
+            ("d:/p/src/main.ts", "import { a } from 'pkg'\n"),
+            (
+                "d:/p/node_modules/pkg/package.json",
+                r#"{"module":"dist/new.js"}"#,
+            ),
+            ("d:/p/node_modules/pkg/dist/new.js", "export const a = 2;"),
+        ],
+        vec![
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/node_modules/pkg/package.json".to_string(),
+                source: Some(Arc::from(r#"{"module":"dist/new.js"}"#)),
+            },
+            WorkspaceChange::FileDeleted {
+                canonical_id: "d:/p/node_modules/pkg/dist/old.js".to_string(),
+            },
+            WorkspaceChange::FileChanged {
+                canonical_id: "d:/p/node_modules/pkg/dist/new.js".to_string(),
+                source: Some(Arc::from("export const a = 2;")),
+            },
+        ],
+    )
+}
+
+#[test]
+fn a_module_swap_before_admission_never_admits_a_torn_answer() {
+    let (before, after, checkout) = module_swap();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "./mod",
+        CHECKOUT_TYPE_IMPORT,
+        checkout,
+        CheckoutPoint::BeforeAdmission,
+    );
+}
+
+#[test]
+fn a_module_swap_between_input_rounds_never_admits_a_torn_answer() {
+    let (before, after, checkout) = module_swap();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "./mod",
+        CHECKOUT_TYPE_IMPORT,
+        checkout,
+        CheckoutPoint::BetweenInputRounds,
+    );
+}
+
+#[test]
+fn a_package_checkout_before_admission_never_admits_a_torn_answer() {
+    let (before, after, checkout) = package_checkout();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "pkg",
+        CHECKOUT_ESM_IMPORT,
+        checkout,
+        CheckoutPoint::BeforeAdmission,
+    );
+}
+
+#[test]
+fn a_package_checkout_between_input_rounds_never_admits_a_torn_answer() {
+    let (before, after, checkout) = package_checkout();
+    assert_checkout_never_admits_a_torn_answer(
+        &before,
+        &after,
+        "d:/p/src/main.ts",
+        "pkg",
+        CHECKOUT_ESM_IMPORT,
+        checkout,
+        CheckoutPoint::BetweenInputRounds,
+    );
+}

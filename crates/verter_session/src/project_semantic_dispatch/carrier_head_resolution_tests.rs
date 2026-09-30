@@ -799,11 +799,14 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
 
             // Push the `(canonical, name)` identity active to simulate being
             // INSIDE `build_instantiate`'s push/pop window for `Tree`.
-            let pushed = dispatch.push_instantiate_active((
-                Arc::from("/tree.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Tree"),
-            ));
+            let pushed = dispatch.push_instantiate_active(
+                (
+                    Arc::from("/tree.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Tree"),
+                ),
+                Arc::from([]),
+            );
             assert!(pushed, "the identity must not already be active");
 
             let carrier = bare_ref_carrier(&dispatch, "Tree", scope, &[]);
@@ -832,6 +835,56 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
     handle
         .join()
         .expect("the recursive-head resolution must terminate bounded (no stack overflow)");
+}
+
+// ── B7b. Generic recursion back-edge where the position is unknown ─────────
+//
+// A generic application of a declaration an enclosing build is still
+// materialising, resolved where no projection run tells its position, keeps
+// the declaration-level back-edge over its own arguments: only a projection
+// that knows the position is eager instantiates it.
+#[test]
+fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_is_unknown() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let host = host();
+            upsert_ts(&host, "/grow.ts", "export type G<T> = { v: T };\n");
+            let dispatch = ProjectSemanticDispatch::new(&host);
+            let scope = file_scope(&dispatch, "/grow.ts");
+            let string = dispatch.graph().intern_node_with_scope(
+                SemanticNodeData::Primitive(PrimitiveKind::String),
+                scope.clone(),
+            );
+            let pushed = dispatch.push_instantiate_active(
+                (
+                    Arc::from("/grow.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("G"),
+                ),
+                Arc::from(vec![string].into_boxed_slice()),
+            );
+            assert!(pushed, "the instantiation must not already be active");
+            let carrier = bare_ref_carrier(&dispatch, "G", scope, &[PrimitiveKind::Number]);
+            let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
+            dispatch.pop_instantiate_active();
+            match dispatch.graph().node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::RecursiveRef { name, args },
+                )) => {
+                    assert_eq!(name.as_ref(), "G");
+                    assert_eq!(args.len(), 1, "the back-edge records its own arguments");
+                }
+                other => panic!(
+                    "an application of an active generic declaration must stay its \
+                     back-edge where its position is unknown, got {other:?}"
+                ),
+            }
+        })
+        .expect("spawn worker thread");
+    handle
+        .join()
+        .expect("the generic back-edge resolution must terminate");
 }
 
 // ── B8. Nested carrier (Intersection arm) — re-entry, not top-level only ────
