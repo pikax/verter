@@ -318,6 +318,10 @@ mod inner {
         /// announcements carry a real child pid; tests of the announcement
         /// wire policy distinguish engines by it.
         child_pid: Option<u32>,
+        /// Test seam: the pulse `provider_restart_pulse` reports. `None` (the
+        /// default) keeps the trait default — no engine-start pulse — so only
+        /// tests that drive the pending-sync re-drive wiring opt in.
+        restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -561,6 +565,13 @@ mod inner {
         /// directions.
         pub fn set_provider_id(&self, provider_id: &'static str) {
             self.state.lock().unwrap().provider_id = Some(provider_id);
+        }
+
+        /// Install the engine-start pulse `provider_restart_pulse` reports, so
+        /// a test can fire (or withhold) the retry signal the pending-sync
+        /// re-drive wiring listens for. `None` restores the trait default.
+        pub fn set_restart_pulse(&self, pulse: Option<std::sync::Arc<tokio::sync::Notify>>) {
+            self.state.lock().unwrap().restart_pulse = pulse;
         }
 
         /// Install a one-shot side effect that fires the FIRST time `open_file` is
@@ -960,6 +971,10 @@ mod inner {
 
         fn child_pid(&self) -> Option<u32> {
             self.state.lock().unwrap().child_pid
+        }
+
+        fn provider_restart_pulse(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+            self.state.lock().unwrap().restart_pulse.clone()
         }
 
         fn supports_completion_resolve(&self) -> bool {

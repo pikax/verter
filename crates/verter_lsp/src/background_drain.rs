@@ -208,6 +208,9 @@ pub(crate) fn arm_pending_sync_redrive_once(
     {
         return;
     }
+    let generation = drain
+        .carrier_transaction_coordinator
+        .pending_redrive_signal_generation();
     if !drain
         .carrier_transaction_coordinator
         .pending_redrive_eligible(&drain.pending_snapshot_provider_sync)
@@ -218,15 +221,29 @@ pub(crate) fn arm_pending_sync_redrive_once(
         drain
             .carrier_transaction_coordinator
             .pending_redrive_disarm();
+        // A retry signal that landed between the eligibility check and the
+        // disarm bumped the generation after it was captured above, and its
+        // own arm stood down on this one's guard — without this re-arm its
+        // cleared budget would be silently dropped and the parked entries
+        // would wait for the next signal.
+        if drain
+            .carrier_transaction_coordinator
+            .pending_redrive_signal_generation()
+            != generation
+        {
+            arm_pending_sync_redrive_once(drain, redrive);
+        }
         return;
     }
     let successor = Arc::clone(drain);
     tokio::spawn(async move {
         let mut attempt = 1u32;
-        // The retry-signal generation as of the pass that just ran: a signal
-        // landing after it (an engine start while this chain was between
-        // passes) must survive the chain's end, so the exhaustion record
-        // yields to it — the cleared budget stands and a fresh chain follows.
+        // The retry-signal generation as of the START of the latest pass. It
+        // is captured immediately BEFORE each pass and never refreshed after
+        // one: a signal landing while a pass runs (an engine start repairing
+        // the inputs the pass is failing on) bumps the generation after this
+        // capture, so the end-of-chain comparison still sees it even though
+        // the pass itself ran on pre-repair inputs.
         let mut pass_generation = successor
             .carrier_transaction_coordinator
             .pending_redrive_signal_generation();
@@ -239,6 +256,9 @@ pub(crate) fn arm_pending_sync_redrive_once(
             if successor.pending_snapshot_provider_sync.is_empty() {
                 break;
             }
+            pass_generation = successor
+                .carrier_transaction_coordinator
+                .pending_redrive_signal_generation();
             drain_pending_snapshot_provider_sync(
                 successor.project_sync.as_ref(),
                 &successor.documents,
@@ -251,9 +271,6 @@ pub(crate) fn arm_pending_sync_redrive_once(
                 &successor.carrier_transaction_coordinator,
             )
             .await;
-            pass_generation = successor
-                .carrier_transaction_coordinator
-                .pending_redrive_signal_generation();
             if attempt + 1 >= redrive.max_attempts {
                 exhausted = !successor.pending_snapshot_provider_sync.is_empty();
                 break;
@@ -263,11 +280,7 @@ pub(crate) fn arm_pending_sync_redrive_once(
             }
             attempt += 1;
         }
-        let signalled_since_pass = successor
-            .carrier_transaction_coordinator
-            .pending_redrive_signal_generation()
-            != pass_generation;
-        if exhausted && !signalled_since_pass {
+        if exhausted {
             let still_queued: Vec<String> = successor
                 .pending_snapshot_provider_sync
                 .iter()
@@ -277,14 +290,23 @@ pub(crate) fn arm_pending_sync_redrive_once(
                 .carrier_transaction_coordinator
                 .pending_redrive_record_exhausted(still_queued);
         }
+        // Release the single-flight guard BEFORE the final signal check: a
+        // retry signal that landed anywhere since this chain's last pass
+        // STARTED — mid-pass, at the attempt cap, or between the exhaustion
+        // record and this disarm — stood down on this chain's guard. Replaying
+        // its clear+arm hands the cleared budget the fresh chain it asked for;
+        // the replay is idempotent for a signal that instead landed after the
+        // disarm, whose own arm then holds the guard and makes the replay's
+        // arm stand down.
         successor
             .carrier_transaction_coordinator
             .pending_redrive_disarm();
-        if signalled_since_pass {
-            // A retry signal landed mid-chain: its own arm found this chain's
-            // guard held and stood down, so the chain hands the baton back —
-            // the signal's cleared budget gets the fresh chain it asked for.
-            arm_pending_sync_redrive_once(&successor, redrive);
+        if successor
+            .carrier_transaction_coordinator
+            .pending_redrive_signal_generation()
+            != pass_generation
+        {
+            signal_pending_sync_redrive(&successor, redrive);
         }
     });
 }

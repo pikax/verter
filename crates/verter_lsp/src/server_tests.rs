@@ -16444,6 +16444,115 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
     );
 }
 
+/// DISCRIMINATING: a retry signal (an engine start repairing the inputs the
+/// pass is failing on) that lands WHILE a chain's final pass runs must survive
+/// the chain's end — the chain yields to it instead of recording its
+/// exhaustion over the budget the signal just cleared. RED-before: the chain
+/// refreshed `pass_generation` AFTER the pass, so the mid-pass signal's
+/// generation bump was folded into the baseline, `signalled_since_pass` read
+/// `false`, the exhaustion record re-parked the entry, and the signal's own
+/// arm had stood down on the chain's guard — the stranded-sync stall behind
+/// the editor-neutral/VS Code E2E diagnostics timeouts.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_sync_redrive_signal_landing_during_a_pass_is_not_swallowed() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_fail_file_ops(true);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    ));
+    let provider_sync_states: DashMap<String, crate::provider_sync::ProviderSyncState> =
+        DashMap::new();
+    let provider_sync_states = Arc::new(provider_sync_states);
+    let pending_snapshot_provider_sync: DashSet<String> = DashSet::new();
+    let pending_snapshot_provider_sync = Arc::new(pending_snapshot_provider_sync);
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    let carrier_transaction_coordinator =
+        Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
+    let drain = Arc::new(PendingSyncDrain {
+        project_sync: Some(sync),
+        documents: Arc::clone(&documents),
+        vfs_workspace: Arc::clone(&vfs_workspace),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+        is_tsgo: false,
+        mru_canonical_ids: None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+    });
+    // Cap the chain at ONE successor pass so the exhaustion decision is the
+    // very pass the signal lands in.
+    let redrive = PendingSyncRedrive {
+        initial_delay_ms: 5,
+        backoff_factor: 1,
+        max_attempts: 2,
+    };
+    drain_pending_snapshot_provider_sync_owned(Arc::clone(&drain), redrive, 1).await;
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "the failed pass must retain the entry (fail closed)"
+    );
+
+    // Hook the engine start onto the successor pass's first provider open:
+    // the mock captures the open's failure BEFORE firing the one-shot
+    // callback, so the signal + recovery land mid-pass while the pass itself
+    // still fails — exactly the replacement-gap interleaving.
+    let open_path = provider
+        .file_sync_calls()
+        .iter()
+        .find_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .expect("the failed pass must have attempted a provider open");
+    {
+        let provider_for_cb = Arc::clone(&provider);
+        let coordinator_for_cb = Arc::clone(&carrier_transaction_coordinator);
+        provider.set_on_open_file(
+            &open_path,
+            Box::new(move || {
+                // The fresh epoch serves: later provider calls succeed.
+                provider_for_cb.set_fail_file_ops(false);
+                // The engine-start retry signal: its own arm stands down on
+                // the running chain's guard, so only the generation bump (the
+                // cleared budget) must carry its intent through the chain's
+                // end.
+                coordinator_for_cb.pending_redrive_clear_exhausted();
+            }),
+        );
+    }
+
+    // No further signal is issued by the test: the chain itself must hand the
+    // mid-pass signal its fresh chain, which settles the recovered entry.
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while pending_snapshot_provider_sync.contains("/workspace/src/App.vue") {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        drained,
+        "a retry signal landing mid-pass must not be swallowed by the chain's exhaustion record"
+    );
+    assert!(
+        provider_sync_states.get("/workspace/src/App.vue").is_some(),
+        "the re-driven sync should commit owner-aware provider state"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
     // Gap (a) — production-path coverage for the background-drain no-owner branch.

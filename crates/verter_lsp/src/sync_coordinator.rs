@@ -789,6 +789,18 @@ fn absorb_inbox(
     }
 }
 
+/// Aborts the wrapped task when the guard drops — used for the restart-pulse
+/// listener, whose owner ([`coordinator_loop`]) must stop it on every return
+/// path (see the listener's setup comment).
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
@@ -869,13 +881,19 @@ async fn coordinator_loop(
     // Without this re-drive, a CI-paced replacement gap longer than the
     // bounded chain strands the parked syncs for the rest of the session and
     // the owed diagnostics never settle. `notify_one` coalesces bursts.
+    // The listener's lifetime is the loop's: the drop guard aborts it on
+    // EVERY return path, so a shut-down coordinator cannot have drain passes
+    // started on it by a later pulse, and the `pending_redrive` context (and
+    // through it the document registry and the sync owners) is not kept alive
+    // past shutdown.
+    let mut _pulse_listener = AbortOnDrop(None);
     if let Some(restart_pulse) = deps
         .type_provider
         .as_ref()
         .and_then(|provider| provider.provider_restart_pulse())
     {
         let drain = Arc::clone(&pending_redrive);
-        tokio::spawn(async move {
+        _pulse_listener.0 = Some(tokio::spawn(async move {
             loop {
                 restart_pulse.notified().await;
                 crate::server::signal_pending_sync_redrive(
@@ -883,7 +901,7 @@ async fn coordinator_loop(
                     crate::server::PENDING_SYNC_REDRIVE,
                 );
             }
-        });
+        }));
     }
 
     loop {
