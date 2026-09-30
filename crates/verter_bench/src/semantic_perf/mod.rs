@@ -298,19 +298,20 @@ impl<'a> Sink<'a> {
     /// Mark the phase about to begin, with its wall-clock start and the
     /// history so far: the evidence for how long the engine had worked when
     /// a deadline expired.
-    fn phase(&self, phase: &str) {
+    fn phase(&self, phase: &str) -> Result<(), JobError> {
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let mut history = self.history.borrow_mut();
         history.push(serde_json::json!({ "phase": phase, "atMs": at_ms }));
-        // A lost marker only loses attribution of a later kill; the record
-        // itself is written separately and checked.
-        let _ = Self::replace(
+        // A marker that cannot be published stops the job before the phase
+        // begins: a stale marker would misattribute a later kill.
+        Self::replace(
             &self.sibling(".phase"),
             &serde_json::json!({ "phase": phase, "atMs": at_ms, "history": *history }).to_string(),
-        );
+        )
+        .map_err(|err| JobError(format!("publish the {phase} phase marker: {err}")))
     }
 
     fn record(&self, result: &JobResult) -> Result<(), JobError> {
@@ -581,30 +582,30 @@ pub fn run_job(
     }
     let mut stats_errors = Vec::new();
 
-    sink.phase("engine-start");
+    sink.phase("engine-start")?;
     let start = Instant::now();
     let (workspace, host) = start_engine(job);
     let engine_start = micros(start);
 
-    sink.phase("setup");
+    sink.phase("setup")?;
     let start = Instant::now();
     let scenario_id = open_project(job, &workspace, &host)?;
     let setup = micros(start);
     drop(workspace);
 
-    sink.phase("init");
+    sink.phase("init")?;
     let (init, _) = request(&host, &scenario_id, &job.init_alias, false);
 
     let mut probes = Vec::with_capacity(job.probes.len());
     let mut nodes = Vec::with_capacity(job.probes.len());
     for alias in &job.probes {
-        sink.phase("cold");
+        sink.phase("cold")?;
         if let Some(hooks) = alloc {
             (hooks.reset)();
         }
         let (cold, node) = request(&host, &scenario_id, alias, job.observability);
         let cold_allocations = alloc.map(|hooks| (hooks.read)());
-        sink.phase("warm");
+        sink.phase("warm")?;
         let mut warm = Vec::with_capacity(job.warm_repeats as usize);
         let mut warm_nodes = Vec::with_capacity(job.warm_repeats as usize);
         for _ in 0..job.warm_repeats {
@@ -623,7 +624,7 @@ pub fn run_job(
         nodes.push((node, warm_nodes));
     }
 
-    sink.phase("stats");
+    sink.phase("stats")?;
     let retention = retention(&host);
     let after_requests = process_stats::current_process()
         .map_err(|err| stats_errors.push(format!("after requests: {err}")))
@@ -651,7 +652,7 @@ pub fn run_job(
     };
     sink.record(&result)?;
 
-    sink.phase("observe");
+    sink.phase("observe")?;
     for (probe, (node, warm_nodes)) in result.probes.iter_mut().zip(&nodes) {
         let start = Instant::now();
         let cold_bytes = wire_bytes(&host, *node);
@@ -671,7 +672,7 @@ pub fn run_job(
         .map_err(|err| result.stats_errors.push(format!("after observe: {err}")))
         .ok();
 
-    sink.phase("teardown");
+    sink.phase("teardown")?;
     let start = Instant::now();
     drop(host);
     result.phases.teardown = Some(micros(start));
@@ -680,6 +681,6 @@ pub fn run_job(
         .ok();
     result.stage = "complete";
     sink.record(&result)?;
-    sink.phase("done");
+    sink.phase("done")?;
     Ok(result)
 }

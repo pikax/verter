@@ -17,13 +17,54 @@ export const RESOURCE_CODES = [2589, 2590, 2799, 2859];
  * `killed` is tsc exhausting the cap or the deadline; `truncated` and
  * `unmeasurable` are failures of the measurement, not of tsc.
  */
+// ---------------------------------------------------------------- termination evidence
+//
+// The one policy by which a supervisor's kill of a process that IS the
+// engine (a Verter probe, a `tsc -p` run) is read as the engine exhausting
+// a resource. Shared by the benchmark arms and the reference measurement.
+
+/** Backends whose memory accounting is the process tree's own (not a Linux cgroup's). */
+export const OWN_ACCOUNTING_BACKENDS = ["windows-job-object", "macos-phys-footprint"];
+
+const num = (x) => typeof x === "number" && Number.isFinite(x);
+
+/**
+ * A memory kill is the engine's when the backend accounts the tree's own
+ * memory and its ACTUAL kill threshold (`killTriggerBytes`, recorded; never
+ * inferred from the configured cap) reached the engine budget.
+ */
+export function memoryKillEvidence(rec, budgetBytes) {
+  return (
+    rec?.killedBy === "memory" &&
+    OWN_ACCOUNTING_BACKENDS.includes(rec.backend) &&
+    ["hard", "sampled"].includes(rec.containment) &&
+    num(rec.killTriggerBytes) &&
+    num(budgetBytes) &&
+    rec.killTriggerBytes >= budgetBytes
+  );
+}
+
+/**
+ * A deadline kill is the engine's when the process itself ran for the whole
+ * deadline: its wall time up to the moment termination began (the wall time
+ * minus the recorded termination latency) is at least the deadline. Only a
+ * process that is the engine from its start qualifies (a whole-program
+ * `tsc -p` run).
+ */
+export function deadlineKillEvidence(rec, timeoutMs) {
+  return (
+    rec?.killedBy === "timeout" &&
+    num(rec.wallMs) &&
+    num(rec.terminationLatencyMs) &&
+    num(timeoutMs) &&
+    rec.wallMs - rec.terminationLatencyMs >= timeoutMs
+  );
+}
+
 /**
  * Whether a measuring run's kill is established as tsc exhausting the
- * resource, by the same rule as a benchmark arm (analyze.mjs killAttributed):
- * `tsc -p` is one process that is the engine; a memory kill counts only
- * when the supervisor's actual threshold reached the measuring budget in an
- * accounting of the process's own memory (not a Linux cgroup's), a deadline
- * only when the process ran for the whole measuring deadline.
+ * resource, by the shared policy against the measuring budget and deadline
+ * its method declares.
  */
 export function measurementKillAttributed(result) {
   const t = result.receipt?.termination;
@@ -34,21 +75,9 @@ export function measurementKillAttributed(result) {
     method = null;
   }
   if (!t || !method || t.killedBy !== result.killed) return false;
-  if (result.killed === "memory") {
-    if (String(t.backend ?? "").startsWith("linux")) return false;
-    const trigger = typeof t.killTriggerBytes === "number" ? t.killTriggerBytes : t.memLimitBytes;
-    return (
-      typeof trigger === "number" &&
-      typeof method.memMb === "number" &&
-      trigger >= method.memMb * 1024 * 1024
-    );
-  }
-  if (result.killed === "timeout")
-    return (
-      typeof t.wallMs === "number" &&
-      typeof method.timeoutMs === "number" &&
-      t.wallMs >= method.timeoutMs
-    );
+  if (result.killed === "memory")
+    return memoryKillEvidence(t, num(method.memMb) ? method.memMb * 1024 * 1024 : null);
+  if (result.killed === "timeout") return deadlineKillEvidence(t, method.timeoutMs);
   return false;
 }
 

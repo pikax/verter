@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalDigest } from "./canonical.mjs";
-import { RESOURCE_CODES } from "./reference.mjs";
+import { deadlineKillEvidence, memoryKillEvidence, RESOURCE_CODES } from "./reference.mjs";
 
 export { RESOURCE_CODES };
 
@@ -85,8 +85,8 @@ export function supervisorDeadlineMs(options = {}) {
 }
 
 /**
- * How long, at least, the engine had worked on the demand when the
- * supervisor killed the invocation: from the start of its first engine phase
+ * For the report only (never attribution): about how long the tool had
+ * run since its first engine phase when the supervisor killed the invocation: from the start of its first engine phase
  * (the marker's wall-clock history) to the kill. The kill came no earlier
  * than the supervisor's spawn plus the child's wall time, so this is a lower
  * bound. Null without the evidence.
@@ -96,53 +96,34 @@ export function engineWorkMs(inv) {
   const first = (inv.phaseHistory ?? []).find((h) => ENGINE_PHASES[tool]?.includes(h.phase));
   const wall = inv.supervisor?.wallMs;
   if (!first || !finite(first.atMs) || !finite(inv.spawnedAtMs) || !finite(wall)) return null;
-  return inv.spawnedAtMs + wall - first.atMs;
+  return inv.spawnedAtMs + wall - (inv.supervisor?.terminationLatencyMs ?? 0) - first.atMs;
 }
 
 /**
  * Whether a kill of an invocation is established as its ENGINE exhausting
- * the resource. `limits` = runLimits(options).
+ * the resource. `limits` = runLimits(options). The evidence rules are the
+ * shared ones of reference.mjs (memoryKillEvidence, deadlineKillEvidence).
  *
- * A whole-program arm (`tsc -p`) is one process that is the engine: its
- * deadline and its memory are its own. A probe arm must have been in an
- * engine phase (the marker) when it was killed, and:
- *
- * - memory: only a tree that is the engine alone proves it (a Verter probe;
- *   a tsc API tree also holds the node driver, whose memory during a request
- *   is not bounded, so a memory kill there is never attributed), and only
- *   when the supervisor's actual kill threshold (`killTriggerBytes`: below
- *   the cap on a sampled backend) is at least the engine budget, in an
- *   accounting of the engine's own memory (a Linux cgroup also counts page
- *   cache and kernel memory, so it proves nothing);
- * - deadline: the engine itself had worked for at least the deadline
- *   (engineWorkMs); the supervisor's deadline adds a startup allowance for
- *   the process start before the engine's first phase.
+ * - A whole-program arm (`tsc -p`) is one process that is the engine from
+ *   its start: its memory kill and its deadline are its own, on evidence.
+ * - A Verter probe is the engine alone: a memory kill counts on evidence,
+ *   while it was in an engine phase (the marker).
+ * - A tsc API tree also holds the node driver, whose memory during a request
+ *   is not bounded: its memory kill is never attributed.
+ * - A probe's deadline kill is never attributed: no engine-owned clock ends
+ *   at the kill, and the elapsed time since the engine's first phase also
+ *   holds client work, IPC and marker I/O. The time is reported
+ *   (engineWorkMs), never read as exhaustion.
  */
 export function killAttributed(inv, limits = {}) {
   const rec = inv.supervisor ?? {};
   const arm = ARMS[inv.arm];
-  const memoryAttributable = (singleProcess) => {
-    if (!singleProcess) return false;
-    if (String(rec.backend ?? "").startsWith("linux")) return false;
-    const trigger =
-      typeof rec.killTriggerBytes === "number" ? rec.killTriggerBytes : rec.memLimitBytes;
+  if (arm?.kind === "cli")
     return (
-      typeof trigger === "number" &&
-      typeof limits.budgetBytes === "number" &&
-      trigger >= limits.budgetBytes
+      memoryKillEvidence(rec, limits.budgetBytes) || deadlineKillEvidence(rec, limits.timeoutMs)
     );
-  };
-  if (arm?.kind === "cli") {
-    if (rec.killedBy === "timeout")
-      return finite(rec.wallMs) && finite(limits.timeoutMs) && rec.wallMs >= limits.timeoutMs;
-    return rec.killedBy === "memory" && memoryAttributable(true);
-  }
-  if (!ENGINE_PHASES[arm?.tool]?.includes(inv.phase)) return false;
-  if (rec.killedBy === "timeout") {
-    const work = engineWorkMs(inv);
-    return work !== null && finite(limits.timeoutMs) && work >= limits.timeoutMs;
-  }
-  return rec.killedBy === "memory" && memoryAttributable(arm.tool === "verter");
+  if (arm?.tool !== "verter" || !ENGINE_PHASES.verter.includes(inv.phase)) return false;
+  return memoryKillEvidence(rec, limits.budgetBytes);
 }
 
 /**
@@ -171,12 +152,31 @@ export function invocationEnd(inv, limits = {}) {
     if (inv.probe?.stage === "measured" || inv.probe?.stage === "complete") {
       return { kind: "observe-killed", detail: `${detail}, after the demand completed` };
     }
-    if (!killAttributed(inv, limits))
-      return { kind: "unattributed-kill", detail: `${detail}, not attributable to the engine` };
+    if (!killAttributed(inv, limits)) {
+      const work = rec.killedBy === "timeout" ? engineWorkMs(inv) : null;
+      const ran =
+        work !== null
+          ? ` (about ${(work / 1000).toFixed(1)} s after the engine's first phase)`
+          : "";
+      return {
+        kind: "unattributed-kill",
+        detail: `${detail}${ran}, not attributable to the engine`,
+      };
+    }
     return { kind: "killed", detail };
   }
   if (rec.killedBy) return { kind: "harness-failure", detail: `killed by ${rec.killedBy}` };
   return { kind: "exited", exitCode: rec.exitCode };
+}
+
+/**
+ * The stored form of a whole-program run's stdout: whole up to 1 MiB, else
+ * both ends (tsc -p prints its diagnostics, then its extended diagnostics).
+ * Deterministic, so the validator can re-derive it from the raw file.
+ */
+export function compactCliStdout(text) {
+  if (typeof text !== "string") return null;
+  return text.length > 1 << 20 ? text.slice(0, 1 << 19) + "\n…\n" + text.slice(-(1 << 19)) : text;
 }
 
 /**

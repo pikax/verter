@@ -227,6 +227,7 @@ async function main() {
           killTriggerBytes: r.record.killTriggerBytes ?? null,
           timeoutMs: r.record.timeoutMs ?? null,
           wallMs: r.record.wallMs ?? null,
+          terminationLatencyMs: r.record.terminationLatencyMs ?? null,
           peakBytes: r.record.peakBytes ?? null,
         };
         exit =

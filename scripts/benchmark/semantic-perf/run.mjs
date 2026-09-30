@@ -16,6 +16,7 @@ import {
   invocationEnd,
   runLimits,
   supervisorDeadlineMs,
+  compactCliStdout,
 } from "./analyze.mjs";
 import {
   BUILD_INPUTS,
@@ -631,11 +632,7 @@ export async function main(argv) {
     let cliStdout = null;
     if (!probeOut && result.record?.stdoutPath) {
       try {
-        cliStdout = readFileSync(result.record.stdoutPath, "utf8");
-        // tsc -p prints its diagnostics then its extended diagnostics; keep
-        // both ends of an oversized output.
-        if (cliStdout.length > 1 << 20)
-          cliStdout = cliStdout.slice(0, 1 << 19) + "\n…\n" + cliStdout.slice(-(1 << 19));
+        cliStdout = compactCliStdout(readFileSync(result.record.stdoutPath, "utf8"));
       } catch {
         cliStdout = null;
       }

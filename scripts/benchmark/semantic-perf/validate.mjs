@@ -34,8 +34,9 @@ import {
   probeRecordProblems,
   runLimits,
   supervisorDeadlineMs,
+  compactCliStdout,
 } from "./analyze.mjs";
-import { sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
+import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import {
   buildProblems,
   RECORDED_PACKAGES,
@@ -44,6 +45,7 @@ import {
   TYPESCRIPT_VERSION,
   BUILD_ENV_NAMES,
   RUNTIME_ENV_NAMES,
+  toolchainPin,
 } from "./provenance.mjs";
 import { allScenarios, cliSource, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
@@ -147,10 +149,15 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     !b.rustcPath ||
     !b.rustcSha256 ||
     b.env?.RUSTC !== b.rustcPath ||
-    b.env?.CARGO_INCREMENTAL !== "0"
+    b.env?.CARGO_INCREMENTAL !== "0" ||
+    !b.toolchainPin ||
+    b.env?.RUSTUP_TOOLCHAIN !== b.toolchainPin ||
+    b.toolchainPin !== toolchainPin(ROOT) ||
+    (/^\d+\.\d+\.\d+$/.test(b.toolchainPin) &&
+      !new RegExp(`^release: ${b.toolchainPin.replace(/\./g, "\\.")}$`, "m").test(b.rustc ?? ""))
   ) {
     fail(
-      "wrong binary: the build does not record the controlled compiler (RUSTC bound to the fingerprinted toolchain rustc, CARGO_INCREMENTAL=0)",
+      "wrong binary: the build does not record the controlled compiler (the repository's pinned toolchain, RUSTC bound to its fingerprinted rustc, CARGO_INCREMENTAL=0)",
     );
   }
   if (!meta.options?.allowTuning) {
@@ -158,13 +165,26 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     // outside the start-up variables may reach the build or a probe.
     const allowed = (names) => new Set(names.map((n) => n.toUpperCase()));
     const runtimeAllowed = allowed(RUNTIME_ENV_NAMES);
-    const buildAllowed = allowed([...BUILD_ENV_NAMES, "CARGO_INCREMENTAL", "RUSTC"]);
+    const buildAllowed = allowed([
+      ...BUILD_ENV_NAMES,
+      "CARGO_INCREMENTAL",
+      "RUSTC",
+      "RUSTUP_TOOLCHAIN",
+    ]);
     const runtime = meta.environment?.runtime?.names;
     const built = meta.build?.environment?.names;
     if (!Array.isArray(runtime) || runtime.some((n) => !runtimeAllowed.has(n.toUpperCase())))
       fail("tuning: the probes' environment is not the constructed one");
     if (!Array.isArray(built) || built.some((n) => !buildAllowed.has(n.toUpperCase())))
       fail("tuning: the build environment is not the constructed one");
+  }
+  // Environment receipts: complete and consistent with the tuning option.
+  if (
+    typeof meta.environment?.runtime?.valuesSha256 !== "string" ||
+    typeof meta.build?.environment?.valuesSha256 !== "string" ||
+    meta.environment?.inherited !== Boolean(meta.options?.allowTuning)
+  ) {
+    fail("tuning: the environment receipts are incomplete or disagree with --allow-tuning");
   }
   if (Object.keys(meta.tuning ?? {}).length && !meta.options?.allowTuning) {
     fail(
@@ -460,6 +480,19 @@ export function rawFileProblems(run) {
         problems.push(`${id}: the supervisor record on disk differs from results.json`);
     } catch (err) {
       problems.push(`${id}: cannot read ${inv.supervisorOut}: ${err.message}`);
+    }
+    // A whole-program run's numbers come from its stdout: re-read the file
+    // the supervisor recorded and re-derive the stored form.
+    if (ARMS[inv.arm]?.kind === "cli") {
+      let raw = null;
+      try {
+        const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
+        raw = compactCliStdout(readFileSync(sup.stdoutPath, "utf8"));
+      } catch {
+        raw = null;
+      }
+      if (raw !== (inv.cliStdout ?? null))
+        problems.push(`${id}: the whole-program stdout on disk differs from results.json`);
     }
     // Every probe invocation's own files are re-read, whether or not
     // results.json embeds them: a record on disk that results.json omits is

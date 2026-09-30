@@ -651,11 +651,12 @@ class Parser {
     }
     // Index signature `[key: K]: V`.
     if (this.isP("[") && this.isId(undefined, 1) && this.isP(":", 2)) {
+      const param = this.peek(1).text;
       this.i += 3;
       const key = this.type();
       this.expectP("]");
       this.expectP(":");
-      return { m: "index", readonly, key, type: this.type() };
+      return { m: "index", readonly, param, key, type: this.type() };
     }
     // `get x(): T` / `set x(v: T)` accessors.
     if (
@@ -717,6 +718,48 @@ const scope = (entries) => ({
   values: new Map(entries.values ?? []),
   infers: new Map(entries.infers ?? []),
 });
+
+/**
+ * An `infer` declaration's identity while its conditional is normalised: a
+ * hidden (non-enumerable, so never serialised or sorted on) link to the
+ * declaration's sentinel, replaced by its number afterwards.
+ */
+const PENDING = Symbol("pending infer declaration");
+function pendingNode(node, sentinel) {
+  Object.defineProperty(node, PENDING, { value: sentinel, enumerable: false });
+  return node;
+}
+
+/** Visit every object of a normalised tree, in its serialisation order. */
+/**
+ * Members that serialise alike while their pending `infer` identities
+ * differ would be merged or ordered by their printed order: fail closed.
+ */
+function assertUnambiguous(members) {
+  const seen = new Map();
+  for (const m of members) {
+    const ids = [];
+    visitNormalized(m, (x) => {
+      if (x[PENDING]) ids.push(x[PENDING]);
+    });
+    if (!ids.length) continue;
+    const key = keyOf(m);
+    const prior = seen.get(key);
+    if (prior && (prior.length !== ids.length || prior.some((s, i) => s !== ids[i])))
+      throw new Error("ambiguous infer declarations among members that differ only in them");
+    seen.set(key, ids);
+  }
+}
+
+function visitNormalized(node, visit) {
+  if (Array.isArray(node)) {
+    for (const x of node) visitNormalized(x, visit);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  visit(node);
+  for (const value of Object.values(node)) visitNormalized(value, visit);
+}
 
 function lookup(env, space, name) {
   for (let i = env.length - 1; i >= 0; i--) {
@@ -805,11 +848,12 @@ function normalizeMember(m, env) {
         ...normalizeSignature(m.typeParams, m.params, m.ret, env),
       };
     case "index":
+      // The parameter is a value binding visible in the value type.
       return {
         m: "index",
         readonly: m.readonly,
         key: normalize(m.key, env),
-        type: normalize(m.type, env),
+        type: normalize(m.type, [...env, scope({ values: m.param ? [[m.param, 0]] : [] })]),
       };
     case "accessor": {
       const sig = normalizeSignature(null, m.params, m.type ?? { k: "kw", name: "void" }, env);
@@ -882,6 +926,7 @@ export function normalize(node, env = []) {
         );
         members.push({ k: "kw", name: "boolean" });
       }
+      assertUnambiguous(members);
       const unique = new Map(members.map((m) => [keyOf(m), m]));
       const sorted = [...unique.keys()].sort().map((k) => unique.get(k));
       return sorted.length === 1 ? sorted[0] : { k: "union", members: sorted };
@@ -932,25 +977,48 @@ export function normalize(node, env = []) {
       return { k: "predicate", asserts: node.asserts, target, type: node.type && n(node.type) };
     }
     case "conditional": {
-      // TypeScript's visibility: an `infer` name is a type only in the true
-      // branch. In the extends clause it only DECLARES (its declaration takes
-      // its position there); an ordinary reference to that name in the
-      // extends clause, and anything in the false branch, resolves outside.
-      const names = inferNames(node.ext).map((name, i) => [name, i]);
+      // TypeScript's visibility: an `infer` name is a type only in its own
+      // constraint and in the true branch. In the extends clause it only
+      // DECLARES; a plain reference to that name there, or in the false
+      // branch, resolves outside. Declarations are numbered by their first
+      // appearance in the NORMALISED extends clause (so property reordering
+      // the canonical form permits does not renumber them): the clause is
+      // normalised with pending identities first, then numbered.
+      const pending = inferNames(node.ext).map((name) => [name, { pending: name }]);
+      const ext = normalize(node.ext, [...env, scope({ infers: pending })]);
+      const own = new Set(pending.map(([, sentinel]) => sentinel));
+      const order = [];
+      visitNormalized(ext, (x) => {
+        const s = x[PENDING];
+        if (x.k === "infer" && own.has(s) && !order.includes(s)) order.push(s);
+      });
+      const numbering = new Map(order.map((s, i) => [s, i]));
+      visitNormalized(ext, (x) => {
+        if (numbering.has(x[PENDING])) x.bound.index = numbering.get(x[PENDING]);
+      });
       return {
         k: "conditional",
         check: n(node.check),
-        ext: normalize(node.ext, [...env, scope({ infers: names })]),
-        whenTrue: normalize(node.whenTrue, [...env, scope({ types: names })]),
+        ext,
+        whenTrue: normalize(node.whenTrue, [
+          ...env,
+          scope({ types: order.map((s, i) => [s.pending, i]) }),
+        ]),
         whenFalse: n(node.whenFalse),
       };
     }
     case "infer": {
-      // A declaration: its position among the innermost conditional's
-      // declarations. Its constraint resolves where the declaration stands.
-      const bound = lookup(env, "infers", node.name);
-      if (!bound) throw new Error("infer " + node.name + " outside a conditional's extends clause");
-      return { k: "infer", bound, constraint: node.constraint && n(node.constraint) };
+      const found = lookup(env, "infers", node.name);
+      if (!found) throw new Error("infer " + node.name + " outside a conditional's extends clause");
+      const out = pendingNode({ k: "infer", bound: { up: found.up, index: null } }, found.index);
+      // The declared name is visible in its own constraint.
+      if (node.constraint)
+        out.constraint = normalize(node.constraint, [
+          ...env,
+          scope({ types: [[node.name, found.index]] }),
+        ]);
+      else out.constraint = undefined;
+      return out;
     }
     case "keyof":
       return { k: "keyof", type: n(node.type) };
@@ -968,6 +1036,8 @@ export function normalize(node, env = []) {
     case "ref": {
       if (!node.args.length && !node.name.includes(".")) {
         const bound = lookup(env, "types", node.name);
+        if (bound && bound.index !== null && typeof bound.index === "object")
+          return pendingNode({ k: "bound", bound: { up: bound.up, index: null } }, bound.index);
         if (bound) return { k: "bound", bound };
       }
       return { k: "ref", name: node.name, args: node.args.map(n) };

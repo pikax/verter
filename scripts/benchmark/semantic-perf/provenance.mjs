@@ -262,6 +262,16 @@ export function envReceipt(env) {
   return { names, valuesSha256: sha256Text(JSON.stringify(names.map((n) => [n, env[n]]))) };
 }
 
+/** The repository's pinned toolchain channel (rust-toolchain.toml), or null. */
+export function toolchainPin(root) {
+  try {
+    const text = readFileSync(join(root, "rust-toolchain.toml"), "utf8");
+    return text.match(/^\s*channel\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function buildVerterProbes(root, { inherit = false } = {}) {
   const args = [
     "build",
@@ -278,11 +288,23 @@ export function buildVerterProbes(root, { inherit = false } = {}) {
   // compiler (fingerprinted below) and incremental compilation is off,
   // whatever the caller's environment says (names compared case-insensitively,
   // as Windows does).
+  // The toolchain is the repository's pin, named explicitly (RUSTUP_TOOLCHAIN
+  // outranks every other rustup override), and the compiler is discovered in
+  // that same constructed environment, so nothing of the caller's selects it.
+  const pin = toolchainPin(root);
+  const discovery = constructedEnv(BUILD_ENV_NAMES, pin ? { RUSTUP_TOOLCHAIN: pin } : {}, {
+    inherit,
+  });
   const rustcPath =
     (
-      spawnSync("rustup", ["which", "rustc"], { cwd: root, encoding: "utf8" }).stdout ?? ""
+      spawnSync("rustup", ["which", "rustc"], { cwd: root, encoding: "utf8", env: discovery })
+        .stdout ?? ""
     ).trim() || null;
-  const controlled = { CARGO_INCREMENTAL: "0", ...(rustcPath ? { RUSTC: rustcPath } : {}) };
+  const controlled = {
+    CARGO_INCREMENTAL: "0",
+    ...(pin ? { RUSTUP_TOOLCHAIN: pin } : {}),
+    ...(rustcPath ? { RUSTC: rustcPath } : {}),
+  };
   const env = constructedEnv(BUILD_ENV_NAMES, controlled, { inherit });
   const r = spawnSync("cargo", args, {
     cwd: root,
@@ -328,6 +350,7 @@ export function buildVerterProbes(root, { inherit = false } = {}) {
     packages,
     env: controlled,
     environment: envReceipt(env),
+    toolchainPin: pin,
     rustc: rustcPath ? tool(rustcPath, ["-vV"]) : null,
     // The compiler cargo was bound to (RUSTC), identified by content.
     rustcPath,

@@ -116,25 +116,30 @@ which are the harness's work. A supervisor error (containment lost, a tree
 that would not empty) invalidates the invocation whatever else happened.
 
 - **Memory.** Only a tree that is the engine alone — a Verter probe, a
-  `tsc -p` process — proves it, and only when the supervisor's actual kill
-  threshold (`killTriggerBytes`: on a sampled backend such as macOS it is
-  below the cap) is at least the engine budget, in an accounting of the
-  engine's own memory (a Linux cgroup also counts page cache and kernel
-  memory, so a kill there proves nothing). A `tsc-api` tree also holds the
+  `tsc -p` process — proves it, and only when the supervisor recorded its
+  actual kill threshold (`killTriggerBytes`: on a sampled backend such as
+  macOS it is below the cap; the configured cap is never used in its place)
+  and that threshold is at least the engine budget, on a backend that
+  accounts the tree's own memory (Windows job object, macOS physical
+  footprint; a Linux cgroup also counts page cache and kernel memory, and an
+  unknown backend proves nothing). A `tsc-api` tree also holds the
   node driver, whose memory during a request is not bounded by anything the
   harness can prove, so a memory kill of that tree is **never** attributed:
   tsc exhausting memory on a demand is established by the measuring
   `tsc -p` run (see Correctness), not by the API arm.
-- **Deadline.** The engine itself must have worked for the whole deadline
-  (`--timeout-ms`). Every phase marker records its wall-clock start, and the
-  harness records when it spawned the supervisor; the kill came no earlier
-  than that spawn plus the supervisor's wall time, so the engine's work is
-  at least that instant minus the start of its first engine phase. The
-  supervisor's deadline is the engine's deadline plus a startup allowance
-  (`--startup-allowance-ms`, 30000 by default) for the process start before
-  the engine's first phase; an engine that started late, and so did not work
-  for the whole deadline, is not attributed. A `tsc -p` process is
-  attributed when it ran for the whole deadline.
+- **Deadline.** Only a process that is the engine from its start — a
+  `tsc -p` run, in the benchmark and in the reference measurement — can
+  prove it: its wall time up to the moment termination began (the
+  supervisor's wall time minus its recorded termination latency) must be at
+  least the deadline (`--timeout-ms`). A probe arm's deadline kill is
+  **never** attributed: no engine-owned clock ends at the kill, and the time
+  since the engine's first phase also holds client work, IPC and marker I/O.
+  It is reported (with that elapsed time) as `unverified`. The supervisor's
+  deadline is the engine's deadline plus a startup allowance
+  (`--startup-allowance-ms`, 30000 by default).
+- The phase marker is published before each phase begins; a probe that
+  cannot publish it stops before the phase, so a stale marker never
+  misplaces a kill.
 - Anything killed after the probe wrote its measured record (observing,
   calibrating, tearing down) is never the engine's demand.
 
@@ -222,8 +227,12 @@ Why each probe demands the same work of both tools:
    `NODE_OPTIONS`, `MALLOC_*`, `GLIBC_TUNABLES`, `LD_PRELOAD`, `DYLD_*`,
    `RUSTFLAGS`, `CARGO_PROFILE_*`, `VERTER_*`, …) reaches a measurement;
    those present in the caller's environment are recorded as ignored. The
-   build additionally sets `CARGO_INCREMENTAL=0` and binds `RUSTC` to the
-   toolchain's own compiler (`rustup which rustc`). Both environments are
+   build additionally sets `CARGO_INCREMENTAL=0`, names the repository's
+   pinned toolchain (`rust-toolchain.toml`) as `RUSTUP_TOOLCHAIN`, and binds
+   `RUSTC` to that toolchain's compiler, discovered in the same constructed
+   environment (so no override of the caller's selects another); the
+   validator requires the recorded pin to be the repository's and the
+   compiler's release to be that pin. Both environments are
    recorded (names, and a digest of the values) and the validator requires
    them to be the constructed ones. A Cargo configuration file outside the
    repository (in an ancestor directory or `CARGO_HOME`), which cargo reads
@@ -283,10 +292,10 @@ TS2589 / TS2590 is tsc's error-any; a measurement tsc cannot finish inside the
 cap or the deadline is recorded as `killed` ("tsc exhausts resources"), never
 retried with more. Every measured tsc process is contained, and its receipt
 keeps the supervisor's termination evidence (backend, containment, cap,
-actual kill threshold, deadline, wall time): a kill is read as tsc exhausting
-the resource by the same rule as a benchmark arm (a memory threshold at least
-the measuring budget outside a Linux cgroup; the whole deadline), and
-otherwise as unmeasurable. A supervisor error fails the measurement.
+actual kill threshold, deadline, wall time, termination latency): a kill is
+read as tsc exhausting the resource by the same rule as a benchmark arm
+(`reference.mjs`: memoryKillEvidence, deadlineKillEvidence), and otherwise
+as unmeasurable. A supervisor error fails the measurement.
 
 The benchmark's tsc arm must then reproduce the reference exactly — same
 canonical answer, same error-type flag — or the run fails validation: either
@@ -308,12 +317,15 @@ equal to a string); same-named overloads, call and construct signatures keep
 their order; tuple labels are dropped. Binders are positions in a lexical
 environment: a signature binds its type parameters and parameters (a
 `typeof` of a parameter and a type predicate's target refer to it), a
-conditional's `infer` declarations take their positions in its extends
-clause but are types only in its true branch (as TypeScript resolves them:
-a plain reference to the same name in the extends clause, or in the false
-branch, resolves outside), a mapped type binds its key; a reference —
-including a computed member key's leading name — resolves to the innermost
-binding of its name. So consistent renaming is one type, while swapped binders, or a
+conditional's `infer` declarations are numbered by their first appearance
+in its NORMALISED extends clause (so a property reordering the canonical form
+permits does not renumber them; members that differ only in their
+declarations cannot be ordered and fail closed) and are types only in their
+own constraint and the true branch (as TypeScript resolves them: a plain
+reference to the same name elsewhere in the extends clause, or in the false
+branch, resolves outside), an index signature binds its parameter in its
+value type, a mapped type binds its key; a reference — including a computed
+member key's leading name — resolves to the innermost binding of its name. So consistent renaming is one type, while swapped binders, or a
 bound name against the free name it shadows, are two. Intersection order,
 tuple order, argument order and modifiers are kept.
 
@@ -328,7 +340,7 @@ Each Verter answer is classified against the reference:
 | `unverified` | the demand completed but its answer was not observed (stopped while observing), the observation lacks its completeness evidence, or the invocation was killed without evidence that its engine exhausted the resource. An observation is either successful (the answer and all its tool's evidence: tsc's error-type flag; Verter's completeness counts) or failed (an error); a failed observation never supplies a comparable answer, whatever text it carries |
 | `refusal` | a typed budget fault (Verter's own budget) |
 | `error` | any other fault, a miss, or a warm repeat that failed or answered differently |
-| `killed` | the engine exhausted the containment cap or the deadline during the demand (Verter's tree is its engine alone), or its own peak exceeded the budget |
+| `killed` | the engine exhausted the containment cap during the demand, on the evidence above (Verter's tree is its engine alone), or its own peak exceeded the budget; a probe's deadline kill is `unverified` |
 | `no-reference` | tsc gives no answer to compare with |
 
 Only `matched` rows enter the head-to-head. A fast wrong, partial or refused
@@ -499,9 +511,10 @@ Results land in `target/semantic-perf/<timestamp>/`:
 The command exits 0 only when validation passes. Standalone validation
 re-reads every raw record — the supervisor's, and for every probe invocation
 its own probe record and phase marker at the path derived from the
-invocation, whether or not `results.json` embeds them — and fails on any
-that differs from `results.json` (a record on disk that `results.json`
-omits included). Re-validate any
+invocation, whether or not `results.json` embeds them, and for every
+whole-program run the stdout file the supervisor recorded (from which its
+diagnostics, times and memory are read) — and fails on any that differs from
+`results.json` (a record on disk that `results.json` omits included). Re-validate any
 run with
 
 ```bash

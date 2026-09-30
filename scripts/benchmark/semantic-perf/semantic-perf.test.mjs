@@ -18,9 +18,15 @@ import { test } from "node:test";
 import { classifyVerterAnswer, compactProbeRecord, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
-import { sha256Text } from "./provenance.mjs";
+import { sha256Text, toolchainPin } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
-import { sameArchitecture, schedule, scheduleBalanceProblems, tuningEnvironment } from "./run.mjs";
+import {
+  sameArchitecture,
+  schedule,
+  scheduleBalanceProblems,
+  tuningEnvironment,
+  ROOT,
+} from "./run.mjs";
 import { allScenarios, cliSource, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
 import { summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
@@ -105,6 +111,35 @@ test("binders are positions: consistent renaming is one type, swapped or free na
   assert.equal(
     canonicalType(`T extends [infer A] ? 1 : A`),
     canonicalType(`T extends [infer B] ? 1 : A`),
+  );
+  // An infer name is visible in its own constraint.
+  assert.notEqual(
+    canonicalType(`<A, T>() => T extends (infer A extends { x: A }) ? A : never`),
+    canonicalType(`<A, T>() => T extends (infer B extends { x: A }) ? B : never`),
+  );
+  assert.equal(
+    canonicalType(`<A, T>() => T extends (infer A extends { x: A }) ? A : never`),
+    canonicalType(`<A, T>() => T extends (infer B extends { x: B }) ? B : never`),
+  );
+  // Declarations are numbered after normalisation: reordered properties are one type.
+  assert.equal(
+    canonicalType(`<T>() => T extends { a: infer A; b: infer B } ? [A, B] : never`),
+    canonicalType(`<T>() => T extends { b: infer B; a: infer A } ? [A, B] : never`),
+  );
+  assert.notEqual(
+    canonicalType(`<T>() => T extends { a: infer A; b: infer B } ? [A, B] : never`),
+    canonicalType(`<T>() => T extends { b: infer A; a: infer B } ? [A, B] : never`),
+  );
+  // Members that differ only in their declarations cannot be ordered: fail closed.
+  assert.throws(() => canonicalType(`T extends [infer A] | [infer B] ? [A, B] : 0`), /ambiguous/);
+  // An index signature's parameter binds a value in its value type.
+  assert.notEqual(
+    canonicalType(`<T>(x: T) => { [x: string]: typeof x }`),
+    canonicalType(`<T>(x: T) => { [y: string]: typeof x }`),
+  );
+  assert.equal(
+    canonicalType(`<T>(x: T) => { [x: string]: typeof x }`),
+    canonicalType(`<T>(x: T) => { [y: string]: typeof y }`),
   );
   // A computed key's name is a value reference like any other.
   assert.notEqual(
@@ -264,6 +299,30 @@ test("the reference measurement records tsc's print and the interpretation reads
   };
   assert.equal(
     interpretMeasurement({ killed: "memory", codes: [], receipt: sampled }).killed,
+    undefined,
+  );
+  const noTrigger = {
+    ...receipt,
+    termination: { ...MEASURED_KILL, killTriggerBytes: null, backend: null, containment: null },
+  };
+  assert.equal(
+    interpretMeasurement({ killed: "memory", codes: [], receipt: noTrigger }).killed,
+    undefined,
+  );
+  const deadline = (wallMs, terminationLatencyMs) => ({
+    ...receipt,
+    termination: { ...MEASURED_KILL, killedBy: "timeout", wallMs, terminationLatencyMs },
+  });
+  assert.equal(
+    interpretMeasurement({ killed: "timeout", codes: [], receipt: deadline(300100, 50) }).killed,
+    "timeout",
+  );
+  assert.equal(
+    interpretMeasurement({ killed: "timeout", codes: [], receipt: deadline(300100, 200) }).killed,
+    undefined,
+  );
+  assert.equal(
+    interpretMeasurement({ killed: "timeout", codes: [], receipt: deadline(300100, null) }).killed,
     undefined,
   );
   const cgroup = { ...receipt, termination: { ...MEASURED_KILL, backend: "linux-cgroup-v2" } };
@@ -461,6 +520,7 @@ const PACKAGES = [
   "verter_compiler",
 ];
 const MEM_MB = 64;
+const PIN = toolchainPin(ROOT);
 const INFRA_MB = 1024;
 
 function supervisorRecord(overrides = {}) {
@@ -620,7 +680,9 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
   const build = {
     rustcPath: "/rust/rustc",
     rustcSha256: "rs",
-    env: { CARGO_INCREMENTAL: "0", RUSTC: "/rust/rustc" },
+    env: { CARGO_INCREMENTAL: "0", RUSTC: "/rust/rustc", RUSTUP_TOOLCHAIN: PIN },
+    toolchainPin: PIN,
+    rustc: `rustc ${PIN}\nrelease: ${PIN}\nhost: x86_64-pc-windows-msvc`,
     environment: { names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"], valuesSha256: "b" },
     packages: Object.fromEntries(
       PACKAGES.map((p) => [
@@ -870,7 +932,11 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
     for (const inv of run.invocations.filter((i) => i.arm === arm)) {
       inv.supervisor = supervisorRecord({
         exitCode: null,
-        ...(overrides.killedBy === "timeout" ? { wallMs: 1500 } : {}),
+        backend: "windows-job-object",
+        ...(overrides.killedBy === "memory"
+          ? { killTriggerBytes: (MEM_MB + INFRA_MB) * 1024 * 1024 }
+          : {}),
+        ...(overrides.killedBy === "timeout" ? { wallMs: 1600, terminationLatencyMs: 50 } : {}),
         ...overrides,
       });
       inv.supervisorExit = overrides.killedBy === "timeout" ? 124 : 137;
@@ -890,6 +956,15 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
   assert.equal(
     classOf(kill("verter", { killedBy: "memory", killTriggerBytes: MEM_MB * MiB }), "verter"),
     "killed",
+  );
+  // A missing actual threshold or an unknown accounting proves nothing (the configured cap is not the threshold).
+  assert.equal(
+    classOf(kill("verter", { killedBy: "memory", killTriggerBytes: null }), "verter"),
+    "unverified",
+  );
+  assert.equal(
+    classOf(kill("verter", { killedBy: "memory", backend: null }), "verter"),
+    "unverified",
   );
   // A sampled trigger below the budget, or a Linux cgroup's accounting, proves nothing.
   assert.equal(
@@ -913,26 +988,18 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
     assert.equal(classOf(run, "tsc-api"), "unverified", phase);
     assert.deepEqual(validate(run).failures, []);
   }
-  // A deadline that expires while the server computes is the engine's.
-  const slow = kill("tsc-api", { killedBy: "timeout" }, "cold");
-  assert.equal(classOf(slow, "tsc-api"), "killed");
-  assert.deepEqual(validate(slow).failures, []);
-  for (const phase of ["stats", "observe", "calibrate"])
-    assert.equal(
-      classOf(kill("tsc-api", { killedBy: "timeout" }, phase), "tsc-api"),
-      "unverified",
-      phase,
-    );
-  // Verter's statistics phase is the harness's work, not the demand's.
-  assert.equal(classOf(kill("verter", { killedBy: "timeout" }, "stats"), "verter"), "unverified");
-  assert.equal(classOf(kill("verter", { killedBy: "timeout" }, "warm"), "verter"), "killed");
-  // The engine must itself have worked for the whole deadline: a late start
-  // (startup ate the allowance and more) is not the engine's exhaustion.
-  const lateStart = kill("tsc-api", { killedBy: "timeout" }, "cold");
-  for (const inv of lateStart.invocations.filter((i) => i.arm === "tsc-api"))
-    inv.phaseHistory = [{ phase: "spawn", atMs: 1600 }];
-  resummarize(lateStart);
-  assert.equal(classOf(lateStart, "tsc-api"), "unverified");
+  // A probe's deadline is never read as exhaustion: no engine-owned clock
+  // ends at the kill. It is reported with the time since the first engine phase.
+  for (const [arm, phase] of [
+    ["tsc-api", "cold"],
+    ["tsc-api", "observe"],
+    ["verter", "warm"],
+    ["verter", "stats"],
+  ]) {
+    const run = kill(arm, { killedBy: "timeout" }, phase);
+    assert.equal(classOf(run, arm), "unverified", `${arm} ${phase}`);
+    assert.deepEqual(validate(run).failures, []);
+  }
   // A supervisor error invalidates the invocation whatever the kill.
   const dirty = kill("verter", {
     killedBy: "memory",
@@ -952,7 +1019,16 @@ test("a kill is the engine's only with evidence: the engine alone, at the budget
   assert.equal(run.summary.cells[0].arms.verter.class, "no-reference");
   const run2 = kill("tsc-api", { killedBy: "timeout" }, "cold");
   run2.summary = summarize(run2, killedRef, [scenario]);
-  assert.equal(run2.summary.cells[0].arms.verter.class, "beyond-tsc");
+  assert.equal(run2.summary.cells[0].arms.verter.class, "no-reference");
+  // The demand itself exhausting the budget — the tsc server's own peak above
+  // it — together with the measured exhaustion does.
+  const run3 = syntheticRun();
+  for (const inv of run3.invocations.filter((i) => i.arm === "tsc-api")) {
+    inv.probe.serverAfterRequests.peakBytes = MEM_MB * MiB + 1;
+    inv.probe.serverAfterObserve.peakBytes = MEM_MB * MiB + 2;
+  }
+  run3.summary = summarize(run3, killedRef, [scenario]);
+  assert.equal(run3.summary.cells[0].arms.verter.class, "beyond-tsc");
 });
 
 test("an observation without its evidence is never a match, and statistics must be finite numbers", () => {
@@ -1124,7 +1200,12 @@ test("after a warmup killed at the memory cap the rest of that arm may be skippe
   const run = syntheticRun();
   run.meta.options.skipAfterKill = true;
   const warmup = run.invocations.find((i) => i.arm === "verter" && i.warmup);
-  warmup.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+  warmup.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: (MEM_MB + INFRA_MB) * 1024 * 1024,
+  });
   warmup.supervisorExit = 137;
   warmup.phase = "cold";
   warmup.probe = null;
@@ -1200,6 +1281,26 @@ test("a raw record on disk that differs from results.json is reported", () => {
     `${inv.probeOut}.phase`,
     JSON.stringify({ phase: inv.phase, history: inv.phaseHistory }),
   );
+  // A whole-program run's stdout is re-read from the file the supervisor recorded.
+  const cliOut = join(dir, "cli.stdout.log");
+  writeFileSync(cliOut, "Check time: 1.00s\n");
+  const cliSup = { ...inv.supervisor, stdoutPath: cliOut };
+  const cliInv = {
+    ...structuredClone(inv),
+    arm: "tsc-cli",
+    supervisorOut: join(dir, "cli.sup.json"),
+    supervisor: cliSup,
+    probeOut: null,
+    probe: null,
+    phase: null,
+    phaseHistory: null,
+    cliStdout: "Check time: 1.00s\n",
+  };
+  writeFileSync(cliInv.supervisorOut, JSON.stringify(cliSup));
+  const cliRun = { ...run, invocations: [cliInv] };
+  assert.deepEqual(rawFileProblems(cliRun), []);
+  writeFileSync(cliOut, "Check time: 9.00s\n");
+  assert.ok(rawFileProblems(cliRun).some((p) => /whole-program stdout/.test(p)));
   // A record on disk that results.json omits is a disagreement too.
   const omitted = structuredClone(run);
   omitted.invocations[0].probe = null;
