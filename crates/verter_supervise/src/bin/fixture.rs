@@ -47,7 +47,7 @@ fn main() {
             println!("{}={value}", rest[0]);
         }
         "touch" => {
-            std::fs::write(&rest[0], b"ran").expect("touch");
+            verter_supervise::disk::write(&rest[0], b"ran").expect("touch");
         }
         "sleep" => std::thread::sleep(Duration::from_millis(rest[0].parse().expect("ms"))),
         "alloc" => alloc(rest[0].parse().expect("chunk MiB")),
@@ -174,6 +174,6 @@ fn spawn_new_session(_command: &mut Command) -> std::process::Child {
 /// Write the pid so a reader never sees a partial file.
 fn publish_pid(pidfile: &Path, pid: u32) {
     let staging = pidfile.with_extension("staging");
-    std::fs::write(&staging, pid.to_string()).expect("write pid");
-    std::fs::rename(&staging, pidfile).expect("publish pid");
+    verter_supervise::disk::write(&staging, pid.to_string()).expect("write pid");
+    verter_supervise::disk::rename(&staging, pidfile).expect("publish pid");
 }

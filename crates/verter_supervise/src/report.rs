@@ -268,12 +268,12 @@ impl Report {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            std::fs::create_dir_all(parent)?;
+            crate::disk::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let staging = path.with_extension(format!("tmp-{}", std::process::id()));
-        std::fs::write(&staging, text)?;
-        std::fs::rename(&staging, path)
+        crate::disk::write(&staging, text)?;
+        crate::disk::rename(&staging, path)
     }
 }
 

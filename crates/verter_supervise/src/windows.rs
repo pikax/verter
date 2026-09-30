@@ -15,8 +15,8 @@
 //! kernel refused, so it can sit above the cap by up to that request; the
 //! commit the tree was granted never exceeds the cap.
 
+use crate::disk::{File, OpenOptions};
 use std::ffi::{c_void, OsStr, OsString};
-use std::fs::{File, OpenOptions};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
