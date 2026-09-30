@@ -1796,9 +1796,12 @@ fn late_outer_churn_keeps_manifest_caches_and_reverse_edges_cold() {
             ResolutionPhase::PreAdmissionValidation,
             move || {
                 mutation_count.fetch_add(1, Ordering::AcqRel);
+                // An input the attempt READ changes before every admission:
+                // a genuine conflict, charged to the operation ledger. (An
+                // unrelated change is compatible and costs nothing.)
                 mutate_workspace
                     .engine
-                    .bump_content_generation_for("/proj/unrelated.ts");
+                    .bump_content_generation_for("/proj/node_modules/pkg/package.json");
             },
             || WorkspaceRead::resolve_import_outcome(workspace.as_ref(), importer, "pkg", CONTEXT),
         );
@@ -1915,4 +1918,54 @@ fn workspace_ingress_uses_only_the_semantic_owned_whole_policy_value() {
         filesystem_tightened.engine.input_resolution_budgets,
         tightened
     );
+}
+
+/// A content change to a file the attempt never read, landing before each
+/// admission check, is compatible: the route is admitted, cacheable and
+/// charged no restart, where the global world equality once refused it.
+#[test]
+fn unrelated_content_churn_before_admission_is_compatible() {
+    let workspace = Arc::new(
+        crate::memory::MemoryWorkspace::new_with_input_resolution_budgets(
+            Default::default(),
+            tightened_budgets(32, 128, 32_768, 16, 1),
+        ),
+    );
+    let importer = "/proj/src/main.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import 'pkg';"));
+    workspace.inject_file(
+        "/proj/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{"types":"./index.d.ts"}"#),
+    );
+    workspace.inject_file(
+        "/proj/node_modules/pkg/index.d.ts".to_string(),
+        Arc::from("export {};"),
+    );
+    WorkspaceAccess::configure_resolver(
+        workspace.as_ref(),
+        vec![project("/proj", "/proj/tsconfig.json")],
+    );
+    let mutate_workspace = Arc::clone(&workspace);
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            mutate_workspace
+                .engine
+                .bump_content_generation_for("/proj/unrelated.ts");
+        },
+        || WorkspaceRead::resolve_import_outcome(workspace.as_ref(), importer, "pkg", CONTEXT),
+    );
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some("/proj/node_modules/pkg/index.d.ts"),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert!(
+        outcome.is_cacheable(),
+        "{:?}",
+        outcome.non_admission_reason()
+    );
+    assert_eq!(crate::resolver::take_outer_restarts_for_test(), 0);
 }

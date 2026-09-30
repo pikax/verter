@@ -276,7 +276,7 @@ pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -
 }
 
 #[cfg(test)]
-fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
+pub(super) fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
     match key {
         SemanticQueryKey::ResolveDecl(_) => "ResolveDecl",
         SemanticQueryKey::Instantiate(_) => "Instantiate",

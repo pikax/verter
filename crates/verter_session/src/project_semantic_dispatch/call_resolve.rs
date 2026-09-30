@@ -16,8 +16,6 @@ use super::ProjectSemanticDispatch;
 
 #[path = "call_resolve_context.rs"]
 mod context;
-#[path = "call_resolve_fixation.rs"]
-mod fixation;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
@@ -3176,51 +3174,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return receiver,
         };
-        let Some(data) = graph.node_data(signature) else {
-            return receiver;
-        };
-        let SemanticNodeData::Signature {
-            kind,
-            params,
-            return_type,
-            type_parameters,
-            occurrence,
-            return_carrier: SignatureReturnCarrier::Declared(_),
-            signature_span,
-            return_type_span,
-            predicate,
-            is_abstract,
-        } = data.as_ref()
-        else {
-            return receiver;
-        };
-        if type_parameters.is_empty() {
-            return receiver;
+        match self.base_signature(signature) {
+            Some(base) if base != signature => base,
+            _ => receiver,
         }
-        let base = |node: SemanticNodeId| {
-            self.instantiate_signature_params_at_base_constraints(signature, node)
-        };
-        let params: Arc<[FunctionParam]> = params
-            .iter()
-            .cloned()
-            .map(|mut param| {
-                param.ty = base(param.ty);
-                param
-            })
-            .collect();
-        let return_type = base(*return_type);
-        graph.intern_node(SemanticNodeData::Signature {
-            kind: *kind,
-            params,
-            return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            occurrence: occurrence.clone(),
-            return_carrier: SignatureReturnCarrier::Declared(return_type),
-            signature_span: *signature_span,
-            return_type_span: *return_type_span,
-            predicate: *predicate,
-            is_abstract: *is_abstract,
-        })
     }
 
     fn call_receiver_relation(
@@ -3289,7 +3246,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn substitute_bindings(
+    pub(super) fn substitute_bindings(
         &self,
         mut node: SemanticNodeId,
         bindings: &[crate::semantic_query::InferBinding],
@@ -3739,138 +3696,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             widened_bindings.push((*param, widened));
         }
         Ok(any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings)))
-    }
-
-    /// A covariant inference as the checker widens it (`getWidenedType` in
-    /// `getCovariantInference`): without `strictNullChecks` `null` and
-    /// `undefined` widen to `any`, so `id(null)` is `any`.
-    fn widened_covariant_inference(&self, bound: SemanticNodeId) -> SemanticNodeId {
-        let graph = self.graph();
-        if !self.relation_strict_config().strict_null_checks
-            && matches!(
-                graph.node_data(bound).as_deref(),
-                Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                ))
-            )
-        {
-            return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-        }
-        bound
-    }
-
-    /// A call's covariant inference from several candidates (the checker's
-    /// `getCommonSupertype` in `getCovariantInference`): the leftmost
-    /// candidate no later one is a supertype of, with each candidate's
-    /// `null` / `undefined` set aside under `strictNullChecks` and added
-    /// back to the answer — `takes(u)` over `((x: unknown) => x is A) |
-    /// ((x: unknown) => x is B)` infers `A`, where a conditional type's
-    /// `infer` unions its candidates. Literals of one base primitive
-    /// union (`"a" | "b"`). `None` — the union the caller falls back to
-    /// — when a candidate is an object literal's fresh type, an array or a
-    /// tuple (the checker first unions object and array LITERAL candidates,
-    /// a provenance an array node does not carry) or a subtype relation is
-    /// undecided. A declared object type is an ordinary candidate: `two(x,
-    /// y)` over `A` and `B` infers `A`.
-    fn call_common_supertype(&self, candidates: &[SemanticNodeId]) -> Option<SemanticNodeId> {
-        let graph = self.graph();
-        let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            if !ordered.iter().any(|kept| {
-                crate::semantic_query::stable_key::provably_equal(graph, *kept, *candidate)
-            }) {
-                ordered.push(*candidate);
-            }
-        }
-        if let [only] = ordered.as_slice() {
-            return Some(*only);
-        }
-        let strict = self.relation_strict_config().strict_null_checks;
-        let is_nullish = |node: SemanticNodeId| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                ))
-            )
-        };
-        let mut nullish: Vec<SemanticNodeId> = Vec::new();
-        let mut primary: Vec<SemanticNodeId> = Vec::with_capacity(ordered.len());
-        for candidate in &ordered {
-            let arms: Vec<SemanticNodeId> = match graph.node_data(*candidate).as_deref() {
-                Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
-                _ => vec![*candidate],
-            };
-            if arms
-                .iter()
-                .any(|arm| match graph.node_data(*arm).as_deref() {
-                    // An object LITERAL's candidate is fresh; a declared object
-                    // type's is not, and takes part like any other.
-                    Some(SemanticNodeData::Object(_)) => {
-                        self.freshness_for_source_node(*arm) == FreshnessKey::Fresh
-                    }
-                    Some(
-                        SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Tuple { .. }
-                        | SemanticNodeData::ObjectSpreadProgram(_),
-                    ) => true,
-                    _ => false,
-                })
-            {
-                return None;
-            }
-            if strict && arms.iter().any(|arm| is_nullish(*arm)) {
-                let kept: Vec<SemanticNodeId> = arms
-                    .iter()
-                    .copied()
-                    .filter(|arm| !is_nullish(*arm))
-                    .collect();
-                nullish.extend(arms.iter().copied().filter(|arm| is_nullish(*arm)));
-                if kept.is_empty() {
-                    continue;
-                }
-                primary.push(self.intern_normalized_union_or_intersection(&kept, true));
-            } else {
-                primary.push(*candidate);
-            }
-        }
-        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(value)) => Some(std::mem::discriminant(value)),
-            _ => None,
-        };
-        let supertype = match primary.as_slice() {
-            [] => None,
-            [first, rest @ ..]
-                if literal_base(*first).is_some()
-                    && rest
-                        .iter()
-                        .all(|other| literal_base(*other) == literal_base(*first)) =>
-            {
-                Some(self.intern_normalized_union_or_intersection(&primary, true))
-            }
-            [first, rest @ ..] => {
-                let mut supertype = *first;
-                for candidate in rest {
-                    match self.execute_relate_pair_kind(
-                        supertype,
-                        *candidate,
-                        crate::semantic_query::RelationKind::Subtype,
-                    ) {
-                        RelationStep::Assignable { .. } => supertype = *candidate,
-                        RelationStep::NotAssignable => {}
-                        _ => return None,
-                    }
-                }
-                Some(supertype)
-            }
-        };
-        let mut members: Vec<SemanticNodeId> = supertype.into_iter().collect();
-        members.extend(nullish);
-        match members.as_slice() {
-            [] => None,
-            [only] => Some(*only),
-            _ => Some(self.intern_normalized_union_or_intersection(&members, true)),
-        }
     }
 
     pub(super) fn call_inference_candidate(

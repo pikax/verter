@@ -2551,10 +2551,9 @@ pub(super) fn carrier_facts_reference_canonical(
         | crate::resolver_core::FactVersionRef::StrictSelfRootWorld(_) => false,
         // A consumed result's receipt references every canonical its
         // evidence reaches.
-        crate::resolver_core::FactVersionRef::Receipt(receipt) => receipt
-            .canonicals()
-            .iter()
-            .any(|canonical| canonical.as_ref() == canonical_id),
+        crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+            receipt.references_canonical(canonical_id)
+        }
     })
 }
 

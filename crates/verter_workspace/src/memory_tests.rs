@@ -2297,7 +2297,6 @@ fn resolve_across_held_sibling_writes(
 /// write retains the world the demanded resolution read. The demanded
 /// resolution is admitted, cacheable, and charged no restart.
 #[test]
-#[ignore = "a compatible in-flight world write is contention, not a superseded world"]
 fn a_sibling_world_write_in_flight_at_admission_costs_no_restart() {
     let ws = sibling_owners_workspace(2);
     let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 1);
@@ -2325,7 +2324,6 @@ fn a_sibling_world_write_in_flight_at_admission_costs_no_restart() {
 /// and refuse the route (`BudgetExceeded`), which the session reads as an
 /// unrootable route, so the batch never warms.
 #[test]
-#[ignore = "a compatible in-flight world write is contention, not a superseded world"]
 fn twelve_sibling_world_writes_in_flight_never_refuse_a_route() {
     let ws = sibling_owners_workspace(13);
     let (outcome, restarts) = resolve_across_held_sibling_writes(&ws, 12);

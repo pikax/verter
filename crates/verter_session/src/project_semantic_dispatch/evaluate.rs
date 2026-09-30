@@ -46,6 +46,25 @@ enum PrintedDeclaration {
     AliasTransparent,
 }
 
+/// One step of the printing walk over a declaration.
+enum DeclarationPrinting {
+    /// The declaration prints so (`None` when its kind or body cannot be
+    /// recovered).
+    Printed(Option<PrintedDeclaration>),
+    /// The declaration's body references this declaration with these
+    /// declared arguments.
+    Reference(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>),
+}
+
+/// How an alias whose body references a declaration prints.
+enum ReferencePrinting {
+    /// Printed so.
+    Printed(PrintedDeclaration),
+    /// As the referenced alias's own declaration prints: named by the
+    /// outer alias unless the target prints as what it resolves to.
+    AsTarget,
+}
+
 /// A builtin mapped utility, by whether its mapping is homomorphic (its
 /// keys are `keyof` its source).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1379,34 +1398,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   (`type Lit<T> = T`) or a primitive.
     ///
     /// `None` when the declaration's kind or body cannot be recovered.
+    ///
+    /// An alias chain is walked in a loop, one alias per step, so a chain
+    /// of any length is read in constant native stack.
     fn printed_declaration(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<PrintedDeclaration> {
-        self.printed_declaration_within(identity, &mut rustc_hash::FxHashSet::default())
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = identity.clone();
+        // Whether the printing is the one of an alias further down the
+        // chain, reached through generic alias applications.
+        let mut through_alias = false;
+        let terminal = loop {
+            let (target, args) = match self.printed_declaration_body(&current, &mut visited) {
+                DeclarationPrinting::Printed(printed) => break printed,
+                DeclarationPrinting::Reference(target, args) => (target, args),
+            };
+            match self.printed_alias_reference(&target, &args) {
+                ReferencePrinting::Printed(printed) => break Some(printed),
+                ReferencePrinting::AsTarget => {
+                    through_alias = true;
+                    current = target;
+                }
+            }
+        };
+        if !through_alias {
+            return terminal;
+        }
+        // An application of a generic alias is named by the outer alias
+        // unless the target prints as what it resolves to — at every step
+        // alike, so every step above the terminal prints as the one below.
+        Some(match terminal {
+            Some(PrintedDeclaration::AliasTransparent) | None => {
+                PrintedDeclaration::AliasTransparent
+            }
+            Some(_) => PrintedDeclaration::AliasNamed,
+        })
     }
 
-    fn printed_declaration_within(
+    /// One step of [`Self::printed_declaration`]: how `identity` prints,
+    /// or the declaration its body references, whose printing decides.
+    fn printed_declaration_body(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
         visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
-    ) -> Option<PrintedDeclaration> {
+    ) -> DeclarationPrinting {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         if !visited.insert(identity.clone()) {
             // An alias cycle names nothing.
-            return Some(PrintedDeclaration::AliasTransparent);
+            return DeclarationPrinting::Printed(Some(PrintedDeclaration::AliasTransparent));
         }
-        match self.prepared_decl_kind(identity)? {
-            TypeDeclKind::Interface | TypeDeclKind::Class => {
-                return Some(PrintedDeclaration::Named)
+        match self.prepared_decl_kind(identity) {
+            None => return DeclarationPrinting::Printed(None),
+            Some(TypeDeclKind::Interface | TypeDeclKind::Class) => {
+                return DeclarationPrinting::Printed(Some(PrintedDeclaration::Named))
             }
-            TypeDeclKind::Alias => {}
+            Some(TypeDeclKind::Alias) => {}
         }
-        let Some(body) = self.declared_alias_body(identity)? else {
-            return Some(PrintedDeclaration::AliasTransparent);
+        let body = match self.declared_alias_body(identity) {
+            None => return DeclarationPrinting::Printed(None),
+            Some(None) => {
+                return DeclarationPrinting::Printed(Some(PrintedDeclaration::AliasTransparent))
+            }
+            Some(Some(body)) => body,
         };
         let graph = self.graph();
-        Some(match graph.node_data(body).as_deref() {
+        DeclarationPrinting::Printed(Some(match graph.node_data(body).as_deref() {
             // A tuple with a variadic element (`...T` over anything but an
             // array type) is normalized when it is instantiated, and the
             // normalized tuple carries no alias (the checker defers only a
@@ -1435,13 +1493,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) => PrintedDeclaration::AliasNamed,
             Some(SemanticNodeData::Intersection(_)) => PrintedDeclaration::AliasNamedIntersection,
             Some(SemanticNodeData::DeclRef { identity: target }) => {
-                self.printed_alias_reference(target, &[], visited)
+                return DeclarationPrinting::Reference(target.clone(), Arc::from([]));
             }
             Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
-                self.printed_alias_reference(target, args, visited)
+                return DeclarationPrinting::Reference(target.clone(), Arc::clone(args));
             }
             _ => PrintedDeclaration::AliasTransparent,
-        })
+        }))
     }
 
     /// How the checker prints an alias whose declared body references
@@ -1472,15 +1530,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   prints `G<boolean>`, `type OuterCond<T> = Cond<T>` prints the
     ///   selected branch);
     /// - any other builtin (a conditional utility) is what it resolves to.
+    ///
+    /// [`ReferencePrinting::AsTarget`] for a generic alias application,
+    /// which the target's own printing decides.
     fn printed_alias_reference(
         &self,
         target: &crate::semantic_query::DeclIdentity,
         args: &[SemanticNodeId],
-        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
-    ) -> PrintedDeclaration {
+    ) -> ReferencePrinting {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         if is_builtin(target) {
-            return match BuiltinMappedUtility::of(&target.decl_name) {
+            return ReferencePrinting::Printed(match BuiltinMappedUtility::of(&target.decl_name) {
                 Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
                     PrintedDeclaration::AliasThrough
                 }
@@ -1489,27 +1549,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     PrintedDeclaration::AliasNamed
                 }
                 None => PrintedDeclaration::AliasTransparent,
-            };
+            });
         }
         let (Some(kind), Some(generic)) = (
             self.prepared_decl_kind(target),
             self.prepared_decl_is_generic(target),
         ) else {
-            return PrintedDeclaration::AliasTransparent;
+            return ReferencePrinting::Printed(PrintedDeclaration::AliasTransparent);
         };
-        match kind {
+        ReferencePrinting::Printed(match kind {
             _ if !generic => PrintedDeclaration::AliasThrough,
             TypeDeclKind::Interface | TypeDeclKind::Class => PrintedDeclaration::AliasNamed,
             TypeDeclKind::Alias if self.alias_declares_homomorphic_mapping(target) => {
                 PrintedDeclaration::AliasThrough
             }
-            TypeDeclKind::Alias => match self.printed_declaration_within(target, visited) {
-                Some(PrintedDeclaration::AliasTransparent) | None => {
-                    PrintedDeclaration::AliasTransparent
-                }
-                Some(_) => PrintedDeclaration::AliasNamed,
-            },
-        }
+            TypeDeclKind::Alias => return ReferencePrinting::AsTarget,
+        })
     }
 
     /// Whether the alias `identity` declares a homomorphic mapped type — a
@@ -1518,17 +1573,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// union, or an application of another alias that does. The checker
     /// gives such a declaration the mapped type's own name, so an alias of
     /// it is printed by that name.
+    ///
+    /// Every alias the walk passes answers as the one it starts from — the
+    /// walk from each continues the same way — so each answer is kept for
+    /// the request, and a chain is walked once however many of its aliases
+    /// are asked about.
     fn alias_declares_homomorphic_mapping(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        if let Some(&known) = self.homomorphic_aliases.borrow().get(identity) {
+            return known;
+        }
+        let mut walked = Vec::new();
+        let answer = self.walk_homomorphic_mapping(identity, &mut walked);
+        let mut known = self.homomorphic_aliases.borrow_mut();
+        for alias in walked {
+            known.insert(alias, answer);
+        }
+        answer
+    }
+
+    /// [`Self::alias_declares_homomorphic_mapping`]'s walk from `identity`,
+    /// recording in `walked` every alias it passes.
+    fn walk_homomorphic_mapping(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        walked: &mut Vec<crate::semantic_query::DeclIdentity>,
     ) -> bool {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         let mut visited = rustc_hash::FxHashSet::default();
         let mut current = identity.clone();
         loop {
+            if let Some(&known) = self.homomorphic_aliases.borrow().get(&current) {
+                return known;
+            }
             if !visited.insert(current.clone()) {
                 return false;
             }
+            walked.push(current.clone());
             let Some(Some(body)) = self.declared_alias_body(&current) else {
                 return false;
             };

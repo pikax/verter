@@ -656,9 +656,13 @@ fn visit_type_expr<'a, H: Hasher, P: LeafPolicy<H>>(
                     worklist.push(e);
                 }
             }
-            TypeExpr::Infer { name } => {
+            TypeExpr::Infer { name, constraint } => {
                 16u8.hash(hasher);
                 name.hash(hasher);
+                constraint.is_some().hash(hasher);
+                if let Some(constraint) = constraint {
+                    worklist.push(constraint);
+                }
             }
             TypeExpr::Rest(inner) => {
                 17u8.hash(hasher);

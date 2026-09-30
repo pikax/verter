@@ -78,13 +78,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::ConditionalOutcome;
 use super::dispatch_txn::{
-    provisional_relate_step, redischarge_is_stable, select_inference_candidates,
-    CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
-    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
-    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
+    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
+    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
+    ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
+    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -202,6 +202,9 @@ pub(crate) enum InferPatternShape {
     /// ``T extends `${infer H}-${infer R}` `` — direct `Infer` holes of a
     /// template literal pattern.
     TemplateLiteral,
+    /// `T extends Box<infer P>` — `Infer` sites among the type arguments
+    /// of a reference to a generic declaration.
+    Reference,
 }
 
 /// Mapped modifiers whose inverse metadata effect is applied while the
@@ -812,6 +815,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
@@ -882,6 +886,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
         let member_key = self.relate_key_for(string, number);
@@ -933,6 +938,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
+            constraint: None,
         });
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -4289,6 +4295,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Union(members) => stack.extend(members.iter().copied()),
+                // A reference infers from its type arguments.
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 _ if self.subtree_contains_infer(node) => return None,
                 _ => {}
             }
@@ -4368,6 +4378,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // `infer` placeholders an element reaches through
+                        // structure or a reference (`[PE<infer M, any>]`)
+                        // are sites of the same pattern.
+                        for node in self
+                            .structural_infer_sites(element.value)
+                            .unwrap_or_default()
+                        {
+                            if let Some(SemanticNodeData::Infer { name, .. }) =
+                                graph.node_data(node).as_deref()
+                            {
+                                sites.push(InferParamSite {
+                                    node,
+                                    name: Arc::clone(name),
+                                    priority: InferenceCandidatePriority::Argument,
+                                });
+                            }
+                        }
                     }
                 }
                 (!sites.is_empty())
@@ -4466,6 +4494,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
+            }
+            Some(SemanticNodeData::InstantiationRef { .. }) => {
+                let sites: Vec<InferParamSite> = self
+                    .structural_infer_sites(target)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|node| match graph.node_data(node).as_deref() {
+                        Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
+                            node,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::Argument,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::Reference, sites, None))
             }
             Some(SemanticNodeData::TemplateLiteral { expressions, .. }) => {
                 let sites: Vec<InferParamSite> = expressions
@@ -5298,6 +5343,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The source signature a relation of `source` to the signature
+    /// `target` compares. A generic source relates as it is instantiated
+    /// in the target's context (`compareSignaturesRelated`); a relation of
+    /// comparability (which erases generics) keeps the source as it is.
+    /// Under an inference session a generic source infers as its base
+    /// signature (`inferFromSignatures` reads `getBaseSignature`: `<T>(x:
+    /// T) => T` against `(...a: infer A) => infer R` infers `[x: unknown]`
+    /// and `unknown`) — unless the target is generic itself: its own type
+    /// parameters are no inference site of the session, so the pair relates
+    /// as it does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
+    /// U) => U, x: T)`). `None` when the base signature cannot be read.
+    fn signature_relation_source(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+    ) -> Option<SemanticNodeId> {
+        if self.current_relation_kind() == RelationKind::Comparable {
+            return Some(source);
+        }
+        if !self.relation_session_active() || self.signature_is_generic(target) {
+            return Some(
+                self.instantiate_signature_in_context_of(source, target, kind)
+                    .unwrap_or(source),
+            );
+        }
+        if self.signature_is_generic(source) {
+            return self.base_signature(source);
+        }
+        Some(source)
+    }
+
     /// Whether `signature` declares type parameters of its own.
     fn signature_is_generic(&self, signature: SemanticNodeId) -> bool {
         matches!(
@@ -5675,10 +5752,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .active_session()
             .map(|session| session.projection_candidates_since(checkpoint))
             .unwrap_or_default();
-        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
-        let projection_recovered = !candidate_nodes.is_empty();
+        let winning = super::inference::winning_candidates(&candidates);
+        let projection_recovered = !winning.is_empty();
         let recovered = if projection_recovered {
-            self.relation_combine_candidates(&candidate_nodes, variance)
+            let (candidate_nodes, variance) = winning.inferred_from();
+            self.relation_combine_candidates(candidate_nodes, variance)
         } else {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
@@ -5772,6 +5850,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::Infer {
             name: base_name,
             binder: base_binder,
+            ..
         }) = graph.node_data(base_infer).as_deref().cloned()
         else {
             return Vec::new();
@@ -8388,8 +8467,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             return result;
         }
-        // Two references to one generic declaration relate by their type
-        // arguments' variance before any structural comparison.
+        // Two references to one generic declaration infer from, and relate
+        // by, their type arguments' variance before any structural
+        // comparison.
+        if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            return result;
+        }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             return result;
         }
@@ -10335,7 +10418,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     graph.node_data(hole).as_deref(),
                     Some(SemanticNodeData::Infer { .. })
                 ) {
-                    undecided |= !self.relation_deposit(hole, slice, occurrence);
+                    // A constrained hole converts its capture first
+                    // (`infer N extends number` takes `"42"` as `42`).
+                    match self.template_capture(slice, hole) {
+                        Some(capture) => {
+                            undecided |= !self.relation_deposit(hole, capture, occurrence);
+                        }
+                        None => undecided = true,
+                    }
                     continue;
                 }
                 match self.valid_for_template_placeholder(slice, hole) {
@@ -10850,21 +10940,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             drop(source_data);
             drop(target_data);
-            // A generic source relates as it is instantiated in the
-            // target's context (`compareSignaturesRelated`); a relation
-            // under an inference session, or of comparability (which
-            // erases generics), keeps the source as it is — unless the
-            // target is generic itself: its own type parameters are no
-            // inference site of the session, so the pair relates as it
-            // does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
-            // U) => U, x: T)`).
-            if self.current_relation_kind() != RelationKind::Comparable
-                && (!self.relation_session_active() || self.signature_is_generic(target))
-            {
-                if let Some(instantiated) =
-                    self.instantiate_signature_in_context_of(source, target, kind)
-                {
-                    work.push(RelateWork::Eval(instantiated, target));
+            match self.signature_relation_source(source, target, kind) {
+                Some(compared) if compared != source => {
+                    work.push(RelateWork::Eval(compared, target));
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    results.push(RelationResult::Unknown);
                     return;
                 }
             }
@@ -12294,6 +12377,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 predicate: *predicate,
             }),
             _ => None,
+        };
+        result_of(source)?;
+        result_of(target)?;
+        // The method's source signature is the one any signature relation
+        // compares (a generic source instantiated or read at its base).
+        let Some(source) = self.signature_relation_source(
+            source,
+            target,
+            crate::semantic_query::SignatureKind::Call,
+        ) else {
+            return Some(RelationResult::Unknown);
         };
         let source_result = result_of(source)?;
         let target_result = result_of(target)?;

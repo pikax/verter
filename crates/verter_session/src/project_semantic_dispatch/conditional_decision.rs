@@ -920,10 +920,9 @@ impl ProjectSemanticDispatch<'_> {
             // relation for ANY check (`any` included — the pre-any-guard
             // placement is load-bearing).
             return match self.execute_relate_pair(check, extends) {
-                super::dispatch_txn::RelationStep::Assignable { bindings } => (
-                    ConditionalBranchSelection::True,
-                    Some(super::relation::RelationInferBindings { bindings }),
-                ),
+                super::dispatch_txn::RelationStep::Assignable { bindings } => {
+                    self.select_with_inferences(check, extends, bindings)
+                }
                 super::dispatch_txn::RelationStep::NotAssignable => {
                     (ConditionalBranchSelection::False, None)
                 }
@@ -940,14 +939,11 @@ impl ProjectSemanticDispatch<'_> {
         // every consumer rides. A binding-producing judgement's returned
         // bindings substitute into the selected (true) branch.
         let related = self.execute_relate_pair(check, extends);
-        let selected = |bindings| {
-            let infer = match route {
-                ConditionalInferRoute::InScopePattern(_) => {
-                    Some(super::relation::RelationInferBindings { bindings })
-                }
-                _ => None,
-            };
-            (ConditionalBranchSelection::True, infer)
+        let selected = |bindings: std::sync::Arc<[crate::semantic_query::InferBinding]>| {
+            if !matches!(route, ConditionalInferRoute::InScopePattern(_)) {
+                return (ConditionalBranchSelection::True, None);
+            }
+            self.select_with_inferences(check, extends, bindings)
         };
         let params = self.type_params_within(&[check, extends]);
         if params.is_empty() {
@@ -982,6 +978,131 @@ impl ProjectSemanticDispatch<'_> {
             }
             _ => (ConditionalBranchSelection::Undecided, None),
         }
+    }
+
+    /// The branch an inferring `extends` pattern selects once its
+    /// inferences are fixed. What the pattern infers selects no branch by
+    /// itself: a constrained `infer` whose inference its constraint refuses
+    /// takes the constraint (`getInferredType`), and the checker relates the
+    /// check to the pattern instantiated with the fixed types
+    /// (`getConditionalType`) — `[1]` against `[infer X extends string]`
+    /// fixes `string` and takes the false branch, and `{ a: 1; b: (x:
+    /// string) => void }` against `{ a: infer U; b: (x: infer U) => void }`
+    /// infers `1` and takes it too. A pattern that reaches each of its
+    /// unconstrained `infer` declarations once infers each from the one
+    /// position it occupies, where the inferring relation already related it:
+    /// that relation is the check.
+    fn select_with_inferences(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        bindings: std::sync::Arc<[crate::semantic_query::InferBinding]>,
+    ) -> (
+        ConditionalBranchSelection,
+        Option<super::relation::RelationInferBindings>,
+    ) {
+        let constrained = self.pattern_constrains_an_infer(extends);
+        let bindings = if constrained {
+            match self.infer_bindings_within_constraints(&bindings) {
+                Some(bindings) => bindings,
+                None => return (ConditionalBranchSelection::Undecided, None),
+            }
+        } else {
+            bindings
+        };
+        if !constrained && !self.pattern_repeats_an_infer(extends) {
+            return (
+                ConditionalBranchSelection::True,
+                Some(super::relation::RelationInferBindings { bindings }),
+            );
+        }
+        let instantiated = bindings.iter().fold(extends, |node, binding| {
+            self.substitute_semantic_type_param(node, binding.param, binding.bound)
+        });
+        match self.relate_outside_inference(check, instantiated) {
+            super::dispatch_txn::RelationStep::Assignable { .. } => (
+                ConditionalBranchSelection::True,
+                Some(super::relation::RelationInferBindings { bindings }),
+            ),
+            super::dispatch_txn::RelationStep::NotAssignable => {
+                (ConditionalBranchSelection::False, None)
+            }
+            _ => (ConditionalBranchSelection::Undecided, None),
+        }
+    }
+
+    /// Whether `pattern` reaches one of its `infer` declarations along more
+    /// than one path (`{ a: infer U; b: (x: infer U) => void }`), or declares
+    /// one binder at two nodes; a homomorphic mapped type over one is one
+    /// position of it. Two passes over the pattern, each node read
+    /// once: which nodes hold an `infer`, then whether a node holding one is
+    /// reached twice.
+    fn pattern_repeats_an_infer(&self, pattern: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let mut holds: rustc_hash::FxHashMap<SemanticNodeId, bool> =
+            rustc_hash::FxHashMap::default();
+        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(pattern, false)];
+        while let Some((node, children_done)) = stack.pop() {
+            let Some(data) = graph.node_data(node) else {
+                holds.insert(node, false);
+                continue;
+            };
+            if children_done {
+                let mut held = matches!(data.as_ref(), SemanticNodeData::Infer { .. });
+                let _ = data.for_each_child(|child| {
+                    held |= holds.get(&child).copied().unwrap_or(false);
+                });
+                holds.insert(node, held);
+                continue;
+            }
+            if holds.contains_key(&node) {
+                continue;
+            }
+            stack.push((node, true));
+            let _ = data.for_each_child(|child| {
+                if !holds.contains_key(&child) {
+                    stack.push((child, false));
+                }
+            });
+        }
+        let mut reached: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut binders: FxHashSet<crate::semantic_query::InferBinderId> = FxHashSet::default();
+        let mut stack = vec![pattern];
+        while let Some(node) = stack.pop() {
+            if !holds.get(&node).copied().unwrap_or(false) {
+                continue;
+            }
+            if !reached.insert(node) {
+                return true;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Infer { binder, .. } => {
+                    if !binders.insert(binder.clone()) {
+                        return true;
+                    }
+                }
+                // A homomorphic mapped type over an `infer` declaration
+                // (`{ [K in keyof infer T]: X }`) is one position of it: its
+                // key space and template read it where the reverse mapping
+                // infers it.
+                SemanticNodeData::Mapped { source, .. } => {
+                    if let Some(SemanticNodeData::Infer { binder, .. }) =
+                        graph.node_data(*source).as_deref()
+                    {
+                        if !binders.insert(binder.clone()) {
+                            return true;
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
     }
 
     /// A written union as the checker constructs it (`getUnionType`): an
@@ -1457,7 +1578,13 @@ impl ProjectSemanticDispatch<'_> {
                     ) {
                         direct = true;
                     } else if self.subtree_contains_infer(element.value) {
-                        return ConditionalInferRoute::OutOfScope;
+                        // A placeholder an element reaches through structure
+                        // or a reference is deposited by the relation of the
+                        // element; any other nesting is not.
+                        if self.structural_infer_sites(element.value).is_none() {
+                            return ConditionalInferRoute::OutOfScope;
+                        }
+                        direct = true;
                     }
                 }
                 if direct {
@@ -1553,6 +1680,17 @@ impl ProjectSemanticDispatch<'_> {
                     ConditionalInferRoute::OutOfScope
                 } else {
                     ConditionalInferRoute::None
+                }
+            }
+            // A reference to a generic declaration infers from its type
+            // arguments (`Box<infer P>`), and through any structure there.
+            SemanticNodeData::InstantiationRef { .. } => {
+                match self.structural_infer_sites(extends) {
+                    Some(sites) if !sites.is_empty() => ConditionalInferRoute::InScopePattern(
+                        super::relation::InferPatternShape::Reference,
+                    ),
+                    Some(_) => ConditionalInferRoute::None,
+                    None => ConditionalInferRoute::OutOfScope,
                 }
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
