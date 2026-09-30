@@ -113,6 +113,8 @@ mod resolution_driver_tests;
 #[cfg(test)]
 mod resolution_flight_tests;
 pub(crate) mod resolution_flights;
+#[cfg(test)]
+mod resolution_interleaving_tests;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;

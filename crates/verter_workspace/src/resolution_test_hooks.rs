@@ -19,6 +19,10 @@ pub(crate) enum ResolutionPhase {
     AttemptStart,
     /// The input driver begins one round of an attempt.
     DriverRound,
+    /// A resolution is about to wait on the publication gate (a writer is
+    /// inside its window at capture, or the attempt is taking the gate to
+    /// admit).
+    PublicationGateWait,
 }
 
 struct InstalledHook {
