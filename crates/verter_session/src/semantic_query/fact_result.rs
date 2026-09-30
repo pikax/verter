@@ -292,7 +292,9 @@ pub enum MemberDomain<T> {
 pub enum ExecutionAbort {
     /// The request was cancelled.
     Cancelled,
-    /// The view the computation read was superseded before it could
-    /// publish.
+    /// The view the computation read was superseded, or was torn, before
+    /// it could publish.
     Superseded,
+    /// The host shut down before the computation could publish.
+    Shutdown,
 }

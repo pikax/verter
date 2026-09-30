@@ -472,6 +472,10 @@ impl CompiledProducts {
 pub(crate) enum CompileEntryOutcome {
     Produced(CompileEntryProducts),
     RuntimeSurfaceRefused(CompileEntryRefusal),
+    /// The compile's semantic inputs were aborted (a cancelled request, a
+    /// shut down host, a superseded view): the transaction publishes
+    /// nothing, not even diagnostics.
+    Aborted(crate::semantic_query::ExecutionAbort),
 }
 
 /// The products of a successful compile transaction.
@@ -2046,6 +2050,7 @@ impl VerterHost {
                 false,
                 produced.template_class_admission,
             ),
+            Ok(CompileEntryOutcome::Aborted(abort)) => return Err(HostError::from(abort)),
             Ok(CompileEntryOutcome::RuntimeSurfaceRefused(refusal)) => (
                 CompiledProducts::RuntimeSurfaceRefused {
                     diagnostic_code: refusal.diagnostic_code,
@@ -2968,6 +2973,8 @@ impl VerterHost {
                 crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
             )
         };
+        // An aborted production publishes nothing.
+        let macro_output = macro_output.map_err(crate::PublicApiProjectionError::Aborted)?;
         if !vue_macro_output_matches_revision(&macro_output, whole_hash) {
             return Ok(None);
         }
@@ -3297,6 +3304,9 @@ impl VerterHost {
             Err(HostProductsFailure::Fatal(payload)) => {
                 return Err(diagnostics.merge(payload));
             }
+            Err(HostProductsFailure::Aborted(abort)) => {
+                return Ok(CompileEntryOutcome::Aborted(abort));
+            }
             // The backend fail-closed on the runtime surface THIS request
             // asked for (all-or-none), and the transaction ends here: no
             // outputs are assembled, no IDE artifact is lifted, no template
@@ -3616,10 +3626,13 @@ impl VerterHost {
                 );
                 // One request-local runtime macro bundle from TypeInfo; the
                 // render lane does not retain it or mutate dependency state.
-                let macro_output = self.produce_vue_macro_codegen(
-                    &snapshot.canonical_id,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
-                );
+                // An aborted production publishes nothing.
+                let macro_output = self
+                    .produce_vue_macro_codegen(
+                        &snapshot.canonical_id,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
+                    )
+                    .map_err(HostError::from)?;
                 let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
                     prop_constness_overrides: None,
                     style_v_bind_vars: snapshot.style_v_bind_vars.clone(),

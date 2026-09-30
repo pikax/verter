@@ -789,9 +789,6 @@ impl TscUnavailableOutcome {
         match self {
             Self::Partial(failure) => match failure.reason {
                 MacroPartialReason::BudgetExceeded => "budget-exceeded",
-                MacroPartialReason::Cancelled => "cancelled",
-                MacroPartialReason::SupersededGeneration => "superseded-generation",
-                MacroPartialReason::UnstableState => "unstable-state",
                 MacroPartialReason::Recursion => "recursion",
                 MacroPartialReason::IncompleteTraversal => "incomplete-traversal",
             },

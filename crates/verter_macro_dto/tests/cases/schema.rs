@@ -260,21 +260,15 @@ fn props_emits_and_model_are_explicit_runtime_forms() {
 fn reason_taxonomies_are_closed_and_tsc_text_is_terminal() {
     let partial_labels = [
         MacroPartialReason::BudgetExceeded,
-        MacroPartialReason::Cancelled,
-        MacroPartialReason::SupersededGeneration,
-        MacroPartialReason::UnstableState,
         MacroPartialReason::Recursion,
         MacroPartialReason::IncompleteTraversal,
     ]
     .map(|reason| match reason {
         MacroPartialReason::BudgetExceeded => "budget",
-        MacroPartialReason::Cancelled => "cancelled",
-        MacroPartialReason::SupersededGeneration => "superseded",
-        MacroPartialReason::UnstableState => "unstable",
         MacroPartialReason::Recursion => "recursion",
         MacroPartialReason::IncompleteTraversal => "incomplete",
     });
-    assert_eq!(partial_labels.len(), 6);
+    assert_eq!(partial_labels.len(), 3);
 
     let unresolved = [
         UnresolvedReason::MissingTypeArgument,

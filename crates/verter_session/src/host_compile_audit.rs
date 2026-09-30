@@ -56,7 +56,7 @@ use verter_audit::{
     AuditedResult, CompilePayload, RequestAuditRecord, RequestKind, RequestKindPayload,
 };
 use verter_compiler::compile::types::VueExecutionInputs;
-use verter_compiler::compile::{VerterCompileResult, VueMacroSemanticInput};
+use verter_compiler::compile::VerterCompileResult;
 use verter_compiler::compile_request::{
     AnalysisProductRequest, CompileProduct, CompileRequest, DeclarationProductRequest,
     FrameworkCompileRequest, IdeProductRequest, ResolvedVueBackend, RuntimeProductRequest,
@@ -187,7 +187,6 @@ fn request_from_target(
 use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
 use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::VerterHost;
 
 /// The full requested product set, read directly off the `CompileRequest`
@@ -521,21 +520,27 @@ impl VerterHost {
                 "vue",
                 self.host_view_project_identity_for(canonical_id),
             );
-            attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
-            let result = compile_registered_vue_artifact(
-                source,
-                &framework_parse,
-                &request,
-                &execution_inputs,
-                &attempt,
-                &allocator,
-            )
-            .unwrap_or_else(|_| {
-                registered_compile_rejected(
-                    "VerterE003",
-                    "registered Vue artifact rejected by its adapter".to_string(),
-                )
-            });
+            // An aborted production of the macro semantics publishes no compile.
+            let result = match self.vue_macro_semantic_input(canonical_id, target) {
+                Ok(macro_input) => {
+                    attempt.stage_vue_macro_semantics(macro_input);
+                    compile_registered_vue_artifact(
+                        source,
+                        &framework_parse,
+                        &request,
+                        &execution_inputs,
+                        &attempt,
+                        &allocator,
+                    )
+                    .unwrap_or_else(|_| {
+                        registered_compile_rejected(
+                            "VerterE003",
+                            "registered Vue artifact rejected by its adapter".to_string(),
+                        )
+                    })
+                }
+                Err(abort) => aborted_compile(abort),
+            };
             let request_id = self.next_request_id();
             let parent_request_id =
                 verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
@@ -606,21 +611,27 @@ impl VerterHost {
                 "vue",
                 self.host_view_project_identity_for(canonical_id),
             );
-            attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
-            let result = compile_registered_vue_artifact(
-                source,
-                &framework_parse,
-                &request,
-                &execution_inputs,
-                &attempt,
-                &allocator,
-            )
-            .unwrap_or_else(|_| {
-                registered_compile_rejected(
-                    "VerterE003",
-                    "registered Vue artifact rejected by its adapter".to_string(),
-                )
-            });
+            // An aborted production of the macro semantics publishes no compile.
+            let result = match self.vue_macro_semantic_input(canonical_id, target) {
+                Ok(macro_input) => {
+                    attempt.stage_vue_macro_semantics(macro_input);
+                    compile_registered_vue_artifact(
+                        source,
+                        &framework_parse,
+                        &request,
+                        &execution_inputs,
+                        &attempt,
+                        &allocator,
+                    )
+                    .unwrap_or_else(|_| {
+                        registered_compile_rejected(
+                            "VerterE003",
+                            "registered Vue artifact rejected by its adapter".to_string(),
+                        )
+                    })
+                }
+                Err(abort) => aborted_compile(abort),
+            };
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -646,21 +657,27 @@ impl VerterHost {
             "vue",
             self.host_view_project_identity_for(canonical_id),
         );
-        attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
-        let result = compile_registered_vue_artifact(
-            source,
-            &framework_parse,
-            &request,
-            &execution_inputs,
-            &attempt,
-            &allocator,
-        )
-        .unwrap_or_else(|_| {
-            registered_compile_rejected(
-                "VerterE003",
-                "registered Vue artifact rejected by its adapter".to_string(),
-            )
-        });
+        // An aborted production of the macro semantics publishes no compile.
+        let result = match self.vue_macro_semantic_input(canonical_id, target) {
+            Ok(macro_input) => {
+                attempt.stage_vue_macro_semantics(macro_input);
+                compile_registered_vue_artifact(
+                    source,
+                    &framework_parse,
+                    &request,
+                    &execution_inputs,
+                    &attempt,
+                    &allocator,
+                )
+                .unwrap_or_else(|_| {
+                    registered_compile_rejected(
+                        "VerterE003",
+                        "registered Vue artifact rejected by its adapter".to_string(),
+                    )
+                })
+            }
+            Err(abort) => aborted_compile(abort),
+        };
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
         // 10. Read accumulators off the active request context.
@@ -702,19 +719,6 @@ impl VerterHost {
         registration.finalize(record.clone());
         drop(_ctx_guard);
         AuditedResult::ok(result, record)
-    }
-
-    fn vue_macro_compile_input(
-        &self,
-        canonical_id: &str,
-        target: CompileTarget,
-    ) -> VueMacroSemanticInput {
-        VueMacroCodegenDemand::for_compile_target(target)
-            .map(|demand| {
-                self.produce_vue_macro_codegen(canonical_id, demand)
-                    .compiler_input()
-            })
-            .unwrap_or(VueMacroSemanticInput::Unavailable)
     }
 
     fn assemble_compile_payload(
@@ -880,6 +884,18 @@ pub(crate) fn debug_assert_compile_bound_attribution(
         canonical_id,
         "{route} bound attribution must name the executed request's canonical id"
     );
+}
+
+/// The result of a compile whose macro semantics were aborted: no compiled
+/// product, only the abort. A cancelled request, a shut down host or a
+/// superseded view publishes nothing of the compile it interrupted.
+fn aborted_compile(abort: crate::semantic_query::ExecutionAbort) -> VerterCompileResult {
+    let what = match abort {
+        crate::semantic_query::ExecutionAbort::Cancelled => "the request was cancelled",
+        crate::semantic_query::ExecutionAbort::Superseded => "the source view was superseded",
+        crate::semantic_query::ExecutionAbort::Shutdown => "the host shut down",
+    };
+    registered_compile_rejected("VerterE005", format!("compile aborted: {what}"))
 }
 
 fn registered_compile_rejected(code: &str, message: String) -> VerterCompileResult {

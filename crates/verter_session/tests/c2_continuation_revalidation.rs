@@ -62,7 +62,9 @@ const TARGET: CompileTarget = CompileTarget::BUNDLER
 #[test]
 fn incremental_revalidation_equals_fresh_recompute() {
     let host = host_with(SFC_A);
-    let before = host.vue_macro_semantic_input("/src/App.vue", TARGET);
+    let before = host
+        .vue_macro_semantic_input("/src/App.vue", TARGET)
+        .expect("not aborted");
     let _ = before; // warm the producer once under the original content
 
     // Edit: a new authored prop member changes the macro input plan.
@@ -75,11 +77,15 @@ fn incremental_revalidation_equals_fresh_recompute() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let incremental = host.vue_macro_semantic_input("/src/App.vue", TARGET);
+    let incremental = host
+        .vue_macro_semantic_input("/src/App.vue", TARGET)
+        .expect("not aborted");
 
     // Fresh: a brand-new host over the same bytes.
     let fresh_host = host_with(SFC_A_EDITED);
-    let fresh = fresh_host.vue_macro_semantic_input("/src/App.vue", TARGET);
+    let fresh = fresh_host
+        .vue_macro_semantic_input("/src/App.vue", TARGET)
+        .expect("not aborted");
 
     // Both must be the SAME semantic answer: the complete runtime and tsc
     // payloads are equal, and neither reports a stale (pre-edit) member
@@ -134,8 +140,12 @@ fn incremental_revalidation_equals_fresh_recompute() {
 #[test]
 fn repeated_derivation_under_unchanged_input_is_stable() {
     let host = host_with(SFC_A);
-    let first = host.vue_macro_semantic_input("/src/App.vue", TARGET);
-    let second = host.vue_macro_semantic_input("/src/App.vue", TARGET);
+    let first = host
+        .vue_macro_semantic_input("/src/App.vue", TARGET)
+        .expect("not aborted");
+    let second = host
+        .vue_macro_semantic_input("/src/App.vue", TARGET)
+        .expect("not aborted");
     // Stability is over the WHOLE payload, not just availability: the
     // resumed answer equals the computed one member-for-member.
     assert_eq!(

@@ -36,9 +36,10 @@ use crate::resolver_core::{
     FactReadSetFinalise, FactVersionRef, ResolverContext, StoreViewCompatToken,
 };
 use crate::semantic_query::{
-    BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext, ValueRootKey,
+    BroadRuntimeKind, ExecutionAbort, PartialReasonSet, PathSegment, ProjectionMode,
+    ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId,
+    SemanticNodeData, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    SurfaceProvenanceContext, ValueRootKey,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
@@ -547,18 +548,13 @@ fn record_unresolved_surface_arms(
     }));
 }
 
-fn cancelled_vue_macro_codegen_output(
-    ctx: &(dyn ResolverContext + Sync),
-    owner_canonical: &str,
-    demand: VueMacroCodegenDemand,
-) -> VueMacroCodegenOutput {
-    terminal_partial_vue_macro_codegen_output(
-        ctx,
-        owner_canonical,
-        demand,
-        PartialReasonSet::CANCELLED,
-        MacroPartialReason::Cancelled,
-    )
+/// Hand back `abort` after refusing the enclosing compute the right to root
+/// on this production: an aborted production observed nothing a consumer
+/// could validate against, so a consumer that did not itself abort must
+/// still not publish a slot rooted only on its own direct reads.
+fn refuse_rooting_on_abort(abort: ExecutionAbort) -> ExecutionAbort {
+    MacroFactFootprint::Unobserved.replay();
+    abort
 }
 
 /// One semantic-transaction entry for this owner's Vue-macro plan.
@@ -579,8 +575,10 @@ fn enter_vue_macro_semantic_attempt<'a>(
     )
 }
 
-/// Build the ReturnOnly handoff for a terminal scheduler failure without
-/// entering semantic classification. Inventory reads are permitted so each
+/// Build the ReturnOnly handoff for a terminal scheduler FAULT (a panic, a
+/// type mismatch, a re-entrant demand) without entering semantic
+/// classification. An aborted computation (cancelled, shut down, or torn)
+/// publishes nothing and never reaches here. Inventory reads are permitted so each
 /// demanded macro retains its stable identity and typed `Partial` outcome;
 /// the result is explicitly non-cacheable and is never published by the
 /// request-scoped scheduler rendezvous.
@@ -718,18 +716,21 @@ impl VerterHost {
     /// [`VueMacroSemanticInput::Unavailable`]. Without it, a type-based macro's
     /// template prop references degrade to instance-property access
     /// (`___VERTER___instance.foo`) instead of the resolved `__props.foo` form.
-    #[must_use]
+    ///
+    /// An aborted production (the request was cancelled, the host shut down,
+    /// or the view it read was superseded) publishes no bundle: the abort is
+    /// returned instead.
     pub fn vue_macro_semantic_input(
         &self,
         canonical_id: &str,
         target: crate::CompileTarget,
-    ) -> verter_compiler::compile::VueMacroSemanticInput {
-        VueMacroCodegenDemand::for_compile_target(target)
-            .map(|demand| {
-                self.produce_vue_macro_codegen(canonical_id, demand)
-                    .compiler_input()
-            })
-            .unwrap_or(verter_compiler::compile::VueMacroSemanticInput::Unavailable)
+    ) -> Result<verter_compiler::compile::VueMacroSemanticInput, ExecutionAbort> {
+        match VueMacroCodegenDemand::for_compile_target(target) {
+            Some(demand) => Ok(self
+                .produce_vue_macro_codegen(canonical_id, demand)?
+                .compiler_input()),
+            None => Ok(verter_compiler::compile::VueMacroSemanticInput::Unavailable),
+        }
     }
 
     /// Produce a request-local bundle from one coherent cold-seed view.
@@ -737,7 +738,7 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
-    ) -> VueMacroCodegenOutput {
+    ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
         let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx =
@@ -751,12 +752,17 @@ impl VerterHost {
     /// The result is intentionally not retained as an aggregate graph-id
     /// cache. Underlying TypeInfo semantic queries retain their own canonical
     /// memo entries and singleflight behavior.
+    ///
+    /// An aborted production publishes nothing: a cancelled request, a shut
+    /// down scheduler, or a computation that read a superseded or torn view
+    /// returns the abort, never a bundle of refusals standing in for the
+    /// answer.
     pub(crate) fn produce_vue_macro_codegen_with_ctx(
         &self,
         ctx: &(dyn ResolverContext + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
-    ) -> VueMacroCodegenOutput {
+    ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
         let identity = vue_macro_codegen_schedule_identity(ctx, owner_canonical, demand);
         let request = ScopedCacheNodeRequest {
             cache_id: VUE_MACRO_CODEGEN_CACHE_ID,
@@ -771,23 +777,27 @@ impl VerterHost {
             .scheduler()
             .execute_scoped_cache_node(request, |job_cancellation| {
                 if job_cancellation.is_cancelled() {
-                    crate::request_context::mark_request_result_cancelled();
-                    return cancelled_vue_macro_codegen_output(ctx, owner_canonical, demand);
+                    return Err(ExecutionAbort::Cancelled);
                 }
-                self.compute_vue_macro_codegen_output(ctx, owner_canonical, demand)
+                let output = self.compute_vue_macro_codegen_output(ctx, owner_canonical, demand);
+                if job_cancellation.is_cancelled() {
+                    return Err(ExecutionAbort::Cancelled);
+                }
+                match observed_abort(output.completeness) {
+                    Some(abort) => Err(abort),
+                    None => Ok(output),
+                }
             }) {
-            Ok(output) => output.as_ref().clone(),
+            Ok(output) => match output.as_ref() {
+                Ok(output) => output.clone(),
+                Err(abort) => return Err(refuse_rooting_on_abort(*abort)),
+            },
             Err(ScopedCacheNodeError::Cancelled) => {
-                crate::request_context::mark_request_result_cancelled();
-                cancelled_vue_macro_codegen_output(ctx, owner_canonical, demand)
+                return Err(refuse_rooting_on_abort(ExecutionAbort::Cancelled))
             }
-            Err(ScopedCacheNodeError::Shutdown) => terminal_partial_vue_macro_codegen_output(
-                ctx,
-                owner_canonical,
-                demand,
-                PartialReasonSet::UNSTABLE_STATE,
-                MacroPartialReason::UnstableState,
-            ),
+            Err(ScopedCacheNodeError::Shutdown) => {
+                return Err(refuse_rooting_on_abort(ExecutionAbort::Shutdown))
+            }
             Err(
                 ScopedCacheNodeError::Panicked
                 | ScopedCacheNodeError::TypeMismatch
@@ -807,7 +817,7 @@ impl VerterHost {
         // enclosing compute roots on nothing the macro traversal read past its
         // direct imports, and any refusal the producer raised is lost.
         output.fact_footprint.replay();
-        output
+        Ok(output)
     }
 
     fn compute_vue_macro_codegen_output(
