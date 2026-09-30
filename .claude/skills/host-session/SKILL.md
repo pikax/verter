@@ -162,8 +162,15 @@ re-admits fresh. No admission cache survives beside the hub (the per-composite
 are `ProviderHub::bound_project` + the hub request cache).
 Background discovery uses `load_file_with_disposition`: `Shadowed` preserves
 editor content and its delivered mapping; `Held` records desired replay state
-without forcing a cold managed fallback to establish. Independent hub groups
-activate concurrently, each with one ordered provider-affine bulk call.
+without forcing a cold managed fallback to establish. `ProjectSync`'s prepared
+mapper is not an application receipt: `ProviderHub::applied_content` returns
+the exact bytes the serving incarnation accepted, and a held, shadowed, or
+failed write — including a rejected close, which keeps the prior surface for
+replay — does not certify delivery. A close is committed only after the engine
+accepts it. Independent hub groups activate concurrently, each with one
+ordered provider-affine bulk call. An A/B/A activation across two project hubs
+rebuilds each group once per bulk delivery; aliases of one project stay in
+that group's order, and a withdrawn binding delivers nothing.
 Dropping a direct overlay write or withdrawal signals that incarnation's
 recovery monitor because its physical outcome is unknown.
 A basis drift observed AFTER a provider write landed splits on what drifted. A

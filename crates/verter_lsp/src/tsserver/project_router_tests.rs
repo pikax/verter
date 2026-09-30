@@ -366,6 +366,105 @@ async fn carrier_batches_preserve_each_provider_order_without_scalar_dispatch() 
 }
 
 #[tokio::test]
+async fn two_provider_aba_aliases_share_a_group_and_withdrawal_blocks_stale_delivery() {
+    let fixture = batch_router_fixture().await;
+    let group_a: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/a/tsconfig.json"))
+        .cloned()
+        .collect();
+    let group_b: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/b/tsconfig.json"))
+        .cloned()
+        .collect();
+    assert!(
+        group_a.len() >= 2 && group_b.len() == 1,
+        "project A aliases share one group; project B is the other instance"
+    );
+
+    fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .unwrap();
+    fixture
+        .router
+        .activate_carrier_members(&group_b)
+        .await
+        .unwrap();
+    fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .unwrap();
+
+    let rebuilds = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::ActivateCarrierMembers { .. }))
+            .count()
+    };
+    let scalars = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::ActivateCarrierMember { .. }))
+            .count()
+    };
+    let a_calls = fixture.providers[0].calls();
+    let b_calls = fixture.providers[1].calls();
+    assert_eq!(
+        rebuilds(&a_calls),
+        2,
+        "A/B/A rebuilds project A twice, once per bulk delivery: {a_calls:?}"
+    );
+    assert_eq!(
+        scalars(&a_calls),
+        0,
+        "scalarization would count members: {a_calls:?}"
+    );
+    assert_eq!(
+        rebuilds(&b_calls),
+        1,
+        "project B receives only its own group: {b_calls:?}"
+    );
+    assert!(
+        matches!(
+            a_calls.first(),
+            Some(MockCall::ActivateCarrierMembers { members }) if members == &group_a
+        ),
+        "aliases of A stay in one ordered group: {a_calls:?}"
+    );
+
+    for provider in &fixture.providers {
+        provider.clear_calls();
+    }
+    fixture
+        .workspace
+        .publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(Arc::new(
+            verter_workspace::WorkspaceSnapshot {
+                owners_memo: Default::default(),
+                projects: Vec::new(),
+                resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+                generation: SnapshotGeneration(2),
+            },
+        )));
+    assert!(fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .is_err());
+    for provider in &fixture.providers {
+        assert!(
+            provider.calls().is_empty(),
+            "withdrawal must not deliver the previous binding"
+        );
+    }
+}
+
+#[tokio::test]
 async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered() {
     let fixture = batch_router_fixture().await;
     fixture

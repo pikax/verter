@@ -646,6 +646,7 @@ struct MockInner {
     /// When set, every `update_file` FAILS without recording — an engine
     /// rejecting a state update it was forwarded (the divergence shape).
     update_fails: std::sync::atomic::AtomicBool,
+    close_fails: std::sync::atomic::AtomicBool,
     shutdowns: AtomicUsize,
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
@@ -675,6 +676,7 @@ impl MockProvider {
                 update_gate: parking_lot::Mutex::new(None),
                 update_started: Notify::new(),
                 update_fails: std::sync::atomic::AtomicBool::new(false),
+                close_fails: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
@@ -700,6 +702,12 @@ impl MockProvider {
     fn set_failing_updates(&self) {
         self.inner
             .update_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn set_failing_closes(&self) {
+        self.inner
+            .close_fails
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -775,6 +783,13 @@ impl TypeProvider for MockProvider {
     }
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        if self
+            .inner
+            .close_fails
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Box::pin(async { Err(TypeProviderError::new("mock close failure")) });
+        }
         self.record(MockCall::CloseFile {
             path: path.to_string(),
         });
@@ -3523,6 +3538,69 @@ async fn a_failed_forward_retires_the_epoch_and_replays_before_serving_again() {
          replay: {:?}",
         replacement.calls()
     );
+}
+
+/// A rejected close leaves the prior surface in desired state. Recovery replays
+/// that surface; a later successful close, then a reopen, is the only path that
+/// replaces it.
+#[tokio::test(start_paused = true)]
+async fn failed_close_keeps_the_prior_surface_until_reopen() {
+    use crate::traits::AppliedContent;
+
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+    provider.open_file("/p/A.ts", "const a = 1;").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 1;"
+    ));
+
+    initial.set_failing_closes();
+    let failure = provider
+        .close_file("/p/A.ts")
+        .await
+        .expect_err("the failed close reaches its submitter");
+    assert!(failure.message.contains("mock close failure"));
+    await_down(&provider).await;
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    provider
+        .get_hover("/p/A.ts", 3)
+        .await
+        .expect("the replacement serves the prior surface");
+    assert!(
+        replacement.calls().iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, content }
+                if path == "/p/A.ts" && content == "const a = 1;"
+        )),
+        "recovery replays the unclosed surface: {:?}",
+        replacement.calls()
+    );
+    assert!(
+        !replacement
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { .. })),
+        "a failed close must not be replayed as a retirement"
+    );
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 1;"
+    ));
+
+    provider.close_file("/p/A.ts").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::NotApplied
+    ));
+    provider.open_file("/p/A.ts", "const a = 2;").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 2;"
+    ));
 }
 
 /// The on-demand shape of the same reconciliation: no eager respawn. The

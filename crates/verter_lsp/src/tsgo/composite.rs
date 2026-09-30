@@ -1716,6 +1716,10 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        self.managed.applied_content(path)
+    }
+
     fn provider_id(&self) -> &'static str {
         // The composite IS the tsgo provider — the SHARED overlay is an internal
         // implementation detail of the ONE provider; every engine-identifying branch

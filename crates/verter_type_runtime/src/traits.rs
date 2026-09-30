@@ -152,6 +152,18 @@ pub enum FileLoadDisposition {
     Shadowed,
 }
 
+/// What a provider can prove about the bytes a serving incarnation accepted.
+///
+/// Production hubs return [`Applied`](Self::Applied) or [`NotApplied`](Self::NotApplied).
+/// [`Uncertified`](Self::Uncertified) is only the default for engines that do not
+/// own application; a caller must not treat it as a hub receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedContent {
+    Uncertified,
+    NotApplied,
+    Applied(Arc<str>),
+}
+
 pub trait TypeProvider: Send + Sync {
     /// Preserve the load's disposition across router/wrapper boundaries.
     fn load_file_with_disposition<'a>(
@@ -174,6 +186,16 @@ pub trait TypeProvider: Send + Sync {
             }
             Ok(FileLoadDisposition::Forwarded)
         })
+    }
+
+    /// Exact bytes the serving incarnation accepted for `path`.
+    ///
+    /// The default does not certify application. Hubs, and wrappers that route
+    /// through a hub, override it. A local delivery ledger may describe a
+    /// prepared mapper, but it is not an application receipt while this returns
+    /// [`AppliedContent::NotApplied`].
+    fn applied_content(&self, _path: &str) -> AppliedContent {
+        AppliedContent::Uncertified
     }
 
     /// Stable identity of this provider implementation.

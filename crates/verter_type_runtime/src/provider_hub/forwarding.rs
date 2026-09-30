@@ -2,6 +2,8 @@
 //! queries run against the serving incarnation under crash quarantine and
 //! epoch settlement.
 
+use std::sync::Arc;
+
 use super::quarantine::hash_extra;
 use super::*;
 use crate::protocol::*;
@@ -39,6 +41,20 @@ where
             })
         })
     }
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        match self
+            .state
+            .shared
+            .applied_files
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(path)
+        {
+            Some(content) => crate::traits::AppliedContent::Applied(Arc::clone(content)),
+            None => crate::traits::AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         // The engine identity is tier-accurate while an incarnation serves.
         // Between incarnations the LAST serving tier is the truthful identity:

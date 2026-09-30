@@ -1023,6 +1023,20 @@ impl TypeProvider for ProjectTsserverProvider {
         })
     }
 
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        let normalized = Self::normalized(path);
+        let Some(route) = self.routes.get(&normalized) else {
+            return AppliedContent::Uncertified;
+        };
+        for entry in &self.providers {
+            if Self::normalized(&entry.key().project) == route.project {
+                return entry.value().applied_content(path);
+            }
+        }
+        AppliedContent::NotApplied
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsserver"
     }

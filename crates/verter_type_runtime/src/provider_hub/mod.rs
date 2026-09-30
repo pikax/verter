@@ -57,6 +57,7 @@
 //! No synchronous guard is ever held across an `.await` or a channel send. The
 //! crate denies `clippy::await_holding_lock` to keep this enforced.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
@@ -332,6 +333,10 @@ struct Shared<P: ?Sized> {
     query_watch: Arc<StdMutex<QueryWatch>>,
     admission: StdMutex<admission::AdmissionState>,
     overlay: overlay::LazyOverlayCore<overlay::HubAdmittedTransport<P>>,
+    /// Bytes a serving incarnation actually accepted. Empty while none serves.
+    /// Desired state can be ahead of this map: a held or failed write is not
+    /// an application receipt.
+    applied_files: StdRwLock<HashMap<String, Arc<str>>>,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -476,6 +481,7 @@ where
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
             admission: StdMutex::new(admission::AdmissionState::default()),
             overlay: overlay::LazyOverlayCore::new(),
+            applied_files: StdRwLock::new(HashMap::new()),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
@@ -1318,6 +1324,7 @@ async fn run_actor<P>(
                                             Ok(()) => {
                                                 desired.apply(&mutation, lane);
                                                 desired.record_admitted(&mutation, &admissions);
+                                                note_receipt(&shared, &mutation);
                                                 let mut watch =
                                                     shared.query_watch.lock().unwrap_or_else(
                                                         |poisoned| poisoned.into_inner(),
@@ -1392,13 +1399,22 @@ async fn run_actor<P>(
                 ack,
             } => {
                 let touched = mutation.touched_paths();
-                let disposition = desired.apply(&mutation, lane);
+                // A close is committed only after the serving engine accepts it.
+                // Recording it first would drop the prior surface when the close
+                // fails and the replacement replays.
+                let closing = mutation.closed_path().is_some();
+                let disposition = if closing {
+                    Disposition::Forward
+                } else {
+                    desired.apply(&mutation, lane)
+                };
                 // The content change is RECORDED: lift the touched paths' crash
                 // attribution here, on the actor — the mutation applies in
                 // order regardless of whether its submitter was still waiting
                 // for the settlement, so a submitter deadline can never leave
-                // stale quarantine behind.
-                {
+                // stale quarantine behind. A close lifts attribution only once
+                // the engine accepts it.
+                if !closing {
                     let mut watch = shared
                         .query_watch
                         .lock()
@@ -1408,10 +1424,23 @@ async fn run_actor<P>(
                     }
                 }
                 let result = match (shared.serving(), disposition) {
-                    (None, _) => Ok(AppliedReceipt {
-                        epoch: None,
-                        applied: false,
-                    }),
+                    (None, _) => {
+                        if closing {
+                            desired.apply(&mutation, lane);
+                            let mut watch = shared
+                                .query_watch
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            for path in &touched {
+                                watch.clear_path(path);
+                            }
+                        }
+                        retract_unserved_close(&shared, &mutation);
+                        Ok(AppliedReceipt {
+                            epoch: None,
+                            applied: false,
+                        })
+                    }
                     (Some(serving), Disposition::Shadowed) => Ok(AppliedReceipt {
                         epoch: Some(serving.epoch),
                         applied: false,
@@ -1433,10 +1462,23 @@ async fn run_actor<P>(
                         )
                         .await
                         {
-                            Ok(Ok(())) => Ok(AppliedReceipt {
-                                epoch: Some(serving.epoch),
-                                applied: true,
-                            }),
+                            Ok(Ok(())) => {
+                                if closing {
+                                    desired.apply(&mutation, lane);
+                                    let mut watch = shared
+                                        .query_watch
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    for path in &touched {
+                                        watch.clear_path(path);
+                                    }
+                                }
+                                note_receipt(&shared, &mutation);
+                                Ok(AppliedReceipt {
+                                    epoch: Some(serving.epoch),
+                                    applied: true,
+                                })
+                            }
                             Ok(Err(error)) => {
                                 // A failed forward is DIVERGENCE: the mutation
                                 // is recorded in the desired state but this
@@ -1538,6 +1580,7 @@ async fn run_actor<P>(
                 match outcome {
                     Ok(()) => {
                         let dropped = desired.discard_admitted();
+                        publish_serving_files(&shared, &desired);
                         let epoch = shared.epochs.mint();
                         shared.overlay.observe_serving_epoch(epoch);
                         // Record the installed engine's tier BEFORE releasing
@@ -1588,6 +1631,43 @@ async fn run_actor<P>(
     }
 }
 
+fn applied_map<P: ?Sized>(
+    shared: &Shared<P>,
+) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<str>>> {
+    shared
+        .applied_files
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record a forward the serving engine accepted. A shadowed or held write
+/// does not call this.
+fn note_receipt<P: ?Sized>(shared: &Shared<P>, mutation: &DesiredMutation) {
+    let mut applied = applied_map(shared);
+    if let Some(path) = mutation.closed_path() {
+        applied.remove(path);
+        return;
+    }
+    if let Some((path, content)) = mutation.committed_file() {
+        applied.insert(path.to_string(), Arc::from(content));
+    }
+}
+
+/// A close with no engine has nothing to forward. Drop any stale receipt.
+fn retract_unserved_close<P: ?Sized>(shared: &Shared<P>, mutation: &DesiredMutation) {
+    if let Some(path) = mutation.closed_path() {
+        applied_map(shared).remove(path);
+    }
+}
+
+fn publish_serving_files<P: ?Sized>(shared: &Shared<P>, desired: &DesiredState) {
+    *applied_map(shared) = desired.serving_file_contents().into_iter().collect();
+}
+
+fn clear_applied<P: ?Sized>(shared: &Shared<P>) {
+    applied_map(shared).clear();
+}
+
 /// Retire the engine serving `epoch`: fail queries closed first, then tear the
 /// failed child down without holding the serving lock.
 async fn retire<P>(shared: &Shared<P>, epoch: ProviderEpoch)
@@ -1605,6 +1685,7 @@ where
         }
     };
     if let Some(retired) = retired {
+        clear_applied(shared);
         let _ = retired.provider.shutdown().await;
     }
 }
@@ -1619,6 +1700,7 @@ where
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
     if let Some(serving) = serving {
+        clear_applied(shared);
         let _ = serving.provider.shutdown().await;
         // Release the incarnation's crash monitor; it observes the teardown.
         serving.crash_signal.notify_one();
