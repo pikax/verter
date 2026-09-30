@@ -8143,13 +8143,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// structural work. Non-trivial pairs return `Unknown` and fall
     /// through to the structural reducer.
     /// Whether a `null` / `undefined` source is an inference candidate for
-    /// `target`: a type parameter or `infer` the active session binds.
+    /// `target`: a type parameter or `infer` the active session binds, or a
+    /// union holding one (`T | undefined`, which is `T` itself without
+    /// `strictNullChecks`).
     fn null_deposits_into(&self, target: &SemanticNodeData) -> bool {
-        self.relation_session_active()
-            && matches!(
-                target,
+        if !self.relation_session_active() {
+            return false;
+        }
+        let binder = |data: &SemanticNodeData| {
+            matches!(
+                data,
                 SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
             )
+        };
+        match target {
+            SemanticNodeData::Union(members) => members.iter().any(|member| {
+                self.graph()
+                    .node_data(*member)
+                    .as_deref()
+                    .is_some_and(binder)
+            }),
+            data => binder(data),
+        }
     }
 
     pub(super) fn shallow_relation_check(
