@@ -134,7 +134,14 @@ Generated-unit requests and writes bind through `ProviderHub::bind_project` and
 canonical resolver and supplies a live publication/content/project-generation
 reader; the hub binds that basis to the actual serving provider and epoch.
 The workspace membership query mints the complete proof for the requested
-unit set. Warm same-basis requests reuse the hub admission, while an excluded,
+unit set. A unit is tested against the owning project's spec through its
+MEMBERSHIP BASIS — the unit's own form first, then the carrier source it
+projects from when that form matches no include (the reverse companion map,
+handed into the workspace query as data by
+`external_ts::carrier_membership_basis`, because the engine maps a companion
+through its source's project: an extension-specific `src/**/*.vue` include
+that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
+`exclude` removes the unit's own form still refuses it. Warm same-basis requests reuse the hub admission, while an excluded,
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
 Generated state is retained only after an applied receipt. Recovery discards

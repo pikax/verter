@@ -25,7 +25,9 @@ use verter_session::external_ts::{
 };
 use verter_session::VerterHost;
 use verter_workspace::published_state::PublishedRoot;
-use verter_workspace::{decide_generated_unit_admission, CanonicalPath, GeneratedUnitAdmission};
+use verter_workspace::{
+    decide_generated_unit_admission_with_basis, CanonicalPath, GeneratedUnitAdmission,
+};
 
 use crate::external_ts::TsgoEngineBackend;
 use verter_type_runtime::provider_hub::{ProjectBasis, ProjectBindingInput};
@@ -94,17 +96,20 @@ impl BoundCarrier {
     /// Decide whether EVERY generated unit of `units` is admitted to this carrier's
     /// owning configured project, over the snapshot the binding was resolved at.
     ///
-    /// Owning the carrier SOURCE proves nothing about the units generated for it (an
-    /// extension-specific `src/**/*.vue` include owns `Foo.vue` and matches no
-    /// `Foo.vue.tsx`), so this is the separate proof a write into an engine Verter does
-    /// not own must hold. The membership authority is the workspace's; nothing here
-    /// re-derives it.
+    /// A unit is a member of the project that admits its membership BASIS — the
+    /// carrier source it projects from (an extension-specific `src/**/*.vue`
+    /// include owns `Foo.vue` and thereby admits its `Foo.vue.tsx`), or the unit
+    /// itself when it derives from no carrier — so this remains a separate proof
+    /// a write into an engine Verter does not own must hold, never a fact the
+    /// binding alone carries. The membership authority is the workspace's;
+    /// nothing here re-derives it.
     #[must_use]
     pub fn admit_generated_units(&self, units: &[CanonicalPath]) -> GeneratedUnitAdmission {
-        decide_generated_unit_admission(
+        decide_generated_unit_admission_with_basis(
             self.basis.published.snapshot.as_ref(),
             &CanonicalPath::new(self.binding.tsconfig_uri()),
             units,
+            crate::external_ts::carrier_membership_basis,
         )
     }
 

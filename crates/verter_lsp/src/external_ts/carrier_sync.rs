@@ -41,7 +41,9 @@ use verter_session::external_ts::{
 };
 use verter_session::{IdeResponse, VerterHost};
 use verter_workspace::FilesystemWorkspace;
-use verter_workspace::{decide_generated_unit_admission, CanonicalPath, GeneratedUnitAdmission};
+use verter_workspace::{
+    decide_generated_unit_admission_with_basis, CanonicalPath, GeneratedUnitAdmission,
+};
 
 use crate::documents::DocumentRegistry;
 use crate::external_ts::{
@@ -992,10 +994,11 @@ fn generated_units_excluded(
         .map(|companion| CanonicalPath::new(companion.provider_uri.as_ref()))
         .collect();
     matches!(
-        decide_generated_unit_admission(
+        decide_generated_unit_admission_with_basis(
             published.snapshot.as_ref(),
             &CanonicalPath::new(binding.tsconfig_uri()),
             &units,
+            super::carrier_membership_basis,
         ),
         GeneratedUnitAdmission::NotAdmitted(_)
     )

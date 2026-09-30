@@ -449,10 +449,12 @@ async fn engage_transport_failure_preserves_source_project_and_generation() {
 // sweep (`inject_editor_demand`) over a real host + published snapshot, with a recording
 // transport double standing in for the editor's engine, and assert on what reached it.
 
-/// The measured shape: every include is extension-specific, so `Foo.vue` is owned and
-/// neither `Foo.vue.tsx` nor `Foo.vue.jsx` is a member.
-const EXTENSION_SPECIFIC_TSCONFIG: &str =
-    r#"{ "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.vue", "src/**/*.d.ts"] }"#;
+/// A project that owns the carrier source (the directory include admits
+/// `Foo.vue`) while its `exclude` removes the companion's own form — the
+/// configuration-excluded shape that stays refused under the carrier-basis
+/// membership model.
+const COMPANION_EXCLUDING_TSCONFIG: &str =
+    r#"{ "include": ["src"], "exclude": ["src/**/*.vue.tsx"] }"#;
 
 /// A transport double that records every operation that reached it.
 struct RecordingTransport {
@@ -504,16 +506,17 @@ async fn establish_recording_transport(
     .expect("establish recording transport")
 }
 
-/// A carrier whose project OWNS the source but does not admit its generated units is
-/// refused with the typed reason BEFORE the transport is established — so nothing can
-/// have been written — and the refusal is reported once per (carrier, generation).
+/// A carrier whose project owns the source but CONFIGURATION-EXCLUDES its
+/// generated units is refused with the typed reason BEFORE the transport is
+/// established — so nothing can have been written — and the refusal is
+/// reported once per (carrier, generation).
 #[tokio::test]
 async fn unadmitted_carrier_is_refused_before_the_transport_is_touched() {
     let source = "d:/ws/src/Foo.vue";
     let companion = "d:/ws/src/Foo.vue.tsx";
     let (overlay, _ws) = overlay_over(
         &[(source, "<template></template>")],
-        fixture_snapshot(EXTENSION_SPECIFIC_TSCONFIG),
+        fixture_snapshot(COMPANION_EXCLUDING_TSCONFIG),
     );
     overlay.record_content(companion, "export {}", OverlayPriority::Interactive);
     overlay.record_content(
@@ -523,7 +526,7 @@ async fn unadmitted_carrier_is_refused_before_the_transport_is_touched() {
     );
     let carrier = crate::tsgo::project_binding::resolve_carrier_bound(&overlay.inner.host, source)
         .into_bound()
-        .expect("the extension-specific include OWNS the carrier source");
+        .expect("the directory include OWNS the carrier source");
 
     let failure = match overlay.engage_provider(companion, &carrier).await {
         Ok(_) => panic!("an unadmitted carrier cannot engage SHARED"),
@@ -532,8 +535,9 @@ async fn unadmitted_carrier_is_refused_before_the_transport_is_touched() {
     assert_eq!(
         failure.kind,
         SharedEngageFailureKind::GeneratedUnitsNotAdmitted {
-            reason: verter_workspace::GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
-            // Only the offender: the `.verter.ts` sibling IS matched by `src/**/*.ts`.
+            reason: verter_workspace::GeneratedUnitNonAdmissionReason::Excluded,
+            // Only the offender: the `.verter.ts` sibling is neither excluded
+            // nor refused through the carrier basis.
             units: vec![companion.to_string()],
         }
     );
@@ -578,10 +582,12 @@ async fn carrier_without_a_recorded_write_set_is_refused_as_unproven() {
 /// ONE sweep, three carriers, all recorded on an editor lane (in scope). Only the carrier
 /// whose WHOLE generated family is admitted reaches the transport:
 ///
-/// - `admitted/Ok.vue` — `.vue.tsx` matched by the `admitted/**/*.tsx` include ⇒ written;
-/// - `Neighbour.vue` — owned, in scope, its `.vue.tsx` matched by nothing ⇒ NOT written,
-///   and neither is its `.verter.ts` sibling even though `src/**/*.ts` matches that one
-///   (admission is all-or-nothing per carrier);
+/// - `admitted/Ok.vue` — every unit admitted (`admitted/**/*.tsx` matches the
+///   `.vue.tsx` directly, `src/**/*.ts` the `.verter.ts`) ⇒ written;
+/// - `Neighbour.vue` — owned, in scope, but its `.vue.tsx` form is
+///   configuration-EXCLUDED ⇒ NOT written, and neither is its `.verter.ts`
+///   sibling even though `src/**/*.ts` matches that one (admission is
+///   all-or-nothing per carrier);
 /// - `outside/Stray.vue` — no owning configured project at all ⇒ NOT written.
 #[tokio::test]
 async fn sweep_writes_only_carriers_whose_generated_units_are_admitted() {
@@ -592,7 +598,7 @@ async fn sweep_writes_only_carriers_whose_generated_units_are_admitted() {
             ("d:/ws/outside/Stray.vue", "<template></template>"),
         ],
         fixture_snapshot(
-            r#"{ "include": ["src/**/*.ts", "src/**/*.vue", "src/admitted/**/*.tsx"] }"#,
+            r#"{ "include": ["src/**/*.ts", "src/**/*.vue", "src/**/*.tsx"], "exclude": ["src/Neighbour.vue.tsx"] }"#,
         ),
     );
     let core = LazyOverlayCore::<RecordingTransport>::new();
@@ -651,9 +657,10 @@ async fn a_new_publication_re_evaluates_generated_unit_admission() {
 
     assert_eq!(sweep().await, vec![format!("write:{companion}")]);
 
-    // Narrow the membership: the project still OWNS `Foo.vue`, no longer its companion.
+    // Narrow the membership: the project still OWNS `Foo.vue`, but its
+    // `exclude` now removes the companion's own form.
     ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
-        EXTENSION_SPECIFIC_TSCONFIG,
+        COMPANION_EXCLUDING_TSCONFIG,
     ))));
     assert_eq!(
         sweep().await,

@@ -1468,9 +1468,9 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
 }
 
 /// A carrier whose owning configured project EXCLUDES its generated units (the
-/// `src/**/*.vue` include claims the source but matches no `Comp.vue.verter.ts`)
-/// can never be advertised: the provider hub's generated-unit admission refuses
-/// the companion buffers, so attempting the publication leaves a permanently
+/// include claims the source while the `exclude` removes the companion's own
+/// form) can never be advertised: the provider hub's generated-unit admission
+/// refuses the companion buffers, so attempting the publication leaves a permanently
 /// retrying pending carrier — and provider-sync completion unannounced — for the
 /// rest of the session. The gateway must settle the carrier TERMINALLY instead:
 /// no store write, no provider-buffer registration, and a settled
@@ -1509,11 +1509,15 @@ async fn excluded_generated_units_settle_terminal_without_provider_writes() {
         CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
-    // The include names the SOURCE extension only: the project owns `Comp.vue`
-    // while admitting none of the units generated for it.
-    let (_ws, snap) = ws_and_snapshot(
+    // The include claims the source while the `exclude` removes the
+    // companion's own form: the project owns `Comp.vue` while admitting none
+    // of the units generated for it.
+    let (_ws, snap) = ws_and_snapshot_body(
         &ws_root,
-        &[(tsconfig.as_str(), r#"["src/**/*.vue"]"#)],
+        &[(
+            tsconfig.as_str(),
+            r#"{ "include": ["src/**/*.vue", "src/**/*.ts"], "exclude": ["src/Comp.vue.verter.ts"] }"#,
+        )],
         &[source.as_str()],
     );
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
@@ -1627,8 +1631,9 @@ async fn narrowing_the_include_retracts_a_previously_admitted_carrier() {
     assert!(matches!(published, ReconcileOutcome::Advertised { .. }));
     assert!(carrier_ready_in_store(&ws_root, &tsconfig, &companion));
 
-    // 2. The include narrows to the source extension: ownership stays Bound,
-    //    but the generated units are excluded. Republish and re-run the gateway.
+    // 2. The include narrows onto the source while the `exclude` removes the
+    //    companion's own form: ownership stays Bound, but the generated units
+    //    are excluded. Republish and re-run the gateway.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -1640,9 +1645,12 @@ async fn narrowing_the_include_retracts_a_previously_admitted_carrier() {
             aliases: Vec::new(),
         })
         .expect("load carrier");
-    let (_ws, narrow) = ws_and_snapshot(
+    let (_ws, narrow) = ws_and_snapshot_body(
         &ws_root,
-        &[(tsconfig.as_str(), r#"["src/**/*.vue"]"#)],
+        &[(
+            tsconfig.as_str(),
+            r#"{ "include": ["src/**/*.vue", "src/**/*.ts"], "exclude": ["src/Comp.vue.verter.ts"] }"#,
+        )],
         &[source.as_str()],
     );
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(narrow)));
@@ -2157,15 +2165,35 @@ fn ws_and_snapshot(
     projects: &[(&str, &str)],
     sources: &[&str],
 ) -> (MemoryWorkspace, WorkspaceSnapshot) {
+    let bodies: Vec<(String, String)> = projects
+        .iter()
+        .map(|(tsconfig, include)| {
+            (
+                (*tsconfig).to_string(),
+                format!(r#"{{ "include": {include} }}"#),
+            )
+        })
+        .collect();
+    let bodies: Vec<(&str, &str)> = bodies
+        .iter()
+        .map(|(tsconfig, body)| (tsconfig.as_str(), body.as_str()))
+        .collect();
+    ws_and_snapshot_body(ws_root, &bodies, sources)
+}
+
+/// [`ws_and_snapshot`] over FULL tsconfig bodies — the membership shape under
+/// test when `exclude` (or any non-include field) is part of it.
+fn ws_and_snapshot_body(
+    ws_root: &str,
+    projects: &[(&str, &str)],
+    sources: &[&str],
+) -> (MemoryWorkspace, WorkspaceSnapshot) {
     let ws = MemoryWorkspace::new(MemoryOptions {
         roots: vec![ws_root.to_string()],
         default_resolve_extensions: None,
     });
-    for (tsconfig, include) in projects {
-        ws.inject_file(
-            (*tsconfig).to_string(),
-            Arc::<str>::from(format!(r#"{{ "include": {include} }}"#).as_str()),
-        );
+    for (tsconfig, body) in projects {
+        ws.inject_file((*tsconfig).to_string(), Arc::<str>::from(*body));
     }
     for src in sources {
         ws.inject_file(

@@ -35,7 +35,7 @@ use verter_type_runtime::provider_hub::{
     AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation, OverlayPriority,
     ProjectWitness,
 };
-use verter_workspace::{decide_generated_unit_admission, CanonicalPath};
+use verter_workspace::{decide_generated_unit_admission_with_basis, CanonicalPath};
 
 use crate::external_ts::TsserverEngineBackend;
 use crate::tsgo::project_binding::{
@@ -473,10 +473,11 @@ impl ProjectTsserverProvider {
         })?;
         let admission = hub
             .admit_request_with(&witness, units, || {
-                decide_generated_unit_admission(
+                decide_generated_unit_admission_with_basis(
                     resolved.published.snapshot.as_ref(),
                     &CanonicalPath::new(binding.tsconfig_uri()),
                     units,
+                    crate::external_ts::carrier_membership_basis,
                 )
             })
             .map_err(|reason| {

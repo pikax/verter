@@ -112,7 +112,7 @@ async fn batch_router_fixture_with_generated_membership(
     for (index, (name, provider)) in ["a", "b"].into_iter().zip(&providers).enumerate() {
         let project_root = format!("{root}/{name}");
         let tsconfig = format!("{project_root}/tsconfig.json");
-        let files: Vec<_> = members
+        let source_files: Vec<_> = members
             .iter()
             .filter(|member| member.project_file_name == tsconfig)
             .map(|member| CanonicalPath::new(&member.source_path))
@@ -123,6 +123,15 @@ async fn batch_router_fixture_with_generated_membership(
                 .filter(|member| member.project_file_name == tsconfig)
                 .map(|member| CanonicalPath::new(&member.companion_path))
                 .collect()
+        } else {
+            Vec::new()
+        };
+        // Without generated membership the project admits NO member — neither
+        // the carriers (so no companion basis matches) nor their units: the
+        // ownership binding still resolves through the configured-project
+        // graph, and the membership snapshot must refuse the batch.
+        let files: Vec<_> = if admit_generated {
+            source_files
         } else {
             Vec::new()
         };
