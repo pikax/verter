@@ -69,7 +69,7 @@ export const TIER_DEFAULTS = {
     warmRepeats: 3,
     timeoutMs: 60_000,
     startupAllowanceMs: 10_000,
-    estimate: "about 5 minutes on an Apple M3 or a recent desktop",
+    estimate: "about 1-2 minutes (62 s on a Ryzen 9 7950X, 336 invocations)",
   },
   standard: {
     arms: DEFAULT_ARMS,
@@ -78,7 +78,7 @@ export const TIER_DEFAULTS = {
     warmRepeats: 3,
     timeoutMs: 120_000,
     startupAllowanceMs: 10_000,
-    estimate: "about 20-30 minutes",
+    estimate: "about 10-15 minutes (564 s on a Ryzen 9 7950X, 1152 invocations)",
   },
   stress: {
     arms: DEFAULT_ARMS,
@@ -112,10 +112,11 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           own peak exceeds it counts as exhausting it
   --infra-mb <n>          containment allowance above the budget for the process tree's other members
                           (tsc's node client, the statistics reader) (default 1024)
-  --timeout-ms <n>        the engine's deadline (default 300000): a kill counts as the engine exhausting
-                          it only when the engine itself worked that long
-  --startup-allowance-ms <n>  added to the supervisor's deadline for the process start before the
-                          engine's first phase (default 30000)
+  --timeout-ms <n>        per-invocation deadline (tier default 60000 / 120000 / 600000); a hang fails
+                          fast and is reported; only a whole-program tsc -p run that ran the whole deadline
+                          counts as exhausting it (a probe's deadline kill is reported, unverified)
+  --startup-allowance-ms <n>  added to the supervisor's deadline for process start (tier default 10000,
+                          stress 30000)
   --allow-tuning          pass the caller's whole environment to the build and the probes (by default
                           both get a constructed one) and run despite Cargo configuration outside the
                           repository; the report is labelled tuned

@@ -136,7 +136,7 @@ that would not empty) invalidates the invocation whatever else happened.
   since the engine's first phase also holds client work, IPC and marker I/O.
   It is reported (with that elapsed time) as `unverified`. The supervisor's
   deadline is the engine's deadline plus a startup allowance
-  (`--startup-allowance-ms`, 30000 by default).
+  (`--startup-allowance-ms`: 10 s in quick and standard, 30 s in stress).
 - The phase marker is published before each phase begins; a probe that
   cannot publish it stops before the phase, so a stale marker never
   misplaces a kill.
@@ -416,15 +416,40 @@ Verter), omitted when a median is below the resolution. Absolute numbers of
 both arms are always shown; nothing is baseline-subtracted.
 `baseline-empty` (a trivial module and probe) is its own row, reported alone.
 
+## Tiers
+
+`--tier` chooses what a run covers; every tier keeps the fairness
+properties below (fresh processes for cold measurements, warm repeats in one
+live process per arm, counterbalanced order, one supervisor and budget for
+every arm, the same validation).
+
+| Tier | Scenarios | Arms | Deadline | Time (measured on a Ryzen 9 7950X, Windows) |
+|---|---|---|---|---|
+| `quick` (default) | one representative normal size per scenario series (21) | Verter, tsc API, and the labelled observability-on and counting Verter arms | 60 s | 62 s (336 invocations) |
+| `standard` | + the other normal sizes and the sizes at tsc's own limits (48) — the baseline | + `tsc -p` in both thread modes | 120 s | 564 s (1152 invocations) |
+| `stress` (opt-in) | + Verter's limit and pathological sizes (55): tsc exhausting 8 GiB, multi-second Verter requests | all six | 600 s | hours |
+
+Every tier runs 1 warmup and 3 measured invocations per (scenario, arm) and
+3 warm repeats; any option given explicitly (`--repeat`, `--arms`,
+`--timeout-ms`, …) overrides the tier's default, and `--only` picks
+scenarios from the whole catalog. The tier of each scenario is listed in
+`scenarios.mjs` (`SCENARIO_TIERS`); the validator checks that a run's cells
+are exactly its tier's (or `--only`'s).
+
 ## Schedule
 
 Each (scenario, setting, arm) runs `--warmup` unmeasured invocations and
-`--repeat` measured ones (even), every one a fresh process. Warmup rounds run
-first. The scenario order reverses on alternate rounds; each cell's arm order
-alternates from round to round (by the cell's own index, so the two reversals
-never cancel), so over the measured rounds every pair of arms runs in each
-order equally often in every cell — the validator recomputes the schedule and
-checks this. Warmups are run, recorded and validated like any other
+`--repeat` measured ones, every one a fresh process that measures the cold
+path. Warm requests are measured in ONE live process per (scenario, arm) —
+its first measured invocation, which answers all `--warm-repeats` requests
+in-process — the same for both tools; warm verdicts compare those in-process
+samples. Warmup rounds run first. The scenario order reverses on alternate
+rounds; each cell's arm order alternates from round to round (by the cell's
+own index, so the two reversals never cancel), so over the measured rounds
+every pair of arms runs in each order equally often in every cell — exactly
+for an even count; for an odd count, within one per cell, and since cells
+alternate which arm leads the extra round, within one over the whole run.
+The validator recomputes the schedule and checks this. Warmups are run, recorded and validated like any other
 invocation, then excluded from the statistics. Fresh processes mean cold
 semantic caches, not cold filesystem caches. For a baseline, keep the machine
 otherwise idle and on stable power (on a laptop: plugged in, not in a
@@ -485,17 +510,22 @@ A first release build (fat LTO) takes several minutes.
 
 ### Run
 
-macOS (Apple silicon):
+macOS (Apple silicon) — the baseline is the standard tier; quick is a
+one-minute check:
 
 ```bash
-node scripts/benchmark/semantic-perf.mjs --allow-sampled
+node scripts/benchmark/semantic-perf.mjs --tier standard --allow-sampled
+node scripts/benchmark/semantic-perf.mjs --allow-sampled            # quick
 ```
 
 Windows (or Linux):
 
 ```bash
-node scripts/benchmark/semantic-perf.mjs
+node scripts/benchmark/semantic-perf.mjs --tier standard
+node scripts/benchmark/semantic-perf.mjs                            # quick
 ```
+
+`--tier stress` adds the Verter-limit and pathological sizes (hours).
 
 Results land in `target/semantic-perf/<timestamp>/`:
 
@@ -521,11 +551,11 @@ run with
 node scripts/benchmark/semantic-perf/validate.mjs target/semantic-perf/<timestamp>/results.json
 ```
 
-Useful options (`--help` lists all): `--only relation,spread` (scenario id
-prefixes), `--repeat 6`, `--warmup 1`, `--settings all` (all four
+Useful options (`--help` lists all, with each tier's time): `--tier quick|standard|stress`,
+`--only relation,spread` (scenario ids or prefixes, from the whole catalog), `--repeat 4`, `--warmup 1`, `--settings all` (all four
 `strictNullChecks` × `noImplicitAny` settings), `--arms verter,tsc-api`,
-`--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 300000`,
-`--startup-allowance-ms 30000`, `--out <dir>`.
+`--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 60000` (tier default),
+`--startup-allowance-ms 10000` (tier default), `--out <dir>`.
 
 ### Re-measuring the reference
 
