@@ -2996,6 +2996,10 @@ impl RenameErrorProvider {
 }
 
 impl crate::TypeProvider for RenameErrorProvider {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        crate::TypeProvider::applied_content(self.inner.as_ref(), path)
+    }
+
     fn provider_id(&self) -> &'static str {
         self.inner.provider_id()
     }

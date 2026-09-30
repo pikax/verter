@@ -1058,7 +1058,12 @@ impl TsgoSharedProvider {
 impl TypeProvider for TsgoSharedProvider {
     fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
         use verter_type_runtime::traits::AppliedContent;
-        match self.applied_carrier_bytes(path, path) {
+        // Slot keys are `slash(path)` (`drive_carrier`), not the caller's spelling.
+        let slashed = slash(path);
+        match self
+            .applied_carrier_bytes(&slashed, &slashed)
+            .or_else(|| self.applied_carrier_bytes(path, path))
+        {
             Some(bytes) => AppliedContent::Applied(bytes),
             None => AppliedContent::NotApplied,
         }

@@ -957,10 +957,25 @@ fn describe_sync_mode(mode: DocumentSyncMode) -> String {
 /// cancellation point at which an optimistic write could outlive a dropped future,
 /// and the read-then-write on `versions` stays mutually exclusive against a
 /// concurrent sync of the same path.
+fn note_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str, content: &str) {
+    accepted
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.to_string(), Arc::from(content));
+}
+
+fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
+    accepted
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+}
+
 async fn deliver_document_sync(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
     contents: &Mutex<HashMap<String, Arc<str>>>,
+    accepted: &StdMutex<HashMap<String, Arc<str>>>,
     path: &str,
     content: &str,
     priority: ProviderPriority,
@@ -979,6 +994,10 @@ async fn deliver_document_sync(
                 .get(&document_key)
                 .is_some_and(|held| held.as_ref() == content)
             {
+                // No new frame. Do not write `accepted` here: `load_file`
+                // overwrites `contents` without notifying the child, so a
+                // match is not evidence the child holds these bytes. A prior
+                // successful notify already recorded the receipt.
                 return Ok(DocumentSyncMode::Unchanged);
             }
             let version = version + 1;
@@ -1010,7 +1029,10 @@ async fn deliver_document_sync(
     transport.try_notify_with_priority(method, &params, priority)?;
 
     versions_guard.insert(document_key.clone(), version);
-    contents_guard.insert(document_key, Arc::from(content));
+    contents_guard.insert(document_key.clone(), Arc::from(content));
+    // Application evidence is the bytes the transport accepted, not the
+    // `load_file` cache (that cache never notifies the child).
+    note_accepted(accepted, &document_key, content);
     Ok(mode)
 }
 
@@ -1051,6 +1073,7 @@ async fn deliver_document_close(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
     contents: &Mutex<HashMap<String, Arc<str>>>,
+    accepted: &StdMutex<HashMap<String, Arc<str>>>,
     diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     path: &str,
     priority: ProviderPriority,
@@ -1067,6 +1090,7 @@ async fn deliver_document_close(
 
     if !versions_guard.contains_key(&document_key) {
         contents_guard.remove(&document_key);
+        forget_accepted(accepted, &document_key);
         return Ok(());
     }
 
@@ -1078,6 +1102,7 @@ async fn deliver_document_close(
 
     versions_guard.remove(&document_key);
     contents_guard.remove(&document_key);
+    forget_accepted(accepted, &document_key);
     Ok(())
 }
 
@@ -2086,7 +2111,12 @@ pub struct TsgoTypeProvider {
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
+    /// `load_file` writes this without telling the child; it is not an
+    /// application receipt.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    /// Bytes a successful `didOpen` / `didChange` left with the child, keyed
+    /// by [`contents_key`]. Absent after a close and after a cache-only load.
+    accepted: Arc<StdMutex<HashMap<String, Arc<str>>>>,
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
@@ -2406,6 +2436,7 @@ impl TsgoTypeProvider {
         }
         let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
         let contents = Arc::new(Mutex::new(HashMap::new()));
+        let accepted = Arc::new(StdMutex::new(HashMap::new()));
         tokio::spawn(read_loop(
             read,
             pending,
@@ -2423,6 +2454,7 @@ impl TsgoTypeProvider {
             tree,
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents,
+            accepted,
             diagnostics_cache,
             teardown_intent,
             semantic_token_legend: Arc::new(StdRwLock::new(None)),
@@ -2582,6 +2614,7 @@ impl TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let accepted = Arc::clone(&self.accepted);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsgo_publish_document",
@@ -2596,6 +2629,7 @@ impl TsgoTypeProvider {
                         &transport,
                         &versions,
                         &contents_cache,
+                        &accepted,
                         &path_owned,
                         &content,
                         priority,
@@ -2622,12 +2656,14 @@ impl TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let accepted = Arc::clone(&self.accepted);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             deliver_document_close(
                 &transport,
                 &versions,
                 &contents_cache,
+                &accepted,
                 &diagnostics_cache,
                 &path_owned,
                 priority,
@@ -2861,6 +2897,19 @@ fn inlay_hint_preferences() -> serde_json::Value {
 }
 
 impl TypeProvider for TsgoTypeProvider {
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        let key = contents_key(path);
+        match self
+            .accepted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+        {
+            Some(bytes) => crate::traits::AppliedContent::Applied(Arc::clone(bytes)),
+            None => crate::traits::AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsgo"
     }
@@ -2920,6 +2969,7 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let accepted = Arc::clone(&self.accepted);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
@@ -2930,6 +2980,7 @@ impl TypeProvider for TsgoTypeProvider {
                         &transport,
                         &versions,
                         &contents_cache,
+                        &accepted,
                         &diagnostics_cache,
                         &path_owned,
                         ProviderPriority::Interactive,

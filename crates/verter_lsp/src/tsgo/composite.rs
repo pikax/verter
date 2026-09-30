@@ -562,6 +562,12 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         }
     }
 
+    /// Bytes the shared hub's serving incarnation accepted. Desired-only
+    /// `record_content` is not an application receipt.
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        verter_type_runtime::traits::TypeProvider::applied_content(self.inner.hub.as_ref(), path)
+    }
+
     /// Record the carrier's current content for the SHARED overlay — a cheap in-memory
     /// insert off the managed lifecycle critical path. It never establishes the SHARED
     /// transport, so opting into SHARED cannot trip the managed file-lifecycle timing
@@ -1771,7 +1777,18 @@ impl TypeProvider for TsgoCompositeProvider {
     }
 
     fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
-        self.managed.applied_content(path)
+        use verter_type_runtime::traits::AppliedContent;
+        match self.managed.applied_content(path) {
+            AppliedContent::Applied(bytes) => AppliedContent::Applied(bytes),
+            other => match self
+                .shared
+                .as_ref()
+                .map(|shared| shared.applied_content(path))
+            {
+                Some(AppliedContent::Applied(bytes)) => AppliedContent::Applied(bytes),
+                _ => other,
+            },
+        }
     }
 
     fn provider_id(&self) -> &'static str {
