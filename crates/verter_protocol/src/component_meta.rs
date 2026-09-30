@@ -2570,6 +2570,7 @@ fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::Sur
         FfiSurfacePartialReason::ConnectedMemoryLimit => {
             proto::SurfacePartialReason::ConnectedMemoryLimit
         }
+        FfiSurfacePartialReason::OperationBudget => proto::SurfacePartialReason::OperationBudget,
         FfiSurfacePartialReason::MissingDependency => {
             proto::SurfacePartialReason::MissingDependency
         }
@@ -2957,6 +2958,7 @@ mod tests {
             R::FlowReturnNoSurface,
             R::UndecidedConditional,
             R::ConnectedMemoryLimit,
+            R::OperationBudget,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived

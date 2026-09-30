@@ -7,14 +7,14 @@
 //! reach a value, which is TS2589 at once. The TS2589 recovery is the
 //! checker's error type: it relates as `any` does (assignable to everything
 //! but `never`) and, as a conditional's check or extends type, is the
-//! conditional's answer.
+//! conditional's answer. It is a resource partial, never kept.
 //!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on [`FIXTURE`], each probe read off a
 //! TS2322 against `never`. The four `strictNullChecks` × `noImplicitAny`
 //! settings agree on every probe.
 
-use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_probe};
+use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_recovered_probe};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     SemanticNodeData,
@@ -156,16 +156,17 @@ fn a_recursive_application_inside_a_branch_is_instantiated() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `probe` reads as the TS2589 recovery of a conditional tail run.
+/// `probe` reads as the TS2589 recovery of a conditional tail run, a
+/// resource partial.
 fn assert_ts2589(source: &str, probe: &str) {
-    with_probe(source, probe, |dispatch, node| {
+    with_recovered_probe(source, probe, |dispatch, node| {
         let data = dispatch.graph().node_data(node);
         assert!(
             matches!(
                 data.as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                     diagnostic,
-                    beyond: None,
+                    origin: None,
                 })) if *diagnostic == TS2589
             ),
             "`{probe}` must be the TS2589 recovery, measured {data:?}"

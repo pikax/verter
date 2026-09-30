@@ -4,14 +4,17 @@
 //! built, after the checker's own strategies — unions of primitives
 //! intersect member-wise, unions that all hold `undefined` intersect without
 //! it, and three or more written types divide in half — and the answer
-//! reads and relates as `any`. Under the limit the intersection distributes.
+//! reads and relates as `any` — a resource partial, never kept. Under the
+//! limit the intersection distributes.
 //!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on the fixture each test builds,
 //! each probe read off a TS2322 against `never`. The four `strictNullChecks`
 //! × `noImplicitAny` settings agree on every probe.
 
-use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_probe};
+use super::checker_probe_lane_tests::{
+    mismatches, mismatches_in_one_host, with_probe, with_recovered_probe,
+};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     SemanticNodeData,
@@ -82,16 +85,15 @@ fn five_ten_member_unions_intersect_to_the_ts2590_recovery() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The recovery is the checker's error type carrying TS2590, and beyond it
-/// the intersection as written: the type Verter still names past the
-/// checker's limit.
+/// The recovery is the checker's error type carrying TS2590, a resource
+/// partial holding the intersection as written as its origin.
 #[test]
-fn the_ts2590_recovery_holds_the_written_intersection_beyond_it() {
-    with_probe(&ten_by_ten(), "U0 & U1 & U2 & U3 & U4", |dispatch, node| {
+fn the_ts2590_recovery_is_a_partial_holding_the_written_intersection() {
+    with_recovered_probe(&ten_by_ten(), "U0 & U1 & U2 & U3 & U4", |dispatch, node| {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
-            beyond: Some(beyond),
+            origin: Some(origin),
         })) = data.as_deref()
         else {
             panic!("the intersection must be the TS2590 recovery, measured {data:?}");
@@ -99,10 +101,10 @@ fn the_ts2590_recovery_holds_the_written_intersection_beyond_it() {
         assert_eq!(*diagnostic, TS2590);
         assert!(
             matches!(
-                dispatch.graph().node_data(*beyond).as_deref(),
+                dispatch.graph().node_data(*origin).as_deref(),
                 Some(SemanticNodeData::Intersection(arms)) if arms.len() == 5
             ),
-            "beyond the limit is the written five-arm intersection"
+            "its origin is the written five-arm intersection"
         );
     });
 }
@@ -110,7 +112,7 @@ fn the_ts2590_recovery_holds_the_written_intersection_beyond_it() {
 /// Two object unions at the limit: 369 × 271 = 99,999 distributes and 400 ×
 /// 250 = 100,000 does not. Under the limit the intersection is the type it
 /// denotes; at the limit it is the checker's TS2590 recovery, holding the
-/// written intersection as the type beyond it.
+/// written intersection as its origin.
 ///
 /// Measured: `IsAny<R>` is `"not-any"` and `[R] extends [{ a: 0 }] ? 1 : 2`
 /// is `2` at 369 × 271; `any` and `1` under TS2590 at 400 × 250.
@@ -135,7 +137,7 @@ fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
             match data.as_deref() {
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                     diagnostic,
-                    beyond: Some(beyond),
+                    origin: Some(origin),
                 })) => {
                     assert!(
                         a * b >= 100_000,
@@ -144,10 +146,10 @@ fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
                     assert_eq!(*diagnostic, TS2590);
                     assert!(
                         matches!(
-                            dispatch.graph().node_data(*beyond).as_deref(),
+                            dispatch.graph().node_data(*origin).as_deref(),
                             Some(SemanticNodeData::Intersection(arms)) if arms.len() == 2
                         ),
-                        "beyond the limit is the written `A & B`"
+                        "its origin is the written `A & B`"
                     );
                 }
                 other => assert!(

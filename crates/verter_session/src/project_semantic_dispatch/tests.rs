@@ -29687,7 +29687,8 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
         let outcome = dispatch.normalize_node_for_structural_fact_demand(subject, navigate);
         let frame = guard.finish();
         match outcome {
-            StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            StructuralFactDemandOutcome::Recovered { reasons, .. }
+            | StructuralFactDemandOutcome::Partial(reasons) => assert!(
                 reasons.contains(reason),
                 "{label}: the demand must be Partial({reason:?}), got Partial({reasons:?})"
             ),
@@ -29794,7 +29795,8 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     let frame = guard.finish();
 
     let reasons = match outcome {
-        StructuralFactDemandOutcome::Partial(reasons) => reasons,
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => reasons,
         StructuralFactDemandOutcome::Complete(node) => panic!(
             "a fresh-node growing generic MUST type Partial (bounded by the fuse / recursion \
              guard), got Complete({:?})",

@@ -119,7 +119,8 @@ function locals() { class LB { x = 1 } class LS extends LB { y = 2 } return [new
                 super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
                     Ok(render_node(dispatch, node, 0))
                 }
-                super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => Err(reasons),
+                super::evaluate::StructuralFactDemandOutcome::Recovered { reasons, .. }
+                | super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => Err(reasons),
             },
         );
         assert!(

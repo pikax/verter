@@ -2157,7 +2157,8 @@ fn a_budget_trip_after_resolution_never_answers_complete() {
                     &dispatch, answer, 0,
                 ),
             ),
-            StructuralFactDemandOutcome::Partial(_) => None,
+            StructuralFactDemandOutcome::Recovered { .. }
+            | StructuralFactDemandOutcome::Partial(_) => None,
         };
         (answer, dispatch.connected_demand_tripped())
     };

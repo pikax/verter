@@ -355,7 +355,7 @@ impl ProjectSemanticDispatch<'_> {
                         operand,
                         crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     )
-                    .into_complete_node()?;
+                    .into_usable_node()?;
                 matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
                     .then_some(resolved)
             })

@@ -1157,6 +1157,9 @@ pub enum FfiSurfacePartialReason {
     UndecidedConditional,
     /// The connected demand exhausted its construction-byte allowance.
     ConnectedMemoryLimit,
+    /// A type operation exhausted Verter's own budget for it; the value is
+    /// the checker's recovery for that operation.
+    OperationBudget,
 }
 
 #[derive(Serialize, Clone)]

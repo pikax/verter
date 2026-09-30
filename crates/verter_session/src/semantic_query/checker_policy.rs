@@ -1,25 +1,21 @@
-//! The checker compatibility policy: every limit at which the pinned checker
-//! gives up on a type operation, in the checker's own units, and the
-//! diagnostic it reports there.
+//! The checker compatibility policy: the allowance of each type operation
+//! the checker bounds, in the operation's own units, and the diagnostic the
+//! checker reports when an operation exhausts it.
 //!
-//! A limit here decides a checker FACT, never how far Verter computes. When
-//! an operation reaches one, the answer is the checker's error type after the
-//! diagnostic ([`QueryError::CheckerRecovery`](super::QueryError::CheckerRecovery)),
-//! which reads and relates as `any` exactly as the checker's does; where
-//! Verter can still name the type itself, the recovery carries that answer
-//! beside it as its `beyond` type, for a consumer that wants the type rather
-//! than the checker's recovery. How much work Verter spends is a separate,
-//! operational question: the connected-demand ledger bounds it, and its trip
-//! is typed incompleteness, never one of these facts.
+//! Each operation's allowance is checked by its budget GATE here, and only a
+//! gate mints an [`OperationRefusal`]: the witness that this operation, and
+//! not some other work, ran out of its own allowance. The refusal is the sole
+//! source of a resource diagnostic (TS2589, TS2590, TS2799, TS2859), and the
+//! answer after one is the checker's recovery — its error type
+//! ([`resource_recovery`]), or a false relation — as a RESOURCE PARTIAL:
+//! usable, but incomplete and never kept, because the allowance rather than
+//! the types decided it. How much work a demand spends overall is a separate,
+//! operational bound: the connected-demand ledger's trip is plain typed
+//! incompleteness and never becomes one of these diagnostics.
 //!
 //! Each counter below starts where the checker's starts and resets where the
-//! checker's resets, so the fact never depends on what an earlier query left
-//! in a memo.
-//!
-//! Where Verter evaluates past a checker limit on budgets of its own, the
-//! diagnostic a budget reports when it is exhausted is here too: the
-//! checker's own code and message, at Verter's limit instead of the
-//! checker's ([`instantiation_budget`]).
+//! checker's resets, so a refusal never depends on what an earlier query
+//! left in a memo.
 
 use super::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
@@ -70,37 +66,99 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// comparisons; `[S] extends [T] ? 1 : 2` is `1` at 1,800 arms and `2` under
 /// TS2859 at 2,100.
 pub(crate) const RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
+
+/// The witness that one type operation exhausted its own allowance: minted
+/// only by the budget gates in this module, so a resource diagnostic can
+/// never be attributed to an operation that did not run out. Work a demand
+/// spent elsewhere, a ledger trip, a child operation's failure or a
+/// cancellation are never a refusal.
+#[must_use = "a refusal decides its operation's answer"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OperationRefusal {
+    diagnostic: CheckerDiagnostic,
+}
+
+impl OperationRefusal {
+    /// The refusal of `operation` with the resource diagnostic `code`.
+    const fn of(code: CheckerDiagnosticCode, operation: CheckerDiagnosticOperation) -> Self {
+        Self {
+            diagnostic: CheckerDiagnostic { code, operation },
+        }
+    }
+
+    /// The diagnostic the checker reports for the refused operation.
+    pub(crate) const fn diagnostic(self) -> CheckerDiagnostic {
+        self.diagnostic
+    }
+}
+
 /// Verter's instantiation budget, checked for one instantiation: `within`
-/// is whether the connected demand's ledger admits its depth. Past it the
-/// instantiation is the checker's TS2589 — its code and message — reported
-/// at Verter's limit rather than the checker's, which Verter evaluates
-/// past.
-pub(crate) fn instantiation_budget(within: bool) -> Result<(), CheckerDiagnostic> {
+/// is whether the connected demand admits its depth. Past it the
+/// instantiation is refused with the checker's TS2589, at Verter's limit.
+pub(crate) fn instantiation_budget(within: bool) -> Result<(), OperationRefusal> {
     if within {
         return Ok(());
     }
-    Err(CheckerDiagnostic {
-        code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
-        operation: CheckerDiagnosticOperation::InstantiationBudget,
-    })
+    Err(OperationRefusal::of(
+        CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        CheckerDiagnosticOperation::InstantiationBudget,
+    ))
 }
 
-/// The checker's error type after `diagnostic`: the typed recovery carrier,
-/// with `beyond` the type Verter names past the checker's limit, if any.
+/// The refusal of an instantiation of `operation` that recurs on its own
+/// path with the arguments it is already evaluating: it can never reach a
+/// value, so every allowance runs out on it, and the refusal is certain
+/// without spending one.
+pub(crate) fn non_terminating_instantiation(
+    operation: CheckerDiagnosticOperation,
+) -> OperationRefusal {
+    OperationRefusal::of(
+        CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        operation,
+    )
+}
+
+/// The checker's error type after `refusal`, as the typed recovery carrier.
+/// `origin` is a type that already exists for the refused operation — its
+/// authored form — kept for display and never read as its answer. The
+/// recovery is a resource partial: the caller marks its result incomplete.
+/// A relation refusal (TS2859) recovers as a false relation instead, never
+/// as a type.
+pub(crate) fn resource_recovery(
+    graph: &SemanticGraphStore,
+    refusal: OperationRefusal,
+    origin: Option<SemanticNodeId>,
+) -> SemanticNodeId {
+    verter_debug_assert::verter_debug_assert!(
+        refusal.diagnostic().recovery().is_some(),
+        "a relation refusal recovers as a false relation"
+    );
+    graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: refusal.diagnostic(),
+        origin,
+    }))
+}
+
+/// The checker's error type after `diagnostic`, a diagnostic the types
+/// themselves decide (never a resource limit): the typed recovery carrier,
+/// a complete answer.
 pub(crate) fn checker_recovery(
     graph: &SemanticGraphStore,
     diagnostic: CheckerDiagnostic,
-    beyond: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
+    verter_debug_assert::verter_debug_assert!(
+        !diagnostic.code.is_resource_limit(),
+        "a resource diagnostic comes only from its operation's refusal"
+    );
     graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
         diagnostic,
-        beyond,
+        origin: None,
     }))
 }
 
 /// The checker's instantiation depth along one evaluation path
 /// (`instantiationDepth`), entered and left level by level. Reaching
-/// [`INSTANTIATION_DEPTH`] is the TS2589 fact.
+/// [`INSTANTIATION_DEPTH`] refuses the path with TS2589.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InstantiationDepth {
     depth: u32,
@@ -112,12 +170,22 @@ impl InstantiationDepth {
         Self { depth }
     }
 
-    /// Enter `levels` more levels. `false` when the path reaches the
-    /// checker's limit there (the levels are entered either way; leave them
-    /// with [`Self::leave`]).
-    pub(crate) fn enter(&mut self, levels: u32) -> bool {
+    /// Enter `levels` more levels of `operation`: its refusal when the path
+    /// reaches the limit there (the levels are entered either way; leave
+    /// them with [`Self::leave`]).
+    pub(crate) fn enter(
+        &mut self,
+        levels: u32,
+        operation: CheckerDiagnosticOperation,
+    ) -> Result<(), OperationRefusal> {
         self.depth += levels;
-        self.depth < INSTANTIATION_DEPTH
+        if self.depth < INSTANTIATION_DEPTH {
+            return Ok(());
+        }
+        Err(OperationRefusal::of(
+            CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation,
+        ))
     }
 
     /// Leave `levels` levels entered by [`Self::enter`].
@@ -127,7 +195,7 @@ impl InstantiationDepth {
 }
 
 /// One tail run of a conditional type (`tailCount`). Reaching
-/// [`CONDITIONAL_TAIL_STEPS`] is the TS2589 fact.
+/// [`CONDITIONAL_TAIL_STEPS`] refuses the run with TS2589.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalTail {
     steps: u32,
@@ -139,16 +207,25 @@ impl ConditionalTail {
         Self { steps }
     }
 
-    /// Take one more tail step. `false` when the run reaches the checker's
-    /// limit there.
-    pub(crate) fn step(&mut self) -> bool {
+    /// Take one more tail step of `operation`: its refusal when the run
+    /// reaches the limit there.
+    pub(crate) fn step(
+        &mut self,
+        operation: CheckerDiagnosticOperation,
+    ) -> Result<(), OperationRefusal> {
         self.steps += 1;
-        self.steps < CONDITIONAL_TAIL_STEPS
+        if self.steps < CONDITIONAL_TAIL_STEPS {
+            return Ok(());
+        }
+        Err(OperationRefusal::of(
+            CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation,
+        ))
     }
 }
 
 /// The structured comparisons one relation check has recorded. Reaching
-/// [`RELATION_COMPARISONS`] is the TS2859 fact.
+/// [`RELATION_COMPARISONS`] refuses the check with TS2859.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RelationComplexity {
     recorded: u32,
@@ -181,14 +258,14 @@ pub(crate) fn with_relation_comparisons_for_tests<R>(allowance: u32, run: impl F
 }
 
 impl RelationComplexity {
-    /// Record one structured comparison: the TS2859 fact when the check
+    /// Record one structured comparison: the check's TS2859 refusal when it
     /// has none left.
-    pub(crate) fn record(&mut self) -> Result<(), CheckerDiagnostic> {
+    pub(crate) fn record(&mut self) -> Result<(), OperationRefusal> {
         if self.recorded >= relation_comparisons() {
-            return Err(CheckerDiagnostic {
-                code: CheckerDiagnosticCode::RelationTooComplex,
-                operation: CheckerDiagnosticOperation::Relation,
-            });
+            return Err(OperationRefusal::of(
+                CheckerDiagnosticCode::RelationTooComplex,
+                CheckerDiagnosticOperation::Relation,
+            ));
         }
         self.recorded += 1;
         Ok(())
@@ -210,12 +287,12 @@ pub(crate) enum ProductFactor {
 
 /// The size of the cross product over `factors`, checked against
 /// [`CROSS_PRODUCT_UNION_SIZE`] BEFORE any constituent exists
-/// (`checkCrossProductUnion`): `Ok(size)` when the checker builds it, the
-/// TS2590 fact `operation` raises otherwise.
+/// (`checkCrossProductUnion`): `Ok(size)` when `operation` builds it, its
+/// TS2590 refusal otherwise.
 pub(crate) fn cross_product_union(
     factors: impl IntoIterator<Item = ProductFactor>,
     operation: CheckerDiagnosticOperation,
-) -> Result<usize, CheckerDiagnostic> {
+) -> Result<usize, OperationRefusal> {
     let mut size: u64 = 1;
     for factor in factors {
         size = match factor {
@@ -225,10 +302,10 @@ pub(crate) fn cross_product_union(
         };
     }
     if size >= CROSS_PRODUCT_UNION_SIZE {
-        return Err(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::UnionTooComplex,
+        return Err(OperationRefusal::of(
+            CheckerDiagnosticCode::UnionTooComplex,
             operation,
-        });
+        ));
     }
     Ok(size as usize)
 }
@@ -243,10 +320,10 @@ mod tests {
     /// constituents, `never` as an empty product and any other type as one.
     #[test]
     fn the_cross_product_rule_counts_as_the_checker_counts() {
-        let ts2590 = Err(CheckerDiagnostic {
-            code: CheckerDiagnosticCode::UnionTooComplex,
-            operation: OP,
-        });
+        let ts2590 = Err(OperationRefusal::of(
+            CheckerDiagnosticCode::UnionTooComplex,
+            OP,
+        ));
         let product = |factors: &[ProductFactor]| cross_product_union(factors.iter().copied(), OP);
         assert_eq!(
             product(&[ProductFactor::Union(369), ProductFactor::Union(271)]),
@@ -292,7 +369,7 @@ mod tests {
             assert_eq!(check.record(), Ok(()));
         }
         assert_eq!(
-            check.record(),
+            check.record().map_err(OperationRefusal::diagnostic),
             Err(CheckerDiagnostic {
                 code: CheckerDiagnosticCode::RelationTooComplex,
                 operation: CheckerDiagnosticOperation::Relation,
@@ -305,22 +382,48 @@ mod tests {
     /// counted fails that many steps sooner.
     #[test]
     fn a_tail_run_fails_at_the_checker_step() {
+        const TAIL: CheckerDiagnosticOperation = CheckerDiagnosticOperation::ConditionalTail;
         let mut run = ConditionalTail::resumed(0);
-        assert!((1..CONDITIONAL_TAIL_STEPS).all(|_| run.step()));
-        assert!(!run.step());
+        assert!((1..CONDITIONAL_TAIL_STEPS).all(|_| run.step(TAIL).is_ok()));
+        assert_eq!(
+            run.step(TAIL).map_err(OperationRefusal::diagnostic),
+            Err(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: TAIL,
+            })
+        );
         let mut resumed = ConditionalTail::resumed(1);
-        assert!((2..CONDITIONAL_TAIL_STEPS).all(|_| resumed.step()));
-        assert!(!resumed.step());
+        assert!((2..CONDITIONAL_TAIL_STEPS).all(|_| resumed.step(TAIL).is_ok()));
+        assert!(resumed.step(TAIL).is_err());
     }
 
     /// A path fails on the level that reaches depth 100, and leaving levels
     /// makes room again.
     #[test]
     fn an_instantiation_path_fails_at_the_checker_depth() {
+        const AWAITED: CheckerDiagnosticOperation = CheckerDiagnosticOperation::LibAwaited;
         let mut path = InstantiationDepth::entered(2);
-        assert!((3..INSTANTIATION_DEPTH).all(|_| path.enter(1)));
-        assert!(!path.enter(1));
+        assert!((3..INSTANTIATION_DEPTH).all(|_| path.enter(1, AWAITED).is_ok()));
+        assert!(path.enter(1, AWAITED).is_err());
         path.leave(2);
-        assert!(path.enter(1));
+        assert!(path.enter(1, AWAITED).is_ok());
+    }
+
+    /// Every refusal carries a resource diagnostic, and only a resource
+    /// diagnostic has no complete recovery.
+    #[test]
+    fn every_refusal_is_a_resource_diagnostic() {
+        let refusals = [
+            instantiation_budget(false).unwrap_err(),
+            non_terminating_instantiation(CheckerDiagnosticOperation::LibAwaited),
+            cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
+            with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())
+                .unwrap_err(),
+        ];
+        assert!(refusals
+            .iter()
+            .all(|refusal| refusal.diagnostic().code.is_resource_limit()));
+        assert!(!CheckerDiagnosticCode::RecursiveFulfillmentCallback.is_resource_limit());
+        assert!(!CheckerDiagnosticCode::ArgumentNotAssignable.is_resource_limit());
     }
 }

@@ -17,6 +17,13 @@ use super::PrimitiveKind;
 /// (`getCandidateForOverloadFailure`): the call's result carries that
 /// candidate and this diagnostic together, so the answer is never a silent
 /// success.
+///
+/// A resource diagnostic ([`CheckerDiagnosticCode::is_resource_limit`]) is
+/// reported where one operation exhausts Verter's own allowance for it, and
+/// only there: the operation's budget gate
+/// ([`checker_policy`](super::checker_policy)) is its sole source. Its
+/// recovery is usable but incomplete — a resource partial, never kept —
+/// because the allowance, not the types, decided it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CheckerDiagnostic {
     /// The diagnostic the checker reports.
@@ -88,6 +95,25 @@ pub enum CheckerDiagnosticCode {
 }
 
 impl CheckerDiagnosticCode {
+    /// Whether the checker reports this code when a type operation runs out
+    /// of an allowance (TS2589, TS2590, TS2799, TS2859). Verter reports these
+    /// at its own allowance for the operation, and the recovery after one is
+    /// a resource partial: usable as the checker's recovery, never a
+    /// complete answer, never kept.
+    #[must_use]
+    pub const fn is_resource_limit(self) -> bool {
+        match self {
+            Self::ExcessivelyDeepInstantiation
+            | Self::UnionTooComplex
+            | Self::TupleTooLarge
+            | Self::RelationTooComplex => true,
+            Self::RecursiveFulfillmentCallback
+            | Self::ArgumentNotAssignable
+            | Self::ArgumentCount
+            | Self::ArgumentCountAtLeast => false,
+        }
+    }
+
     /// The checker's numeric diagnostic code.
     #[must_use]
     pub const fn code(self) -> u32 {

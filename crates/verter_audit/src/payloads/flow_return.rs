@@ -98,6 +98,9 @@ pub enum FlowDegradationTag {
     /// The value was composed around an interior read that did not
     /// complete.
     PartialInterior,
+    /// The value holds, or was derived from, the checker's recovery after
+    /// an operation exhausted its own allowance.
+    OperationBudget,
 }
 
 /// Closed mirror of the session's no-value flow-return reasons — the

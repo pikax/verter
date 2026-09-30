@@ -98,7 +98,8 @@ fn reversed_object_unions(count: usize) -> String {
 /// about one structured comparison per arm: they hold within an allowance
 /// of 3 × 200 comparisons. Reversed, every arm scans the target, about
 /// 200² / 2 comparisons: past the same allowance the check overflows and is
-/// the checker's false (TS2859) — a complete answer, not a budget refusal.
+/// the checker's false (TS2859) — a resource partial of the operation
+/// budget, never a proof that the unions do not relate.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings agree), through `[S]
 /// extends [T] ? 1 : 2`: aligned, `1` over 600, 1,800 and 3,200 arms each;
@@ -113,9 +114,38 @@ fn a_union_source_relates_each_arm_to_its_position_first() {
         assert!(aligned.is_empty(), "{}", aligned.join("\n"));
         let reversed = mismatches(&reversed_object_unions(200), &[(relate, "2")]);
         assert!(reversed.is_empty(), "{}", reversed.join("\n"));
+        super::checker_probe_lane_tests::with_recovered_probe(
+            &reversed_object_unions(200),
+            relate,
+            |_, _| {},
+        );
     });
     let reversed = mismatches(&reversed_object_unions(200), &[(relate, "1")]);
     assert!(reversed.is_empty(), "{}", reversed.join("\n"));
+}
+
+/// A relation refused for complexity is never kept: its false depends on
+/// the allowance, not the types, so a second read on the same host relates
+/// the unions again and is again the recovered partial, never a complete
+/// negative served from the memo.
+#[test]
+fn a_relation_refused_for_complexity_is_never_kept() {
+    use super::evaluate::StructuralFactDemandOutcome;
+    let source = reversed_object_unions(200);
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let read = || {
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            &source,
+            "[S] extends [T] ? 1 : 2",
+            |_, outcome| matches!(outcome, StructuralFactDemandOutcome::Recovered { .. }),
+        )
+    };
+    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
+        assert!(read(), "cold");
+        assert!(read(), "warm");
+    });
 }
 
 /// Aligned unions of 600, 1,800 and 3,200 arms relate within the production

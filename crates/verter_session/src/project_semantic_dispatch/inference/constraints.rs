@@ -64,7 +64,7 @@ impl ProjectSemanticDispatch<'_> {
                 constraint,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
-            .into_complete_node()?;
+            .into_usable_node()?;
         let graph = self.graph();
         let mut members: Vec<SemanticNodeId> = match graph.node_data(resolved).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),

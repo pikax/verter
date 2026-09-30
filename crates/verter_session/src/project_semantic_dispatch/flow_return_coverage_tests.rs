@@ -5805,8 +5805,8 @@ fn reduced_annotation_in(
                     crate::semantic_query::ProjectionMode::Expanded,
                 ),
             )
-            .into_complete_node()
-            .unwrap_or_else(|| panic!("{name}: the demand must complete"));
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("{name}: the demand must answer"));
         let data = dispatch
             .graph()
             .node_data(node)
@@ -5951,7 +5951,7 @@ fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
             data,
             SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                 diagnostic: ts2589,
-                beyond: None
+                origin: None
             }),
             "{name}"
         );
@@ -6246,7 +6246,7 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
-            beyond: None,
+            origin: None,
         })
     );
     assert_eq!(raised, any());
@@ -6306,7 +6306,7 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
-            beyond: None,
+            origin: None,
         })
     );
     assert_eq!(raised, any());

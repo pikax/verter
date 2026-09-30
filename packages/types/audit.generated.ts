@@ -1003,7 +1003,7 @@ export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep"
  * so each detected flow-model gap keeps a distinct wire spelling
  * instead of collapsing into one "gap" bucket.
  */
-export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "GapClosureCapture" | "GapAbruptCompletion" | "GapUnmodeledExpression" | "NonCallableBinding" | "UnrepresentableCallee" | "FailedBindingInitializer" | "UnappliedWriteEffect" | "ConditionalVarDefinition" | "UnreducedDeclaredUnion" | "UnresolvedValue" | "UnmodeledPosition" | "PartialInterior";
+export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "GapClosureCapture" | "GapAbruptCompletion" | "GapUnmodeledExpression" | "NonCallableBinding" | "UnrepresentableCallee" | "FailedBindingInitializer" | "UnappliedWriteEffect" | "ConditionalVarDefinition" | "UnreducedDeclaredUnion" | "UnresolvedValue" | "UnmodeledPosition" | "PartialInterior" | "OperationBudget";
 
 /**
  * Closed mirror of the session's no-value flow-return reasons — the

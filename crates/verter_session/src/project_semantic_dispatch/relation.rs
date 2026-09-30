@@ -1420,22 +1420,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             (top, chain)
         };
-        // One more structured comparison of the chain's check: past the
-        // checker's allowance the check overflows, false (TS2859).
-        let exhausted = {
+        // One more structured comparison of the chain's check: past its
+        // allowance the check is refused with TS2859 and recovers as false —
+        // a resource partial, never a proof that the pair does not relate.
+        let refused = {
             let mut txn = self.dispatch_txn.borrow_mut();
             let counts = &mut txn.relation.chain_comparisons;
-            match counts
+            counts
                 .iter_mut()
                 .rev()
                 .find(|(base, _)| *base == chain.base)
-            {
-                Some((_, comparisons)) => comparisons.record().is_err(),
-                None => false,
-            }
+                .and_then(|(_, comparisons)| comparisons.record().err())
         };
-        if exhausted {
+        if refused.is_some() {
             self.overflow_relation_chain(&chain);
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+            );
             return Some(RelationResult::NotAssignable);
         }
         // The pair's frame, memo entry and proof are reserved before the
@@ -8068,8 +8069,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The checker's TS2590 recovery for the intersection `node` when it
     /// refuses the intersection's cross product (`getIntersectionType`),
-    /// holding `node` as the type beyond the checker's limit; `None` when
-    /// the checker builds it.
+    /// a resource partial holding `node` as its origin, or the recovery an
+    /// arm already is; `None` when the checker builds it.
     ///
     /// The arms are read as the checker holds them: a nested intersection
     /// flattens and a name stands for the type it resolves to, so an
@@ -8110,16 +8111,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(members.iter().rev().copied());
                 }
                 Some(SemanticNodeData::Intersection(_)) => stack.push(resolved),
+                // An arm that already is a refused intersection's recovery
+                // is the checker's error type, which the intersection is:
+                // it keeps its own refusal.
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                     diagnostic, ..
                 })) if diagnostic.code
                     == crate::semantic_query::CheckerDiagnosticCode::UnionTooComplex =>
                 {
-                    return Some(crate::semantic_query::checker_policy::checker_recovery(
-                        graph,
-                        *diagnostic,
-                        Some(node),
-                    ));
+                    return Some(resolved);
                 }
                 Some(SemanticNodeData::Union(_)) => {
                     any_union = true;
@@ -8158,9 +8158,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
-        refused.map(|diagnostic| {
-            crate::semantic_query::checker_policy::checker_recovery(graph, diagnostic, Some(node))
-        })
+        refused.map(|refusal| self.recover_at_operation_budget(refusal, Some(node)))
     }
 
     /// The pair a relation decides in place of `(source, target)` when
@@ -8247,8 +8245,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// partial or control carrier. No relation over one is a fact: two
     /// markers are never the same type because they are the same marker,
     /// and a marker is never below `unknown` or above `never` because the
-    /// relation cannot read it. The checker's error type (the
-    /// `CheckerRecovery` and `Failure` dispositions) relates as `any`
+    /// relation cannot read it. The checker's error type (the checker
+    /// recoveries and the `Failure` disposition) relates as `any`
     /// does, and a recursion or declaration carrier is unwrapped before it
     /// is compared, so neither is a marker here.
     ///
@@ -8265,6 +8263,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 query_error_disposition(err),
                 QueryErrorDisposition::Failure
                     | QueryErrorDisposition::CheckerRecovery
+                    | QueryErrorDisposition::BudgetRecovery
                     | QueryErrorDisposition::RecursionCarrier
                     | QueryErrorDisposition::ExpandableDecl
             ),

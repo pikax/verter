@@ -2361,7 +2361,8 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
     // node entirely: no consumer can classify the unsettled carrier.
     let mutual = dispatch.normalize_node_for_structural_fact_demand(member("mutual"), navigate());
     match mutual {
-        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => assert!(
             reasons.contains(PartialReasonSet::SAME_PATH_RECURSION),
             "the cycle stop carries SAME_PATH_RECURSION, got {reasons:?}"
         ),
@@ -2406,7 +2407,8 @@ fn normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete() {
     let outcome = dispatch.normalize_node_for_structural_fact_demand(fake, navigate());
     let resolved = match outcome {
         StructuralFactDemandOutcome::Complete(node) => node,
-        StructuralFactDemandOutcome::Partial(reasons) => {
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => {
             panic!("an honest miss must stay Complete, got Partial({reasons:?})")
         }
     };
@@ -2503,7 +2505,8 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
     dispatch.set_connected_limits_for_tests(256, 24);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(toowide, navigate());
     match outcome {
-        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => assert!(
             reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
             "the refused template construction surfaces as the ledger's work-limit trip, \
              got {reasons:?}"
@@ -3231,7 +3234,8 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
 
     let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(mutual, navigate());
     match peeled {
-        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => assert!(
             reasons.contains(PartialReasonSet::SAME_PATH_RECURSION),
             "a mutual-recursion `DeclRef` cycle is a typed cycle partial, got {reasons:?}"
         ),

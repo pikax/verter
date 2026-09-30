@@ -1178,8 +1178,8 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.header(category::INTRINSIC, subtag::OPAQUE);
             encode_query_error(&mut enc, err);
             // A recursive back-edge names the instantiation it stands for;
-            // a checker recovery past a checker limit names the type Verter
-            // holds beyond it.
+            // a checker recovery names the authored form of the operation it
+            // refused.
             match err {
                 QueryError::RecursiveRef { args, .. } => {
                     enc.u16(args.len() as u16);
@@ -1188,9 +1188,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                     }
                 }
                 QueryError::CheckerRecovery {
-                    beyond: Some(beyond),
+                    origin: Some(origin),
                     ..
-                } => enc.child(*beyond),
+                } => enc.child(*origin),
                 _ => {}
             }
         }

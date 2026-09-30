@@ -33,7 +33,8 @@ const PROBE_ROOT: &str = "/wb";
 pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
 /// Answer `probe` in TYPE position over a module of `source` and hand the
-/// reduced node to `read`.
+/// reduced node to `read`: the checker's answer, which after an operation
+/// exhausted its allowance is the checker's recovery.
 pub(super) fn with_probe<R>(
     source: &str,
     probe: &str,
@@ -70,10 +71,38 @@ pub(super) fn with_probe_on_host<R>(
 ) -> R {
     with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
         let node = outcome
-            .into_complete_node()
+            .into_usable_node()
             .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
         read(dispatch, node)
     })
+}
+
+/// [`with_probe`] for a probe an operation's own allowance stops: the demand
+/// must be a resource partial whose only reason is the operation budget,
+/// and `read` gets the node holding the checker's recovery.
+pub(super) fn with_recovered_probe<R>(
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    let project = ProbeProject::default();
+    with_probe_outcome_on_host(
+        &probe_host(project),
+        project,
+        source,
+        probe,
+        |dispatch, outcome| match outcome {
+            super::evaluate::StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                assert_eq!(
+                    reasons,
+                    crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+                    "`{probe}` is a resource partial of the operation budget alone"
+                );
+                read(dispatch, node)
+            }
+            other => panic!("`{probe}` must be a recovered resource partial, got {other:?}"),
+        },
+    )
 }
 
 /// [`with_probe_on_host`] handing `read` the published demand's outcome,
@@ -112,6 +141,19 @@ pub(super) fn with_probe_outcome_on_host<R>(
         result.return_type(),
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
+    // The probe's value is its function's flow return, which may already
+    // have evaluated through an operation's recovery: that return's
+    // operation-budget degradation is the probe's partiality too.
+    let outcome = match (outcome, result.degradation()) {
+        (
+            super::evaluate::StructuralFactDemandOutcome::Complete(node),
+            Some(crate::semantic_query::FlowReturnDegradation::OperationBudget),
+        ) => super::evaluate::StructuralFactDemandOutcome::Recovered {
+            node,
+            reasons: crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+        },
+        (outcome, _) => outcome,
+    };
     read(&dispatch, outcome)
 }
 
@@ -286,7 +328,7 @@ pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<S
                         node,
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     )
-                    .into_complete_node()
+                    .into_usable_node()
                     .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
                 (!checker_syntax::matches_node(dispatch, value, &expected, 0)).then(|| {
                     format!(
@@ -353,7 +395,7 @@ pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec
                     result.return_type(),
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 )
-                .into_complete_node()
+                .into_usable_node()
                 .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
             (!checker_syntax::matches_node(&dispatch, node, &expected, 0)).then(|| {
                 format!(

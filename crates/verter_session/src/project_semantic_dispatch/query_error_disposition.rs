@@ -19,7 +19,8 @@
 //! | [`UnsupportedSurface`] | `UnrepresentableSurface`, `UnrepresentableSurfaceMember` | Typed unsupported-surface / unsupported-member result, retaining its existing sentinel output semantics. |
 //! | [`Partial`] | `BudgetExceeded`, `Cancelled`, `UnstableState` | Typed partial — `ReturnOnly`, never shared, never warmed. |
 //! | [`Failure`] | `Other`, `UnsupportedIntrinsic`, `ValueDomainMismatch` | Genuine typed failure (the §22 error type). |
-//! | [`CheckerRecovery`] | `CheckerRecovery` | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. |
+//! | [`CheckerRecovery`] | `CheckerRecovery` (a diagnostic the types decide) | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. A complete answer. |
+//! | [`BudgetRecovery`] | `CheckerRecovery` (a resource diagnostic) | The checker's error type after an operation exhausted Verter's allowance for it: raised AS its recovery like [`CheckerRecovery`], but a resource partial — `ReturnOnly`, never shared, never warmed. |
 //!
 //! The classification also carries the PRECISE typed unresolved reason a
 //! consumer publishes, because the disposition classes are deliberately
@@ -36,6 +37,7 @@
 //! [`Partial`]: QueryErrorDisposition::Partial
 //! [`Failure`]: QueryErrorDisposition::Failure
 //! [`CheckerRecovery`]: QueryErrorDisposition::CheckerRecovery
+//! [`BudgetRecovery`]: QueryErrorDisposition::BudgetRecovery
 
 use verter_type_expr::{ClosedLiteralDomainUnresolvedReason, ReactiveWrapperUnresolvedReason};
 
@@ -70,16 +72,25 @@ pub(crate) enum QueryErrorDisposition {
     /// absorbers and relates like `any` — but a COMPLETE answer: it raises as
     /// the diagnostic's recovery, and a boundary publishes it as a value.
     CheckerRecovery,
+    /// The checker's error type after an operation exhausted Verter's own
+    /// allowance for it (a resource diagnostic). It raises as its recovery
+    /// and relates like `any`, exactly as [`CheckerRecovery`](Self::CheckerRecovery)
+    /// does, but the allowance decided it, not the types: it is a resource
+    /// partial — `ReturnOnly`, never published as a complete answer.
+    BudgetRecovery,
 }
 
 impl QueryErrorDisposition {
     /// Whether this disposition is the §22 ERROR TYPE — a genuine "this type
     /// IS an error" result, as opposed to a control / recursion / partial
-    /// signal. Exactly [`Failure`](Self::Failure) and
-    /// [`CheckerRecovery`](Self::CheckerRecovery).
+    /// signal. Exactly [`Failure`](Self::Failure) and the two checker
+    /// recoveries.
     #[must_use]
     pub(crate) const fn is_error_type(self) -> bool {
-        matches!(self, Self::Failure | Self::CheckerRecovery)
+        matches!(
+            self,
+            Self::Failure | Self::CheckerRecovery | Self::BudgetRecovery
+        )
     }
 
     /// Whether an interned `Opaque` carrier with this disposition would
@@ -92,7 +103,10 @@ impl QueryErrorDisposition {
     pub(crate) const fn is_unknown_materializing(self) -> bool {
         !matches!(
             self,
-            Self::RecursionCarrier | Self::ExpandableDecl | Self::CheckerRecovery
+            Self::RecursionCarrier
+                | Self::ExpandableDecl
+                | Self::CheckerRecovery
+                | Self::BudgetRecovery
         )
     }
 }
@@ -231,12 +245,23 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::Failure,
             ClosedLiteralDomainUnresolvedReason::Fault,
         ),
-        // The checker's recovered error type reads as `any`: a complete
-        // answer, but not a closed literal domain.
-        QueryError::CheckerRecovery { .. } => (
-            QueryErrorDisposition::CheckerRecovery,
-            ClosedLiteralDomainUnresolvedReason::Unsupported,
-        ),
+        // The checker's recovered error type reads as `any`. After a
+        // diagnostic the types decide it is a complete answer, but not a
+        // closed literal domain; after an operation exhausted its allowance
+        // it is a resource partial, published as the budget it ran out of.
+        QueryError::CheckerRecovery { diagnostic, .. } => {
+            if diagnostic.code.is_resource_limit() {
+                (
+                    QueryErrorDisposition::BudgetRecovery,
+                    ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
+                )
+            } else {
+                (
+                    QueryErrorDisposition::CheckerRecovery,
+                    ClosedLiteralDomainUnresolvedReason::Unsupported,
+                )
+            }
+        }
     };
     QueryErrorClass {
         disposition,
