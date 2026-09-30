@@ -346,6 +346,28 @@ enum TemplateAlternatives {
     AnyString,
 }
 
+/// The bytes one template piece holds: the piece and its text.
+fn template_piece_bytes(piece: &TemplatePiece) -> usize {
+    std::mem::size_of::<TemplatePiece>()
+        + match piece {
+            TemplatePiece::Text(text) => text.len(),
+            TemplatePiece::Hole(_) => 0,
+        }
+}
+
+/// The bytes a list of template pieces holds.
+fn template_piece_list_bytes(pieces: &[TemplatePiece]) -> usize {
+    pieces.iter().map(template_piece_bytes).sum()
+}
+
+/// The bytes a list of concatenations holds, piece for piece.
+fn template_pieces_bytes(concatenations: &[Vec<TemplatePiece>]) -> usize {
+    concatenations
+        .iter()
+        .map(|pieces| template_piece_list_bytes(pieces))
+        .sum()
+}
+
 /// Canonical TypeScript stringification of a literal interpolated into a
 /// template-literal type (`` `${...}` ``). Typed-IR only — it reads the
 /// interned [`LiteralValue`], never source text. Mirrors TS lexing: a string
@@ -16048,6 +16070,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             TemplateAlternatives::Finite(alternatives) => alternatives,
         };
+        // Each concatenation interns one derived node: its bytes are
+        // reserved, all at once, before any is built.
+        let node_bytes = alternatives
+            .iter()
+            .map(|constituent| {
+                super::connected_demand::derived_node_bytes(template_piece_list_bytes(
+                    &constituent.pieces,
+                ))
+            })
+            .try_fold(0usize, usize::checked_add)
+            .unwrap_or(usize::MAX);
+        if let Err(reasons) = self.connected_demand.reserve_bytes(node_bytes) {
+            self.fold_local_partial_completeness(reasons);
+            return Err(reasons);
+        }
         let members: Vec<SemanticNodeId> = alternatives
             .into_iter()
             .map(|constituent| self.template_type_from_pieces(constituent.pieces))
@@ -16169,6 +16206,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for (index, alternatives) in per_arg.iter().enumerate() {
             let width = results.len() * alternatives.len();
             if let Err(reasons) = self.connected_demand.charge_units(width) {
+                return TemplateAlternatives::Exhausted(reasons);
+            }
+            // The concatenations are reserved before one is built: each
+            // holds its prefix's pieces, the alternative's and the next text.
+            let suffix = text(index + 1);
+            let bytes = template_pieces_bytes(&results)
+                .checked_mul(alternatives.len())
+                .zip(
+                    alternatives
+                        .iter()
+                        .map(|alternative| template_piece_list_bytes(&alternative.pieces))
+                        .try_fold(0usize, usize::checked_add)
+                        .and_then(|total| total.checked_mul(results.len())),
+                )
+                .and_then(|(prefixes, alternatives)| prefixes.checked_add(alternatives))
+                .and_then(|total| {
+                    total.checked_add(width.checked_mul(
+                        std::mem::size_of::<Vec<TemplatePiece>>() + template_piece_bytes(&suffix),
+                    )?)
+                })
+                .unwrap_or(usize::MAX);
+            if let Err(reasons) = self.connected_demand.reserve_bytes(bytes) {
                 return TemplateAlternatives::Exhausted(reasons);
             }
             let mut next: Vec<Vec<TemplatePiece>> = Vec::with_capacity(width);

@@ -1438,6 +1438,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.overflow_relation_chain(&chain);
             return Some(RelationResult::NotAssignable);
         }
+        // The pair's frame, memo entry and proof are reserved before the
+        // pair is related; a refusal is resource incompleteness.
+        if self
+            .connected_demand
+            .reserve_bytes(super::connected_demand::RELATION_PAIR_BYTES)
+            .is_err()
+        {
+            self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+            return Some(RelationResult::Unknown);
+        }
         let depth = chain.depth + 1;
         let mut expanding = chain.expanding;
         {

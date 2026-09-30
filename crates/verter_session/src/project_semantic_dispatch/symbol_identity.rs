@@ -663,6 +663,7 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
         PropCallableRoleUnresolvedReason::Cycle
     } else if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+        || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
     {
         PropCallableRoleUnresolvedReason::WorkLimitExceeded
     } else if reasons.contains(PartialReasonSet::MISSING_DEPENDENCY) {

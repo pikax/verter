@@ -581,6 +581,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             || reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
             || reasons
                 .contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+            || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         {
             let (limit, actual) = crate::request_context::current_request_budget()
                 .map(|budget| {

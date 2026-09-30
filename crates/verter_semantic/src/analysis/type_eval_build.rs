@@ -5936,6 +5936,7 @@ fn publication_diagnostic_kind(
         Source::BudgetExceeded => Target::BudgetExceeded,
         Source::ProjectionWorkLimit => Target::ProjectionWorkLimit,
         Source::ConnectedQueryDepthLimit => Target::ConnectedQueryDepthLimit,
+        Source::ConnectedMemoryLimit => Target::ConnectedMemoryLimit,
         Source::MappedDepthExceeded => Target::MappedDepthExceeded,
         Source::UnresolvedReference => Target::UnresolvedReference,
         Source::IndeterminateConditional => Target::IndeterminateConditional,

@@ -66,7 +66,8 @@ export interface TestExpansionDiagnostic {
     | "cyclicReference"
     | "cyclicInstantiation"
     | "instantiationError"
-    | "emptyUnionArm";
+    | "emptyUnionArm"
+    | "connectedMemoryLimit";
   context: string;
   propertyName?: string;
 }
@@ -143,6 +144,7 @@ const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
 const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
 const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
 const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
+const EXPANSION_REASON_CONNECTED_MEMORY_LIMIT = 15;
 
 type TypeNodeInit = NonNullable<
   NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
@@ -493,5 +495,7 @@ function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number
       return EXPANSION_REASON_PROJECTION_WORK_LIMIT;
     case "connectedQueryDepthLimit":
       return EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT;
+    case "connectedMemoryLimit":
+      return EXPANSION_REASON_CONNECTED_MEMORY_LIMIT;
   }
 }
