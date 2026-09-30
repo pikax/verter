@@ -98,6 +98,11 @@ mod conditional_decision;
 pub(crate) mod connected_demand;
 #[cfg(test)]
 mod connected_demand_tests;
+// The exclusive-cost receipts a connected demand records for each
+// computation and replays when it serves a result warm.
+pub(crate) mod cost_receipt;
+#[cfg(test)]
+mod cost_receipt_tests;
 pub(crate) mod cycle_gate;
 mod enum_type;
 pub(crate) mod enumerate;

@@ -15837,6 +15837,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             TemplateAlternatives::Finite(alternatives) => alternatives,
         };
+        // Each concatenation interns one derived node: its bytes are
+        // reserved, all at once, before any is built.
+        let node_bytes = alternatives
+            .iter()
+            .map(|constituent| {
+                super::connected_demand::derived_node_bytes(template_piece_list_bytes(
+                    &constituent.pieces,
+                ))
+            })
+            .try_fold(0usize, usize::checked_add)
+            .unwrap_or(usize::MAX);
+        if let Err(reasons) = self.connected_demand.reserve_bytes(node_bytes) {
+            self.fold_local_partial_completeness(reasons);
+            return Err(reasons);
+        }
         let members: Vec<SemanticNodeId> = alternatives
             .into_iter()
             .map(|constituent| self.template_type_from_pieces(constituent.pieces))

@@ -440,6 +440,40 @@ pub fn relate_named_types_for_tests(
     )
 }
 
+/// Reduce the template literal type named `name` in `scope_canonical_id` as
+/// one connected demand under `construction_byte_limit` when given: whether
+/// the reduction completed, and the construction bytes the demand charged.
+pub fn reduce_named_template_for_tests(
+    host: &crate::VerterHost,
+    scope_canonical_id: &str,
+    name: &str,
+    construction_byte_limit: Option<usize>,
+) -> (bool, usize) {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    if let Some(limit) = construction_byte_limit {
+        dispatch.set_construction_byte_limit_for_tests(limit);
+    }
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Expanded,
+    );
+    let expr = verter_type_expr::TypeExpr::Ref {
+        name: std::sync::Arc::from(name),
+        type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+    };
+    let node = dispatch
+        .lower_type_expr_in_scope_with_context(scope_canonical_id, &expr, context)
+        .unwrap_or_else(|| panic!("`{name}` lowers in {scope_canonical_id}"));
+    let (_, completeness) =
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context);
+    (
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        dispatch.connected_demand_usage().bytes,
+    )
+}
+
 /// Integration-test shim that drives the
 /// `substitute_semantic_type_param` helper so its hash-cons
 /// discriminator tests can exercise the memo with controlled

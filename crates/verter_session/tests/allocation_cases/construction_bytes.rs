@@ -103,3 +103,43 @@ fn the_worst_relation_shape_stops_within_its_byte_allowance() {
         "peak live {peak} bytes past the {limit}-byte allowance"
     );
 }
+
+/// `type R = \`${A}-${B}\`` over `a` string literals in `A` and `b` in `B`.
+fn template_over(a: usize, b: usize) -> String {
+    let union = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|i| format!("\"{prefix}{i}\""))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!(
+        "export type A = {};\nexport type B = {};\nexport type R = `${{A}}-${{B}}`;\n",
+        union("a", a),
+        union("b", b)
+    )
+}
+
+/// 369 × 271 = 99,999 concatenations, each reserving its pieces and the
+/// literal node it interns before it is built: the peak the reduction
+/// holds live stays within what it charged.
+///
+/// Measured on TypeScript 7.0.2 (all four settings agree): `IsAny<R>` is
+/// `"not-any"` and `"a0-b0" extends R ? 1 : 2` is `1`.
+#[test]
+fn a_template_holds_no_more_than_it_reserved() {
+    let host = host_with(&template_over(369, 271));
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "A", None);
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "B", None);
+    reset_alloc_counter();
+    let (complete, charged) =
+        verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "R", None);
+    let peak = peak_live_bytes();
+    assert!(
+        complete,
+        "99,999 concatenations are within the checker's limit"
+    );
+    assert!(
+        peak <= charged as i64 + DEMAND_SETUP_BYTES,
+        "peak live {peak} bytes past the {charged} bytes reserved"
+    );
+}
