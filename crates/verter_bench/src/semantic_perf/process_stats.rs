@@ -140,8 +140,8 @@ pub fn for_pid(pid: u32) -> Result<ProcessStats, StatsError> {
         }
         // CPU times are in mach absolute-time units.
         let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
-        let cpu_micros = (mach_timebase_info(&mut timebase) == 0 && timebase.denom != 0)
-            .then(|| {
+        let cpu_micros =
+            (mach_timebase_info(&mut timebase) == 0 && timebase.denom != 0).then(|| {
                 let ticks = u128::from(info.ri_user_time) + u128::from(info.ri_system_time);
                 (ticks * u128::from(timebase.numer) / u128::from(timebase.denom) / 1_000) as u64
             });
