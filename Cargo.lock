@@ -3313,6 +3313,7 @@ dependencies = [
  "criterion",
  "glob",
  "hotpath",
+ "libc",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -3331,8 +3332,10 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
  "walkdir",
+ "windows-sys",
 ]
 
 [[package]]
