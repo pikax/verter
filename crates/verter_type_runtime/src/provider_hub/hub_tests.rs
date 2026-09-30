@@ -3818,3 +3818,345 @@ async fn a_wedged_or_failed_instance_never_blocks_an_independent_healthy_instanc
     assert!(stuck.await.unwrap().is_err());
     assert!(!wedged.is_serving());
 }
+
+// ── The lazy-attach re-arm door (`establish_rearming` +
+//    `HubPolicy::lazy_attach`): the discipline the shared editor attach's
+//    transport cell used to own, now owned by the hub. ──
+
+/// An establisher whose first `fail_first` attempts fail and every later one
+/// hands `provider` back. The attempt counter is shared with the test (the
+/// establisher is type-erased inside the hub), so a fail-closed demand is
+/// discriminated from a retry storm by the observed attempt count.
+struct ScriptedLazyAttach {
+    attempts: Arc<AtomicUsize>,
+    fail_first: usize,
+    provider: MockProvider,
+    crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>>,
+}
+
+impl ScriptedLazyAttach {
+    fn failing_until(fail_first: usize, provider: MockProvider) -> Self {
+        Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            fail_first,
+            provider,
+            crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+}
+
+impl ProviderEstablisher<MockProvider> for ScriptedLazyAttach {
+    fn log_name(&self) -> &'static str {
+        "test-lazy-attach"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "test-attach"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "test attach is re-arming"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        false
+    }
+
+    fn establish<'a>(&'a self, crash_notify: Arc<Notify>) -> EstablishFuture<'a, MockProvider> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt < self.fail_first {
+            return Box::pin(async { Err(TypeProviderError::new("scripted attach failure")) });
+        }
+        *self.crash_notify.lock() = Some(Arc::clone(&crash_notify));
+        let provider = self.provider.clone();
+        Box::pin(async move { Ok(Arc::new(provider)) })
+    }
+}
+
+/// The number of establisher invocations observed so far (the retry-storm
+/// discriminator: a fail-closed demand must not invoke the establisher).
+fn attempts_of(backend: &ScriptedLazyAttach) -> Arc<AtomicUsize> {
+    Arc::clone(&backend.attempts)
+}
+
+/// A cell-held probe the test flips between demands.
+fn discriminant_probe(
+    cell: &Arc<parking_lot::Mutex<Option<String>>>,
+) -> impl Fn() -> Option<String> + '_ {
+    let cell = Arc::clone(cell);
+    move || cell.lock().clone()
+}
+
+/// A failed lazy attach fails CLOSED on every demand at the UNCHANGED
+/// discriminant (no retry storm) and on an unobservable one (`None`), and
+/// re-arms only through a FRESH discriminant. A serving incarnation returns
+/// its epoch without probing.
+#[tokio::test]
+async fn lazy_attach_rearm_fails_closed_until_the_discriminant_advances() {
+    let backend = ScriptedLazyAttach::failing_until(1, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    let observed = Arc::new(parking_lot::Mutex::new(Some("nonce-a".to_string())));
+
+    // First demand at `nonce-a`: one real attempt, which the script fails.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // Same discriminant: fail closed with NO new attempt.
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "an unchanged discriminant must not re-attempt establishment (no retry storm)"
+    );
+
+    // Unobservable discriminant (`None`): still fail closed, no attempt.
+    *observed.lock() = None;
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+
+    // A FRESH discriminant re-arms and establishes.
+    *observed.lock() = Some("nonce-b".to_string());
+    let epoch = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-arms the lazy attach");
+    assert!(hub.is_serving());
+
+    // While serving, the door returns the epoch without probing (the probe
+    // cell is poisoned to prove it is never read).
+    *observed.lock() = None;
+    assert_eq!(
+        hub.establish_rearming(discriminant_probe(&observed))
+            .await
+            .unwrap(),
+        epoch
+    );
+}
+
+/// A death under the lazy-attach policy RETIRES the epoch fail-closed without
+/// the respawn loop: demands at the dead establishment's discriminant fail
+/// closed with zero new attempts, and a fresh discriminant re-establishes
+/// under a NEW epoch. The instance is never declared exhausted.
+#[tokio::test]
+async fn lazy_attach_death_retires_fail_closed_and_re_arms_on_a_fresh_discriminant() {
+    let backend = ScriptedLazyAttach::failing_until(0, MockProvider::new("tsgo"));
+    let attempts = attempts_of(&backend);
+    let crash_notify = Arc::clone(&backend.crash_notify);
+    let hub = ProviderHub::new(
+        backend,
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    let observed = Arc::new(parking_lot::Mutex::new(Some("nonce-a".to_string())));
+
+    let first = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("the first demand establishes");
+    assert!(hub.is_serving());
+
+    // The attach dies: the watcher notifies the crash signal the hub handed
+    // the establishment. Deterministic spin — no wall-clock sleep.
+    crash_notify
+        .lock()
+        .as_ref()
+        .expect("the establishment received its crash signal")
+        .notify_one();
+    for _ in 0..100_000 {
+        if !hub.is_serving() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !hub.is_serving(),
+        "a lazy-attach death must retire the serving epoch"
+    );
+
+    // The discriminant re-read AFTER the successful establishment is what the
+    // eviction gated: an unchanged one fails closed with no new attempt.
+    *observed.lock() = Some("nonce-a".to_string());
+    assert!(hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .is_err());
+    let attempts_after_death = attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        attempts_after_death, 1,
+        "a demand at the dead establishment's discriminant must not re-attempt"
+    );
+
+    // A fresh discriminant (a reconnect) re-establishes under a NEW epoch.
+    *observed.lock() = Some("nonce-c".to_string());
+    let second = hub
+        .establish_rearming(discriminant_probe(&observed))
+        .await
+        .expect("a fresh discriminant re-establishes the lazy attach");
+    assert!(second > first, "the replacement must mint a fresh epoch");
+    assert_eq!(attempts.load(Ordering::SeqCst), attempts_after_death + 1);
+}
+
+/// The direct admitted write (`forward_admitted_file`) performs ZERO provider
+/// operations on refusal — a path the admission does not cover, or an
+/// admission whose basis drifted — and exactly one write when current.
+#[tokio::test]
+async fn forward_admitted_file_refusals_write_nothing() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    let hub = ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        basis,
+        Arc::clone(&reader),
+    );
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    // A path the admission does NOT cover: typed refusal, zero writes.
+    assert!(matches!(
+        hub.forward_admitted_file(
+            &admission,
+            "d:/ws/src/Other.vue.tsx",
+            "export {}",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::IncompleteGeneratedProof)
+    ));
+    assert!(
+        engine.calls().is_empty(),
+        "an uncovered path must not be written"
+    );
+
+    // A basis drift (a new publication) invalidates the admission BEFORE the
+    // write: typed refusal, zero writes.
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        2,
+        1,
+    );
+    assert!(matches!(
+        hub.forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "export const v = 1;",
+            OverlayFileKind::Open,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::StaleBasis)
+    ));
+    assert!(
+        engine.calls().is_empty(),
+        "a stale-basis admission must not write — zero speculative provider work"
+    );
+
+    // The warm witness dies with the drift; a current binding writes exactly
+    // once through the covering admission.
+    assert!(
+        hub.bound_project(source).is_none(),
+        "a drifted basis must retire the warm witness"
+    );
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let witness = hub
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            Vec::new(),
+            ProjectBasis::new(Arc::clone(&publication), 1, 1),
+            reader,
+        ))
+        .unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    hub.forward_admitted_file(
+        &admission,
+        unit.as_str(),
+        "export const v = 1;",
+        OverlayFileKind::Open,
+        OverlayPriority::Foreground,
+    )
+    .await
+    .expect("a current admission writes the covered unit");
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::OpenFile { path, .. } if path == unit.as_str()))
+            .count()
+            == 1,
+        "exactly one provider write for the admitted unit"
+    );
+}

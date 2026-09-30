@@ -169,6 +169,29 @@ pub enum GeneratedUnitAdmission {
     NotAdmitted(GeneratedUnitNonAdmission),
 }
 
+impl GeneratedUnitAdmission {
+    /// The fail-closed admission for units whose owning configured project
+    /// could not be resolved (no bound owner): nothing is admitted, every
+    /// unit offends with [`GeneratedUnitNonAdmissionReason::NoSuchConfiguredProject`].
+    /// The same answer the membership query gives for a tsconfig the snapshot
+    /// does not hold; a caller that resolved NO owner uses it to fail its
+    /// write closed rather than fabricate a proof.
+    #[must_use]
+    pub fn unresolved_owner(units: &[CanonicalPath]) -> Self {
+        Self::NotAdmitted(GeneratedUnitNonAdmission {
+            offending: units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit.clone(),
+                        GeneratedUnitNonAdmissionReason::NoSuchConfiguredProject,
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
 /// Decide whether EVERY unit of `units` is admitted to the configured project
 /// whose tsconfig is `owning_tsconfig`.
 ///

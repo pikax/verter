@@ -72,7 +72,6 @@ mod desired;
 mod epoch;
 mod forwarding;
 mod quarantine;
-mod transport;
 
 pub use admission::{
     AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
@@ -83,7 +82,6 @@ use desired::{DesiredMutation, DesiredState, Disposition, Lane};
 use epoch::EpochMint;
 use quarantine::{InFlightGuard, QueryFingerprint, QueryWatch};
 
-pub use transport::{EstablishedTransport, LazyTransport, TransportIdentity};
 pub use verter_identity::identity::ProviderEpoch;
 
 /// Notification severity levels for provider events.
@@ -203,6 +201,14 @@ pub struct HubPolicy {
     /// `None`: the hub establishes only through [`ProviderHub::establish`] and
     /// recovery, and queries without a serving engine fail closed.
     pub on_demand: Option<Duration>,
+    /// `true` for an externally-attached transport (the shared editor
+    /// attach): a death RETIRES the serving epoch fail-closed without the
+    /// respawn loop. Re-establishment belongs to the re-arm door
+    /// ([`ProviderHub::establish_rearming`]) — a fresh generation
+    /// discriminant — never to a backoff storm against a dead attach, and
+    /// the instance is never declared exhausted: a later fresh
+    /// discriminant (a reconnect) still re-arms.
+    pub retire_only_on_crash: bool,
 }
 
 impl HubPolicy {
@@ -213,6 +219,7 @@ impl HubPolicy {
             max_restarts,
             establish_timeout: DEFAULT_ESTABLISH_TIMEOUT,
             on_demand: None,
+            retire_only_on_crash: false,
         }
     }
 
@@ -223,6 +230,22 @@ impl HubPolicy {
             max_restarts,
             establish_timeout: DEFAULT_ESTABLISH_TIMEOUT,
             on_demand: Some(retry_cooldown),
+            retire_only_on_crash: false,
+        }
+    }
+
+    /// An externally-attached transport the re-arm door
+    /// ([`ProviderHub::establish_rearming`]) establishes lazily: a death
+    /// retires the epoch fail-closed (no respawn loop, no exhaustion), and a
+    /// failed or evicted attach re-attempts only through a fresh generation
+    /// discriminant.
+    #[must_use]
+    pub const fn lazy_attach(establish_timeout: Duration) -> Self {
+        Self {
+            max_restarts: 0,
+            establish_timeout,
+            on_demand: None,
+            retire_only_on_crash: true,
         }
     }
 
@@ -279,6 +302,19 @@ struct Lifecycle {
     /// crash monitors captured at an older value are abandoned.
     teardown_generation: u64,
     last_failure: Option<(Instant, String)>,
+    /// The re-arm gate of a lazily-attached transport
+    /// ([`HubPolicy::lazy_attach`]): the generation discriminant of the last
+    /// FAILED attempt — or of the establishment a death evicted. `None`
+    /// while an incarnation serves (or before the first attempt): every
+    /// demand may establish. While set, only a probe that ADVANCES past the
+    /// gate re-arms; an unchanged (or unobservable) discriminant fails
+    /// closed without a new attempt.
+    attach_gate: Option<String>,
+    /// The discriminant the serving (or last evicted) incarnation
+    /// established at — re-read AFTER a successful establishment, so an
+    /// advertisement that advanced mid-handshake is carried as the
+    /// establishment's own. A death arms [`Lifecycle::attach_gate`] with it.
+    established_discriminant: Option<String>,
 }
 
 /// State shared between the hub handle and its actor.
@@ -418,6 +454,8 @@ where
                 phase: Phase::Idle,
                 teardown_generation: 0,
                 last_failure: None,
+                attach_gate: None,
+                established_discriminant: None,
             }),
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
             admission: StdMutex::new(admission::AdmissionState::default()),
@@ -473,6 +511,67 @@ where
     /// orphaned. A failure is not retried within the policy's retry cooldown.
     pub async fn establish(&self) -> Result<ProviderEpoch, TypeProviderError> {
         establish(&self.state).await
+    }
+
+    /// Establish through the re-arm door of a lazily-attached transport
+    /// ([`HubPolicy::lazy_attach`]) — the door that replaces a wall-clock
+    /// retry cooldown with the transport's own re-arm authority: an external
+    /// generation discriminant (a reconnect nonce, a workspace/config
+    /// generation).
+    ///
+    /// A demand FAILS CLOSED — no attempt, no I/O — while the observed
+    /// discriminant is UNCHANGED since the last failed attempt (or since the
+    /// establishment a death evicted), so a dead or absent attach is never
+    /// stormed; any ADVANCE (a fresh discriminant) re-arms and establishes
+    /// through the same singleflight as [`ProviderHub::establish`]. A serving
+    /// incarnation returns its epoch without probing.
+    ///
+    /// `probe` reads the CURRENT discriminant (`None` when none is
+    /// observable — which never re-arms after a first failure). The
+    /// discriminant is re-read AFTER a success and retained as the
+    /// establishment's own, so a generation that advanced mid-establishment
+    /// is what a later eviction compares against.
+    pub async fn establish_rearming(
+        &self,
+        probe: impl Fn() -> Option<String>,
+    ) -> Result<ProviderEpoch, TypeProviderError> {
+        if let Some(epoch) = self.state.shared.serving_epoch() {
+            return Ok(epoch);
+        }
+        let gate = self.state.shared.lifecycle().attach_gate.clone();
+        let observed = probe();
+        if let Some(failed_at) = gate {
+            if !generation_advanced(&Some(failed_at), &observed) {
+                return Err(TypeProviderError::new(format!(
+                    "{} attach failed at the current generation and re-arms only on a fresh one",
+                    self.state.establisher.log_name()
+                )));
+            }
+        }
+        match establish(&self.state).await {
+            Ok(epoch) => {
+                let established_at = probe();
+                let mut lifecycle = self.state.shared.lifecycle();
+                lifecycle.established_discriminant = established_at;
+                lifecycle.attach_gate = None;
+                Ok(epoch)
+            }
+            Err(error) => {
+                self.state.shared.lifecycle().attach_gate = observed;
+                Err(error)
+            }
+        }
+    }
+
+    /// The serving provider incarnation, if one serves: the exact instance
+    /// and epoch every hub-issued witness and admitted request binds to. A
+    /// hub with no serving engine yields `None` (the caller fails closed).
+    #[must_use]
+    pub fn serving(&self) -> Option<(Arc<P>, ProviderEpoch)> {
+        self.state
+            .shared
+            .serving()
+            .map(|serving| (Arc::clone(&serving.provider), serving.epoch))
     }
 
     /// Recover from the death of the engine serving `retired`.
@@ -847,6 +946,7 @@ where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
     let log_name = state.establisher.log_name();
+    let retire_only = state.policy.retire_only_on_crash;
     {
         let mut lifecycle = state.shared.lifecycle();
         // TEARDOWN DISCRIMINATION: a deliberate shutdown produces the same
@@ -866,7 +966,18 @@ where
         if !matches!(lifecycle.phase, Phase::Idle) {
             return;
         }
-        lifecycle.phase = Phase::Recovering;
+        if retire_only {
+            // An externally-attached transport never respawns on a timer:
+            // retire the epoch fail-closed and hold the re-arm at the
+            // discriminant the dead incarnation established at. The next
+            // demand re-establishes only through a FRESH discriminant (a
+            // reconnect); within the same one every query fails closed to
+            // its baseline. The instance is never declared exhausted.
+            lifecycle.attach_gate = lifecycle.established_discriminant.clone();
+            lifecycle.phase = Phase::Idle;
+        } else {
+            lifecycle.phase = Phase::Recovering;
+        }
     }
     tracing::warn!("{log_name} crash detected - initiating restart sequence");
 
@@ -891,6 +1002,14 @@ where
         return;
     }
     let _ = ack_rx.await;
+
+    if retire_only {
+        tracing::warn!(
+            "{log_name} attach died — epoch {retired:?} retired; re-establishment \
+             waits for a fresh generation discriminant"
+        );
+        return;
+    }
 
     state.notifier.notify(
         NotifySeverity::Warning,
@@ -1370,6 +1489,20 @@ where
         let _ = serving.provider.shutdown().await;
         // Release the incarnation's crash monitor; it observes the teardown.
         serving.crash_signal.notify_one();
+    }
+}
+
+/// Whether the observed generation discriminant ADVANCED past the gated one —
+/// the re-arm signal of [`ProviderHub::establish_rearming`].
+///
+/// Re-arm ONLY when the current discriminant is `Some(new)` that differs from
+/// the gate. A missing current discriminant (`None` — none observable) does
+/// NOT re-arm, so a flapping / absent advertisement never storms
+/// establishment.
+fn generation_advanced(gated: &Option<String>, current: &Option<String>) -> bool {
+    match current {
+        Some(now) => Some(now) != gated.as_ref(),
+        None => false,
     }
 }
 

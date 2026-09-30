@@ -8,7 +8,7 @@ use std::sync::Arc;
 use verter_workspace::published_state::PublishedRoot;
 use verter_workspace::{CanonicalPath, GeneratedUnitAdmission};
 
-use super::{ProviderHub, Shared};
+use super::{ProviderHub, Serving, Shared};
 use crate::traits::{CarrierActivation, CarrierScriptKind, TypeProvider};
 
 /// The inputs which can change whether one project owns a generated unit.
@@ -426,6 +426,30 @@ where
         Ok(witness)
     }
 
+    /// The CURRENT hub-issued witness for `source`, if one still binds the
+    /// serving provider and its basis — the warm path of
+    /// [`Self::bind_project`] without re-running the caller's resolver. A
+    /// witness whose basis drifted, whose provider was replaced, or that
+    /// this hub never issued yields `None`: the caller re-resolves and
+    /// re-binds. This is the ONLY warm binding memo — no admission decision
+    /// outside the hub outlives it.
+    #[must_use]
+    pub fn bound_project(&self, source: &str) -> Option<ProjectWitness> {
+        let witness = {
+            let state = self
+                .state
+                .shared
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.bindings.get(source).cloned()
+        };
+        let witness = witness?;
+        check_witness_current(&self.state.shared, &witness)
+            .ok()
+            .map(|()| witness)
+    }
+
     /// Admit exactly the generated units named by a complete workspace proof.
     /// Inferred/default-project answers cannot satisfy this configured-project
     /// proof; the engine has no capability to override exclusions.
@@ -603,6 +627,109 @@ where
             Ok(())
         } else {
             Err(AdmissionRefusal::StaleProvider)
+        }
+    }
+
+    /// Forward ONE admitted generated-unit file write directly to the serving
+    /// engine, outside the actor queue.
+    ///
+    /// The caller this serves (the shared overlay) writes a whole open-carrier
+    /// set as a CONCURRENT, barrier-coalesced sweep; the single-writer actor
+    /// serializes its forwards, which would hand the engine one program
+    /// update per carrier — the sequential-sweep latency the overlay's
+    /// design exists to avoid. Admission is enforced HERE with the checks the
+    /// actor path ([`Self::apply_overlay`]) enforces: complete proof, exact
+    /// coverage of `path`, and pre/post currency against the serving epoch
+    /// and the live basis. A refused write touches the provider ZERO times;
+    /// a provider write failure or a post-write currency failure follows the
+    /// actor path's disposition (retire the epoch, or arm its recovery).
+    ///
+    /// The write is NEVER recorded as replayable desired state: a replacement
+    /// engine may receive the unit only through a FRESH admission against its
+    /// own serving epoch.
+    pub async fn forward_admitted_file(
+        &self,
+        admission: &AdmittedRequest,
+        path: &str,
+        content: &str,
+        kind: OverlayFileKind,
+        priority: OverlayPriority,
+    ) -> Result<(), AdmissionRefusal> {
+        if !admission.covers(path) {
+            return Err(AdmissionRefusal::IncompleteGeneratedProof);
+        }
+        check_current(&self.state.shared, admission)?;
+        let serving = self
+            .state
+            .shared
+            .serving()
+            .ok_or(AdmissionRefusal::NoServingProvider)?;
+        if serving.epoch != admission.witness.0.epoch {
+            return Err(AdmissionRefusal::StaleProvider);
+        }
+        let forwarded = match kind {
+            OverlayFileKind::Open => match priority {
+                OverlayPriority::Foreground => serving.provider.open_file(path, content).await,
+                OverlayPriority::Normal => serving.provider.open_file_normal(path, content).await,
+                OverlayPriority::Background => {
+                    serving.provider.open_file_background(path, content).await
+                }
+            },
+            OverlayFileKind::Load => match priority {
+                OverlayPriority::Foreground => serving.provider.load_file(path, content).await,
+                OverlayPriority::Normal => serving.provider.load_file_normal(path, content).await,
+                OverlayPriority::Background => {
+                    serving.provider.load_file_background(path, content).await
+                }
+            },
+            OverlayFileKind::Update => match priority {
+                OverlayPriority::Foreground => serving.provider.update_file(path, content).await,
+                OverlayPriority::Normal => serving.provider.update_file_normal(path, content).await,
+                OverlayPriority::Background => {
+                    serving.provider.update_file_background(path, content).await
+                }
+            },
+        };
+        match forwarded {
+            Ok(()) => {
+                if check_current(&self.state.shared, admission).is_ok() {
+                    // The written path's content changed: lift its crash
+                    // attribution, exactly as a queued mutation would.
+                    let mut watch = self
+                        .state
+                        .shared
+                        .query_watch
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    watch.clear_path(path);
+                    Ok(())
+                } else {
+                    // The engine may now hold a unit the CURRENT basis does
+                    // not admit, or it was replaced mid-write: either way it
+                    // must not keep serving this admission's state.
+                    self.disposition_after_admitted_write_failure(&serving)
+                        .await;
+                    Err(AdmissionRefusal::StaleProvider)
+                }
+            }
+            Err(_) => {
+                // A partial provider write cannot be allowed to serve.
+                self.disposition_after_admitted_write_failure(&serving)
+                    .await;
+                Err(AdmissionRefusal::ProviderWriteFailed)
+            }
+        }
+    }
+
+    /// The post-failure disposition of a direct admitted write: an on-demand
+    /// instance retires fail-closed now; an explicit or lazy-attached
+    /// instance arms its crash monitor (bounded recover, or retire-only for
+    /// [`super::HubPolicy::lazy_attach`]).
+    async fn disposition_after_admitted_write_failure(&self, serving: &Serving<P>) {
+        if self.state.policy.on_demand.is_some() {
+            super::retire(&self.state.shared, serving.epoch).await;
+        } else {
+            serving.crash_signal.notify_one();
         }
     }
 }
