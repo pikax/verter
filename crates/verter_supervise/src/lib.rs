@@ -29,6 +29,7 @@
 //! tree is killed (`killedBy: "supervisor-error"`, exit 125).
 
 pub mod cli;
+pub mod disk;
 pub mod report;
 
 #[cfg(target_os = "linux")]
@@ -42,8 +43,8 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+use disk::File;
 use std::ffi::OsString;
-use std::fs::File;
 
 use cli::RunSpec;
 use report::Report;
@@ -168,7 +169,7 @@ fn open_outputs(spec: &RunSpec) -> std::io::Result<Outputs> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent)?;
+        disk::create_dir_all(parent)?;
     }
     Ok(Outputs {
         stdout: File::create(spec.stdout_path())?,

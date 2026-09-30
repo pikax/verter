@@ -14,7 +14,7 @@
 //! supervisor refuses to launch; a per-process `RLIMIT_AS` is not an
 //! aggregate tree cap and is never substituted.
 
-use std::fs::{File, OpenOptions};
+use crate::disk::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -56,7 +56,7 @@ impl Cgroup {
                 "{CGROUP_ROOT} is not a cgroup v2 unified hierarchy"
             )));
         }
-        let own = std::fs::read_to_string("/proc/self/cgroup")
+        let own = disk::read_to_string("/proc/self/cgroup")
             .map_err(|error| refuse(format!("/proc/self/cgroup: {error}")))?;
         let own = own
             .lines()
@@ -74,7 +74,7 @@ impl Cgroup {
                 .as_nanos()
         );
         let dir = parent.join(unique);
-        std::fs::create_dir(&dir)
+        disk::create_dir(&dir)
             .map_err(|error| refuse(format!("cannot create {}: {error}", dir.display())))?;
         let configure = || -> Result<Cgroup, String> {
             write(&dir.join("memory.max"), &mem_limit_bytes.to_string())?;
@@ -100,7 +100,7 @@ impl Cgroup {
             })
         };
         configure().map_err(|error| {
-            std::fs::remove_dir(&dir).ok();
+            disk::remove_dir(&dir).ok();
             format!("cannot establish containment: {error}")
         })
     }
@@ -114,7 +114,7 @@ impl Cgroup {
     }
 
     fn event(&self, name: &str) -> Result<u64, String> {
-        let events = std::fs::read_to_string(self.file("memory.events"))
+        let events = disk::read_to_string(self.file("memory.events"))
             .map_err(|error| format!("memory.events: {error}"))?;
         Ok(events
             .lines()
@@ -138,7 +138,7 @@ impl Cgroup {
     }
 
     fn remove(&self) {
-        std::fs::remove_dir(&self.dir).ok();
+        disk::remove_dir(&self.dir).ok();
     }
 }
 
@@ -165,7 +165,7 @@ fn workload_parent(own: &Path) -> Result<PathBuf, String> {
     let members = read_trimmed(&own.join("cgroup.procs"))?;
     if members.lines().all(|member| member.trim() == pid) {
         let leaf = own.join(format!("verter-supervise-{pid}-self"));
-        match std::fs::create_dir(&leaf) {
+        match disk::create_dir(&leaf) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("cannot create {}: {error}", leaf.display())),
@@ -188,17 +188,17 @@ fn workload_parent(own: &Path) -> Result<PathBuf, String> {
 }
 
 fn swap_active() -> bool {
-    std::fs::read_to_string("/proc/swaps")
+    disk::read_to_string("/proc/swaps")
         .map(|swaps| swaps.lines().count() > 1)
         .unwrap_or(true)
 }
 
 fn write(path: &Path, value: &str) -> Result<(), String> {
-    std::fs::write(path, value).map_err(|error| format!("{}: {error}", path.display()))
+    disk::write(path, value).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn read_trimmed(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path)
+    disk::read_to_string(path)
         .map(|text| text.trim().to_owned())
         .map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -210,7 +210,7 @@ fn read_u64(path: &Path) -> Result<u64, String> {
 }
 
 fn populated(events: &Path) -> bool {
-    std::fs::read_to_string(events)
+    disk::read_to_string(events)
         .map(|events| events.lines().any(|line| line == "populated 1"))
         .unwrap_or(true)
 }
@@ -238,7 +238,7 @@ fn empty_cgroup(kill: &File, events: &Path, limit: Duration) -> (bool, bool) {
 }
 
 fn cpu_usage(cgroup: &Cgroup) -> Option<(f64, f64)> {
-    let stat = std::fs::read_to_string(cgroup.file("cpu.stat")).ok()?;
+    let stat = disk::read_to_string(cgroup.file("cpu.stat")).ok()?;
     let field = |name: &str| -> Option<f64> {
         stat.lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
@@ -349,7 +349,7 @@ impl Workload {
     /// were still alive and whether any survived.
     pub(crate) fn teardown(&self) -> (u64, u64) {
         let members = |dir: &Path| {
-            std::fs::read_to_string(dir.join("cgroup.procs"))
+            disk::read_to_string(dir.join("cgroup.procs"))
                 .map(|procs| procs.lines().count() as u64)
                 .unwrap_or(0)
         };
@@ -368,7 +368,7 @@ impl Workload {
 
     /// Remove the emptied cgroup when the supervisor is gone and cannot.
     pub(crate) fn abandoned(&self) {
-        std::fs::remove_dir(&self.dir).ok();
+        disk::remove_dir(&self.dir).ok();
     }
 }
 
@@ -632,29 +632,29 @@ mod tests {
     fn teardown_stops_signalling_once_the_cgroup_is_empty() {
         let dir =
             std::env::temp_dir().join(format!("verter-supervise-teardown-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let events = dir.join("cgroup.events");
         let kill_path = dir.join("cgroup.kill");
-        std::fs::write(&kill_path, "").unwrap();
+        disk::write(&kill_path, "").unwrap();
         let kill = OpenOptions::new().append(true).open(&kill_path).unwrap();
 
-        std::fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        disk::write(&events, "populated 0\nfrozen 0\n").unwrap();
         assert_eq!(
             empty_cgroup(&kill, &events, Duration::from_millis(300)),
             (false, false)
         );
-        assert_eq!(std::fs::read_to_string(&kill_path).unwrap(), "");
+        assert_eq!(disk::read_to_string(&kill_path).unwrap(), "");
 
         // Populated until the first kill lands, then empty.
-        std::fs::write(&events, "populated 1\n").unwrap();
+        disk::write(&events, "populated 1\n").unwrap();
         let flip = {
             let events = events.clone();
             let kill_path = kill_path.clone();
             std::thread::spawn(move || {
-                while std::fs::read_to_string(&kill_path).unwrap().is_empty() {
+                while disk::read_to_string(&kill_path).unwrap().is_empty() {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                std::fs::write(&events, "populated 0\n").unwrap();
+                disk::write(&events, "populated 0\n").unwrap();
             })
         };
         assert_eq!(
@@ -664,10 +664,10 @@ mod tests {
         flip.join().unwrap();
         std::thread::sleep(Duration::from_millis(250));
         assert_eq!(
-            std::fs::read_to_string(&kill_path).unwrap(),
+            disk::read_to_string(&kill_path).unwrap(),
             "1",
             "exactly one kill, none after the cgroup emptied"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        disk::remove_dir_all(&dir).ok();
     }
 }

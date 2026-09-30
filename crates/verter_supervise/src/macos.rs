@@ -38,6 +38,8 @@ use std::ffi::{c_char, c_int, CString};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use crate::disk;
+
 use crate::report::{Containment, KilledBy, Report, Sample, SampleSeries};
 use crate::unix::{
     crash_now, monotonic_ns, ms, ns_to_ms, os, Exited, LinkEvent, SpawnRequest, Wakeups,
@@ -678,10 +680,10 @@ fn spawn_suspended(request: &SpawnRequest) -> Result<libc::pid_t, String> {
         Some(cwd) => Some(c_string(os(cwd)).map_err(refuse)?),
         None => None,
     };
-    let stdin = std::fs::File::open("/dev/null")
+    let stdin = disk::open("/dev/null")
         .map_err(|error| refuse(format!("cannot open /dev/null: {error}")))?;
     let output = |path: &[u8]| {
-        std::fs::OpenOptions::new()
+        disk::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)

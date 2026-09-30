@@ -259,7 +259,7 @@ pub(crate) enum LinkEvent {
 /// (its end of input means the supervisor is gone) and a reply pipe.
 pub(crate) struct WatchdogLink {
     child: Child,
-    control: std::fs::File,
+    control: crate::disk::File,
     replies: OwnedFd,
     pending: Vec<u8>,
     last_heartbeat: Instant,
@@ -287,7 +287,8 @@ impl WatchdogLink {
         let mut child = command
             .spawn()
             .map_err(|error| format!("cannot start the watchdog: {error}"))?;
-        let control = std::fs::File::from(OwnedFd::from(child.stdin.take().expect("piped stdin")));
+        let control =
+            crate::disk::File::from(OwnedFd::from(child.stdin.take().expect("piped stdin")));
         let replies = OwnedFd::from(child.stdout.take().expect("piped stdout"));
         let mut link = WatchdogLink {
             child,
@@ -324,7 +325,7 @@ impl WatchdogLink {
     /// Read available reply bytes; `false` at end of input.
     fn fill(&mut self) -> bool {
         let mut buffer = [0u8; 4096];
-        let mut reader = std::fs::File::from(match self.replies.try_clone() {
+        let mut reader = crate::disk::File::from(match self.replies.try_clone() {
             Ok(fd) => fd,
             Err(_) => return false,
         });
