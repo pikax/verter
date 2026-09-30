@@ -59,6 +59,10 @@ import {
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
 import { summarize } from "./summary.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
+import { biomeRawFileProblems, validateBiome } from "./oss/biome.mjs";
+import { ossRawFileProblems, validateOss } from "./oss/checkers.mjs";
+import { loadTools } from "./oss/provision.mjs";
+import { loadThenableExpected } from "./oss/thenable.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -573,6 +577,20 @@ async function cli(argv) {
     requireAllMatched: argv.includes("--require-all-matched"),
   });
   failures.push(...result.failures);
+  // The opt-in sections, when the run has them.
+  if (run.oss) {
+    failures.push(...ossRawFileProblems(run.oss, loadTools(), allScenarios()));
+    failures.push(
+      ...validateOss(run.oss, expected, allScenarios(), run.meta?.options ?? {}, schedule).failures,
+    );
+  }
+  if (run.biome) {
+    failures.push(...biomeRawFileProblems(run.biome));
+    failures.push(
+      ...validateBiome(run.biome, loadThenableExpected(), run.meta?.options ?? {}, schedule)
+        .failures,
+    );
+  }
   for (const w of result.warnings) console.log(`warning: ${w}`);
   for (const f of failures) console.log(`FAIL: ${f}`);
   console.log(failures.length ? `validation FAILED (${failures.length})` : "validation passed");

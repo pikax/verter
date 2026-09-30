@@ -557,6 +557,10 @@ Useful options (`--help` lists all, with each tier's time): `--tier quick|standa
 `--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 60000` (tier default),
 `--startup-allowance-ms 10000` (tier default), `--out <dir>`.
 
+`--oss [tools]` and `--biome` add opt-in comparisons with pinned open-source
+tools, each in its own section: see
+[Open-Source Comparisons](./semantic-benchmark-oss.md).
+
 ### Re-measuring the reference
 
 After changing a scenario, the library or the measuring method, re-measure the

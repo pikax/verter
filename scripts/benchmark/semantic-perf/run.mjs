@@ -47,6 +47,16 @@ import {
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 import { validateRun } from "./validate.mjs";
+import { renderBiomeMarkdown, runBiome, summarizeBiome, validateBiome } from "./oss/biome.mjs";
+import {
+  renderOssMarkdown,
+  runOss,
+  selectCheckers,
+  summarizeOss,
+  validateOss,
+} from "./oss/checkers.mjs";
+import { loadTools } from "./oss/provision.mjs";
+import { loadThenableExpected } from "./oss/thenable.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(HERE, "..", "..", "..");
@@ -126,9 +136,16 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --lib-mode <m>          how Verter reads the library: root-file (default, as tsc does) | ambient
   --no-skip-after-kill    re-run every invocation of an arm whose warmup was killed at the memory cap
                           (by default the rest are recorded as skipped: a memory kill is deterministic)
+  --oss [a,b]             also run the pinned open-source tools (all, or the named ones: tsz,
+                          bamtiscript, ezno, biome), each in a separate section
+                          (docs/contributing/semantic-benchmark-oss.md); provisioned into target/oss-tools
+                          on first use. The type checkers run whole program on the measuring program beside
+                          tsc -p; Biome, which has no type query, answers whether __Probe is Promise-like
+                          (its noFloatingPromises decision) on the thenable catalog beside Verter and tsc
+  --biome                 the Biome section alone (as --oss biome)
   --help`;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     tier: "quick",
     out: null,
@@ -232,6 +249,15 @@ function parseArgs(argv) {
       case "--no-skip-after-kill":
         opts.skipAfterKill = false;
         break;
+      case "--oss": {
+        // An optional list: the next argument, unless it is another option.
+        const list = i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : "";
+        opts.oss = list.split(",").filter(Boolean);
+        break;
+      }
+      case "--biome":
+        opts.biome = true;
+        break;
       case "--help":
         opts.help = true;
         break;
@@ -250,6 +276,16 @@ function parseArgs(argv) {
     startupAllowanceMs: "--startup-allowance-ms",
   };
   for (const [key, name] of Object.entries(flag)) if (!given.has(name)) opts[key] = defaults[key];
+  // `--oss` names the tools: every one when no list is given; Biome runs
+  // its own section (it answers another form of the demand).
+  if (opts.oss) {
+    const list = opts.oss;
+    if (!list.length || list.includes("biome")) opts.biome = true;
+    const checkers = list.filter((id) => id !== "biome");
+    if (list.length && !checkers.length) delete opts.oss;
+    else opts.oss = checkers;
+    if (opts.oss) selectCheckers(loadTools(), opts.oss);
+  }
   return opts;
 }
 
@@ -764,6 +800,41 @@ export async function main(argv) {
     );
   }
 
+  // The opt-in comparisons, each in its own counterbalanced schedule and
+  // its own section, after the semantic run (which they never change).
+  const tools = opts.oss || opts.biome ? loadTools() : null;
+  const shared = {
+    root: ROOT,
+    outDir,
+    opts,
+    tools,
+    supervisor: binaries.supervisor.pinned,
+    runtimeEnv,
+    schedule,
+    runSupervised,
+    log,
+  };
+  const ossResult = opts.oss
+    ? await runOss({
+        ...shared,
+        cells,
+        ids: selectCheckers(tools, opts.oss),
+        typescript,
+        libText,
+        tsconfigText,
+        jobs: process.env.CARGO_BUILD_JOBS ?? null,
+      })
+    : null;
+  const biomeResult = opts.biome
+    ? await runBiome({
+        ...shared,
+        verterProbe: binaries.probe.pinned,
+        typescript,
+        libText,
+        tsconfigText,
+      })
+    : null;
+
   const binariesAfter = {
     probe: sha256File(binaries.probe.pinned),
     counted: sha256File(binaries.counted.pinned),
@@ -819,13 +890,44 @@ export async function main(argv) {
   run.summary = summarize(run, expected, scenarios);
   const validation = validateRun(run, expected, scenarios);
   run.validation = validation;
+  let ok = validation.ok;
+  const extraFailures = [];
+  if (ossResult) {
+    ossResult.summary = summarizeOss(ossResult, expected, scenarios, run.meta.options);
+    ossResult.validation = validateOss(ossResult, expected, scenarios, run.meta.options, schedule);
+    run.oss = ossResult;
+    ok &&= ossResult.validation.ok;
+    extraFailures.push(...ossResult.validation.failures);
+  }
+  if (biomeResult) {
+    const thenableExpected = loadThenableExpected();
+    biomeResult.summary = summarizeBiome(biomeResult, thenableExpected, run.meta.options);
+    biomeResult.validation = validateBiome(
+      biomeResult,
+      thenableExpected,
+      run.meta.options,
+      schedule,
+    );
+    run.biome = biomeResult;
+    ok &&= biomeResult.validation.ok;
+    extraFailures.push(...biomeResult.validation.failures);
+  }
   writeFileSync(join(outDir, "results.json"), JSON.stringify(run, null, 1));
-  writeFileSync(join(outDir, "results.md"), renderMarkdown(run));
+  let markdown = renderMarkdown(run);
+  if (run.oss) markdown += "\n" + renderOssMarkdown(run.oss);
+  if (run.biome) markdown += "\n" + renderBiomeMarkdown(run.biome);
+  writeFileSync(join(outDir, "results.md"), markdown);
   log(`\nsemantic-perf: results ${join(outDir, "results.json")}`);
   log(`semantic-perf: report  ${join(outDir, "results.md")}`);
   log(
     `semantic-perf: validation ${validation.ok ? "PASSED" : "FAILED"} (${validation.failures.length} failure(s))`,
   );
   for (const failure of validation.failures.slice(0, 40)) log(`  - ${failure}`);
-  return validation.ok ? 0 : 1;
+  if (ossResult || biomeResult) {
+    log(
+      `semantic-perf: opt-in sections ${extraFailures.length ? "FAILED" : "PASSED"} (${extraFailures.length} failure(s))`,
+    );
+    for (const failure of extraFailures.slice(0, 40)) log(`  - ${failure}`);
+  }
+  return ok ? 0 : 1;
 }

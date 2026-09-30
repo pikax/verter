@@ -1,0 +1,177 @@
+{
+  "schema": 1,
+  "note": "Pinned third-party tools of the opt-in comparisons (--oss, --biome). Each is fetched or built by provision.mjs into target/oss-tools/<tool>/<pin>/ and never updated: a new pin is a reviewed edit of this file.",
+  "tools": {
+    "tsz": {
+      "kind": "checker",
+      "name": "tsz",
+      "project": "tsz-org/tsz",
+      "license": "Apache-2.0",
+      "pin": "v0.1.75",
+      "commit": "0c0e53f96bfd64be253cdd8c53e2853fd5cfdadb",
+      "format": "tsc",
+      "argv": [
+        "-p",
+        "{tsconfig}",
+        "--pretty",
+        "false"
+      ],
+      "answers": "a tsc-compatible CLI: the measuring program's TS2322 head line prints the probe's type",
+      "smoke": {
+        "argv": [
+          "-p",
+          "{tsconfig}",
+          "--pretty",
+          "false"
+        ],
+        "expect": "smoke.ts(1,14): error TS2322"
+      },
+      "platforms": {
+        "win32-x64": {
+          "source": {
+            "type": "archive",
+            "url": "https://github.com/tsz-org/tsz/releases/download/v0.1.75/tsz-v0.1.75-x86_64-pc-windows-msvc.zip",
+            "sha256": "b1149abeb313911c163f50b6120211f342fbccf88b82dc5e2cf775fb9a385284"
+          },
+          "binary": "tsz-v0.1.75-x86_64-pc-windows-msvc/tsz.exe"
+        },
+        "darwin-arm64": {
+          "source": {
+            "type": "archive",
+            "url": "https://github.com/tsz-org/tsz/releases/download/v0.1.75/tsz-v0.1.75-aarch64-apple-darwin.tar.gz",
+            "sha256": "9990d771e4a37d493ff013d63a89ce9f8cea0d7aa761e2e07e145d183cd2eefe"
+          },
+          "binary": "tsz-v0.1.75-aarch64-apple-darwin/tsz"
+        }
+      }
+    },
+    "bamtiscript": {
+      "kind": "checker",
+      "name": "bamTiScript",
+      "project": "gosuda/bamTiScript",
+      "license": "MIT",
+      "pin": "60003d0fa299c49cb578452fe458368edb3e8e5b",
+      "commit": "60003d0fa299c49cb578452fe458368edb3e8e5b",
+      "format": "tsc",
+      "argv": [
+        "-p",
+        "{tsconfig}",
+        "--noEmit",
+        "--pretty",
+        "false"
+      ],
+      "answers": "a tsc-compatible CLI (`bamts`): the measuring program's TS2322 head line prints the probe's type",
+      "smoke": {
+        "argv": [
+          "-p",
+          "{tsconfig}",
+          "--noEmit",
+          "--pretty",
+          "false"
+        ],
+        "expect": "smoke.ts(1,14): error TS2322"
+      },
+      "platforms": {
+        "*": {
+          "source": {
+            "type": "git",
+            "url": "https://github.com/gosuda/bamTiScript.git",
+            "commit": "60003d0fa299c49cb578452fe458368edb3e8e5b"
+          },
+          "build": [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "bamts-cli",
+            "--bin",
+            "bamts"
+          ],
+          "binary": "target/release/bamts{exe}"
+        }
+      }
+    },
+    "ezno": {
+      "kind": "checker",
+      "name": "Ezno",
+      "project": "kaleidawave/ezno",
+      "license": "MIT",
+      "pin": "0.0.23",
+      "commit": "f270633ae11c65e8444c89981c7f2c1fc379f3c5",
+      "format": "ezno",
+      "argv": [
+        "check",
+        "{scenario}",
+        "--definition-file",
+        "{lib}",
+        "--max-diagnostics",
+        "all"
+      ],
+      "answers": "diagnostics only, in Ezno's own format (no TypeScript codes); no type query in its CLI",
+      "smoke": {
+        "argv": [
+          "check",
+          "{scenario}"
+        ],
+        "expect": "Type 1 is not assignable to type string"
+      },
+      "platforms": {
+        "win32-x64": {
+          "source": {
+            "type": "file",
+            "url": "https://github.com/kaleidawave/ezno/releases/download/release%2Fezno-0.0.23/ezno-0-0-23-x86_64-pc-windows.exe",
+            "sha256": "1bd8d223d3a9ec3d36305e7d94e23db1f03d0588a502a2f7d2c53d87a3cd629d"
+          },
+          "binary": "ezno-0-0-23-x86_64-pc-windows.exe"
+        },
+        "darwin-arm64": {
+          "source": {
+            "type": "git",
+            "url": "https://github.com/kaleidawave/ezno.git",
+            "commit": "f270633ae11c65e8444c89981c7f2c1fc379f3c5"
+          },
+          "build": [
+            "cargo",
+            "build",
+            "--release",
+            "--bin",
+            "ezno"
+          ],
+          "binary": "target/release/ezno"
+        }
+      }
+    },
+    "biome": {
+      "kind": "linter",
+      "name": "Biome",
+      "project": "biomejs/biome",
+      "license": "MIT OR Apache-2.0",
+      "pin": "2.5.15",
+      "commit": "0b4c11f553a7e702f9851af139662e1de45dc131",
+      "smoke": {
+        "argv": [
+          "--version"
+        ],
+        "expect": "Version: 2.5.15"
+      },
+      "platforms": {
+        "win32-x64": {
+          "source": {
+            "type": "file",
+            "url": "https://github.com/biomejs/biome/releases/download/%40biomejs%2Fbiome%402.5.15/biome-win32-x64.exe",
+            "sha256": "f2beadee753b78fe76081158123538be886a31b5e67a34863e42535f3f491926"
+          },
+          "binary": "biome-win32-x64.exe"
+        },
+        "darwin-arm64": {
+          "source": {
+            "type": "file",
+            "url": "https://github.com/biomejs/biome/releases/download/%40biomejs%2Fbiome%402.5.15/biome-darwin-arm64",
+            "sha256": "3636796d8c78bfcfe0d45946dc93e21e12d27a49eba7401e18af1ea854d25503"
+          },
+          "binary": "biome-darwin-arm64"
+        }
+      }
+    }
+  }
+}

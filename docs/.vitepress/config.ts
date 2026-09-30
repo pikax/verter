@@ -106,6 +106,10 @@ export default withMermaid(
               { text: "Rust Setup", link: "/contributing/rust-setup" },
               { text: "Testing", link: "/contributing/testing" },
               { text: "Semantic Benchmark", link: "/contributing/semantic-benchmark" },
+              {
+                text: "Semantic Benchmark: Open-Source Tools",
+                link: "/contributing/semantic-benchmark-oss",
+              },
               { text: "CI/CD", link: "/contributing/ci-cd" },
             ],
           },

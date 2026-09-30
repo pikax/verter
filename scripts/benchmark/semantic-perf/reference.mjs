@@ -126,5 +126,5 @@ export function interpretMeasurement(result) {
   }
   const normalized = normalize(answer);
   const errorAny = isKeyword(normalized, "any") && codes.some((c) => RESOURCE_CODES.includes(c));
-  return { digest: digestNode(normalized), errorAny, codes };
+  return { digest: digestNode(normalized), errorAny, codes, node: normalized };
 }

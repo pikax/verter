@@ -1,0 +1,329 @@
+{
+ "schema": 1,
+ "typescript": "7.0.2",
+ "method": {
+  "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
+  "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
+  "tscExeSha256": "f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7",
+  "tscVersion": "Version 7.0.2",
+  "platform": "win32-x64",
+  "memMb": 8192,
+  "timeoutMs": 300000,
+  "launcher": "verter-supervise"
+ },
+ "setting": "strict",
+ "cases": {
+  "relation-200-yes": {
+   "sourceSha256": "e0876b8921445a1be0bfd360d6e3d1f4f115da66151fa0a7ccdb2effcb3bf645",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "ab1f2464ce71234ab67e8014ff0ae1f55c5b1ca324386001392ee9d22357a082",
+    "sourceSha256": "b3efa0a788344518dab84dcd51d5fc8f79aba799b52c51ff23f83c9375266bee",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "relation-200-no": {
+   "sourceSha256": "f7331d236afbb508078dd910213101ea8d39a059dc70458366e2d274b34a5b5a",
+   "never": false,
+   "printed": "[2]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "7f2aa4e40bb1e2a59b6d1752786d678f5ee6a21b2226a8e57c5a9a6c5981b9fb",
+    "sourceSha256": "60c4ffff647da7e29344a1395fba401636ec4512c19218c21544f5b6be48f571",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "template-membership-yes": {
+   "sourceSha256": "8b29cb2729e0afbd87c3c08608353b24159e525f479dbd4e0ee96f6b09eb0229",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "9c8a91db1e4e8a6e33d0f4d8ce7d0ccae3d0822ffa9ea41711d7c927e543b677",
+    "sourceSha256": "70dcc32cc4c64c91380b5f69c4e76226f49a2a951bcda254b0c00c0e56679618",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "template-membership-no": {
+   "sourceSha256": "66e1e226dab842f9917372b143a6bd6edda107548c1d876c92ba6f6fb77382e9",
+   "never": false,
+   "printed": "[2]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "74fce66b108fb68c17b98d6cb1b2f7bb0e4ca740cc23740313fee7254746fe7b",
+    "sourceSha256": "4f9834dc15066a545560c82b440e96a9f01f04070a28097a7b4e7b9335b09f35",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "alias-chain-50-yes": {
+   "sourceSha256": "5a934065f2e26161c209144f1d300fbca62b5d4e924652ec02eb260824fb5a59",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "0b32750d34ffa319c542609d674e566a83dd71b02dc5363eda18978e56a87565",
+    "sourceSha256": "a5cf2a52d17e81287c5053a9dc177f578e7c14a697f7b43a592a8bd47177accb",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "alias-chain-50-no": {
+   "sourceSha256": "370581de93df8086f5873ceed84599d9dcd93d65ae35ba8dc1186e12c2c8eb92",
+   "never": false,
+   "printed": "[1]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "a129c2238284f949eb8820487224130095623c53f0f2425c266f5848d9c68494",
+    "sourceSha256": "428c483c0da673ccb834e440b4c5bdd297d55c06b11c62e50d1e94f786136a85",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "conditional-chain-20-yes": {
+   "sourceSha256": "d86ba87033dcff4a75e8ade2c2e945fa7fc985d95b0afae650e12a1d1e3451a5",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "885f81b726e060b1893a922d189ccab5604aea8888de6dd086b4aa673d1ff995",
+    "sourceSha256": "fe497460b2f1788aec6948a855b7a337add48ed27251664d58276b07b32e137c",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "conditional-chain-20-no": {
+   "sourceSha256": "c0b3687eae0db38b2f5887da83f831edf585b76d5dffa5dffa129f6ee9fe7937",
+   "never": false,
+   "printed": "[2]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "fef7bd38f3fb6e198047796d7efef82418546c641d6b8be01666e92c6d6ecc62",
+    "sourceSha256": "a186957755b092d29d165889f32514f953508e8a241953ed43c20e10f72fffd8",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "tail-recursive-parse-10-yes": {
+   "sourceSha256": "7abf2d7576da0517a9da038d7650abd19b1c631a9d637035d42c72207c5137f8",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "ab1f2464ce71234ab67e8014ff0ae1f55c5b1ca324386001392ee9d22357a082",
+    "sourceSha256": "ccb761ae856f1e197e6f0c84a5fdf2996898bc6247067a1bce536de817ab0251",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "tail-recursive-parse-10-no": {
+   "sourceSha256": "4a5558b4ca97957f6198f0199934fc079d719e75167aaa486fd4eb5e70ca0cfb",
+   "never": false,
+   "printed": "[2]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "7f2aa4e40bb1e2a59b6d1752786d678f5ee6a21b2226a8e57c5a9a6c5981b9fb",
+    "sourceSha256": "d1b861249434a77b171a387f1f39a295b5a75980476abf1f5f1a2f498dd7e3cf",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "generic-call-yes": {
+   "sourceSha256": "56a25ab7d442e3157965d5e8449add750bf765f161367c3c1c081bfe44b95032",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "29739e20df1135e4803b074b485736e001593c42d3732437198c4b138096356d",
+    "sourceSha256": "cb8e9a5b2307f165a233a44f4f045d47192e5d7da70b322c169aa3ded2a1ca95",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "generic-call-no": {
+   "sourceSha256": "3be872affbbb5d2b5f88f28660fb73500aa6be483eeaac11dd918c41a283f96f",
+   "never": false,
+   "printed": "[1]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "5478a5e7c999d47dec3ae588834939c645f124a2a1348e3a736af6f960deeeda",
+    "sourceSha256": "68702d35965f12b0e5455e804a4df4113fbd040df6605bd35fefbc2df1ba2a67",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "overloads-yes": {
+   "sourceSha256": "1189eb7ac0307259953e153de903ed0e3b80e7fd448aa232a678f2c55ecae467",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "29739e20df1135e4803b074b485736e001593c42d3732437198c4b138096356d",
+    "sourceSha256": "393e8562a9d1d167fd93a72a218686519fc55a992e6f44b75740ebba5b08eca1",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "overloads-no": {
+   "sourceSha256": "24d5babfe9b1acb48195a2200712565d958a73f447f540cccf6f168656593658",
+   "never": false,
+   "printed": "[2]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "1089bfdc60d9caddce78655e585df07e4a714d2501756e20425d3ceace6e7651",
+    "sourceSha256": "630f87dbc5c329cd06de062006e72cf1688efdc65d389457459b10318d4e9420",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "infer-reference-yes": {
+   "sourceSha256": "25d7105b8a066f15ac5663cf45d97cd254f0ec7380c057b7924f6f531c2f72e8",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "9c8a91db1e4e8a6e33d0f4d8ce7d0ccae3d0822ffa9ea41711d7c927e543b677",
+    "sourceSha256": "d26509324e631a314e96b00269b8e9d75fb84080446e90c1ca224b7fabc0fb31",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "infer-reference-no": {
+   "sourceSha256": "4367279466b73497241e93b7791142eb90823389e80de59a0a2108a7f36de0a5",
+   "never": false,
+   "printed": "[1]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "100e973172f80207c302848b9178dc2cb59782b575ac1fead290eaec4864c7d4",
+    "sourceSha256": "d65a99ec631e3c017e48f4c04d9b892eb2c3f89fb21de47afbb9a72853fe1f01",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "contravariant-callback-yes": {
+   "sourceSha256": "c4130b7a321571378a95aee4d70dc2c0ddd02d26fc4befe28eb9dabb433d3433",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "ab1f2464ce71234ab67e8014ff0ae1f55c5b1ca324386001392ee9d22357a082",
+    "sourceSha256": "07e1ab090b7225da0e3700ce293c18406283ca02488438abccec0bd66a9e6acd",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "contravariant-callback-no": {
+   "sourceSha256": "45eeb609622d82b8bb4b1527274024cdfd52c4bc29dd7a2c62eda6b87aeb700f",
+   "never": false,
+   "printed": "[1]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "6ea0e86b8f3e535866fc95091836eece93a6e371d81ccba2091da52533219635",
+    "sourceSha256": "a888c3a0db986f9efdd559b683ce7c93434125923be41847ef8af166ebd63448",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "library-then-awaited-yes": {
+   "sourceSha256": "386ebb940e83bce7630c8a185955b41b87f740b0ea39df55b763cd496715de95",
+   "never": false,
+   "printed": "[Promise<boolean>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "daab628db486ad78fa6b92b005aeced8ae860131b49bfe277af0c855aeb4d91c",
+    "sourceSha256": "c0e34d429a2c08d315f2131b92529d1b391e0b3c348ae1593f6b48dbb254b92c",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "library-then-awaited-no": {
+   "sourceSha256": "7a518ec00a2fa09db9a152c586629312f2822dcf1a1d50fecf460b14f68be392",
+   "never": false,
+   "printed": "[number]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "83182e62aa58c7d3e5a88fc71992179133ba36ad8b837e2666af5177086044ee",
+    "sourceSha256": "8f93b1047967060635c9ae372ac2a97eed981f5ac6bf981d79ab18cd6e83148a",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "library-map-infer-yes": {
+   "sourceSha256": "5b2b723de946b393d42161207336093a9f9ef5b58f6a637a024c1f23bec9fc81",
+   "never": false,
+   "printed": "[Promise<1>]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "9c8a91db1e4e8a6e33d0f4d8ce7d0ccae3d0822ffa9ea41711d7c927e543b677",
+    "sourceSha256": "b7ffadcfc09aed08135a728fe01586a8886e7aea9d3afdd30dff2f576b2144ce",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "library-map-infer-no": {
+   "sourceSha256": "25dbb61ae304ed437cd388af3b79bfe702ad87b2ce6c3809fc16bf3d1abad250",
+   "never": false,
+   "printed": "[1]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "100e973172f80207c302848b9178dc2cb59782b575ac1fead290eaec4864c7d4",
+    "sourceSha256": "79041b168109392ae6fabbd52f170831c803b6c087a50f3ecb9e2c44abc82f04",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "mapped-index-yes": {
+   "sourceSha256": "f79e740b1c790b65bc95197b33c1e5ec5360e5b58f0d0894641fb4511fdb8810",
+   "never": false,
+   "printed": "[Promise<\"a\">]",
+   "codes": [],
+   "thenable": true,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "1b9bf18f5d7c527bd688cf066b02dab06dee3bc1730838a4faed6b8267bdc80e",
+    "sourceSha256": "ee17b8579f01a460653b0315fd6121b343fb9d5ee8f65b3a6003dd3c5105c5ea",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  },
+  "mapped-index-no": {
+   "sourceSha256": "921c16fc122c9e2b89f6c6cfd7960a27a974a50d191f835cd480ce935cd5280d",
+   "never": false,
+   "printed": "[\"a\"]",
+   "codes": [],
+   "thenable": false,
+   "receipt": {
+    "exit": 1,
+    "stdoutSha256": "0b3e603251805b713b3b47c78c80b462db90734d2352d68c3dd2f1781c22c1aa",
+    "sourceSha256": "5561fb63cc8c69ed1ca8a429d978cb233c297470b532e946cfc5eeff7ff0e9b3",
+    "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821"
+   }
+  }
+ }
+}
