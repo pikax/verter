@@ -532,6 +532,13 @@ pub struct ProjectSemanticDispatch<'a> {
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
+    /// Monotonic count of operation-budget recoveries this dispatcher
+    /// folded ([`PartialReasonSet::OPERATION_BUDGET`](crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)).
+    /// A structural-fact demand snapshots it and compares at its settle, so
+    /// a recovery made anywhere under the demand — inside a relation, a
+    /// nested build or a canonical construction — leaves the demand a
+    /// resource partial even where no read carried the reason to it.
+    pub(super) operation_budget_epoch: std::cell::Cell<u64>,
     /// Operational work/depth/cancellation accounting for the connected
     /// demands rooted at this dispatcher. The dispatcher holds the ledger but
     /// owns none of its logic — see [`connected_demand`].
@@ -756,6 +763,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
+            operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
             ),
@@ -1012,9 +1020,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         evidence: canonical_algebra::CanonicalEvidence,
     ) {
-        if evidence.incomplete || !evidence.inspected_file_roots.is_empty() {
+        if evidence.incomplete
+            || evidence.refusal.is_some()
+            || !evidence.inspected_file_roots.is_empty()
+        {
             self.canonical_evidence_epoch
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        // A refused operation's recovery is a resource partial of its own
+        // class, whatever else the canonicalization proved.
+        if evidence.refusal.is_some() {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+            );
         }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
@@ -4416,6 +4434,8 @@ mod conditional_decision_tests;
 mod constrained_infer_tests;
 #[cfg(test)]
 mod generic_source_inference_tests;
+#[cfg(test)]
+mod infer_inventory_tests;
 #[cfg(test)]
 mod inference_fixation_tests;
 #[cfg(test)]

@@ -1178,8 +1178,8 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.header(category::INTRINSIC, subtag::OPAQUE);
             encode_query_error(&mut enc, err);
             // A recursive back-edge names the instantiation it stands for;
-            // a checker recovery past a checker limit names the type Verter
-            // holds beyond it.
+            // a checker recovery names the authored form of the operation it
+            // refused.
             match err {
                 QueryError::RecursiveRef { args, .. } => {
                     enc.u16(args.len() as u16);
@@ -1188,9 +1188,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                     }
                 }
                 QueryError::CheckerRecovery {
-                    beyond: Some(beyond),
+                    origin: Some(origin),
                     ..
-                } => enc.child(*beyond),
+                } => enc.child(*origin),
                 _ => {}
             }
         }
@@ -1961,7 +1961,9 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     };
     enc.u8(tag);
     match err {
-        QueryError::CheckerRecovery { diagnostic, .. } => {
+        QueryError::CheckerRecovery {
+            diagnostic, basis, ..
+        } => {
             enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
             enc.u8(match diagnostic.operation {
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
@@ -1976,6 +1978,11 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
                 crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
+            });
+            // Frozen: a proven recovery and a budget recovery are distinct nodes.
+            enc.u8(match basis {
+                crate::semantic_query::RecoveryBasis::Certified => 1,
+                crate::semantic_query::RecoveryBasis::Budget => 2,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

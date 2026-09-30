@@ -925,8 +925,12 @@ fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
     );
 }
 
+/// An `infer` at an object's index signature value or at a call or
+/// construct signature's return infers through the relation like a
+/// property's (TypeScript 7.0.2: `{ [k: string]: string } extends { [k:
+/// string]: infer U }`, and the call and construct forms, are `string`).
 #[test]
-fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_positions() {
+fn conditional_infer_reaches_object_index_call_and_construct_positions() {
     use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
 
     let host = host();
@@ -1004,7 +1008,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
         spans: Default::default(),
         declaration_origin: None,
     };
-    let unsupported = [
+    let positions = [
         (
             "index",
             object(
@@ -1051,14 +1055,11 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             ),
         ),
     ];
-    for (label, source, target) in unsupported {
+    for (label, source, target) in positions {
         let result = reverse_test_conditional(&dispatch, source, target, infer, never);
-        assert!(
-            matches!(
-                graph.node_data(result).as_deref(),
-                Some(SemanticNodeData::Conditional { .. })
-            ),
-            "an object {label}-signature infer position is deliberately unsupported and must stay deferred, never select true with an unresolved Infer"
+        assert_eq!(
+            result, string,
+            "an object {label}-signature infer position infers the source's type"
         );
     }
 }
@@ -2087,10 +2088,21 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         ),
         readonly: true,
     });
+    // The capture keeps labels, optionality and rest and is never readonly
+    // (TypeScript 7.0.2, every setting: `readonly [head?: string, ...tail:
+    // number[]] extends readonly [...infer R] ? R : never` is `[head?:
+    // string, ...tail: number[]]`).
+    let captured = graph.intern_node(SemanticNodeData::Tuple {
+        elements: match graph.node_data(concrete).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+            _ => unreachable!("a tuple"),
+        },
+        readonly: false,
+    });
     assert_eq!(
         reverse_test_conditional(&dispatch, concrete, pattern, infer, never),
-        concrete,
-        "covariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "covariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 
     let signature = |param_ty| {
@@ -2123,8 +2135,8 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             infer,
             never,
         ),
-        concrete,
-        "contravariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+        captured,
+        "contravariant tuple-rest capture must preserve labels/optional/rest exactly, never readonly"
     );
 }
 
@@ -29687,7 +29699,8 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
         let outcome = dispatch.normalize_node_for_structural_fact_demand(subject, navigate);
         let frame = guard.finish();
         match outcome {
-            StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            StructuralFactDemandOutcome::Recovered { reasons, .. }
+            | StructuralFactDemandOutcome::Partial(reasons) => assert!(
                 reasons.contains(reason),
                 "{label}: the demand must be Partial({reason:?}), got Partial({reasons:?})"
             ),
@@ -29864,7 +29877,8 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
     let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
-        StructuralFactDemandOutcome::Partial(reasons) => reasons,
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => reasons,
         StructuralFactDemandOutcome::Complete(node) => panic!(
             "a fresh-node growing generic MUST type Partial under a starved ledger, got \
              Complete({node:?})"

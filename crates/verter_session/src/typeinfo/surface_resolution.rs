@@ -36,7 +36,7 @@
 //! drop.
 
 use crate::semantic_query::{
-    PartialReason, PartialReasonSet, QueryError, ResultCompleteness, SemanticNodeData,
+    MemberDomain, PartialReason, PartialReasonSet, QueryError, ResultCompleteness, SemanticNodeData,
 };
 
 /// Opaque evidence that a success arm was minted by this module's private
@@ -279,6 +279,35 @@ impl<T> SurfaceResolution<T> {
                 reason: inc.reason.union(reasons),
                 partial: inc.partial,
             }),
+        }
+    }
+
+    /// This claim as the member-domain fact it answers.
+    ///
+    /// `Resolved` is the complete closed domain, `OpenPresence` the complete
+    /// open one, `NoSurface` the complete negative answer. An `Incomplete`
+    /// claim that still built a usable subset is an APPROXIMATE domain, and
+    /// only ever a presence-only one: its members are real, and what it
+    /// omits proves nothing, whatever arm it was demoted from. Without a
+    /// subset it is unavailable.
+    pub fn into_fact(self) -> crate::semantic_query::FactResult<MemberDomain<T>> {
+        use crate::semantic_query::FactResult;
+        match self {
+            Self::Resolved(witnessed) => {
+                FactResult::complete(MemberDomain::Closed(witnessed.into_inner()))
+            }
+            Self::OpenPresence(witnessed) => {
+                FactResult::complete(MemberDomain::Open(witnessed.into_inner()))
+            }
+            Self::NoSurface(_) => FactResult::complete(MemberDomain::NoSurface),
+            Self::Incomplete(IncompleteSurface {
+                reason,
+                partial: Some(partial),
+            }) => FactResult::approximate(MemberDomain::Open(partial), reason),
+            Self::Incomplete(IncompleteSurface {
+                reason,
+                partial: None,
+            }) => FactResult::unavailable(reason),
         }
     }
 

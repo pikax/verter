@@ -319,6 +319,9 @@ impl VerterHost {
                 Err(SuppliedRequestFailure::Products(HostProductsFailure::Fatal(payload))) => {
                     return Err(refused(diagnostics.merge(payload)));
                 }
+                Err(SuppliedRequestFailure::Products(HostProductsFailure::Aborted(abort))) => {
+                    return Err(CompileRequestFailure::Host(HostError::from(abort)));
+                }
                 // The backend fail-closed on the runtime surface this request
                 // asked for. All-or-none: the transaction ends here, no output
                 // is assembled and no sibling product is lifted. The non-fatal

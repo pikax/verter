@@ -2374,39 +2374,30 @@ impl Engine {
     /// live", so the workspace-symbol frontier never completes and rename
     /// silently returns no edits.
     ///
-    /// Bounded: the optimistic yields keep the uncontended path lock-free,
-    /// then one timed rendezvous on the publication gate distinguishes a slow
-    /// publisher from a stuck one. Every session writer holds the base gate
-    /// for its whole publication too, so acquiring that gate pins both epochs
-    /// without needing a second lock.
+    /// The optimistic yields keep the uncontended path lock-free; a writer
+    /// still inside its window after them is WAITED on, by taking the
+    /// publication gate it holds, never turned into a refusal: however long a
+    /// descheduled publisher takes, the world it leaves is the one to
+    /// capture. Every writer holds the base gate for its whole publication
+    /// (session writers included), so under that gate both epochs are stable
+    /// and the capture cannot fail. No caller holds the gate here: captures
+    /// begin attempts, and an attempt takes the gate only for its admission.
     fn capture_stable_resolution_world(
         &self,
         population: ResolutionPopulation,
-    ) -> Option<CapturedResolutionFence> {
+    ) -> CapturedResolutionFence {
         const CAPTURE_YIELDS: usize = 1024;
-        const CAPTURE_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-        self.capture_stable_resolution_world_with_policy(
-            population,
-            CAPTURE_YIELDS,
-            CAPTURE_GATE_WAIT,
-        )
-    }
-
-    fn capture_stable_resolution_world_with_policy(
-        &self,
-        population: ResolutionPopulation,
-        optimistic_yields: usize,
-        gate_wait: std::time::Duration,
-    ) -> Option<CapturedResolutionFence> {
-        for _ in 0..optimistic_yields {
+        for _ in 0..CAPTURE_YIELDS {
             if let Some(captured) = self.capture_resolution_world(population) {
-                return Some(captured);
+                return captured;
             }
             std::thread::yield_now();
         }
-
-        let _publication = self.resolution_world_write.try_lock_for(gate_wait)?;
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::PublicationGateWait);
+        let _publication = self.resolution_world_write.lock();
         self.capture_resolution_world(population)
+            .expect("no world writer is inside its window while the publication gate is held")
     }
 
     /// The fence an attempt admits under, decided while the caller holds the
@@ -3642,17 +3633,9 @@ impl Engine {
             crate::probe_scope!(RESOLVE_ATTEMPT);
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
-            let captured = {
+            let mut captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
-            };
-            let Some(mut captured) = captured else {
-                #[cfg(test)]
-                resolution_test_hooks::record_return_only();
-                return ResolutionOutcome::refused(
-                    None,
-                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-                );
             };
             // A request overlay answers from its own effective world: every
             // fact it changes is versioned in the overlay's version space, so
@@ -4044,6 +4027,10 @@ impl Engine {
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
             let session_domain = captured.session_domain.clone();
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::PublicationGateWait,
+            );
             let (_publication, _session_publication) = {
                 crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
@@ -4368,14 +4355,7 @@ impl Engine {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         loop {
-            let Some(mut captured) = self.capture_stable_resolution_world(population) else {
-                #[cfg(test)]
-                resolution_test_hooks::record_return_only();
-                return ResolutionOutcome::refused(
-                    None,
-                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-                );
-            };
+            let mut captured = self.capture_stable_resolution_world(population);
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
 
@@ -4897,15 +4877,7 @@ impl Engine {
 
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledgers
-                    .iter_mut()
-                    .any(|ledger| ledger.charge_outer_restart(reader).is_err())
-                {
-                    return false;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
 
             let mut resolved = Vec::with_capacity(records.len());
             let mut relative_results: FxHashMap<ParsedRelativeBatchKey, Option<String>> =
@@ -4986,12 +4958,7 @@ impl Engine {
         crate::probe_scope!(RECORD_PARSED_EDGES);
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledger.charge_outer_restart(reader).is_err() {
-                    return false;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
                 reader,
                 canonical_id,
@@ -5075,12 +5042,7 @@ impl Engine {
     ) -> Option<crate::types::ExactResolutionResult> {
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledger.charge_outer_restart(reader).is_err() {
-                    return None;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
                 reader,
                 canonical_id,

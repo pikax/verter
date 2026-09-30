@@ -2438,6 +2438,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // contextual type: its parameters instantiated with every
             // parameter fixed, its return with the inferences alone (the
             // checker's fixing and non-fixing mappers).
+            // Fixing an inference widens a fresh literal it holds (the
+            // checker's `getCovariantInference` under `isFixed`): `both(1, (x)
+            // => x + 1)` over `both<T>(x: T, f: (x: T) => T)` types `x` as
+            // `number`.
+            let substitution = match self.fresh_widened_substitution_outside_top_level(
+                session_id,
+                &substitution,
+                None,
+            ) {
+                Ok(widened) => widened.unwrap_or(substitution),
+                Err(failure) => {
+                    self.abandon_session(session_id);
+                    return CandidateVerdict::Degraded(failure);
+                }
+            };
             // An uninferred parameter reads as itself, its constraint on it,
             // the way the checker reads a literal context through a type
             // parameter's constraint.

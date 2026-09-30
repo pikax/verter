@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use super::super::dispatch_txn::RelationStep;
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -64,7 +66,7 @@ impl ProjectSemanticDispatch<'_> {
                 constraint,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
-            .into_complete_node()?;
+            .into_usable_node()?;
         let graph = self.graph();
         let mut members: Vec<SemanticNodeId> = match graph.node_data(resolved).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
@@ -157,18 +159,159 @@ impl ProjectSemanticDispatch<'_> {
         Some(best.map_or(slice, |(_, converted)| converted))
     }
 
-    /// `bindings` with each constrained `infer` the checker's fixed type
-    /// (`getInferredType`): its inference when it is assignable to its
-    /// constraint, else that constraint. A constraint reads no `infer` of its
-    /// pattern (the checker resolves it where the conditional is written).
-    /// `None` when a constraint relation is undecided.
+    /// The constraint each `infer` of `pattern` fixes within: the one it
+    /// declares (`infer X extends C`), else the one its position implies
+    /// (`getInferredTypeParameterConstraint`) — a reference's type argument
+    /// takes the constraint of the reference's type parameter there,
+    /// instantiated with the reference's type arguments; a rest element or
+    /// rest parameter takes `unknown[]`; a template literal hole takes
+    /// `string`; several positions take the intersection of theirs. One
+    /// walk over the pattern.
+    pub(in crate::project_semantic_dispatch) fn infer_constraints_in(
+        &self,
+        pattern: SemanticNodeId,
+    ) -> FxHashMap<SemanticNodeId, SemanticNodeId> {
+        let graph = self.graph();
+        let is_infer = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+        };
+        let mut implied: FxHashMap<SemanticNodeId, Vec<SemanticNodeId>> = FxHashMap::default();
+        let mut declared: FxHashMap<SemanticNodeId, SemanticNodeId> = FxHashMap::default();
+        let unknown_array = || {
+            let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+            graph.intern_node(SemanticNodeData::Array {
+                element: unknown,
+                readonly: false,
+            })
+        };
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = vec![pattern];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Infer {
+                    constraint: Some(constraint),
+                    ..
+                } => {
+                    declared.insert(node, *constraint);
+                }
+                SemanticNodeData::InstantiationRef { base, args }
+                    if base.canonical_id.as_ref() != "__builtin__" =>
+                {
+                    for (index, arg) in args.iter().enumerate() {
+                        if is_infer(*arg) {
+                            if let Some(constraint) =
+                                self.declared_parameter_constraint(base, index, args)
+                            {
+                                if constraint != *arg {
+                                    implied.entry(*arg).or_default().push(constraint);
+                                }
+                            }
+                        }
+                    }
+                }
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        if element.rest && is_infer(element.value) {
+                            implied
+                                .entry(element.value)
+                                .or_default()
+                                .push(unknown_array());
+                        }
+                    }
+                }
+                SemanticNodeData::Signature { params, .. } => {
+                    for param in params.iter() {
+                        if param.rest && is_infer(param.ty) {
+                            implied.entry(param.ty).or_default().push(unknown_array());
+                        }
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for hole in expressions.iter() {
+                        if is_infer(*hole) {
+                            let string = graph
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                            implied.entry(*hole).or_default().push(string);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        let mut constraints = declared;
+        for (infer, positions) in implied {
+            if constraints.contains_key(&infer) {
+                continue;
+            }
+            let constraint = match positions.as_slice() {
+                [one] => *one,
+                many => self.intern_normalized_union_or_intersection(many, false),
+            };
+            constraints.insert(infer, constraint);
+        }
+        constraints
+    }
+
+    /// The constraint of type parameter `index` of the generic declaration
+    /// `base`, instantiated with `args`; `None` when it declares none or the
+    /// declaration cannot be read.
+    fn declared_parameter_constraint(
+        &self,
+        base: &crate::semantic_query::DeclIdentity,
+        index: usize,
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            base.canonical_id.as_ref(),
+            base.owner,
+            base.decl_name.as_ref(),
+        )?;
+        prepared.type_parameters.get(index)?.constraint.as_ref()?;
+        let binders = self.locator_binder_frame_from_narrow_params(
+            &super::super::relation_variance::declaration_scope(base),
+            &base.decl_name,
+            &prepared.type_parameters,
+        );
+        let (_, binder) = binders.get(index)?;
+        let constraint = match self.graph().node_data(*binder).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
+        };
+        Some(
+            binders
+                .iter()
+                .zip(args)
+                .fold(constraint, |node, ((_, binder), arg)| {
+                    self.substitute_semantic_type_param(node, *binder, *arg)
+                }),
+        )
+    }
+
+    /// `bindings` with each `infer` that `constraints` constrains the
+    /// checker's fixed type (`getInferredType`): its inference when it is
+    /// assignable to its constraint, else that constraint. `None` when a
+    /// constraint relation is undecided.
     pub(in crate::project_semantic_dispatch) fn infer_bindings_within_constraints(
         &self,
         bindings: &Arc<[InferBinding]>,
+        constraints: &FxHashMap<SemanticNodeId, SemanticNodeId>,
     ) -> Option<Arc<[InferBinding]>> {
         let mut fixed: Vec<InferBinding> = bindings.to_vec();
         for binding in fixed.iter_mut() {
-            let Some(constraint) = self.infer_constraint(binding.param) else {
+            let Some(&constraint) = constraints.get(&binding.param) else {
                 continue;
             };
             self.dispatch_txn.borrow_mut().begin_binding_disabled();
@@ -181,17 +324,6 @@ impl ProjectSemanticDispatch<'_> {
             }
         }
         Some(Arc::from(fixed.into_boxed_slice()))
-    }
-
-    /// Whether `pattern` declares an `infer` with a constraint.
-    pub(in crate::project_semantic_dispatch) fn pattern_constrains_an_infer(
-        &self,
-        pattern: SemanticNodeId,
-    ) -> bool {
-        self.infer_scan(pattern, true)
-            .infers
-            .iter()
-            .any(|infer| self.infer_constraint(*infer).is_some())
     }
 }
 

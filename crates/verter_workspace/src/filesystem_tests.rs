@@ -2941,7 +2941,8 @@ fn concurrent_resolutions_are_not_refused_for_retry_exhaustion() {
                 scope.spawn(move || {
                     let owner = format!("{root_id}/owner{index}.ts");
                     let specifier = format!("./dep{index}");
-                    let mut exhausted = 0_usize;
+                    let dep = format!("{root_id}/dep{index}.ts");
+                    let mut refused = Vec::new();
                     // ONE content transition per worker, then a burst of warm
                     // demands. The transition is what makes the first demand
                     // re-observe its candidate's evidence; the burst is what
@@ -2957,26 +2958,30 @@ fn concurrent_resolutions_are_not_refused_for_retry_exhaustion() {
                     );
                     for _ in 0..ROUNDS {
                         let outcome = workspace.resolve_import_outcome(&owner, &specifier, CONTEXT);
-                        if outcome.non_admission_reason()
-                            == Some(verter_audit::NonAdmissionReason::ResolutionRetryExhausted)
+                        // Every demand answers its dependency AND is admitted:
+                        // a refusal of any kind (retry exhaustion, a spent
+                        // restart budget) is a route lost to contention.
+                        if outcome.result().map(|result| result.source_id.as_str())
+                            != Some(dep.as_str())
+                            || !outcome.is_cacheable()
                         {
-                            exhausted += 1;
+                            refused.push(outcome.non_admission_reason());
                         }
                     }
-                    exhausted
+                    refused
                 })
             })
             .collect();
-        let exhausted: usize = handles
+        let refused: Vec<_> = handles
             .into_iter()
-            .map(|handle| handle.join().expect("no worker may panic"))
-            .sum();
-        assert_eq!(
-            exhausted,
-            0,
-            "{exhausted} of {} concurrent resolutions were refused for retry \
-             exhaustion. Nothing was wrong with any of them: they lost their \
-             attempt budget to other workers' publication windows",
+            .flat_map(|handle| handle.join().expect("no worker may panic"))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "{} of {} concurrent resolutions were not admitted with their answer \
+             ({refused:?}). Nothing was wrong with any of them: they lost to \
+             other workers' publication windows",
+            refused.len(),
             THREADS * ROUNDS
         );
     });

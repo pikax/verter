@@ -480,7 +480,9 @@ fn analysis_fixed_view_fence_blocks_stale_promotion() {
     // External mutation lands AFTER capture.
     host.bump_store_view_epoch();
 
-    let analysis = host.get_component_meta_via_view_with_fixed_store_view(canonical, &view, &fixed);
+    let analysis = host
+        .get_component_meta_via_view_with_fixed_store_view(canonical, &view, &fixed)
+        .expect("an uncancelled request is not aborted");
 
     // Value still returned to the caller…
     let analysis = analysis.expect("analysis value is still returned even when fenced");

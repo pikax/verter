@@ -472,6 +472,10 @@ impl CompiledProducts {
 pub(crate) enum CompileEntryOutcome {
     Produced(CompileEntryProducts),
     RuntimeSurfaceRefused(CompileEntryRefusal),
+    /// The compile's semantic inputs were aborted (a cancelled request, a
+    /// shut down host, a superseded view): the transaction publishes
+    /// nothing, not even diagnostics.
+    Aborted(crate::semantic_query::ExecutionAbort),
 }
 
 /// The products of a successful compile transaction.
@@ -2046,6 +2050,7 @@ impl VerterHost {
                 false,
                 produced.template_class_admission,
             ),
+            Ok(CompileEntryOutcome::Aborted(abort)) => return Err(HostError::from(abort)),
             Ok(CompileEntryOutcome::RuntimeSurfaceRefused(refusal)) => (
                 CompiledProducts::RuntimeSurfaceRefused {
                     diagnostic_code: refusal.diagnostic_code,
@@ -2681,17 +2686,22 @@ impl VerterHost {
     /// projection-entry half of the "one coherent projector invocation"
     /// contract. Composition never gates the response: an absent or failed
     /// component-meta output degrades to the typed `Unsupported` availability.
+    /// An aborted component-meta computation aborts the projection: it
+    /// publishes nothing.
     fn compose_component_contract(
         &self,
         canonical: &str,
         adapter_id: &verter_language::FrameworkAdapterId,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> (
-        crate::framework::ComponentContractAvailability,
-        Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
-    ) {
-        match self.get_component_meta_output_via_view_with_publication_evidence(
+    ) -> Result<
+        (
+            crate::framework::ComponentContractAvailability,
+            Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
+        ),
+        crate::semantic_query::ExecutionAbort,
+    > {
+        Ok(match self.get_component_meta_output_via_view_with_publication_evidence(
             canonical, view, fixed, false,
         ) {
             Ok(Some(output)) => {
@@ -2715,14 +2725,15 @@ impl VerterHost {
                 ),
                 None,
             ),
-            Err(error) => (
+            Err(crate::meta_resolve::ComponentMetaFailure::Output(error)) => (
                 crate::framework::public_contract::unsupported_from_output_error(
                     adapter_id.clone(),
                     &error,
                 ),
                 None,
             ),
-        }
+            Err(crate::meta_resolve::ComponentMetaFailure::Aborted(abort)) => return Err(abort),
+        })
     }
 
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
@@ -2853,8 +2864,9 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        let (contract, publication_witness) =
-            self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        let (contract, publication_witness) = self
+            .compose_component_contract(&canonical, &adapter_id, &view, &fixed)
+            .map_err(crate::PublicApiProjectionError::Aborted)?;
         Ok(Some(
             crate::framework::api_projector::ComponentApiProjection {
                 response,
@@ -2968,6 +2980,8 @@ impl VerterHost {
                 crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
             )
         };
+        // An aborted production publishes nothing.
+        let macro_output = macro_output.map_err(crate::PublicApiProjectionError::Aborted)?;
         if !vue_macro_output_matches_revision(&macro_output, whole_hash) {
             return Ok(None);
         }
@@ -3023,8 +3037,9 @@ impl VerterHost {
         // template flag. The resolve opens its own request-scoped demand for
         // exactly the files it walks; see
         // `resolve_fallthrough_surface_internal_with_overrides`.
-        let fallthrough_resolution =
-            self.resolve_fallthrough_surface_pinned(&canonical, pinned_view);
+        let fallthrough_resolution = self
+            .resolve_fallthrough_surface_pinned(&canonical, pinned_view)
+            .map_err(crate::PublicApiProjectionError::Aborted)?;
         let fallthrough_props = crate::host_resolve::fallthrough_props::project_fallthrough_props(
             fallthrough_resolution.as_ref(),
             &|child_canonical_id| self.owner_import_reference_for(&canonical, child_canonical_id),
@@ -3296,6 +3311,9 @@ impl VerterHost {
             Ok(products) => products,
             Err(HostProductsFailure::Fatal(payload)) => {
                 return Err(diagnostics.merge(payload));
+            }
+            Err(HostProductsFailure::Aborted(abort)) => {
+                return Ok(CompileEntryOutcome::Aborted(abort));
             }
             // The backend fail-closed on the runtime surface THIS request
             // asked for (all-or-none), and the transaction ends here: no
@@ -3616,10 +3634,13 @@ impl VerterHost {
                 );
                 // One request-local runtime macro bundle from TypeInfo; the
                 // render lane does not retain it or mutate dependency state.
-                let macro_output = self.produce_vue_macro_codegen(
-                    &snapshot.canonical_id,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
-                );
+                // An aborted production publishes nothing.
+                let macro_output = self
+                    .produce_vue_macro_codegen(
+                        &snapshot.canonical_id,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
+                    )
+                    .map_err(HostError::from)?;
                 let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
                     prop_constness_overrides: None,
                     style_v_bind_vars: snapshot.style_v_bind_vars.clone(),

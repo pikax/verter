@@ -262,12 +262,7 @@ fn call_inference() {
             read: Read::Return(r#"r12"#),
             tsc: [r#"undefined"#, r#"any"#, r#"undefined"#, r#"any"#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::Exact,
-                Class::WrongClean,
-                Class::Exact,
-                Class::WrongClean,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"r13"#),
@@ -301,12 +296,7 @@ fn call_inference() {
             read: Read::Return(r#"r16"#),
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
     ];
     let failures = census("call_inference", Matrix::new(CALL_INFERENCE), &rows);

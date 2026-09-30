@@ -494,7 +494,8 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // A `Partial` demand carries NO node: truncated or faulted, which is a
     // semantic non-answer, not a type. Nothing to compare, so the row's
     // structural bases stay false and only a non-answer pin is satisfied.
-    let Some(node) = demand.into_complete_node() else {
+    // A `Recovered` demand holds the checker's recovery: that is its answer.
+    let Some(node) = demand.into_usable_node() else {
         return LiveProbeOutcome {
             matched_checker: false,
             matched_checker_in_order: false,

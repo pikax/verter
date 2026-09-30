@@ -1253,6 +1253,7 @@ fn materialize_output_source(
                             QueryErrorDisposition::RecursionCarrier
                             | QueryErrorDisposition::ExpandableDecl
                             | QueryErrorDisposition::CheckerRecovery
+                            | QueryErrorDisposition::BudgetRecovery
                             // Optional absence never reaches here (it is
                             // `Ok(None)`); if the raise contract ever changed,
                             // absence is still the correct answer for it.

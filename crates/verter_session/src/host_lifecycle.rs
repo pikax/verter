@@ -812,6 +812,7 @@ impl VerterHost {
         HostRetentionSnapshot {
             overlay_resolution_slots: workspace.overlay_resolution_slots,
             overlay_value_versions: workspace.overlay_value_versions,
+            fallthrough_nodes: self.resolver.runtime.fallthrough.retained_node_count(),
             live_artifacts: indexed.live_artifact_count(),
             retained_retired_versions: indexed.retained_retired_version_count(),
             live_roots: indexed.live_root_count(),
@@ -1018,9 +1019,10 @@ impl VerterHost {
         }
         // What the document's own content keyed: its resolved-import facts
         // (one key per content hash), the resolver's component-meta states
-        // (one key per view fingerprint) and its overlay source registrations
-        // (one per view fingerprint). Each already follows the current content
-        // on an edit; the close drops the last one.
+        // (one key per view fingerprint), its overlay source registrations
+        // (one per view fingerprint) and its fallthrough nodes (keyed by the
+        // component; an edit adds a candidate under the same key, bounded per
+        // key). The close drops what is left.
         let import_facts_released = self
             .project_type_store
             .resolved_import_facts()
@@ -1029,6 +1031,11 @@ impl VerterHost {
             .resolver
             .runtime
             .release_component_meta_states(canonical_id);
+        let fallthrough_nodes_released = self
+            .resolver
+            .runtime
+            .fallthrough
+            .release_owner(canonical_id);
         let overlay_sources_retracted = self
             .carrier_publication
             .source_authority
@@ -1044,6 +1051,7 @@ impl VerterHost {
             canonical_id,
             import_facts_released,
             meta_states_released,
+            fallthrough_nodes_released,
             overlay_sources_retracted,
             "evict released the document's content-keyed caches"
         );

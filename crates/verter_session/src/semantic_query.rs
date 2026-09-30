@@ -81,6 +81,10 @@ pub use intersection_input::{
     IntersectionInputId, IntersectionInputRef, IntersectionPurpose, IntersectionRecipe,
     IntersectionTerm,
 };
+pub mod fact_result;
+#[cfg(test)]
+mod fact_result_tests;
+pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]
@@ -149,7 +153,7 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, RecoveryBasis,
 };
 /// The checker compatibility policy: the limits at which the checker gives up
 /// on a type operation, and the diagnostic it reports there.
@@ -1987,6 +1991,10 @@ pub enum FlowReturnDegradation {
     /// answer carries the member's degradation as this typed reason rather
     /// than publishing clean.
     PartialInterior,
+    /// The evaluation's value holds, or was derived from, the checker's
+    /// recovery after an operation exhausted its own allowance: usable as the
+    /// checker's answer, a resource partial, never kept.
+    OperationBudget,
 }
 
 /// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
@@ -5041,6 +5049,14 @@ impl PartialReasonSet {
     /// never a checker fact: the returned node is an intermediate carrier
     /// stop and is never admitted to a shared memo or result cache.
     pub const CONNECTED_MEMORY_LIMIT: Self = Self(1 << 18);
+    /// A type operation exhausted Verter's own budget for it (its product,
+    /// comparisons, tail steps, tuple elements or instantiation depth), and
+    /// the value is the checker's recovery for that operation, with the
+    /// checker's diagnostic. Usable as that recovery — it reads and relates
+    /// as the checker's error type, or a relation as false — but a resource
+    /// stop, never a complete answer: it is never admitted to a shared memo
+    /// or result cache.
+    pub const OPERATION_BUDGET: Self = Self(1 << 19);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -5149,11 +5165,13 @@ pub enum PartialReason {
     UndecidedConditional,
     /// [`PartialReasonSet::CONNECTED_MEMORY_LIMIT`].
     ConnectedMemoryLimit,
+    /// [`PartialReasonSet::OPERATION_BUDGET`].
+    OperationBudget,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -5173,6 +5191,7 @@ impl PartialReason {
         Self::FlowReturnNoSurface,
         Self::UndecidedConditional,
         Self::ConnectedMemoryLimit,
+        Self::OperationBudget,
     ];
 
     /// The single-reason set this variant names.
@@ -5198,6 +5217,7 @@ impl PartialReason {
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
             Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
             Self::ConnectedMemoryLimit => PartialReasonSet::CONNECTED_MEMORY_LIMIT,
+            Self::OperationBudget => PartialReasonSet::OPERATION_BUDGET,
         }
     }
 
@@ -5226,6 +5246,7 @@ impl PartialReason {
             Self::FlowReturnNoSurface => "flowReturnNoSurface",
             Self::UndecidedConditional => "undecidedConditional",
             Self::ConnectedMemoryLimit => "connectedMemoryLimit",
+            Self::OperationBudget => "operationBudget",
         }
     }
 }
@@ -5747,20 +5768,25 @@ pub enum QueryError {
     /// type, which reads as the diagnostic's
     /// [`recovery`](CheckerDiagnostic::recovery) (`any`).
     ///
-    /// A complete, language-defined answer: it relates, absorbs and raises
-    /// as that recovery, carrying the diagnostic that produced it. Never a
-    /// stand-in for something this substrate cannot answer — those stay
-    /// typed gaps.
+    /// A language-defined answer: it relates, absorbs and raises as that
+    /// recovery, carrying the diagnostic that produced it. Never a stand-in
+    /// for something this substrate cannot answer — those stay typed gaps.
+    /// Its [`RecoveryBasis`] says whether it is complete: a diagnostic the
+    /// types decide, or a certified divergence, is a complete answer; an
+    /// operation that exhausted Verter's own allowance for it
+    /// ([`checker_policy`]) leaves a resource partial — usable, but never a
+    /// complete answer and never kept.
     CheckerRecovery {
         /// The diagnostic the checker reports.
         diagnostic: CheckerDiagnostic,
-        /// The type itself where the checker gives up at one of its limits
-        /// ([`checker_policy`]) and Verter still names it: the answer
-        /// beyond the checker's limit, for a consumer that wants the type
-        /// rather than the checker's recovery. Nothing reads it as the
-        /// recovery: the recovery is `any`, and this is a retained leaf of
-        /// the node, never a descendant a semantic walk enters.
-        beyond: Option<SemanticNodeId>,
+        /// Whether the recovery is proven or the allowance decided it.
+        basis: RecoveryBasis,
+        /// The authored form of the refused operation, where one already
+        /// exists (the written template or intersection), kept for display.
+        /// It is never the operation's answer and nothing reads it as one:
+        /// the recovery is `any`, and this is a retained leaf of the node,
+        /// never a descendant a semantic walk enters.
+        origin: Option<SemanticNodeId>,
     },
 }
 
@@ -5919,13 +5945,15 @@ impl PartialEq for QueryError {
             (
                 Self::CheckerRecovery {
                     diagnostic: a_d,
-                    beyond: a_b,
+                    basis: a_s,
+                    origin: a_b,
                 },
                 Self::CheckerRecovery {
                     diagnostic: b_d,
-                    beyond: b_b,
+                    basis: b_s,
+                    origin: b_b,
                 },
-            ) => a_d == b_d && a_b == b_b,
+            ) => a_d == b_d && a_s == b_s && a_b == b_b,
             _ => false,
         }
     }
@@ -6018,9 +6046,14 @@ impl std::hash::Hash for QueryError {
             | Self::UnmodeledPosition
             | Self::PermissiveWildcard
             | Self::OpenSurface => {}
-            Self::CheckerRecovery { diagnostic, beyond } => {
+            Self::CheckerRecovery {
+                diagnostic,
+                basis,
+                origin,
+            } => {
+                basis.hash(state);
                 diagnostic.hash(state);
-                beyond.hash(state);
+                origin.hash(state);
             }
         }
     }
@@ -11090,7 +11123,8 @@ mod tests {
                     code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                     operation: CheckerDiagnosticOperation::LibAwaited,
                 },
-                beyond: None,
+                basis: RecoveryBasis::Certified,
+                origin: None,
             },
         ];
         let mut tags = HashSet::new();

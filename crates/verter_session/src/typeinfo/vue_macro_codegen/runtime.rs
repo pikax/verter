@@ -713,15 +713,12 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
     }
 }
 
+/// The typed refusal of a lane whose inputs are incomplete. An abort class
+/// the computation observed makes the whole production publish nothing
+/// ([`crate::semantic_query::ExecutionAbort::observed_in`]), so it has no refusal row of its own here.
 pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
-    let reason = if reasons.contains(PartialReasonSet::CANCELLED) {
-        MacroPartialReason::Cancelled
-    } else if reasons.contains(PartialReasonSet::SUPERSEDED_GENERATION) {
-        MacroPartialReason::SupersededGeneration
-    } else if reasons.contains(PartialReasonSet::UNSTABLE_STATE) {
-        MacroPartialReason::UnstableState
-    } else if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+    let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)

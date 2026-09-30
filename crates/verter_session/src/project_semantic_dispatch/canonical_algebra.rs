@@ -408,6 +408,12 @@ pub(crate) struct CanonicalEvidence {
     /// but not proven canonical, so it is ReturnOnly — never a warm
     /// canonical result.
     pub(crate) incomplete: bool,
+    /// The refusal of an operation of this canonicalization that exhausted
+    /// its own allowance, whose recovery the result holds: a resource
+    /// partial, folded as its own reason at the disposition point. Only a
+    /// refusal minted inside this canonicalization is recorded; an arm that
+    /// already is some other operation's recovery keeps its own identity.
+    pub(crate) refusal: Option<checker_policy::OperationRefusal>,
     /// Nodes already scope-classified — one sidecar lookup per unique node
     /// per canonicalization, regardless of how many walks revisit it.
     seen_nodes: FxHashSet<SemanticNodeId>,
@@ -675,6 +681,7 @@ impl CanonicalEvidence {
     /// point (`ProjectSemanticDispatch::deposit_canonical_evidence`).
     pub(crate) fn absorb(&mut self, other: CanonicalEvidence) {
         self.incomplete |= other.incomplete;
+        self.refusal = self.refusal.or(other.refusal);
         for root in other.inspected_file_roots {
             if !self
                 .inspected_file_roots
@@ -1436,8 +1443,8 @@ fn canonicalize_with(
     //     it is, never rebuilt by distributing over it. A distribution that
     //     keeps the written intersection as its printed origin falls through
     //     to mint it; a cross product the checker refuses is its TS2590
-    //     recovery, holding the written intersection as the type beyond the
-    //     checker's limit.
+    //     recovery, a resource partial holding the written intersection as
+    //     its origin.
     if !is_union {
         remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
         if kept.len() >= 2 {
@@ -1460,10 +1467,11 @@ fn canonicalize_with(
                         return CanonicalComposite { node, evidence };
                     }
                 }
-                Err(diagnostic) => {
+                Err(refusal) => {
                     let written = mint_composite(graph, kept, false, nullability, &evidence);
+                    evidence.refusal = evidence.refusal.or(Some(refusal));
                     return CanonicalComposite {
-                        node: checker_policy::checker_recovery(graph, diagnostic, Some(written)),
+                        node: checker_policy::resource_recovery(graph, refusal, Some(written)),
                         evidence,
                     };
                 }
@@ -1746,18 +1754,19 @@ pub(super) fn distribute_over_unions(
             || (origin == DistributionOrigin::KeepWrittenIntersection
                 && !distributed.keeps_written_origin(graph, arms)))
         .then(|| distributed.into_node(graph, nullability, evidence)),
-        Err(diagnostic) => {
+        Err(refusal) => {
             let written = mint_composite(graph, arms.to_vec(), false, nullability, evidence);
-            Some(checker_policy::checker_recovery(
+            evidence.refusal = evidence.refusal.or(Some(refusal));
+            Some(checker_policy::resource_recovery(
                 graph,
-                diagnostic,
+                refusal,
                 Some(written),
             ))
         }
     }
 }
 
-/// The TS2590 fact when the checker refuses the cross product of the
+/// The TS2590 refusal of the cross product of the
 /// intersection of `arms` (`getIntersectionType`), found without building
 /// the constituents of the last cross product it would build: only a
 /// divided intersection's halves, whose widths the checker weighs, are
@@ -1767,7 +1776,7 @@ pub(super) fn intersection_cross_product_refused(
     arms: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     evidence: &mut CanonicalEvidence,
-) -> Option<crate::semantic_query::CheckerDiagnostic> {
+) -> Option<checker_policy::OperationRefusal> {
     let weighed = canonicalize_with(
         graph,
         arms,
@@ -1776,8 +1785,9 @@ pub(super) fn intersection_cross_product_refused(
         SupertypeReduction::Always,
         DistributionOrigin::Weighed,
     );
+    let refusal = weighed.evidence.refusal;
     evidence.absorb(weighed.evidence);
-    too_complex_recovery(graph, weighed.node)
+    refusal
 }
 
 /// The union an intersection over union arms distributes to
@@ -1850,7 +1860,7 @@ fn intersect_over_unions(
     supertype_reduction: SupertypeReduction,
     origin: DistributionOrigin,
     evidence: &mut CanonicalEvidence,
-) -> Result<Option<DistributedIntersection>, crate::semantic_query::CheckerDiagnostic> {
+) -> Result<Option<DistributedIntersection>, checker_policy::OperationRefusal> {
     let union_members = |arm: SemanticNodeId| match graph.node_data(arm).as_deref() {
         Some(SemanticNodeData::Union(members)) => Some(members.iter().copied().collect::<Vec<_>>()),
         _ => None,
@@ -1858,9 +1868,13 @@ fn intersect_over_unions(
     if !arms.iter().any(|arm| union_members(*arm).is_some()) {
         return Ok(None);
     }
+    // A restarted or divided intersection is this intersection's own
+    // construction: its refusal is this one's. An arm that already is
+    // another operation's recovery is not a refusal; it is the type formed.
     let formed = |canonical: CanonicalComposite, evidence: &mut CanonicalEvidence| {
+        let refusal = canonical.evidence.refusal;
         evidence.absorb(canonical.evidence);
-        too_complex_recovery(graph, canonical.node).map_or(
+        refusal.map_or(
             Ok(Some(DistributedIntersection {
                 formed: Some(canonical.node),
                 constituents: Vec::new(),
@@ -1912,9 +1926,10 @@ fn intersect_over_unions(
                 supertype_reduction,
                 origin,
             );
+            let refusal = inner.evidence.refusal;
             evidence.absorb(inner.evidence);
-            if let Some(diagnostic) = too_complex_recovery(graph, inner.node) {
-                return Err(diagnostic);
+            if let Some(refusal) = refusal {
+                return Err(refusal);
             }
             let nullish = graph.intern_node(SemanticNodeData::Primitive(nullish));
             return formed(
@@ -1937,9 +1952,10 @@ fn intersect_over_unions(
                 supertype_reduction,
                 DistributionOrigin::Distributed,
             );
+            let refusal = intersected.evidence.refusal;
             evidence.absorb(intersected.evidence);
-            if let Some(diagnostic) = too_complex_recovery(graph, intersected.node) {
-                return Err(diagnostic);
+            if let Some(refusal) = refusal {
+                return Err(refusal);
             }
             *half = intersected.node;
         }
@@ -2028,23 +2044,6 @@ fn intersect_over_unions(
         formed: None,
         constituents,
     }))
-}
-
-/// The TS2590 fact `node` carries when it is the checker's recovery from a
-/// cross product it refused.
-fn too_complex_recovery(
-    graph: &SemanticGraphStore,
-    node: SemanticNodeId,
-) -> Option<crate::semantic_query::CheckerDiagnostic> {
-    match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
-            diagnostic,
-            ..
-        })) if diagnostic.code == crate::semantic_query::CheckerDiagnosticCode::UnionTooComplex => {
-            Some(*diagnostic)
-        }
-        _ => None,
-    }
 }
 
 /// The checker's `intersectUnionsOfPrimitiveTypes`: when two or more of

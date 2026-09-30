@@ -390,7 +390,9 @@ fn prepare_vue_execution_inputs(
     macro_demand: crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand,
     axis: SharedDependencyAxis,
 ) -> Result<VueHostExecutionInputs, HostProductsFailure> {
-    let macro_output = host.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand);
+    let macro_output = host
+        .produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand)
+        .map_err(HostProductsFailure::Aborted)?;
     let macro_dependency_diagnostics =
         super::vue_macro_dependency_diagnostics::collect(host, snapshot, &macro_output);
     if axis == SharedDependencyAxis::Restate {
@@ -1331,6 +1333,8 @@ pub(crate) enum HostProductsFailure {
     },
     /// A fatal refusal: the diagnostics payload for the compile failure.
     Fatal(DiagnosticsSnapshot),
+    /// The semantic inputs were aborted: nothing is published.
+    Aborted(crate::semantic_query::ExecutionAbort),
 }
 
 /// Maps the Vue bound backend's multi-product execution refusal for the

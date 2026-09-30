@@ -13,7 +13,7 @@ use super::{classify_query_error, query_error_disposition, QueryErrorDisposition
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
-    SemanticQueryValueTag,
+    RecoveryBasis, SemanticQueryValueTag,
 };
 
 fn budget_failure() -> BudgetExceededFailure {
@@ -60,7 +60,8 @@ fn every_variant() -> Vec<QueryError> {
         QueryError::UnrepresentableSurfaceMember,
         QueryError::CheckerRecovery {
             diagnostic: recursive_fulfillment(),
-            beyond: None,
+            basis: RecoveryBasis::Certified,
+            origin: None,
         },
     ]
 }
@@ -273,21 +274,78 @@ fn genuine_failures_are_the_error_type() {
     }
 }
 
-/// A checker recovery is the §22 error type — it dominates the absorbers and
-/// relates like `any` — and at the same time a complete answer: it raises as
-/// its recovery rather than as a failure shell, and the type it stands for is
-/// known.
+/// A checker recovery after a diagnostic the types decide is the §22 error
+/// type — it dominates the absorbers and relates like `any` — and at the
+/// same time a complete answer: it raises as its recovery rather than as a
+/// failure shell, and the type it stands for is known.
 #[test]
 fn checker_recovery_is_a_complete_error_type() {
     let err = QueryError::CheckerRecovery {
         diagnostic: recursive_fulfillment(),
-        beyond: None,
+        basis: RecoveryBasis::Certified,
+        origin: None,
     };
     let class = classify_query_error(&err);
     assert_eq!(class.disposition, QueryErrorDisposition::CheckerRecovery);
     assert!(class.disposition.is_error_type());
     assert!(!class.disposition.is_unknown_materializing());
     assert!(!err.means_type_is_not_yet_known());
+}
+
+/// A TS2589 recovery a certified divergence decides is a complete answer:
+/// the basis, not the code, classifies a recovery.
+#[test]
+fn a_certified_divergence_is_a_complete_error_type() {
+    let err = QueryError::CheckerRecovery {
+        diagnostic: CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::ConditionalTail,
+        },
+        basis: RecoveryBasis::Certified,
+        origin: None,
+    };
+    let class = classify_query_error(&err);
+    assert_eq!(class.disposition, QueryErrorDisposition::CheckerRecovery);
+    assert_eq!(
+        class.domain_reason,
+        ClosedLiteralDomainUnresolvedReason::Unsupported
+    );
+}
+
+/// A recovery after a resource diagnostic — an operation that exhausted its
+/// own allowance — reads and relates as the checker's error type like any
+/// recovery, but it is a resource partial: it publishes the budget the
+/// operation ran out of, never a complete answer.
+#[test]
+fn a_resource_recovery_is_a_partial_error_type() {
+    for code in [
+        CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        CheckerDiagnosticCode::UnionTooComplex,
+        CheckerDiagnosticCode::TupleTooLarge,
+        CheckerDiagnosticCode::RelationTooComplex,
+    ] {
+        let err = QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code,
+                operation: CheckerDiagnosticOperation::Intersection,
+            },
+            basis: RecoveryBasis::Budget,
+            origin: None,
+        };
+        let class = classify_query_error(&err);
+        assert_eq!(
+            class.disposition,
+            QueryErrorDisposition::BudgetRecovery,
+            "{code:?}"
+        );
+        assert_eq!(
+            class.domain_reason,
+            ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
+            "{code:?}"
+        );
+        assert!(class.disposition.is_error_type(), "{code:?}");
+        assert!(!class.disposition.is_unknown_materializing(), "{code:?}");
+    }
 }
 
 /// The two unsupported-surface sentinels keep their own class and their
@@ -314,7 +372,7 @@ fn unsupported_surface_sentinels_keep_their_output_semantics() {
 }
 
 /// The §22 error-type predicate is EXACTLY the `Failure` and
-/// `CheckerRecovery` dispositions — the derivation `QueryError::is_error_type`
+/// two checker-recovery dispositions — the derivation `QueryError::is_error_type`
 /// routes through.
 #[test]
 fn error_type_predicate_is_exactly_the_failure_disposition() {

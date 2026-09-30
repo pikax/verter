@@ -18888,6 +18888,62 @@ const revision = {revision}
     );
 }
 
+/// A component's fallthrough nodes are keyed by the component, so they can
+/// never be read again once it is closed or deleted: closing and deleting
+/// every component returns the fallthrough node cache to where it started.
+///
+/// Discriminating: the cache used to keep every component's nodes for the
+/// life of the host, one set per component ever resolved, so the count grew
+/// with the number of components the session had seen.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn closing_or_deleting_components_releases_their_fallthrough_nodes() {
+    const OWNERS: usize = 32;
+
+    fn source(n: usize) -> String {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string }}>()
+const n = {n}
+</script>
+<template><div :title="label">{{{{ n }}}}</div></template>"#
+        )
+    }
+    let nodes = |host: &VerterHost| host.retention_snapshot().fallthrough_nodes;
+
+    let host = make_host();
+    // The project's intrinsic `div` surface is shared by every component and
+    // stays; warm it once so the baseline includes it.
+    upsert_vue(&host, "/src/Warm.vue", &source(0));
+    assert!(host.resolve_fallthrough_surface("/src/Warm.vue").is_some());
+    host.evict("/src/Warm.vue");
+    let baseline = nodes(&host);
+
+    let owners: Vec<String> = (0..OWNERS).map(|n| format!("/src/C{n}.vue")).collect();
+    for (n, owner) in owners.iter().enumerate() {
+        upsert_vue(&host, owner, &source(n + 1));
+        assert!(host.resolve_fallthrough_surface(owner).is_some());
+    }
+    let resolved = nodes(&host);
+    assert!(
+        resolved >= baseline + OWNERS,
+        "fixture: every component warms its own nodes ({baseline} -> {resolved})"
+    );
+
+    for (n, owner) in owners.iter().enumerate() {
+        if n % 2 == 0 {
+            host.evict(owner);
+        } else {
+            let _ = host.remove(owner);
+        }
+    }
+    assert_eq!(
+        nodes(&host),
+        baseline,
+        "closed and deleted components keep no fallthrough nodes"
+    );
+}
+
 /// The surface reached INCREMENTALLY after a generation-advancing edit must be
 /// the one a FRESH execution produces on the same basis.
 ///

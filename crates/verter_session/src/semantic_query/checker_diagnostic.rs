@@ -17,6 +17,15 @@ use super::PrimitiveKind;
 /// (`getCandidateForOverloadFailure`): the call's result carries that
 /// candidate and this diagnostic together, so the answer is never a silent
 /// success.
+///
+/// A resource diagnostic ([`CheckerDiagnosticCode::is_resource_limit`]) is
+/// reported in exactly two places, both owned by
+/// [`checker_policy`](super::checker_policy): where one operation exhausts
+/// Verter's own allowance for it — a [`RecoveryBasis::Budget`] recovery,
+/// usable but incomplete, never kept, because the allowance rather than the
+/// types decided it — and, for TS2589, where a sound proof certifies that
+/// the operation can never reach a value — a [`RecoveryBasis::Certified`]
+/// recovery, complete and kept like any semantic answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CheckerDiagnostic {
     /// The diagnostic the checker reports.
@@ -95,6 +104,25 @@ pub enum CheckerDiagnosticCode {
 }
 
 impl CheckerDiagnosticCode {
+    /// Whether the checker reports this code when a type operation runs out
+    /// of an allowance (TS2589, TS2590, TS2799, TS2859). Verter reports these
+    /// at its own allowance for the operation, as a resource partial, or —
+    /// TS2589 only — at a certified divergence, as a complete answer.
+    #[must_use]
+    pub const fn is_resource_limit(self) -> bool {
+        match self {
+            Self::ExcessivelyDeepInstantiation
+            | Self::UnionTooComplex
+            | Self::TupleTooLarge
+            | Self::RelationTooComplex => true,
+            Self::CircularTypeAlias
+            | Self::RecursiveFulfillmentCallback
+            | Self::ArgumentNotAssignable
+            | Self::ArgumentCount
+            | Self::ArgumentCountAtLeast => false,
+        }
+    }
+
     /// The checker's numeric diagnostic code.
     #[must_use]
     pub const fn code(self) -> u32 {
@@ -172,4 +200,17 @@ pub enum CheckerDiagnosticOperation {
     /// A type alias's declared type (`getDeclaredTypeOfTypeAlias`), whose
     /// body requires the alias itself.
     TypeAliasDeclaration,
+}
+
+/// Why a checker recovery is the answer: what the recovery proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecoveryBasis {
+    /// The types decide the diagnostic, independent of any allowance: a
+    /// diagnostic the checker derives from the types themselves, or a
+    /// certified divergence — a sound proof that the operation can never
+    /// reach a value. The recovery is a complete answer and may be kept.
+    Certified,
+    /// The operation exhausted Verter's own allowance for it. The recovery
+    /// is usable but a resource partial: never complete, never kept.
+    Budget,
 }

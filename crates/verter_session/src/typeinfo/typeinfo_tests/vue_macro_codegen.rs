@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    MacroAnchor, MacroInvalidReason, MacroMemberReason, MacroPartialReason, MacroRuntimeOutcome,
-    MacroRuntimeShape, MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation,
-    RuntimeConstructor, RuntimeProp, RuntimePropType, SynthesizedRowKind,
-    TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
-    TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
+    MacroAnchor, MacroInvalidReason, MacroMemberReason, MacroRuntimeOutcome, MacroRuntimeShape,
+    MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
+    RuntimePropType, SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition,
+    TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 
 use crate::typeinfo::vue_macro_codegen::{VueMacroCodegenDemand, VueMacroDependencyFailure};
@@ -51,6 +50,17 @@ fn produce(
     canonical_id: &str,
     demand: VueMacroCodegenDemand,
 ) -> crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput {
+    try_produce(host, canonical_id, demand).expect("an uncancelled production publishes")
+}
+
+fn try_produce(
+    host: &VerterHost,
+    canonical_id: &str,
+    demand: VueMacroCodegenDemand,
+) -> Result<
+    crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    crate::semantic_query::ExecutionAbort,
+> {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, canonical_id, demand)
     })

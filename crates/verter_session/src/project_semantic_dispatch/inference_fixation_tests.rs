@@ -75,3 +75,50 @@ fn a_signature_prefers_its_covariant_inference_where_it_fits() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A context-sensitive argument is typed under its parameter with the
+/// inference fixed, and a fixed inference widens the fresh literal it holds
+/// (`getCovariantInference` under `isFixed`): `both(1, (x) => x + 1)` types
+/// `x` as `number` and relates without TS2345. Without `strictNullChecks`
+/// `T | undefined` is `T`, so `un(undefined)` infers `undefined` for `T`,
+/// which widens to `any`.
+#[test]
+fn a_fixed_inference_widens_and_a_nullish_argument_infers() {
+    let source = r##"
+declare function both<T>(x: T, f: (x: T) => T): T;
+declare function un<T>(x: T | undefined): T;
+declare function nu<T>(x: T | null): T;
+export function r16() { return both(1, (x) => x + 1); }
+export function r12() { return un(undefined); }
+export function r12b() { return nu(null); }
+"##;
+    let reads = [
+        (
+            super::differential_harness_tests::Read::Return("r16"),
+            vec!["number"; 4],
+        ),
+        (
+            super::differential_harness_tests::Read::Return("r12"),
+            vec!["undefined", "any", "undefined", "any"],
+        ),
+        (
+            super::differential_harness_tests::Read::Return("r12b"),
+            vec!["null", "any", "null", "any"],
+        ),
+    ];
+    let verdicts = Matrix::new(source).settings(&ALL).verdicts(&reads);
+    let mut failures = Vec::new();
+    for ((read, answers), row) in reads.iter().zip(&verdicts) {
+        for (answer, verdict) in answers.iter().zip(row) {
+            if !verdict.matched || !verdict.diagnostics.is_empty() {
+                failures.push(format!(
+                    "`{}`: tsc answers `{answer}` with no diagnostic, {} with {:?}",
+                    read.text(),
+                    verdict.lane,
+                    verdict.diagnostics
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

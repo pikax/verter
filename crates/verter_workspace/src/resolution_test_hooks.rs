@@ -17,6 +17,12 @@ pub(crate) enum ResolutionPhase {
     WorldWriteHeld,
     /// An importer resolution attempt begins, before its world capture.
     AttemptStart,
+    /// The input driver begins one round of an attempt.
+    DriverRound,
+    /// A resolution is about to wait on the publication gate (a writer is
+    /// inside its window at capture, or the attempt is taking the gate to
+    /// admit).
+    PublicationGateWait,
 }
 
 struct InstalledHook {

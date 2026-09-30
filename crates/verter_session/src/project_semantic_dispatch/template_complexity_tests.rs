@@ -2,14 +2,15 @@
 //! checker's limit is the checker's TS2590 recovery (`checkCrossProductUnion`
 //! in `getTemplateLiteralType`): the product of the spans' constituent
 //! counts is checked before a concatenation is built, and the answer reads
-//! and relates as `any`. Under the limit the template distributes.
+//! and relates as `any` — a resource partial, never kept. Under the limit
+//! the template distributes.
 //!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on the fixture each test builds,
 //! each probe read off a TS2322 against `never`. The four `strictNullChecks`
 //! × `noImplicitAny` settings agree on every probe.
 
-use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_probe};
+use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_recovered_probe};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     SemanticNodeData,
@@ -158,16 +159,17 @@ fn boolean_spans_two_constituents() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Past the limit the template is the TS2590 recovery holding the authored
-/// template as the type beyond it: nothing is concatenated.
+/// Past the limit the template is the TS2590 recovery, a resource partial
+/// holding the authored template as its origin: nothing is concatenated.
 #[test]
-fn the_ts2590_recovery_holds_the_authored_template_beyond_it() {
+fn the_ts2590_recovery_is_a_partial_holding_the_authored_template() {
     let source = format!("{IS_ANY}{DIGITS}");
-    with_probe(&source, "`${D}${D}${D}${D}${D}`", |dispatch, node| {
+    with_recovered_probe(&source, "`${D}${D}${D}${D}${D}`", |dispatch, node| {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
-            beyond: Some(beyond),
+            basis: crate::semantic_query::RecoveryBasis::Budget,
+            origin: Some(origin),
         })) = data.as_deref()
         else {
             panic!("the template must be the TS2590 recovery, measured {data:?}");
@@ -175,11 +177,11 @@ fn the_ts2590_recovery_holds_the_authored_template_beyond_it() {
         assert_eq!(*diagnostic, TS2590);
         assert!(
             matches!(
-                dispatch.graph().node_data(*beyond).as_deref(),
+                dispatch.graph().node_data(*origin).as_deref(),
                 Some(SemanticNodeData::TemplateLiteral { expressions, .. })
                     if expressions.len() == 5
             ),
-            "beyond the limit is the authored five-span template"
+            "its origin is the authored five-span template"
         );
     });
 }
@@ -327,9 +329,82 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
     );
     match completeness {
         ResultCompleteness::Partial(reasons) => assert!(
-            reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT),
-            "the partial is the memory rail's, got {reasons:?}"
+            reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+                && !reasons.contains(PartialReasonSet::OPERATION_BUDGET),
+            "the partial is the memory rail's, never the template's TS2590, got {reasons:?}"
         ),
         ResultCompleteness::Complete => panic!("4 KiB cannot hold 1,600 concatenations"),
     }
+}
+
+/// A recovery is a resource partial and never kept: a second read of the
+/// same template on the same host evaluates it again and is again the
+/// recovered partial, never a complete answer served from the memo.
+#[test]
+fn a_ts2590_recovery_is_never_kept() {
+    use super::evaluate::StructuralFactDemandOutcome;
+    let source = format!("{IS_ANY}{DIGITS}");
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let read = || {
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            &source,
+            "`${D}${D}${D}${D}${D}`",
+            |_, outcome| match outcome {
+                StructuralFactDemandOutcome::Recovered { reasons, .. } => Some(reasons),
+                _ => None,
+            },
+        )
+    };
+    let cold = read();
+    let warm = read();
+    assert_eq!(
+        cold,
+        Some(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET),
+        "cold"
+    );
+    assert_eq!(
+        warm,
+        Some(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET),
+        "warm"
+    );
+}
+
+/// A relation refused inside a span is the relation's own refusal: the span
+/// reads the relation's false recovery and the template concatenates it,
+/// partial through the relation, and never becomes the template's TS2590.
+/// Two hundred object arms against the same arms reversed need about 20,100
+/// comparisons, past an allowance of 600 (see the relation work tests).
+#[test]
+fn a_relation_refused_inside_a_span_is_not_the_templates_ts2590() {
+    let arms = |value: &dyn Fn(usize) -> String, reversed: bool| {
+        let mut arms: Vec<String> = (0..200)
+            .map(|i| format!("{{ p{i}: {} }}", value(i)))
+            .collect();
+        if reversed {
+            arms.reverse();
+        }
+        arms.join(" | ")
+    };
+    let source = format!(
+        "type S = {};\ntype T = {};\n",
+        arms(&|i| i.to_string(), false),
+        arms(&|_| "number".to_owned(), true)
+    );
+    let span = "`${[S] extends [T] ? \"a\" : \"b\"}-x`";
+    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
+        with_recovered_probe(&source, span, |dispatch, node| {
+            let data = dispatch.graph().node_data(node);
+            assert!(
+                matches!(
+                    data.as_deref(),
+                    Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)))
+                        if text == "b-x"
+                ),
+                "the span reads the relation's false and the template is `\"b-x\"`, \
+                 measured {data:?}"
+            );
+        });
+    });
 }
