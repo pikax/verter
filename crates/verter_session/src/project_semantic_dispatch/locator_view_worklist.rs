@@ -242,10 +242,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// - where the checker defers instantiating it — inside an object type
     ///   (its members and signatures), an array or tuple element, a
-    ///   signature, or a type argument of an interface or class;
-    /// - or where it is the body's own value through conditional branches
-    ///   alone: the checker's tail loop, which the build runs in place
-    ///   (`getConditionalType`).
+    ///   signature, a type argument of an interface or class, or either
+    ///   branch of a conditional type that stays undecided (the checker
+    ///   defers the whole conditional; only a decided conditional's selected
+    ///   branch is instantiated);
+    /// - or where it is the body's own value through selected conditional
+    ///   branches alone: the checker's tail loop, which the build runs in
+    ///   place (`getConditionalType`).
     ///
     /// Anywhere else — an alias's type argument, a conditional's check or
     /// extends type, a union's member — the checker instantiates it
@@ -262,6 +265,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => false,
         });
         tail || ancestors.iter().any(|frame| match frame {
+            // Both branches of an undecided conditional are projected here;
+            // the checker instantiates neither.
+            ProjectionFrame::ConditionalAfterTrue { .. }
+            | ProjectionFrame::ConditionalFinish { .. } => true,
             ProjectionFrame::CompositeResume { data, .. } => match data.as_ref() {
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Array { .. }
