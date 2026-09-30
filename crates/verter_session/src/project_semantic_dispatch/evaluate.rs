@@ -1687,7 +1687,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// An alias's declared body shape with `Alias` wrappers peeled: `None`
     /// when the body cannot be recovered, `Some(None)` for an alias cycle.
-    fn declared_alias_body(
+    pub(super) fn declared_alias_body(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<Option<SemanticNodeId>> {

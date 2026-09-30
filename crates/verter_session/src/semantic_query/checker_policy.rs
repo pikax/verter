@@ -69,6 +69,28 @@ pub(crate) fn instantiation_budget(within: bool) -> Result<(), CheckerDiagnostic
     })
 }
 
+/// The checker's TS2456 for a type alias whose declared type requires
+/// itself: the alias's body applies the alias — directly, or through other
+/// aliases — where the checker instantiates eagerly, with no conditional
+/// type of the declaration deciding on the way. Through a conditional type's
+/// branch the same application is the next step of the tail loop instead,
+/// and a position the checker defers (an object member, an array or tuple
+/// element) is a lazy reference. A checker error, not a resource limit:
+/// the alias is `any` however large the budgets.
+///
+/// Measured on TypeScript 7.0.2, all four `strictNullChecks` ×
+/// `noImplicitAny` settings: `type G<T> = G<[T]>`, `type G<T> = G<T>`,
+/// `type G<T> = H<T>; type H<T> = G<[T]>` and `type G<T> = H<[T]>; type H<T>
+/// = T extends any ? G<T> : never` report TS2456 and `G<string>` is `any`;
+/// `type G<T> = { a: G<[T]> }` and `type G<T> = G<[T]>[]` report nothing;
+/// `type G<T> = T extends never ? never : G<[T]>` is TS2589.
+pub(crate) const fn circular_type_alias() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::CircularTypeAlias,
+        operation: CheckerDiagnosticOperation::TypeAliasDeclaration,
+    }
+}
+
 /// The checker's error type after `diagnostic`: the typed recovery carrier,
 /// with `beyond` the type Verter names past the checker's limit, if any.
 pub(crate) fn checker_recovery(
@@ -118,12 +140,9 @@ impl InstantiationDepth {
 /// Build<N, [...Acc, 0]>` (all four `strictNullChecks` × `noImplicitAny`
 /// settings agree), `Build<999>` is `999` and `Build<1000>` is `any`
 /// under TS2589 — and Verter runs to its own, far larger one, reporting
-/// the same TS2589 there.
-///
-/// Known diagnostic gap: a generic alias whose body applies itself
-/// directly, `type Grow<T> = Grow<[T]>`, is circular to the checker
-/// (TS2456, and `any`); Verter runs its tail loop to the tail budget
-/// instead and reports TS2589, with the same `any`.
+/// the same TS2589 there. A body applying its own alias with no conditional
+/// type deciding is not a tail run but a circular declaration
+/// ([`circular_type_alias`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalTail {
     steps: u32,

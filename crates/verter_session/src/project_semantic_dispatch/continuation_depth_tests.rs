@@ -678,3 +678,98 @@ fn a_mapped_template_applying_its_declaration_reaches_ts2589() {
         );
     }
 }
+
+/// The checker diagnostic `G<string>` over `source` evaluates to, under
+/// `options` and a tail budget of `tail` when set: its numeric code, when
+/// the answer is a checker recovery anywhere in it.
+fn diagnostic_of_g_string(
+    options: &'static str,
+    source: &'static str,
+    tail: Option<u32>,
+) -> Option<u32> {
+    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    on_a_small_stack(move || {
+        let _tail = tail.map(super::connected_demand::TailBudgetForTests::install);
+        with_probe_in(
+            ProbeProject {
+                compiler_options: Some(options),
+                ..Default::default()
+            },
+            source,
+            "G<string>",
+            |dispatch, node| {
+                let value = dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("the probe evaluates completely");
+                let mut seen = rustc_hash::FxHashSet::default();
+                let mut stack = vec![value];
+                while let Some(node) = stack.pop() {
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    let Some(data) = dispatch.graph().node_data(node) else {
+                        continue;
+                    };
+                    if let SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                        diagnostic,
+                        ..
+                    }) = data.as_ref()
+                    {
+                        return Some(diagnostic.code.code());
+                    }
+                    data.for_each_retained_child(|child| stack.push(child));
+                }
+                None
+            },
+        )
+    })
+}
+
+/// A generic alias whose declared type requires itself — its body applies
+/// it, directly or through other aliases, with no conditional type of its
+/// own deciding — is the checker's TS2456 (`any`), however large the
+/// budgets; through its own conditional type's branch the application is
+/// the tail loop, TS2589 at the tail budget (a lower one than production's
+/// standing in); in a position the checker defers it is a lazy reference.
+///
+/// TypeScript 7.0.2, all four settings, `G<string>` over: `type G<T> =
+/// G<[T]>`, `type G<T> = G<T>`, `type G<T> = H<T>; type H<T> = G<[T]>` and
+/// `type G<T> = H<[T]>; type H<T> = T extends any ? G<T> : never` — TS2456,
+/// `any`; `type G<T> = T extends never ? never : G<[T]>` — TS2589, `any`;
+/// `type G<T> = { a: G<[T]> }` and `type G<T> = G<[T]>[]` — no diagnostic.
+#[test]
+fn circular_type_aliases_are_the_checkers_ts2456_and_tail_runs_its_ts2589() {
+    const CIRCULAR: [&str; 4] = [
+        "type G<T> = G<[T]>;\n",
+        "type G<T> = G<T>;\n",
+        "type G<T> = H<T>; type H<T> = G<[T]>;\n",
+        "type G<T> = H<[T]>; type H<T> = T extends any ? G<T> : never;\n",
+    ];
+    const DEFERRED: [&str; 2] = ["type G<T> = { a: G<[T]> };\n", "type G<T> = G<[T]>[];\n"];
+    const TAIL: &str = "type G<T> = T extends never ? never : G<[T]>;\n";
+    for options in SETTINGS {
+        for source in CIRCULAR {
+            assert_eq!(
+                diagnostic_of_g_string(options, source, None),
+                Some(2456),
+                "`{source}` under {options}"
+            );
+        }
+        for source in DEFERRED {
+            assert_eq!(
+                diagnostic_of_g_string(options, source, None),
+                None,
+                "`{source}` under {options}"
+            );
+        }
+        assert_eq!(
+            diagnostic_of_g_string(options, TAIL, Some(200)),
+            Some(2589),
+            "`{TAIL}` under {options}"
+        );
+    }
+}

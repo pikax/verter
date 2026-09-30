@@ -602,7 +602,10 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
         .upsert(UpsertRequest {
             canonical_id: Some("/runaway.ts".to_string()),
             input_id: "/runaway.ts".to_string(),
-            source: Arc::from("export type Runaway<T> = Runaway<[T]>;\n"),
+            // Through its own conditional type the self-application is the
+            // checker's tail loop over ever-new arguments; applied directly it
+            // would be a circular declaration (TS2456), not growth.
+            source: Arc::from("export type Runaway<T> = T extends never ? never : Runaway<[T]>;\n"),
             file_language: crate::LanguageRegistry::global()
                 .classify_static("/runaway.ts")
                 .static_resolution(),
