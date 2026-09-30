@@ -795,13 +795,18 @@ fn normalized_projection_shape_equivalent(
                 SemanticNodeData::Infer {
                     name: left_name,
                     binder: left_binder,
+                    constraint: left_constraint,
                 },
                 SemanticNodeData::Infer {
                     name: right_name,
                     binder: right_binder,
+                    constraint: right_constraint,
                 },
             ) => {
-                if left_name != right_name || left_binder != right_binder {
+                if left_name != right_name
+                    || left_binder != right_binder
+                    || !push_optional_proof_pair(&mut stack, *left_constraint, *right_constraint)
+                {
                     return Some(false);
                 }
             }

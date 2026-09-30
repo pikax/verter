@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    MacroAnchor, MacroInvalidReason, MacroMemberReason, MacroPartialReason, MacroRuntimeOutcome,
-    MacroRuntimeShape, MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation,
-    RuntimeConstructor, RuntimeProp, RuntimePropType, SynthesizedRowKind,
-    TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
-    TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
+    MacroAnchor, MacroInvalidReason, MacroMemberReason, MacroRuntimeOutcome, MacroRuntimeShape,
+    MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
+    RuntimePropType, SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition,
+    TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 
 use crate::typeinfo::vue_macro_codegen::{VueMacroCodegenDemand, VueMacroDependencyFailure};
@@ -51,6 +50,17 @@ fn produce(
     canonical_id: &str,
     demand: VueMacroCodegenDemand,
 ) -> crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput {
+    try_produce(host, canonical_id, demand).expect("an uncancelled production publishes")
+}
+
+fn try_produce(
+    host: &VerterHost,
+    canonical_id: &str,
+    demand: VueMacroCodegenDemand,
+) -> Result<
+    crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    crate::semantic_query::ExecutionAbort,
+> {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, canonical_id, demand)
     })
@@ -758,12 +768,13 @@ defineProps<Payload>()
 #[test]
 fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    // A deep array nest is lowered element-wise by the flow IR's own
-    // structural lowering, so it charges that lowering's nesting envelope.
-    let mut inferred = "[0]".to_owned();
-    for _ in 0..80 {
-        inferred = format!("[{inferred}]");
-    }
+    // A leaf the flow lowering infers whole (a `satisfies` over a
+    // conditional holding a 5,000-element array literal) exceeds that
+    // inference's work budget.
+    let inferred = format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    );
     upsert(
         &host,
         "/src/InferenceBudget.vue",
@@ -789,7 +800,7 @@ defineProps<Payload>()
     assert_eq!(
         payload.declaration_failure,
         Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
-            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
         ))
     );
     // Pinned terminal state: the aggregate completeness is EXACTLY
@@ -813,12 +824,13 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    // A deep array nest is lowered element-wise by the flow IR's own
-    // structural lowering, so it charges that lowering's nesting envelope.
-    let mut inferred = "[0]".to_owned();
-    for _ in 0..80 {
-        inferred = format!("[{inferred}]");
-    }
+    // A leaf the flow lowering infers whole (a `satisfies` over a
+    // conditional holding a 5,000-element array literal) exceeds that
+    // inference's work budget.
+    let inferred = format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    );
     upsert(
         &host,
         "/src/InferenceBudgetSibling.vue",
@@ -852,7 +864,7 @@ defineModel<string>('selected')
     assert_eq!(
         payload.declaration_failure,
         Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
-            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
         ))
     );
 

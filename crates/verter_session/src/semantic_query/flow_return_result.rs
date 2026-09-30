@@ -257,6 +257,27 @@ impl FlowReturnResult {
         self.degradation
     }
 
+    /// This result published by an evaluation that read a degraded member
+    /// return as a type:
+    /// its own typed degradation when it has one, else
+    /// [`FlowReturnDegradation::PartialInterior`].
+    #[must_use]
+    pub(crate) fn with_partial_interior(mut self) -> Self {
+        self.degradation
+            .get_or_insert(FlowReturnDegradation::PartialInterior);
+        self
+    }
+
+    /// This result evaluated through the checker's recovery after an
+    /// operation exhausted its own allowance: its own typed degradation
+    /// when it has one, else [`FlowReturnDegradation::OperationBudget`].
+    #[must_use]
+    pub(crate) fn with_operation_budget(mut self) -> Self {
+        self.degradation
+            .get_or_insert(FlowReturnDegradation::OperationBudget);
+        self
+    }
+
     /// The surviving FRESH literal constituents at the return's top
     /// level (see the field). Empty means every kept literal is pinned.
     #[must_use]

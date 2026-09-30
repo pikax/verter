@@ -953,32 +953,29 @@ defineModel<string>('selected')
     assert_eq!(output.tsc.as_ref().expect("TSC bundle").entries.len(), 3);
 }
 
-fn assert_cancelled_macro_output(
+fn assert_complete_macro_output(
     output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
 ) {
-    assert!(output
-        .completeness
-        .reasons()
-        .contains(crate::semantic_query::PartialReasonSet::CANCELLED));
-    assert!(!output.facts_cacheable());
-    let runtime = output.runtime.as_ref().expect("runtime bundle");
-    assert!(!runtime.entries.is_empty());
-    assert!(runtime.entries.iter().all(|entry| matches!(
-        entry.outcome,
-        MacroRuntimeOutcome::Partial(ref failure)
-            if failure.reason == MacroPartialReason::Cancelled
-    )));
-    let tsc = output.tsc.as_ref().expect("TSC bundle");
-    assert!(!tsc.entries.is_empty());
-    assert!(tsc.entries.iter().all(|entry| matches!(
-        entry.outcome,
-        MacroTscOutcome::Partial(ref failure)
-            if failure.reason == MacroPartialReason::Cancelled
-    )));
+    assert_eq!(
+        output.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(output.facts_cacheable());
+    assert!(matches!(
+        output.runtime.as_ref().expect("runtime bundle").entries[0].outcome,
+        MacroRuntimeOutcome::Complete(_)
+    ));
+    assert!(matches!(
+        output.tsc.as_ref().expect("TSC bundle").entries[0].outcome,
+        MacroTscOutcome::Complete(_)
+    ));
 }
 
+/// A request cancelled before its production runs publishes nothing — no
+/// bundle of refusal rows standing in for the answer — and an uncancelled
+/// retry answers completely.
 #[test]
-fn cancelled_request_returns_typed_partial_and_uncancelled_retry_completes() {
+fn a_cancelled_request_publishes_nothing_and_an_uncancelled_retry_completes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     const FILE: &str = "/src/CancelledRetry.vue";
     upsert(
@@ -991,29 +988,65 @@ fn cancelled_request_returns_typed_partial_and_uncancelled_retry_completes() {
     cancelled.cancel();
     let cancelled_output = {
         let _guard = crate::request_context::RequestContextGuard::install(cancelled);
-        produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+        try_produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc)
     };
-    assert_cancelled_macro_output(&cancelled_output);
-
-    let retry = produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc);
     assert_eq!(
-        retry.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        cancelled_output.err(),
+        Some(crate::semantic_query::ExecutionAbort::Cancelled)
     );
-    assert!(retry.facts_cacheable());
-    assert!(matches!(
-        retry.runtime.as_ref().expect("runtime bundle").entries[0].outcome,
-        MacroRuntimeOutcome::Complete(_)
-    ));
-    assert!(matches!(
-        retry.tsc.as_ref().expect("TSC bundle").entries[0].outcome,
-        MacroTscOutcome::Complete(_)
+
+    assert_complete_macro_output(&produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc));
+}
+
+/// A production whose only requester is cancelled WHILE it runs is
+/// discarded: it publishes nothing, and nothing it computed before the
+/// cancellation poisons the retry, which answers completely and warms.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_production_cancelled_mid_flight_is_discarded_without_poisoning_the_retry() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    const FILE: &str = "/src/CancelledMidFlight.vue";
+    upsert(
+        host.as_ref(),
+        FILE,
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+    );
+    let rendezvous = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+    *host.test_force.vue_macro_codegen_build_rendezvous.lock() = Some(Arc::clone(&rendezvous));
+
+    let context = crate::request_context::RequestContext::new(7004, Arc::from(FILE), false, None);
+    let attempt = {
+        let host = Arc::clone(&host);
+        let context = Arc::clone(&context);
+        std::thread::spawn(move || {
+            let _guard = crate::request_context::RequestContextGuard::install(context);
+            try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+        })
+    };
+    // The production is running: cancel its only requester, then let it go on.
+    rendezvous.0.wait();
+    context.cancel();
+    rendezvous.1.wait();
+    let aborted = attempt.join().expect("attempt thread");
+    *host.test_force.vue_macro_codegen_build_rendezvous.lock() = None;
+
+    assert_eq!(
+        aborted.err(),
+        Some(crate::semantic_query::ExecutionAbort::Cancelled)
+    );
+    assert_complete_macro_output(&produce(
+        host.as_ref(),
+        FILE,
+        VueMacroCodegenDemand::RuntimeAndTsc,
     ));
 }
 
+/// A cancelled requester of a shared production leaves it without
+/// publishing anything for itself, and the live requester that joined the
+/// same production is answered completely.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn cancelled_winner_does_not_abort_live_sibling() {
+fn a_cancelled_requester_does_not_poison_a_live_one_on_the_same_production() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     const FILE: &str = "/src/CancelledWinner.vue";
     upsert(
@@ -1036,7 +1069,7 @@ fn cancelled_winner_does_not_abort_live_sibling() {
         let winner_context = Arc::clone(&winner_context);
         std::thread::spawn(move || {
             let _guard = crate::request_context::RequestContextGuard::install(winner_context);
-            produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+            try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
         })
     };
     rendezvous.0.wait();
@@ -1047,7 +1080,7 @@ fn cancelled_winner_does_not_abort_live_sibling() {
             let context =
                 crate::request_context::RequestContext::new(7003, Arc::from(FILE), false, None);
             let _guard = crate::request_context::RequestContextGuard::install(context);
-            produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+            try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
         })
     };
 
@@ -1077,21 +1110,11 @@ fn cancelled_winner_does_not_abort_live_sibling() {
     let sibling_output = sibling.join().expect("sibling thread");
     *host.test_force.vue_macro_codegen_build_rendezvous.lock() = None;
 
-    assert_cancelled_macro_output(&winner_output);
     assert_eq!(
-        sibling_output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        winner_output.err(),
+        Some(crate::semantic_query::ExecutionAbort::Cancelled)
     );
-    assert!(sibling_output.facts_cacheable());
-    assert!(matches!(
-        sibling_output
-            .runtime
-            .as_ref()
-            .expect("runtime bundle")
-            .entries[0]
-            .outcome,
-        MacroRuntimeOutcome::Complete(_)
-    ));
+    assert_complete_macro_output(&sibling_output.expect("the live requester is answered"));
 }
 
 /// `CompileTarget::IDE` is TSX-only, and the TSX it produces is type-checked

@@ -105,8 +105,13 @@ pub(super) fn needs_context(
             unsafe_roots: &unsafe_roots,
             scopes: ShadowStack::default(),
         };
-        verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
-        if scan.found {
+        // A walk refused its stack is taken as needing the context, the
+        // fail-closed answer; the compile around it is refused with the
+        // refusal.
+        let walked = verter_parser::oxc_parse::leased_program_walk(&program, || {
+            scan.visit_program(&program)
+        });
+        if walked.is_err() || scan.found {
             return true;
         }
     }
@@ -139,8 +144,10 @@ fn expr_needs_context(
         unsafe_roots,
         scopes: ShadowStack::default(),
     };
-    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_program(&program));
-    scan.found
+    // A walk refused its stack is taken as needing the context, the
+    // fail-closed answer; the compile around it is refused with the refusal.
+    verter_parser::oxc_parse::leased_program_walk(&program, || scan.visit_program(&program))
+        .map_or(true, |()| scan.found)
 }
 
 /// Whether a `{@render}` DYNAMIC-callee expression (the whole inner snippet
@@ -190,8 +197,10 @@ fn render_callee_needs_context(
         unsafe_roots,
         scopes: ShadowStack::default(),
     };
-    verter_parser::oxc_parse::with_program_stack(&program, || scan.visit_expression(scanned));
-    scan.found
+    // A walk refused its stack is taken as needing the context, the
+    // fail-closed answer; the compile around it is refused with the refusal.
+    verter_parser::oxc_parse::leased_program_walk(&program, || scan.visit_expression(scanned))
+        .map_or(true, |()| scan.found)
 }
 
 /// Collect the UNSAFE prop root names of a program: the `$props()` destructure

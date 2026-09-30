@@ -858,6 +858,9 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
                 FunctionBodySource::from_function(function).unwrap()
             }
             FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+            FunctionNode::Initializer(expression) => {
+                FunctionBodySource::from_initializer(expression)
+            }
         };
         let prepared = build_indexed_function_body_skeleton(&body, source, entry).unwrap();
         let bindings = prepared.bindings();
@@ -923,6 +926,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
         source,
         &owners,
         Arc::from("/class.ts"),
+        &Default::default(),
     );
     let entry = index.matches_named("f").next().unwrap().entry();
     let prepared =
@@ -1198,9 +1202,9 @@ fn each_callable_keeps_its_own_read_partition_of_the_merged_site_footprint() {
 /// The three outcomes a consumer must be able to tell apart at one call
 /// site: a callback that provably captures nothing, a callback whose only
 /// free read binds no declaration at all (a global — never a capture),
-/// and a callback the indexed program does not serve (a parameter
-/// default), which asserts NOTHING and must fail closed rather than read
-/// as capture-free.
+/// and a callable the indexed program does not serve (a class whose static
+/// block runs at its evaluation), which asserts NOTHING and must fail
+/// closed rather than read as capture-free.
 #[test]
 fn capture_free_globals_only_and_uncorrelated_callables_stay_distinct() {
     let prepared = indexed_structure_of("function root() { sink(() => 1); return 1; }");
@@ -1224,16 +1228,61 @@ fn capture_free_globals_only_and_uncorrelated_callables_stay_distinct() {
         "a read that binds no declaration is free, never a capture"
     );
 
-    let prepared = indexed_structure_of("function root(p, q = () => p) { return q; }");
+    let prepared = indexed_structure_of(
+        "function root() { const a = 1; sink(class { static { use(a); } }); return 1; }",
+    );
     let closures = sole_closure_inventory(prepared.skeleton());
     assert_eq!(
         closures[0].correlation,
         SkeletonClosureCorrelation::Uncorrelated,
-        "a parameter-default callable the index does not serve is a typed unknown"
+        "a callable the index does not serve is a typed unknown"
     );
     assert!(
         closures[0].captures.is_empty(),
         "an uncorrelated record asserts no capture set"
+    );
+}
+
+/// A callable in a parameter list has no index entry of its own, but the
+/// frame resolves every name it reaches: its capture set is exact. A read
+/// capture is read; a write-only capture is retained for its cell alone;
+/// and a body-level `var` is invisible to a parameter default (the body's
+/// variables live in their own environment once a parameter has a
+/// default), so a same-named read there binds nothing of this frame.
+#[test]
+fn a_parameter_list_callable_names_its_captures_exactly() {
+    let prepared = indexed_structure_of("function root(p, q = () => p) { return q; }");
+    let skeleton = prepared.skeleton();
+    let p = single_binding_named(skeleton, "p");
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert_eq!(closures[0].captures.as_ref(), &[FlowBindingRef::Local(p)]);
+    assert_eq!(
+        closures[0].read_captures.as_ref(),
+        &[FlowBindingRef::Local(p)]
+    );
+
+    let prepared = indexed_structure_of("function root(p, q = () => { p = 2; }) { return q; }");
+    let skeleton = prepared.skeleton();
+    let p = single_binding_named(skeleton, "p");
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert_eq!(
+        closures[0].captures.as_ref(),
+        &[FlowBindingRef::Local(p)],
+        "a write-only capture is retained"
+    );
+    assert!(
+        closures[0].read_captures.is_empty(),
+        "a write-only capture is not read"
+    );
+
+    let prepared = indexed_structure_of("function root(q = () => x) { var x = 1; return q; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert!(
+        closures[0].captures.is_empty(),
+        "a parameter default never sees the body's own `var`"
     );
 }
 
@@ -1343,7 +1392,7 @@ fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
 /// its capture family would seal complete over a retained cell.
 #[test]
 fn callables_in_binding_pattern_computed_keys_are_enumerated() {
-    use SkeletonClosureCorrelation::{Exact, Uncorrelated};
+    use SkeletonClosureCorrelation::Exact;
     for (source, expected) in [
         (
             "function root(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
@@ -1363,7 +1412,7 @@ fn callables_in_binding_pattern_computed_keys_are_enumerated() {
         ),
         (
             "function root(a, { [reg(() => a)]: x }) { return x; }",
-            Uncorrelated,
+            Exact,
         ),
     ] {
         let prepared = indexed_structure_of(source);
@@ -1426,24 +1475,28 @@ fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
     assert!(!calls[0].new_construct);
 }
 
-/// An array literal opens one child site per element, but a nest of array
-/// literals deeper than the shallow inference's nesting budget is a leaf:
-/// that inference answers it whole and reports the typed budget
-/// exhaustion, so neither half descends it level by level. Sixty-four
-/// levels are structural; sixty-five are one leaf.
+/// An array literal opens one child site per element at any depth: a nest
+/// of array literals is structural level by level, so the evaluator answers
+/// it as the checker does (65 levels return `number` under 65 array
+/// dimensions, TypeScript 7.0.2).
 #[test]
-fn array_nests_past_the_inference_budget_are_leaves() {
-    let nest = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
-    let return_shape = |levels: usize| {
-        let skeleton = skeleton_of(&format!("function f() {{ return {}; }}", nest(levels)));
-        let site = skeleton.return_sites[0]
-            .argument
-            .expect("the return carries a value");
-        matches!(
-            skeleton.expr_site(site).shape,
-            SkeletonExprShape::ArrayLiteral { .. }
-        )
-    };
-    assert!(return_shape(64), "a 64-level nest opens its array sites");
-    assert!(!return_shape(65), "a 65-level nest is one leaf");
+fn array_nests_open_a_site_per_level_at_any_depth() {
+    let levels = 65;
+    let skeleton = skeleton_of(&format!(
+        "function f() {{ return {}0{}; }}",
+        "[".repeat(levels),
+        "]".repeat(levels)
+    ));
+    let mut site = skeleton.return_sites[0]
+        .argument
+        .expect("the return carries a value");
+    let mut opened = 0;
+    while let SkeletonExprShape::ArrayLiteral { elements } = &skeleton.expr_site(site).shape {
+        opened += 1;
+        site = elements[0];
+    }
+    assert_eq!(
+        opened, levels,
+        "every level of the nest opens its array site"
+    );
 }

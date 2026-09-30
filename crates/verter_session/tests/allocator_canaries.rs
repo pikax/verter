@@ -33,6 +33,11 @@ thread_local! {
     /// declaration is near-invisible in the call count and quadratic in
     /// the byte count.
     static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
+    /// Bytes allocated and not yet freed on the current harness thread,
+    /// and the highest that count reached since the last reset: the
+    /// live construction a measured window holds at its peak.
+    static LIVE_BYTES: Cell<i64> = const { Cell::new(0) };
+    static PEAK_LIVE_BYTES: Cell<i64> = const { Cell::new(0) };
 }
 
 fn increment_alloc_counter(size: usize) {
@@ -41,11 +46,31 @@ fn increment_alloc_counter(size: usize) {
     // no longer accessible.
     let _ = ALLOC_COUNTER.try_with(|counter| counter.set(counter.get().wrapping_add(1)));
     let _ = ALLOC_BYTES.try_with(|bytes| bytes.set(bytes.get().wrapping_add(size as u64)));
+    add_live_bytes(size as i64);
+}
+
+fn add_live_bytes(delta: i64) {
+    let _ = LIVE_BYTES.try_with(|live| {
+        let now = live.get().wrapping_add(delta);
+        live.set(now);
+        let _ = PEAK_LIVE_BYTES.try_with(|peak| {
+            if now > peak.get() {
+                peak.set(now);
+            }
+        });
+    });
+}
+
+/// The highest live byte count on this thread since the last reset.
+fn peak_live_bytes() -> i64 {
+    PEAK_LIVE_BYTES.with(Cell::get)
 }
 
 fn reset_alloc_counter() {
     ALLOC_COUNTER.with(|counter| counter.set(0));
     ALLOC_BYTES.with(|bytes| bytes.set(0));
+    LIVE_BYTES.with(|live| live.set(0));
+    PEAK_LIVE_BYTES.with(|peak| peak.set(0));
 }
 
 fn alloc_count() -> u64 {
@@ -63,6 +88,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        add_live_bytes(-(layout.size() as i64));
         unsafe { System.dealloc(ptr, layout) }
     }
 
@@ -73,7 +99,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // A grow-in-place realloc still REQUESTS `new_size` bytes; the
-        // byte counter records requests, not net residency.
+        // byte counter records requests, not net residency; the live
+        // count trades the old block for the new one.
+        add_live_bytes(-(layout.size() as i64));
         increment_alloc_counter(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -537,9 +565,9 @@ mod canary_flow_return_audit_emission_zero_alloc {
         let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
         let symbol: Arc<str> = Arc::from("makeThing");
         let exceeded = FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::ReturnSites,
-            limit: 256,
-            observed: 300,
+            axis: FlowSliceBudgetAxis::SelectedNodes,
+            limit: 4096,
+            observed: 4097,
         };
 
         // Warm the TLS probes (request-context slot, accumulator
@@ -891,6 +919,9 @@ mod canary_fact_emission_allocation_volume_class {
 
 #[path = "allocation_cases/flow_products.rs"]
 mod flow_product_allocation;
+
+#[path = "allocation_cases/construction_bytes.rs"]
+mod construction_bytes_allocation;
 
 #[path = "allocation_cases/flow_literal_provenance.rs"]
 mod flow_literal_provenance_allocation;

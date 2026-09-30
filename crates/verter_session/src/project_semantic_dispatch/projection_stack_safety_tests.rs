@@ -486,11 +486,14 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
             decl_name: Arc::from("Recursive"),
         },
     });
-    assert!(dispatch.push_instantiate_active((
-        Arc::from("/recursive.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Recursive"),
-    )));
+    assert!(dispatch.push_instantiate_active(
+        (
+            Arc::from("/recursive.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Recursive"),
+        ),
+        Arc::from([]),
+    ));
     let (_demand_guard, initial_trip) = dispatch.enter_connected_demand(false);
     assert_eq!(initial_trip, None);
     let tripped = dispatch
@@ -599,7 +602,10 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
         .upsert(UpsertRequest {
             canonical_id: Some("/runaway.ts".to_string()),
             input_id: "/runaway.ts".to_string(),
-            source: Arc::from("export type Runaway<T> = Runaway<[T]>;\n"),
+            // Through its own conditional type the self-application is the
+            // checker's tail loop over ever-new arguments; applied directly it
+            // would be a circular declaration (TS2456), not growth.
+            source: Arc::from("export type Runaway<T> = T extends never ? never : Runaway<[T]>;\n"),
             file_language: crate::LanguageRegistry::global()
                 .classify_static("/runaway.ts")
                 .static_resolution(),

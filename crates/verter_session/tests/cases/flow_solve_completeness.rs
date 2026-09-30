@@ -2921,26 +2921,8 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
         "the retained selection satisfying the request budget plans"
     );
 
-    // A stricter return-site budget with the same graph, query and demand:
-    // provenance passes; only the resource policy is stricter.
-    let mut strict_sites = request_named("rich");
-    strict_sites.resources.slice_budget = FlowSliceBudget {
-        max_return_sites: 1,
-        ..FlowSliceBudget::default()
-    };
-    assert_eq!(
-        fixture
-            .build_plan_with_retained(strict_sites, &loose)
-            .unwrap_err(),
-        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::ReturnSites,
-            limit: 1,
-            observed: 2,
-        }),
-        "a selection over the request's return-site budget is a typed planning error"
-    );
-
-    // The same rule on the selected-node axis.
+    // A stricter selected-node budget with the same graph, query and
+    // demand: provenance passes; only the resource policy is stricter.
     let mut strict_nodes = request_named("rich");
     strict_nodes.resources.slice_budget = FlowSliceBudget {
         max_selected_nodes: u32::try_from(selected).expect("in range") - 1,
@@ -2978,7 +2960,6 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     // selection's counts, never the budget VALUES.
     let mut tighter = request_named("rich");
     tighter.resources.slice_budget = FlowSliceBudget {
-        max_return_sites: 2,
         max_selected_nodes: u32::try_from(selected).expect("in range"),
         max_value_states: value_states,
     };
@@ -3230,7 +3211,7 @@ enum CallableCaptureOutcome {
 /// retains `a` — as part of producing the demanded binding. Each fixture
 /// returns a target of such a pattern; none may seal the capture family
 /// without `a`.
-const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 8] = [
+const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 9] = [
     (
         "declarator_key",
         "function declarator_key(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
@@ -3259,6 +3240,11 @@ const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, CallableCaptureOutcome); 8
     (
         "param_key",
         "function param_key(a, { [reg(() => a)]: x }) { return x; }",
+        CallableCaptureOutcome::Captured,
+    ),
+    (
+        "param_key_static_block",
+        "function param_key_static_block(a, { [reg(class { static { use(a); } })]: x }) { return x; }",
         CallableCaptureOutcome::Gap,
     ),
     (
@@ -3374,8 +3360,8 @@ fn assert_callable_capture_outcome(
 }
 
 const UNSERVED_CALLABLE_FIXTURE_SOURCE: &str = r#"
-function unserved_callable(p, q = () => p) {
-  return q;
+function unserved_callable(p) {
+  return sink(class { static { use(p); } });
 }
 "#;
 
@@ -3483,8 +3469,9 @@ fn a_sibling_reader_never_turns_a_write_only_capture_into_a_value_demand() {
     );
 }
 
-/// An authored callable the indexed program does not serve — here a
-/// parameter default — asserts NOTHING about what it captures. Reading
+/// An authored callable the indexed program does not serve — here a class
+/// whose static block runs at its evaluation — asserts NOTHING about what
+/// it captures. Reading
 /// its absent record as "captures nothing" publishes a wrong-complete
 /// result: the callable really does retain the enclosing `p`. It fails
 /// closed as the capture family's typed gap, so the solve stays a typed

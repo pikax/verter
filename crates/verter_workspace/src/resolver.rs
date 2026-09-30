@@ -441,6 +441,14 @@ thread_local! {
     static DRIVER_TERMINAL_KEY_COPIES: Cell<usize> = const { Cell::new(0) };
     static DRIVER_DELTA_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static INPUT_RESOLUTION_BUDGET_EVENTS: std::cell::RefCell<Vec<InputResolutionBudgetExhaustion>> = const { std::cell::RefCell::new(Vec::new()) };
+    static OUTER_RESTARTS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The outer restarts resolutions on this thread charged since the last
+/// take.
+#[cfg(test)]
+pub(crate) fn take_outer_restarts_for_test() -> usize {
+    OUTER_RESTARTS.take()
 }
 
 #[cfg(test)]
@@ -841,6 +849,8 @@ impl InputResolutionLedger {
         &mut self,
         reader: &dyn crate::traits::WorkspaceRead,
     ) -> Result<(), Box<AttemptFailure>> {
+        #[cfg(test)]
+        OUTER_RESTARTS.set(OUTER_RESTARTS.get() + 1);
         self.applied_outputs.clear();
         let unresolved = self
             .last_load_set
@@ -949,6 +959,10 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
     let mut last_load_set: Option<LoadSet> = None;
 
     loop {
+        #[cfg(test)]
+        crate::engine::resolution_test_hooks::fire(
+            crate::engine::resolution_test_hooks::ResolutionPhase::DriverRound,
+        );
         let basis = crate::resolution_currency::resolution_basis_for_reader(reader)
             .unwrap_or_else(ResolutionBasis::unbound_placeholder);
         if active_basis != Some(basis) {

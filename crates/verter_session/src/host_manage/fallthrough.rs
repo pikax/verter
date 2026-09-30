@@ -124,18 +124,29 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
-    ) -> Option<crate::types::FallthroughResolution> {
+    ) -> Result<Option<crate::types::FallthroughResolution>, crate::semantic_query::ExecutionAbort>
+    {
         let _ctx_guard = self.install_request_budget_context_if_none(
             self.next_request_id(),
             canonical_id,
             false,
         );
         let mut visiting = rustc_hash::FxHashSet::default();
-        self.resolve_fallthrough_surface_internal_pinned(
+        // The resolve folds its completeness into the enclosing scope; this
+        // scope reads it back (and bubbles it on) so an aborted resolve
+        // publishes nothing.
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let resolution = self.resolve_fallthrough_surface_internal_pinned(
             canonical_id,
             fixed_store_view,
             &mut visiting,
-        )
+        );
+        let observed = crate::request_context::current_cold_compute_completeness();
+        drop(scope);
+        match crate::semantic_query::ExecutionAbort::observed_in(observed) {
+            Some(abort) => Err(abort),
+            None => Ok(resolution),
+        }
     }
 
     /// The `(module specifier, namespace member)` pair `owner_canonical_id`'s

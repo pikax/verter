@@ -562,6 +562,14 @@ pub enum ProgramExpressionSource {
     },
     /// An indexed callback/function value's exact return carrier.
     FunctionReturn(FunctionReturnSource),
+    /// A class field's initializer served as its own position
+    /// ([`FunctionNode::Initializer`]): the field's value is the
+    /// position's body-derived return, its fresh literals widened unless
+    /// the field is `readonly`.
+    FieldInitializer {
+        source: FunctionReturnSource,
+        readonly: bool,
+    },
     /// A call-bearing compound outside the indexed expression domain.
     UnsupportedCall,
 }
@@ -682,6 +690,17 @@ pub struct FunctionCapturedRead {
     pub binding: FlowBindingIdentity,
     pub path: Arc<[Arc<str>]>,
     pub span: verter_span::Span,
+}
+
+/// The exact closure subjects and read dependencies of one callable in a
+/// frame's PARAMETER LIST (`cb = () => a`): no index entry serves it, but
+/// the frame's own resolution names everything it reads and writes from
+/// around it, so its capture set is exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParameterCallableCaptures {
+    pub span: verter_span::Span,
+    pub bindings: CanonicalCaptureIdentity,
+    pub reads: Arc<[FunctionCapturedRead]>,
 }
 
 /// Exact closure subjects and read dependencies of one immediately nested callable.
@@ -834,6 +853,14 @@ pub struct FunctionProgramEntry {
     pub captured_reads: Arc<[FunctionCapturedRead]>,
     /// Immediate child creation sites and their retained read-path dependencies.
     pub nested_captures: Arc<[FunctionNestedCaptures]>,
+    /// The references each parameter-list callable makes to names it does
+    /// not declare, by the callable's span: resolved with the frame's own
+    /// references into [`Self::parameter_callable_captures`].
+    pub(crate) parameter_callable_references:
+        Arc<[(verter_span::Span, Arc<[FunctionReferenceRecord]>)]>,
+    /// The exact captures of each parameter-list callable whose every
+    /// reference resolved (the others keep their typed gap).
+    pub parameter_callable_captures: Arc<[FunctionParameterCallableCaptures]>,
     /// Evaluation-effect call sites.
     pub effects: Arc<[FunctionEffectRecord]>,
     /// Indexed call sites: program point, callee carrier, exact same-file
@@ -1184,6 +1211,8 @@ impl FunctionProgramIndex {
 struct DiscoveryCtx<'source, 'ast> {
     canonical_id: Arc<str>,
     source: &'source str,
+    /// The header walk's classification of the class fields.
+    class_fields: &'source crate::analysis::class_field_value::ClassFieldValues,
     /// The containment every walk of oxc's over a node of the program runs
     /// under, scanning the program at most once for all of them.
     walks: verter_parser::oxc_parse::ProgramWalkStack<'ast>,
@@ -1234,7 +1263,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     FunctionNode::Function(function) => {
                         function.id.as_ref().map(|id| Arc::from(id.name.as_str()))
                     }
-                    FunctionNode::Arrow(_) => None,
+                    FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => None,
                 },
             };
             nodes
@@ -1261,22 +1290,28 @@ pub fn build_function_program_index(
     owners: &TopLevelOwnerTable,
     canonical_id: Arc<str>,
 ) -> FunctionProgramIndex {
-    build_function_program_index_impl(program, source, owners, canonical_id, None).0
+    // No header walk ran: each class's fields are classified as discovery
+    // meets them.
+    let class_fields = crate::analysis::class_field_value::ClassFieldValues::default();
+    build_function_program_index_impl(program, source, owners, canonical_id, &class_fields, None).0
 }
 
 /// Index one retained parse and register exact arena addresses in the same walk.
 /// The nodes belong on the retained worker; only the content-free index may cross it.
+/// `class_fields` is the header walk's classification of the class fields.
 pub fn build_function_program_index_with_nodes<'ast>(
     program: &'ast oxc_ast::ast::Program<'ast>,
     source: &str,
     owners: &TopLevelOwnerTable,
     canonical_id: Arc<str>,
+    class_fields: &crate::analysis::class_field_value::ClassFieldValues,
 ) -> (FunctionProgramIndex, FunctionProgramNodes<'ast>) {
     let (index, nodes) = build_function_program_index_impl(
         program,
         source,
         owners,
         canonical_id,
+        class_fields,
         Some(FunctionProgramNodes::default()),
     );
     (index, nodes.expect("retained indexing requested nodes"))
@@ -1287,11 +1322,13 @@ fn build_function_program_index_impl<'ast>(
     source: &str,
     owners: &TopLevelOwnerTable,
     canonical_id: Arc<str>,
+    class_fields: &crate::analysis::class_field_value::ClassFieldValues,
     nodes: Option<FunctionProgramNodes<'ast>>,
 ) -> (FunctionProgramIndex, Option<FunctionProgramNodes<'ast>>) {
     let mut ctx = DiscoveryCtx {
         canonical_id,
         source,
+        class_fields,
         walks: verter_parser::oxc_parse::ProgramWalkStack::new(program),
         owners,
         nodes,
@@ -1633,6 +1670,41 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                 }
             }
         }
+        // A parameter-list callable's references resolve in this frame's
+        // scopes; every one resolved makes its capture set exact.
+        let mut parameter_callable_captures = Vec::new();
+        for (span, references) in entries[index].parameter_callable_references.iter() {
+            let mut bindings: Vec<FlowBindingIdentity> = Vec::new();
+            let mut reads: Vec<FunctionCapturedRead> = Vec::new();
+            let mut exact = true;
+            for reference in references.iter() {
+                match resolve(&reference.name, reference.span) {
+                    FunctionReferenceBinding::Resolved(identity) => {
+                        if !bindings.contains(&identity) {
+                            bindings.push(identity.clone());
+                        }
+                        if reference.read_role.is_some() {
+                            reads.push(FunctionCapturedRead {
+                                binding: identity,
+                                path: Arc::clone(&reference.path),
+                                span: reference.span,
+                            });
+                        }
+                    }
+                    FunctionReferenceBinding::Free => {}
+                    _ => exact = false,
+                }
+            }
+            if exact {
+                reads.sort_by_key(|read| read.span.start);
+                parameter_callable_captures.push(FunctionParameterCallableCaptures {
+                    span: *span,
+                    bindings: CanonicalCaptureIdentity(Arc::from(bindings.into_boxed_slice())),
+                    reads: Arc::from(reads.into_boxed_slice()),
+                });
+            }
+        }
+        entries[index].parameter_callable_captures = parameter_callable_captures.into();
         // Code no entry serves (a class, a parameter-list callable) is a
         // callable nested here too: its escaping assignments reach the
         // defining frame, this one included.
@@ -3146,6 +3218,7 @@ fn discover_top_level_callable<'ast>(
             formal_params(&arrow.params),
             FunctionBodyRef::of_arrow(arrow),
         ),
+        FunctionNode::Initializer(_) => return,
     };
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
@@ -3364,15 +3437,48 @@ fn discover_class_members<'ast>(
                         static_side: prop.r#static,
                     });
                 ctx.enclosing_this = Some(EnclosingThis::of_member(prop.r#static));
-                // A field whose initializer's type derives from a call is an
-                // indexed program expression its synthetic value reads.
-                if let (Some(_), Some(value), Some(anchor)) = (
-                    crate::analysis::type_eval_build::class_field_value_name(
-                        name, prop, ctx.source,
-                    ),
+                // A field read through a synthetic value is an indexed
+                // program expression that value reads. One classified as an
+                // initializer (it reads `this`, or holds a callback that
+                // may) is also a served position of its own, whose frame
+                // reads the receiver: the synthetic value is its
+                // body-derived return.
+                if let (Some(kind), Some(value), Some(anchor)) = (
+                    ctx.class_fields.field(class, prop, ctx.source),
                     prop.value.as_ref(),
                     ctx.anchor(contributor_index),
                 ) {
+                    let source = if kind
+                        == crate::analysis::class_field_value::ClassFieldValueSource::Initializer
+                    {
+                        discover_initializer_inner(
+                            value,
+                            name,
+                            FunctionPartIdentity::Member {
+                                member_path: Arc::clone(&member_path),
+                            },
+                            contributor_index,
+                            descent.clone(),
+                            ctx,
+                        );
+                        ProgramExpressionSource::FieldInitializer {
+                            source: FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
+                                anchor: AuthoredAnchor {
+                                    canonical_id: Arc::clone(&ctx.canonical_id),
+                                    owner: anchor.owner,
+                                    symbol: Arc::from(name),
+                                    space: LocatorSymbolSpace::Value,
+                                },
+                                function_part: FunctionPartIdentity::Member {
+                                    member_path: Arc::clone(&member_path),
+                                },
+                                overload_ordinal: 0,
+                            }),
+                            readonly: prop.readonly,
+                        }
+                    } else {
+                        program_expression_source(&ctx.walks, value)
+                    };
                     ctx.expressions.push(ProgramExpressionRecord {
                         point: ProgramExpressionIdentity {
                             canonical_id: Arc::clone(&ctx.canonical_id),
@@ -3383,7 +3489,7 @@ fn discover_class_members<'ast>(
                             contributor: anchor,
                             descent: descent.clone(),
                         },
-                        source: program_expression_source(&ctx.walks, value),
+                        source,
                     });
                 }
                 match prop.value.as_ref() {
@@ -3501,6 +3607,48 @@ fn discover_arrow_inner<'ast>(
     );
     ctx.push(entry, FunctionNode::Arrow(arrow));
     discover_nested_positions(FunctionBodyRef::of_arrow(arrow), &key, &locator, ctx);
+}
+
+/// A class field's initializer that reads `this`, or holds a callback that
+/// may, discovered as a served position of its own
+/// ([`FunctionNode::Initializer`]) under the member's part identity: no
+/// parameters, the one expression its body.
+fn discover_initializer_inner<'ast>(
+    initializer: &'ast Expression<'ast>,
+    name: &str,
+    part: FunctionPartIdentity,
+    contributor_index: usize,
+    descent: FunctionDescent,
+    ctx: &mut DiscoveryCtx<'_, 'ast>,
+) {
+    let Some(anchor) = ctx.anchor(contributor_index) else {
+        return;
+    };
+    let key = FunctionProgramKey {
+        declaration: FunctionDeclarationRef {
+            owner: anchor.owner,
+            name: Arc::from(name),
+            space: SymbolSpace::Value,
+        },
+        part,
+        overload_ordinal: 0,
+    };
+    let locator = FunctionBodyLocator {
+        contributor: anchor,
+        descent,
+    };
+    let node = FunctionNode::Initializer(initializer);
+    let body = FunctionBodyRef::Expression(initializer);
+    let entry = ctx.build_entry(
+        key.clone(),
+        locator.clone(),
+        Arc::from(Vec::new().into_boxed_slice()),
+        body,
+        initializer.span().start,
+        node,
+    );
+    ctx.push(entry, node);
+    discover_nested_positions(body, &key, &locator, ctx);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3670,6 +3818,7 @@ fn discover_nested_callable<'ast>(
             formal_params(&arrow.params),
             FunctionBodyRef::of_arrow(arrow),
         ),
+        FunctionNode::Initializer(_) => return None,
     };
     let key = FunctionProgramKey {
         declaration: parent_key.declaration.clone(),
@@ -3758,11 +3907,10 @@ struct TypeParamOccurrences {
 
 impl TypeParamOccurrences {
     fn of(walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>, node: &FunctionNode<'_>) -> Self {
-        let params = match node {
-            FunctionNode::Function(func) => &func.params,
-            FunctionNode::Arrow(arrow) => &arrow.params,
-        };
         let mut out = Self::default();
+        let Some(params) = node.params() else {
+            return out;
+        };
         for (ordinal, param) in params.items.iter().enumerate() {
             if let Some(annotation) = param.type_annotation.as_ref() {
                 out.collect(walks, &annotation.type_annotation, ordinal as u32);
@@ -3903,10 +4051,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         function_start: u32,
         node: FunctionNode<'ast>,
     ) -> FunctionProgramEntry {
-        let function_end = match node {
-            FunctionNode::Function(function) => function.span.end,
-            FunctionNode::Arrow(arrow) => arrow.span.end,
-        };
+        let function_end = node.span().end;
         let frame_span = verter_span::Span::new(function_start, function_end);
         let mut inventory = InventoryVisitor {
             call_addresses: self.nodes.as_mut().map(|nodes| &mut nodes.call_sites),
@@ -3922,7 +4067,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             }
         }
         inventory.in_parameter_list = true;
-        for param in &node.params().items {
+        for param in node.param_items() {
             inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
             self.walks.with_node_stack(param.span, || {
                 inventory.visit_binding_pattern(&param.pattern);
@@ -3937,7 +4082,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                 }
             });
         }
-        if let Some(rest) = &node.params().rest {
+        if let Some(rest) = node.param_rest() {
             inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
             self.walks.with_node_stack(rest.span, || {
                 inventory.visit_binding_pattern(&rest.rest.argument);
@@ -3970,6 +4115,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             creates_unserved_callable,
             class_local_scope: _,
             unserved_assignments,
+            parameter_callable_references,
             references,
             source_type_queries,
             type_queries,
@@ -4035,6 +4181,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             descendant_assignments: Arc::from([]),
             captured_reads: Arc::from([]),
             nested_captures: Arc::from([]),
+            parameter_callable_references: parameter_callable_references.into(),
+            parameter_callable_captures: Arc::from([]),
             effects: Arc::from(effects.into_boxed_slice()),
             call_sites: Arc::from(call_sites.into_boxed_slice()),
             control: Arc::from(control.into_boxed_slice()),
@@ -4115,6 +4263,9 @@ struct InventoryVisitor<'sink, 'ast> {
     /// parameter-list callable) makes to names it does not declare
     /// ([`access::EscapingAssignments`]).
     unserved_assignments: Vec<FunctionReferenceRecord>,
+    /// Every reference a parameter-list callable makes to a name it does
+    /// not declare, by the callable's span.
+    parameter_callable_references: Vec<(verter_span::Span, Arc<[FunctionReferenceRecord]>)>,
     references: Vec<FunctionReferenceRecord>,
     source_type_queries: Vec<FunctionSourceTypeQuery>,
     type_queries: Vec<FunctionTypeQuery>,
@@ -4137,6 +4288,26 @@ struct InventoryVisitor<'sink, 'ast> {
 }
 
 impl InventoryVisitor<'_, '_> {
+    /// Record one parameter-list callable's escaping references: its
+    /// assignments reach the enclosing frames as every unserved code's do,
+    /// and its reads and writes together name its captures.
+    fn record_parameter_callable(
+        &mut self,
+        span: verter_span::Span,
+        escaping: access::EscapingAssignments,
+    ) {
+        let (writes, reads) = escaping.into_escaping_references();
+        self.unserved_assignments.extend(writes.iter().cloned());
+        let mut references = reads;
+        references.extend(writes.into_iter().map(|mut write| {
+            write.read_role = None;
+            write
+        }));
+        references.sort_by_key(|reference| reference.span.start);
+        self.parameter_callable_references
+            .push((span, Arc::from(references.into_boxed_slice())));
+    }
+
     fn record_binding(
         &mut self,
         id: &oxc_ast::ast::BindingIdentifier<'_>,
@@ -4324,7 +4495,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_function(it, flags);
-            self.unserved_assignments.extend(escaping.into_escaping());
+            self.record_parameter_callable(it.span.into(), escaping);
         }
     }
 
@@ -4333,7 +4504,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_arrow_function_expression(it);
-            self.unserved_assignments.extend(escaping.into_escaping());
+            self.record_parameter_callable(it.span.into(), escaping);
         }
     }
 
@@ -4794,6 +4965,13 @@ pub enum FunctionNode<'a> {
     Function(&'a Function<'a>),
     /// An arrow function.
     Arrow(&'a ArrowFunctionExpression<'a>),
+    /// A class field's initializer that reads `this` (`b = this.a + 1`), or
+    /// holds a callback that may (`cb = [() => this.a]`):
+    /// a position with no parameters whose value is the one expression, and
+    /// whose `this` is the class's instance (or, for a static field, the
+    /// class) — served like an expression-bodied arrow so the flow lane
+    /// reads the receiver.
+    Initializer(&'a Expression<'a>),
 }
 
 impl<'a> FunctionNode<'a> {
@@ -4803,16 +4981,31 @@ impl<'a> FunctionNode<'a> {
         match self {
             Self::Function(func) => func.span,
             Self::Arrow(arrow) => arrow.span,
+            Self::Initializer(expression) => expression.span(),
         }
     }
 
-    /// The formal parameters.
+    /// The formal parameters (`None` for an initializer, which has none).
     #[must_use]
-    pub fn params(&self) -> &'a oxc_ast::ast::FormalParameters<'a> {
+    pub fn params(&self) -> Option<&'a oxc_ast::ast::FormalParameters<'a>> {
         match self {
-            Self::Function(func) => &func.params,
-            Self::Arrow(arrow) => &arrow.params,
+            Self::Function(func) => Some(&func.params),
+            Self::Arrow(arrow) => Some(&arrow.params),
+            Self::Initializer(_) => None,
         }
+    }
+
+    /// The formal parameters' items, in source order (none for an
+    /// initializer).
+    #[must_use]
+    pub fn param_items(&self) -> &'a [oxc_ast::ast::FormalParameter<'a>] {
+        self.params().map_or(&[], |params| params.items.as_slice())
+    }
+
+    /// The rest parameter, when authored.
+    #[must_use]
+    pub fn param_rest(&self) -> Option<&'a oxc_ast::ast::FormalParameterRest<'a>> {
+        self.params().and_then(|params| params.rest.as_deref())
     }
 
     /// The function body (`None` for a bodiless overload signature).
@@ -4821,13 +5014,29 @@ impl<'a> FunctionNode<'a> {
         match self {
             Self::Function(func) => func.body.as_deref().map(FunctionBodyRef::Block),
             Self::Arrow(arrow) => Some(FunctionBodyRef::of_arrow(arrow)),
+            Self::Initializer(expression) => Some(FunctionBodyRef::Expression(expression)),
         }
     }
 
-    /// Whether this is an expression-bodied arrow (`(x) => x * 2`).
+    /// Whether this is an expression-bodied arrow (`(x) => x * 2`) or an
+    /// initializer.
     #[must_use]
     pub fn is_expression_body(&self) -> bool {
-        matches!(self, Self::Arrow(arrow) if arrow.is_expression())
+        match self {
+            Self::Function(_) => false,
+            Self::Arrow(arrow) => arrow.is_expression(),
+            Self::Initializer(_) => true,
+        }
+    }
+
+    /// Whether the position is `async`.
+    #[must_use]
+    pub fn is_async(&self) -> bool {
+        match self {
+            Self::Function(func) => func.r#async,
+            Self::Arrow(arrow) => arrow.r#async,
+            Self::Initializer(_) => false,
+        }
     }
 
     /// The function's own type parameter clause, when authored.
@@ -4836,6 +5045,7 @@ impl<'a> FunctionNode<'a> {
         match self {
             Self::Function(func) => func.type_parameters.as_deref(),
             Self::Arrow(arrow) => arrow.type_parameters.as_deref(),
+            Self::Initializer(_) => None,
         }
     }
 
@@ -4845,6 +5055,7 @@ impl<'a> FunctionNode<'a> {
         match self {
             Self::Function(func) => func.return_type.as_deref(),
             Self::Arrow(arrow) => arrow.return_type.as_deref(),
+            Self::Initializer(_) => None,
         }
     }
 }
@@ -5254,7 +5465,7 @@ pub fn resolve_function_node<'a>(
                         FunctionNode::Function(function) => {
                             function.id.as_ref().map(|id| Arc::from(id.name.as_str()))
                         }
-                        FunctionNode::Arrow(_) => None,
+                        FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => None,
                     };
                     return Some(ResolvedFunctionNode {
                         node,
@@ -5308,7 +5519,7 @@ pub fn resolve_function_node<'a>(
                         FunctionNode::Function(func) => {
                             func.id.as_ref().map(|id| Arc::from(id.name.as_str()))
                         }
-                        FunctionNode::Arrow(_) => None,
+                        FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => None,
                     };
                     return Some(ResolvedFunctionNode {
                         node,
@@ -5334,7 +5545,7 @@ pub fn resolve_function_node<'a>(
                         FunctionNode::Function(func) => {
                             func.id.as_ref().map(|id| Arc::from(id.name.as_str()))
                         }
-                        FunctionNode::Arrow(_) => None,
+                        FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => None,
                     };
                     return Some(ResolvedFunctionNode {
                         node,
@@ -5444,7 +5655,9 @@ pub fn build_indexed_program_expression_ir(
                 .as_ref()?
                 .expression
         }
-        // A class field's initializer.
+        // A class field's initializer: one classified as deriving from a
+        // call, which reads no `this` (a field that may is served as a
+        // position of its own, never read here).
         FunctionDescentStep::ClassMember { member_ordinal } if steps.len() == 0 => {
             match class_declaration_of(statement)?
                 .body

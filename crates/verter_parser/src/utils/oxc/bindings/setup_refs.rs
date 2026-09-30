@@ -70,7 +70,9 @@ pub fn collect_setup_binding_refs<'a>(
         // setup bindings under test and must not suppress their own references.
         scopes: vec![FxHashSet::default()],
     };
-    crate::oxc_parse::with_program_stack(program, || collector.visit_program(program));
+    // A walk refused its stack collects nothing; the operation around it is
+    // refused with the refusal.
+    let _ = crate::oxc_parse::leased_program_walk(program, || collector.visit_program(program));
     match collector.sink {
         RefSink::Names { refs, .. } => refs,
         RefSink::Spans { .. } => unreachable!("Names sink installed above"),
@@ -104,7 +106,11 @@ pub fn collect_expression_free_refs<'a>(
         },
         scopes: vec![FxHashSet::default()],
     };
-    crate::oxc_parse::with_span_stack(source, expr.span(), || collector.visit_expression(expr));
+    // A walk refused its stack collects nothing; the operation around it is
+    // refused with the refusal.
+    let _ = crate::oxc_parse::leased_span_walk(source, expr.span(), || {
+        collector.visit_expression(expr)
+    });
     match collector.sink {
         RefSink::Names { refs, .. } => refs,
         RefSink::Spans { .. } => unreachable!("Names sink installed above"),
@@ -182,7 +188,11 @@ pub fn collect_expression_free_ref_spans<'a>(
         },
         scopes: vec![FxHashSet::default()],
     };
-    crate::oxc_parse::with_span_stack(source, expr.span(), || collector.visit_expression(expr));
+    // A walk refused its stack collects nothing; the operation around it is
+    // refused with the refusal.
+    let _ = crate::oxc_parse::leased_span_walk(source, expr.span(), || {
+        collector.visit_expression(expr)
+    });
     match collector.sink {
         RefSink::Spans { spans, .. } => *out = spans,
         RefSink::Names { .. } => unreachable!("Spans sink installed above"),

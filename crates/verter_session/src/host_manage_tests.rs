@@ -1503,6 +1503,140 @@ fn owner_import_route_witness_is_side_effect_free() {
     );
 }
 
+/// Within one request an owner's import-route witness resolves the owner's
+/// specifiers once: every later consumer rooting on it in the request
+/// shares that build, its observations replayed into any witness scope
+/// open around the consumer, and an edit in the request builds it again.
+/// Building it for every consumer resolved each specifier of a real-world
+/// component about a thousand times per request.
+#[test]
+fn a_request_builds_an_owners_import_route_witness_once() {
+    use crate::host_manage::import_route_witness::{
+        witness_builds_for_tests, ResolutionWitnessScope,
+    };
+    let host = make_host();
+    let importer = "/workspace/src/importer.ts";
+    upsert_non_sfc(
+        &host,
+        importer,
+        "import { Theme } from './theme'\nimport { Size } from './size'\nexport type Re = [Theme, Size]\n",
+    );
+    let _request = crate::request_context::install_test_request_for(importer);
+    let before = witness_builds_for_tests();
+    let first = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder produces a witness");
+    assert!(!first.is_empty(), "the unresolved specifiers observe facts");
+    for _ in 0..3 {
+        assert_eq!(
+            host.owner_import_route_witness_for_tests(importer),
+            Some(first.clone())
+        );
+    }
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        1,
+        "one build per request"
+    );
+
+    let replayed = {
+        let scope = ResolutionWitnessScope::enter();
+        let _ = host.owner_import_route_witness_for_tests(importer);
+        scope.collected()
+    };
+    let as_set = |facts: &[crate::resolver_core::FactVersionRef]| {
+        facts.iter().cloned().collect::<rustc_hash::FxHashSet<_>>()
+    };
+    assert_eq!(
+        as_set(&replayed),
+        as_set(&first),
+        "a shared build records its observations into the scope around its consumer"
+    );
+    assert_eq!(witness_builds_for_tests() - before, 1);
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/theme.ts",
+        "export interface Theme { item: string }\n",
+    );
+    let after_edit = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder produces a witness after the edit");
+    assert_eq!(
+        witness_builds_for_tests() - before,
+        2,
+        "an edit builds it again"
+    );
+    assert_ne!(
+        after_edit, first,
+        "the rebuilt witness observes the new file"
+    );
+}
+
+/// Within one request, normalizing an analysis canonical probes its
+/// declaration companions once: every later normalization of it in the
+/// request shares that run, its observations replayed into any witness
+/// scope open around the consumer, and an edit in the request probes again.
+/// Probing for every consumer re-ran the same missing dependencies' probes
+/// about sixty times per request on a real-world component.
+#[test]
+fn a_request_normalizes_an_analysis_canonical_once() {
+    use crate::host_manage::import_route_witness::{
+        normalization_builds_for_tests, ResolutionWitnessScope,
+    };
+    let host = make_host();
+    let importer = "/workspace/src/importer.ts";
+    let missing = "/workspace/src/missing";
+    upsert_non_sfc(
+        &host,
+        importer,
+        "import { X } from './missing'\nexport type Re = X\n",
+    );
+    let _request = crate::request_context::install_test_request_for(importer);
+    let resolutions = |host: &crate::VerterHost| {
+        let provenance = host.ws().vfs_provenance_snapshot();
+        provenance.import_resolution_cache_hit_count + provenance.import_resolution_cache_miss_count
+    };
+    let builds = normalization_builds_for_tests();
+    let (first, observed) = {
+        let scope = ResolutionWitnessScope::enter();
+        let first = host.normalized_analysis_canonical(missing).into_owned();
+        (first, scope.collected())
+    };
+    assert_eq!(first, missing, "a missing dependency normalizes to itself");
+    assert!(!observed.is_empty(), "its probes observe facts");
+    let probed = resolutions(&host);
+    for _ in 0..5 {
+        let replayed = {
+            let scope = ResolutionWitnessScope::enter();
+            assert_eq!(host.normalized_analysis_canonical(missing), missing);
+            scope.collected()
+        };
+        assert_eq!(
+            replayed, observed,
+            "a shared normalization records its observations into the scope around its consumer"
+        );
+    }
+    assert_eq!(
+        resolutions(&host),
+        probed,
+        "later normalizations in the request probe nothing"
+    );
+    assert_eq!(
+        normalization_builds_for_tests() - builds,
+        1,
+        "one run per request"
+    );
+
+    upsert_non_sfc(&host, "/workspace/src/missing.ts", "export type X = 1\n");
+    assert_eq!(
+        host.normalized_analysis_canonical(missing),
+        "/workspace/src/missing.ts",
+        "an edit in the request probes again and finds the new file"
+    );
+    assert_eq!(normalization_builds_for_tests() - builds, 2);
+}
+
 /// The CALLER-DECLARED specifier is covered by the owner's import-route
 /// witness.
 ///
@@ -11245,7 +11379,7 @@ fn host_resolution_populates_no_host_side_route_memo() {
 /// edges are `export *` wildcards (`export * from './missing'; export * from
 /// './present';`) is a wildcard-only provider: its wildcards resolve into a
 /// local `dep_edges` map and are NOT published into `import_routes`, so
-/// `import_route_witness_for_specifiers(owner, ..)` returns `None`. The hole-2
+/// the wildcard rooting produced no witness (`None`). The hole-2
 /// rooting loop fed that `None` through `?`, dropping the WHOLE route entry —
 /// so a valid result resolved via the LATER wildcard (`./present`) was returned
 /// as `None` (no value served at all). "Do not admit to cache" was wrongly
@@ -11321,7 +11455,7 @@ fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcar
 /// Two independent rails enforce this, and the test guards the end-to-end
 /// behaviour rather than isolating either:
 /// - The coverage-checked `ImportRoute` admission
-///   (`import_route_witness_for_specifiers`): the rooting
+///   (the route walk's own witness scope): the rooting
 ///   loop admits an `ImportRoute` fact ONLY when the produced hash covers
 ///   EVERY unresolved wildcard source the traversal hit; a partial table that
 ///   omits `./missing` yields no fact, so the `Miss` is returned with EMPTY
@@ -18751,6 +18885,62 @@ const revision = {revision}
         "{EDITS} edits must not grow the fallthrough node cache — it held {after_first} keys \
          after one resolve and {after_edits} after {EDITS} more, i.e. one retained intrinsic \
          surface per content generation"
+    );
+}
+
+/// A component's fallthrough nodes are keyed by the component, so they can
+/// never be read again once it is closed or deleted: closing and deleting
+/// every component returns the fallthrough node cache to where it started.
+///
+/// Discriminating: the cache used to keep every component's nodes for the
+/// life of the host, one set per component ever resolved, so the count grew
+/// with the number of components the session had seen.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn closing_or_deleting_components_releases_their_fallthrough_nodes() {
+    const OWNERS: usize = 32;
+
+    fn source(n: usize) -> String {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string }}>()
+const n = {n}
+</script>
+<template><div :title="label">{{{{ n }}}}</div></template>"#
+        )
+    }
+    let nodes = |host: &VerterHost| host.retention_snapshot().fallthrough_nodes;
+
+    let host = make_host();
+    // The project's intrinsic `div` surface is shared by every component and
+    // stays; warm it once so the baseline includes it.
+    upsert_vue(&host, "/src/Warm.vue", &source(0));
+    assert!(host.resolve_fallthrough_surface("/src/Warm.vue").is_some());
+    host.evict("/src/Warm.vue");
+    let baseline = nodes(&host);
+
+    let owners: Vec<String> = (0..OWNERS).map(|n| format!("/src/C{n}.vue")).collect();
+    for (n, owner) in owners.iter().enumerate() {
+        upsert_vue(&host, owner, &source(n + 1));
+        assert!(host.resolve_fallthrough_surface(owner).is_some());
+    }
+    let resolved = nodes(&host);
+    assert!(
+        resolved >= baseline + OWNERS,
+        "fixture: every component warms its own nodes ({baseline} -> {resolved})"
+    );
+
+    for (n, owner) in owners.iter().enumerate() {
+        if n % 2 == 0 {
+            host.evict(owner);
+        } else {
+            let _ = host.remove(owner);
+        }
+    }
+    assert_eq!(
+        nodes(&host),
+        baseline,
+        "closed and deleted components keep no fallthrough nodes"
     );
 }
 

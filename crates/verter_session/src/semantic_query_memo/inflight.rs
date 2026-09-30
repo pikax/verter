@@ -5,10 +5,9 @@
 //! waiters join that cell; only the winner computes. Failed, incomplete,
 //! cancelled, or stale production never publishes into
 //! [`crate::project_type_store::ProjectTypeStore`]. RAII guards keep the
-//! recursion stack and the in-flight table consistent across panics and
-//! early returns.
+//! producing task's open producers and the in-flight table consistent across
+//! panics and early returns.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
@@ -104,10 +103,10 @@ pub(super) struct InflightState {
     /// joiner, so a rendezvous does not launder a named class into the
     /// anonymous bridge on the follower's side.
     pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
-    /// The generation-qualified execution owner that claimed this flight.
-    /// Joiners register a temporary wait-for edge to this owner before
-    /// parking, allowing cross-thread cycles to escape through ReturnOnly.
-    pub(super) owner: Option<super::wait_cycle::ExecutionOwner>,
+    /// The generation-qualified task that claimed this flight. Subscribers
+    /// register a temporary wait-for edge to this task before parking, so a
+    /// cycle of waiting tasks escapes through ReturnOnly.
+    pub(super) owner: Option<super::tasks::TaskId>,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,
@@ -125,51 +124,6 @@ impl FlightCell {
         Self {
             state: Mutex::new(InflightState::default()),
             ready: Condvar::new(),
-        }
-    }
-}
-
-thread_local! {
-    /// Per-thread stack of prepared query tokens currently being
-    /// executed. Used to detect same-path recursion so callers return a
-    /// sentinel instead of self-awaiting. Frames are `Arc` handles —
-    /// pushing costs one refcount bump, and membership probes
-    /// fast-reject on the token's cached key hash before full-key
-    /// equality.
-    pub(super) static IN_FLIGHT_ON_THIS_THREAD: RefCell<Vec<PreparedKeyHandle>> =
-        const { RefCell::new(Vec::new()) };
-}
-
-/// RAII guard that pops a frame off [`IN_FLIGHT_ON_THIS_THREAD`] when dropped.
-///
-/// Ensures the recursion stack stays consistent even if the cold build
-/// panics — otherwise a caught panic or unwind could leave a frame on the
-/// stack and future unrelated queries for that key from the same thread
-/// would be misclassified as same-path recursion.
-pub(super) struct RecursionStackGuard {
-    handle: Option<PreparedKeyHandle>,
-}
-
-impl RecursionStackGuard {
-    pub(super) fn push(handle: PreparedKeyHandle) -> Self {
-        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow_mut().push(handle.clone()));
-        Self {
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for RecursionStackGuard {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            IN_FLIGHT_ON_THIS_THREAD.with(|slot| {
-                let mut v = slot.borrow_mut();
-                // Pop the exact frame this guard pushed — pointer
-                // identity, no key comparison.
-                if let Some(pos) = v.iter().rposition(|k| k.same_instance(&handle)) {
-                    v.remove(pos);
-                }
-            });
         }
     }
 }
@@ -312,10 +266,10 @@ pub(super) const MAX_INFLIGHT_RETRIES: usize = 3;
 pub(crate) struct InlineMemberFlight {
     pub(super) prepared: PreparedKeyHandle,
     pub(super) inflight: Arc<FlightCell>,
-    /// Present only when an inline flight starts outside an existing
-    /// semantic execution stack. Production nested members reuse the
-    /// active owner; direct callers hold this detached RAII lease.
-    _owner_registration: Option<super::wait_cycle::ExecutionOwnerRegistration>,
+    /// The task computing the member inline. Holding it keeps the task
+    /// active while the flight is open, whether it is the installed task of
+    /// the enclosing execution or one registered for this flight alone.
+    _task: super::tasks::ExecutionTask,
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -358,18 +312,12 @@ impl super::SemanticGraphStore {
     ) -> Option<InlineMemberFlight> {
         let prepared = PreparedKeyHandle::prepare(key);
         let inflight = Arc::new(FlightCell::new());
-        let (owner, owner_registration) = if let Some(owner) =
-            super::wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph)
-        {
-            (owner, None)
-        } else {
-            let registration = self.wait_for_graph.register_owner();
-            (registration.owner(), Some(registration))
-        };
+        let task = super::tasks::ExecutionScope::current(&self.task_registry)
+            .unwrap_or_else(|| self.task_registry.register_task());
         {
             let mut state = inflight.state.lock();
             state.claimed = true;
-            state.owner = Some(owner);
+            state.owner = Some(task.id());
         }
         let mut table = self.inflight.lock();
         if table.contains_key(&prepared) {
@@ -379,7 +327,7 @@ impl super::SemanticGraphStore {
         Some(InlineMemberFlight {
             prepared,
             inflight,
-            _owner_registration: owner_registration,
+            _task: task,
         })
     }
 

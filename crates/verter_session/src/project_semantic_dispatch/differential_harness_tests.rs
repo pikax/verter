@@ -20,7 +20,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -66,8 +66,48 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 
-/// How long one row may take before it is reported overdue.
-const ROW_DEADLINE: Duration = Duration::from_secs(60);
+/// The four settings with `strictBindCallApply` off, in the same order.
+pub(super) const BIND_CALL_APPLY_OFF: [Setting; 4] = [
+    Setting {
+        root: "/strict-loose-bind",
+        label: "strict, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-loose-bind",
+        label: "strictNullChecks off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/strict-implicit-loose-bind",
+        label: "noImplicitAny off, strictBindCallApply off",
+        options: r#"{ "strict": true, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+    Setting {
+        root: "/loose-implicit-loose-bind",
+        label: "both off, strictBindCallApply off",
+        options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false, "strictBindCallApply": false }"#,
+    },
+];
+
+/// The CPU time one row's evaluating thread may spend before the row is
+/// reported overdue. A hang detector, not a speed budget: it catches a row
+/// that loops or whose work blows up super-linearly, never a slow but
+/// healthy machine. It is the thread's own CPU time, not the time on the
+/// clock, so a row slowed by the tests running beside it in the same
+/// process is not reported. On a platform with no reader of a thread's CPU
+/// time it is the time on the clock.
+const ROW_CPU_BUDGET: Duration = Duration::from_secs(60);
+
+/// The time on the clock after which a row is reported overdue whatever
+/// CPU time it spent: the backstop for a row that makes no progress (a
+/// thread blocked on a lock or a channel spends no CPU time, so the budget
+/// above never trips for it). It sits below the test runner's own
+/// five-minute terminator, so the row reports its own diagnostic.
+const ROW_NO_PROGRESS_BACKSTOP: Duration = Duration::from_secs(240);
+
+/// How often the row's CPU time is read while it runs.
+const ROW_POLL: Duration = Duration::from_millis(50);
 
 /// What a row reads.
 #[derive(Clone, Copy)]
@@ -79,7 +119,7 @@ pub(super) enum Read<'a> {
 }
 
 impl Read<'_> {
-    fn text(&self) -> &str {
+    pub(super) fn text(&self) -> &str {
         match self {
             Read::Type(text) | Read::Return(text) => text,
         }
@@ -94,6 +134,9 @@ pub(super) struct Matrix<'a> {
     lib: Option<&'a str>,
     script: bool,
     files: &'a [(&'a str, &'a str)],
+    /// A file whose source differs per project, one source per setting in
+    /// setting order.
+    file_per_setting: Option<(&'a str, &'a [&'a str])>,
 }
 
 impl<'a> Matrix<'a> {
@@ -105,13 +148,27 @@ impl<'a> Matrix<'a> {
             lib: None,
             script: false,
             files: &[],
+            file_per_setting: None,
         }
+    }
+
+    /// With a file `name` beside the probe module whose source is
+    /// `sources[i]` in the i-th setting's project.
+    pub(super) fn file_per_setting(mut self, name: &'a str, sources: &'a [&'a str]) -> Self {
+        self.file_per_setting = Some((name, sources));
+        self
     }
 
     /// With `(file name, source)` modules beside the probe module in
     /// each project.
     pub(super) fn files(mut self, files: &'a [(&'a str, &'a str)]) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Checked in `settings` only, in place of all four.
+    pub(super) fn settings(mut self, settings: &'a [Setting]) -> Self {
+        self.settings = settings;
         self
     }
 
@@ -202,12 +259,22 @@ impl<'a> Matrix<'a> {
         failures
     }
 
-    /// Each row's verdict in each setting, in row then setting order.
-    pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
+    /// One host carrying every setting's project with the probe module for
+    /// `rows` (and the library and sibling files) upserted into it.
+    fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
-        for setting in self.settings {
+        for (index, setting) in self.settings.iter().enumerate() {
             let canonical = format!("{}/probe.ts", setting.root);
+            if let Some((name, sources)) = self.file_per_setting {
+                let path = format!("{}/{name}", setting.root);
+                crate::u6_flow_shape_corpus_tests::upsert(
+                    &host,
+                    &path,
+                    sources[index],
+                    crate::FileLanguage::script_ts(),
+                );
+            }
             if let Some(lib) = self.lib {
                 crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
                     &host,
@@ -232,6 +299,54 @@ impl<'a> Matrix<'a> {
                 crate::FileLanguage::script_ts(),
             );
         }
+        host
+    }
+
+    /// Every `(setting, function)` whose body-derived return closes WITHOUT
+    /// its proof — the finalizer's verdict partial — with its partial
+    /// reasons, as the failure list.
+    pub(super) fn unproven_returns(&self, functions: &[&str]) -> Vec<String> {
+        let host = self.host(&[]);
+        let mut unproven = Vec::new();
+        for setting in self.settings {
+            let canonical = format!("{}/probe.ts", setting.root);
+            for function in functions {
+                let store_view = host.resolver_store_view_read().into_owned_view();
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                let key = crate::semantic_query::FlowReturnKey {
+                    function: dispatch.flow_function_slot_for(
+                        Arc::from(canonical.as_str()),
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        Arc::from(*function),
+                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                        0,
+                    ),
+                    normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                    context: dispatch.flow_return_context_for(&canonical),
+                    demand: ReturnProjectionDemand::whole_return(),
+                    input: crate::semantic_query::FlowInputContext::empty(),
+                    result_contract: super::flow_solve::flow_return_result_contract_id(),
+                };
+                let read = dispatch.execute_read(
+                    crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+                );
+                if read.result_is_partial {
+                    unproven.push(format!(
+                        "`{function}` [{}]: its proof does not close ({:?})",
+                        setting.label, read.partial_reasons
+                    ));
+                }
+            }
+        }
+        unproven
+    }
+
+    /// Each row's verdict in each setting, in row then setting order.
+    pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
+        let host = self.host(rows);
         rows.iter()
             .enumerate()
             .map(|(index, (read, answers))| {
@@ -244,7 +359,7 @@ impl<'a> Matrix<'a> {
                     .zip(answers)
                     .map(|(setting, expected)| {
                         let canonical = format!("{}/probe.ts", setting.root);
-                        let observed =
+                        let (observed, diagnostics) =
                             observe_with_deadline(&host, &canonical, &symbol, self.lib.is_some());
                         let matched = match &observed {
                             Observed::Clean(text) => {
@@ -256,6 +371,7 @@ impl<'a> Matrix<'a> {
                             matched,
                             class: observed.class(),
                             lane: observed.describe(),
+                            diagnostics,
                         }
                     })
                     .collect()
@@ -317,6 +433,8 @@ pub(super) struct Verdict {
     pub(super) class: &'static str,
     /// What the lane gave.
     pub(super) lane: String,
+    /// The checker diagnostics the lane recorded for the row, by code.
+    pub(super) diagnostics: Vec<u32>,
 }
 
 /// What the lane gave for one row.
@@ -331,8 +449,9 @@ enum Observed {
     NoValue(String),
     /// The evaluation panicked.
     Panicked(String),
-    /// The evaluation outran [`ROW_DEADLINE`].
-    Overdue,
+    /// The evaluation spent more than [`ROW_CPU_BUDGET`] of CPU time, or
+    /// made no progress for [`ROW_NO_PROGRESS_BACKSTOP`].
+    Overdue(String),
 }
 
 impl Observed {
@@ -340,7 +459,7 @@ impl Observed {
         match self {
             Observed::Clean(text) if !text.contains('<') || is_generic_print(text) => "WRONG-CLEAN",
             Observed::Panicked(_) => "PANIC",
-            Observed::Overdue => "HANG",
+            Observed::Overdue(_) => "HANG",
             _ => "GAP",
         }
     }
@@ -354,7 +473,7 @@ impl Observed {
             Observed::Partial => "the lane reduced to a partial demand".to_owned(),
             Observed::NoValue(error) => format!("the lane produced no value: {error}"),
             Observed::Panicked(message) => format!("the lane panicked: {message}"),
-            Observed::Overdue => format!("the lane took longer than {ROW_DEADLINE:?}"),
+            Observed::Overdue(reason) => format!("the lane {reason}"),
         }
     }
 }
@@ -373,12 +492,12 @@ fn observe_with_deadline(
     canonical: &str,
     symbol: &str,
     scoped: bool,
-) -> Observed {
+) -> (Observed, Vec<u32>) {
     let (sender, receiver) = mpsc::channel();
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
     let symbol = symbol.to_owned();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
             observe(&thread_host, &canonical, &symbol, scoped)
         }))
@@ -392,16 +511,178 @@ fn observe_with_deadline(
                         .map(|text| (*text).to_owned())
                 })
                 .unwrap_or_default();
-            Observed::Panicked(message)
+            (Observed::Panicked(message), Vec::new())
         });
         let _ = sender.send(observed);
     });
-    receiver
-        .recv_timeout(ROW_DEADLINE)
-        .unwrap_or(Observed::Overdue)
+    match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
+        Ok(observed) => observed,
+        Err(RowOverdue::Disconnected) => (
+            Observed::Panicked("the evaluating thread ended with no answer".to_owned()),
+            Vec::new(),
+        ),
+        Err(overdue) => (Observed::Overdue(overdue.to_string()), Vec::new()),
+    }
 }
 
-fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Observed {
+/// Why a row has no answer.
+#[derive(Debug, PartialEq, Eq)]
+enum RowOverdue {
+    /// Its thread spent more than the CPU budget.
+    Cpu(Duration),
+    /// It made no progress for the backstop, spending this much CPU time.
+    NoProgress(Duration, Duration),
+    /// Its thread ended without sending one.
+    Disconnected,
+}
+
+impl std::fmt::Display for RowOverdue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RowOverdue::Cpu(budget) => write!(
+                f,
+                "spent more than {budget:?} of CPU time ({})",
+                thread_cpu::SOURCE.unwrap_or("time on the clock")
+            ),
+            RowOverdue::NoProgress(backstop, spent) => write!(
+                f,
+                "made no progress for {backstop:?} (spent {spent:?} of CPU time)"
+            ),
+            RowOverdue::Disconnected => write!(f, "ended with no answer"),
+        }
+    }
+}
+
+/// The answer `thread` sends on `receiver`, unless the thread spends more
+/// than `cpu_budget` of CPU time first or `backstop` passes on the clock.
+fn await_row<T, R>(
+    thread: &std::thread::JoinHandle<T>,
+    receiver: &mpsc::Receiver<R>,
+    cpu_budget: Duration,
+    backstop: Duration,
+) -> Result<R, RowOverdue> {
+    let started = Instant::now();
+    // bounded-loop: ends at the answer, the CPU budget or the backstop.
+    loop {
+        match receiver.recv_timeout(ROW_POLL) {
+            Ok(answer) => return Ok(answer),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RowOverdue::Disconnected),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let spent = thread_cpu::spent(thread).unwrap_or_else(|| started.elapsed());
+        if spent > cpu_budget {
+            return Err(RowOverdue::Cpu(cpu_budget));
+        }
+        if started.elapsed() > backstop {
+            return Err(RowOverdue::NoProgress(backstop, spent));
+        }
+    }
+}
+
+/// The CPU time a running thread has spent, read from another thread.
+#[cfg(target_os = "linux")]
+mod thread_cpu {
+    use std::os::raw::{c_int, c_long};
+    use std::os::unix::thread::{JoinHandleExt, RawPthread};
+    use std::time::Duration;
+
+    /// `struct timespec` on Linux: `time_t` and the nanoseconds are `long`.
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: c_long,
+        tv_nsec: c_long,
+    }
+
+    extern "C" {
+        fn pthread_getcpuclockid(thread: RawPthread, clock: *mut c_int) -> c_int;
+        fn clock_gettime(clock: c_int, time: *mut Timespec) -> c_int;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("pthread_getcpuclockid");
+
+    pub(super) fn spent<T>(thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        let mut clock: c_int = 0;
+        let mut time = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: the handle is not joined or dropped while it is borrowed,
+        // so its pthread id stays valid; both calls write only the values
+        // they are given.
+        let read = unsafe {
+            pthread_getcpuclockid(thread.as_pthread_t(), &mut clock) == 0
+                && clock_gettime(clock, &mut time) == 0
+        };
+        read.then(|| Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
+    }
+}
+
+/// The CPU time a running thread has spent, read from another thread.
+#[cfg(windows)]
+mod thread_cpu {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::time::Duration;
+
+    /// `FILETIME`: a count of 100-nanosecond intervals, split in halves.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    impl FileTime {
+        fn nanos(&self) -> u64 {
+            ((u64::from(self.high) << 32) | u64::from(self.low)) * 100
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetThreadTimes(
+            thread: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+    }
+
+    pub(super) const SOURCE: Option<&str> = Some("GetThreadTimes");
+
+    pub(super) fn spent<T>(thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
+        let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
+        // SAFETY: the handle stays open while the join handle is borrowed,
+        // and the call writes the four `FILETIME`s it is given.
+        let ok = unsafe {
+            GetThreadTimes(
+                thread.as_raw_handle(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        (ok != 0).then(|| Duration::from_nanos(kernel.nanos() + user.nanos()))
+    }
+}
+
+/// No reader of a thread's CPU time here: the budget is the time on the
+/// clock.
+#[cfg(not(any(target_os = "linux", windows)))]
+mod thread_cpu {
+    use std::time::Duration;
+
+    pub(super) const SOURCE: Option<&str> = None;
+
+    pub(super) fn spent<T>(_thread: &std::thread::JoinHandle<T>) -> Option<Duration> {
+        None
+    }
+}
+
+fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (Observed, Vec<u32>) {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from(canonical),
@@ -416,8 +697,16 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
     let result = match carrier.as_result() {
         Ok(result) => Arc::clone(result),
-        Err(error) => return Observed::NoValue(format!("{error:?}")),
+        Err(error) => return (Observed::NoValue(format!("{error:?}")), Vec::new()),
     };
+    let diagnostics: Vec<u32> = result
+        .checker_diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.code())
+        .collect();
+    // The probe's type is read as a consumer reads it: under a request for
+    // the probe file, so every judgement takes that project's options.
+    let _request = crate::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -432,13 +721,14 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> Ob
         )
         .into_complete_node()
     else {
-        return Observed::Partial;
+        return (Observed::Partial, diagnostics);
     };
     let text = print(&dispatch, node, 0);
-    match result.degradation() {
+    let observed = match result.degradation() {
         None => Observed::Clean(text),
         Some(degradation) => Observed::Degraded(text, format!("{degradation:?}")),
-    }
+    };
+    (observed, diagnostics)
 }
 
 /// `node` as the checker prints it.
@@ -476,7 +766,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             crate::semantic_query::PrimitiveKind::BigInt => "bigint".to_owned(),
             other => format!("{other:?}").to_ascii_lowercase(),
         },
-        SemanticNodeData::Literal(LiteralValue::String(value)) => format!("\"{value}\""),
+        SemanticNodeData::Literal(LiteralValue::String(value)) => checker_string_literal(value),
         SemanticNodeData::Literal(LiteralValue::Number(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::Boolean(value)) => format!("{value}"),
         SemanticNodeData::Literal(LiteralValue::BigInt(value)) => format!("{value}n"),
@@ -501,6 +791,16 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             .map(|member| operand(dispatch, *member, depth, false))
             .collect::<Vec<_>>()
             .join(" & "),
+        // An object type with one call signature and nothing else prints as
+        // that signature's function type.
+        SemanticNodeData::Object(surface)
+            if surface.call_signatures.len() == 1
+                && surface.construct_signatures.is_empty()
+                && surface.index_signatures.is_empty()
+                && surface.positive_members().is_empty() =>
+        {
+            signature_text(dispatch, surface.call_signatures[0], depth, " => ")
+        }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = Vec::new();
             for signature in surface.call_signatures.iter() {
@@ -524,7 +824,11 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
                 ));
             }
             for member in surface.positive_members().iter() {
-                let name = member.key.as_string().unwrap_or("<key>");
+                let name = match member.key.cloned_known() {
+                    Some(verter_type_expr::PropertyKey::String(name)) => name.to_string(),
+                    Some(verter_type_expr::PropertyKey::Number(index)) => index.to_string(),
+                    _ => "<key>".to_owned(),
+                };
                 let optional = if member.optional { "?" } else { "" };
                 match member.method_kind {
                     Some(verter_type_expr::ObjectMethodKind::Method) => members.push(format!(
@@ -581,7 +885,7 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
         } => {
             let mut text = String::from("`");
             for (index, quasi) in quasis.iter().enumerate() {
-                text.push_str(quasi);
+                verter_type_expr::push_template_quasi(&mut text, quasi);
                 if let Some(expression) = expressions.get(index) {
                     text.push_str(&format!("${{{}}}", at(*expression)));
                 }
@@ -611,7 +915,43 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             let text: String = format!("{error:?}").chars().take(80).collect();
             format!("<opaque {text}>")
         }
-        SemanticNodeData::Conditional { .. } => "<unreduced conditional>".to_owned(),
+        // A conditional the checker keeps (a generic operand) prints as
+        // written, its branches as the pending substitution reads them.
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            pending,
+            ..
+        } => {
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
+            format!(
+                "{} extends {} ? {} : {}",
+                operand(dispatch, *check, depth, false),
+                operand(dispatch, *extends, depth, false),
+                at(true_branch),
+                at(false_branch)
+            )
+        }
+        // An `infer` declaration prints with its constraint; a reference to
+        // one is its name.
+        SemanticNodeData::Infer {
+            name, constraint, ..
+        } => match constraint {
+            Some(constraint) => format!("infer {name} extends {}", at(*constraint)),
+            None => format!("infer {name}"),
+        },
+        SemanticNodeData::InferRef { name, .. } => name.to_string(),
         SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {
@@ -619,6 +959,36 @@ fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: us
             format!("<unrendered {text}>")
         }
     }
+}
+
+/// A string literal type as the checker prints it: double-quoted, with a
+/// backslash, a double quote, every control character and U+2028 / U+2029 /
+/// U+0085 escaped.
+fn checker_string_literal(value: &str) -> String {
+    let mut text = String::from("\"");
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => text.push_str("\\\\"),
+            '"' => text.push_str("\\\""),
+            '\n' => text.push_str("\\n"),
+            '\t' => text.push_str("\\t"),
+            '\r' => text.push_str("\\r"),
+            '\u{8}' => text.push_str("\\b"),
+            '\u{c}' => text.push_str("\\f"),
+            '\u{b}' => text.push_str("\\v"),
+            '\0' if characters.peek().is_some_and(char::is_ascii_digit) => {
+                text.push_str("\\x00");
+            }
+            '\0' => text.push_str("\\0"),
+            control @ ('\u{1}'..='\u{1f}' | '\u{2028}' | '\u{2029}' | '\u{85}') => {
+                text.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => text.push(other),
+        }
+    }
+    text.push('"');
+    text
 }
 
 /// `node` printed as an operand of `|`, `&`, `[]` or `keyof`:
@@ -694,22 +1064,41 @@ fn signature_text(
             .collect();
         format!("<{}>", names.join(", "))
     };
-    let rendered: Vec<String> = params
-        .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            format!(
-                "{}{}{}: {}",
-                if param.rest { "..." } else { "" },
-                param
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("arg{index}"), str::to_owned),
-                if param.optional { "?" } else { "" },
-                at(param.ty)
-            )
-        })
-        .collect();
+    let mut rendered: Vec<String> = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        let name = param
+            .name
+            .as_deref()
+            .map_or_else(|| format!("arg{index}"), str::to_owned);
+        // A rest parameter of a tuple type prints as the parameters its
+        // elements are (the checker's expanded parameters): an element's
+        // label, else `<rest>_<index>`, names each.
+        if param.rest {
+            if let Some(SemanticNodeData::Tuple { elements, .. }) =
+                graph.node_data(param.ty).as_deref()
+            {
+                for (position, element) in elements.iter().enumerate() {
+                    let element_name = element
+                        .label
+                        .as_deref()
+                        .map_or_else(|| format!("{name}_{position}"), str::to_owned);
+                    rendered.push(format!(
+                        "{}{element_name}{}: {}",
+                        if element.rest { "..." } else { "" },
+                        if element.optional { "?" } else { "" },
+                        at(element.value)
+                    ));
+                }
+                continue;
+            }
+        }
+        rendered.push(format!(
+            "{}{name}{}: {}",
+            if param.rest { "..." } else { "" },
+            if param.optional { "?" } else { "" },
+            at(param.ty)
+        ));
+    }
     let result = match predicate {
         Some(predicate) => {
             let subject = match predicate.subject {
@@ -958,8 +1347,21 @@ fn canonical_member(member: &str) -> String {
         };
         let rest = member[parts[0].len() + 2..].to_owned();
         let (name, rest) = if let Some(optional) = name.strip_suffix('?') {
-            // `name?: (T | undefined)` prints the optional member's own
-            // `undefined`; both sides keep it.
+            // Without `exactOptionalPropertyTypes` (off in every setting)
+            // `name?: T | undefined` and `name?: T` are one type; the
+            // checker's declaration emit spells a declared `b?: string`
+            // as authored and a synthesized optional (a spread's partial)
+            // as `a?: number | undefined`, so both sides drop the
+            // optional member's `undefined` arm.
+            let arms: Vec<String> = split_top(&rest, " | ")
+                .into_iter()
+                .filter(|arm| arm.trim() != "undefined")
+                .collect();
+            let rest = if arms.is_empty() {
+                rest
+            } else {
+                arms.join(" | ")
+            };
             (format!("{optional}?"), rest)
         } else {
             (name, rest)
@@ -1017,6 +1419,26 @@ fn the_canonical_spelling_sorts_members_and_folds_booleans() {
         canonical_text("{ b: [1, 2?]; a: number | string; }")
     );
     assert_eq!(
+        canonical_text("[a: string, b?: number | undefined]"),
+        canonical_text("[a: string, b?: number]")
+    );
+    assert_eq!(
+        canonical_text("{ a: 1; b?: 2 | undefined; }"),
+        canonical_text("{ b?: 2; a: 1; }")
+    );
+    assert_ne!(
+        canonical_text("{ b?: undefined; }"),
+        canonical_text("{ b?: 2; }")
+    );
+    assert_ne!(
+        canonical_text("{ b: 2 | undefined; }"),
+        canonical_text("{ b: 2; }")
+    );
+    assert_ne!(
+        canonical_text("[a: string, b?: number]"),
+        canonical_text("[a: string, b: number]")
+    );
+    assert_eq!(
         canonical_text("(x: string | null) => number | undefined"),
         canonical_text("(x: null | string) => undefined | number")
     );
@@ -1070,4 +1492,39 @@ fn the_matrix_reads_modules_scripts_and_library_projects() {
             .returns(&[("k", "\"lib\"")]),
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A row whose thread computes past the CPU budget is overdue by it, and a
+/// row whose thread is blocked — spending no CPU time — is overdue by the
+/// backstop on the clock; a row that answers within both is its answer.
+#[test]
+fn a_row_is_overdue_by_its_cpu_time_or_by_the_no_progress_backstop() {
+    let run = |work: fn(), cpu_budget: Duration, backstop: Duration| {
+        let (sender, receiver) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            work();
+            let _ = sender.send(());
+        });
+        await_row(&thread, &receiver, cpu_budget, backstop)
+    };
+    let spin: fn() = || {
+        let started = Instant::now();
+        let mut n: u64 = 0;
+        while started.elapsed() < Duration::from_secs(5) {
+            n = std::hint::black_box(n.wrapping_add(1));
+        }
+    };
+    let block: fn() = || std::thread::sleep(Duration::from_secs(5));
+    let answer: fn() = || {};
+    let cpu_budget = Duration::from_millis(200);
+    assert_eq!(
+        run(spin, cpu_budget, Duration::from_secs(4)),
+        Err(RowOverdue::Cpu(cpu_budget))
+    );
+    let blocked = run(block, cpu_budget, Duration::from_millis(300));
+    assert!(
+        matches!(blocked, Err(RowOverdue::NoProgress(..))) || thread_cpu::SOURCE.is_none(),
+        "{blocked:?}"
+    );
+    assert_eq!(run(answer, cpu_budget, Duration::from_secs(4)), Ok(()));
 }

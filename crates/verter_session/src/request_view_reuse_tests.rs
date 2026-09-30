@@ -737,3 +737,87 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
         "a framework carrier's parse identity is its framework parse key"
     );
 }
+
+/// A request validates each consumed result's receipt once, not once per
+/// signature that reaches it: a second signature sharing a chain's
+/// receipt reads only its own fact. What the answer depends on stays in
+/// the key: strict self-roots the receipt reaches, and a completion that
+/// moves the overlay, walk the receipt again; a refused walk is never
+/// remembered; a new request starts empty.
+#[test]
+fn a_request_validates_a_shared_receipt_once() {
+    use crate::resolver_core::{RequestStoreView, StoreView};
+    use verter_workspace::{FactVersionRef, ResultReceipt};
+
+    let (host, _) = small_host_with_one_script();
+    let base = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let whole = |level: u8| FactVersionRef::FileWholeHash {
+        canonical_id: format!("/r/{level}.ts"),
+        hash: [level; 16],
+    };
+    for level in 0..34u8 {
+        overlay.insert_whole_hash_for_tests(&format!("/r/{level}.ts"), [level; 16]);
+    }
+    let mut chain = ResultReceipt::new(vec![whole(0)]);
+    for level in 1..32u8 {
+        chain = ResultReceipt::new(vec![FactVersionRef::Receipt(chain), whole(level)]);
+    }
+    let first = vec![FactVersionRef::Receipt(chain.clone()), whole(32)];
+    let second = vec![FactVersionRef::Receipt(chain.clone()), whole(33)];
+
+    let view = RequestStoreView::new(&base, Arc::clone(&overlay));
+    let reads = |signature: &[FactVersionRef], roots: &[&str]| {
+        let before = view.leaf_validations_for_tests();
+        assert_eq!(view.validate_fact_signature(signature, roots), Ok(()));
+        view.leaf_validations_for_tests() - before
+    };
+    assert_eq!(reads(&first, &[]), 33, "the chain's 32 facts and its own");
+    assert_eq!(reads(&second, &[]), 1, "only its own fact");
+    let before = view.leaf_validations_for_tests();
+    assert!(view.validates(&FactVersionRef::Receipt(chain.clone())));
+    assert_eq!(
+        view.leaf_validations_for_tests(),
+        before,
+        "one fact, no reads"
+    );
+
+    // Levels 7 to 31 reach the root and are read again; the seven below
+    // never reach it, so their answers stand.
+    assert_eq!(reads(&second, &["/r/7.ts"]), 26, "a strict root it reaches");
+    assert_eq!(reads(&second, &["/r/7.ts"]), 1);
+    assert_eq!(
+        reads(&second, &["/elsewhere.ts"]),
+        1,
+        "a root it never reaches"
+    );
+
+    overlay.insert_whole_hash_for_tests("/moved.ts", [9; 16]);
+    assert_eq!(reads(&second, &[]), 33, "a completion moved the overlay");
+    assert_eq!(reads(&second, &[]), 1);
+
+    let stale = ResultReceipt::new(vec![FactVersionRef::Receipt(chain.clone()), {
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/r/33.ts".into(),
+            hash: [0; 16],
+        }
+    }]);
+    let stale = vec![FactVersionRef::Receipt(stale)];
+    for _ in 0..2 {
+        let before = view.leaf_validations_for_tests();
+        assert!(view.validate_fact_signature(&stale, &[]).is_err());
+        assert!(
+            view.leaf_validations_for_tests() > before,
+            "a refused receipt is read again"
+        );
+    }
+
+    let fresh = RequestStoreView::new(&base, overlay);
+    let before = fresh.leaf_validations_for_tests();
+    assert_eq!(fresh.validate_fact_signature(&second, &[]), Ok(()));
+    assert_eq!(
+        fresh.leaf_validations_for_tests() - before,
+        33,
+        "a new request"
+    );
+}

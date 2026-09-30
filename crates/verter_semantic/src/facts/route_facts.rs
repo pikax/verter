@@ -629,6 +629,10 @@ impl RouteFactProducer<'_> {
                     children.push((argument, context, guard));
                 }
             }
+            TypeExpr::Infer {
+                constraint: Some(constraint),
+                ..
+            } => children.push((constraint, context, guard)),
             TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
             | TypeExpr::TypeParameter(_)
@@ -1160,8 +1164,10 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
             | TypeExpr::TemplateLiteral { .. }
             | TypeExpr::Unknown(_)
             | TypeExpr::RecursiveRef { .. }
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Infer { .. } => {}
+            | TypeExpr::SyntheticSlotBinding(_) => {}
+            TypeExpr::Infer { constraint, .. } => {
+                children.extend(constraint.iter().map(Arc::as_ref))
+            }
         }
         pending.extend(children.drain(..).rev());
     }

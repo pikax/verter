@@ -92,20 +92,52 @@ fn stable_capture_waits_for_a_short_publication_window_without_spending_a_retry(
         std::thread::sleep(Duration::from_millis(20));
         release_tx.send(()).expect("writer is still waiting");
     });
-    let captured = workspace
+    // The capture waits the window out however long it lasts: it returns a
+    // world, never a refusal.
+    let _captured = workspace
         .engine
-        .capture_stable_resolution_world_with_policy(
-            workspace.engine.default_resolution_population(),
-            0,
-            Duration::from_secs(1),
-        );
+        .capture_stable_resolution_world(workspace.engine.default_resolution_population());
 
     releaser.join().expect("releaser must not panic");
     writer.join().expect("writer must not panic");
-    assert!(
-        captured.is_some(),
-        "a short publication window is contention, not retry exhaustion"
+}
+
+/// A resolution that begins while a world writer is descheduled inside its
+/// window for longer than any bounded wait would allow is still admitted
+/// with its answer: the capture waits the writer out, it never turns the
+/// wait into a refusal.
+#[test]
+fn a_resolution_during_a_long_publication_window_is_admitted_with_its_answer() {
+    let workspace = Arc::new(workspace());
+    workspace.inject_file(
+        "/p/dep.ts".to_string(),
+        Arc::from("export const value = 1\n"),
     );
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_workspace = Arc::clone(&workspace);
+    let writer = std::thread::spawn(move || {
+        writer_workspace.engine.mutate_resolution_world(|_world| {
+            entered_tx.send(()).expect("capture test is listening");
+            release_rx
+                .recv()
+                .expect("publication window must be released");
+            ((), false)
+        });
+    });
+    entered_rx
+        .recv()
+        .expect("writer must enter its odd-epoch publication window");
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        release_tx.send(()).expect("writer is still waiting");
+    });
+
+    let (target, _witness) = admitted_signature(&workspace, "./dep");
+
+    releaser.join().expect("releaser must not panic");
+    writer.join().expect("writer must not panic");
+    assert_eq!(target.as_deref(), Some("/p/dep.ts"));
 }
 
 #[test]

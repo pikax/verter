@@ -20,6 +20,9 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 # sufficiency can be validated against the raw resolution graph. Enable
 # from a downstream feature alias (e.g. `verter_session/parser_cache_audit`).
 parser_cache_audit = []
+# Reservation counting and fault injection for the stack containment
+# (`oxc_parse::faults`), for downstream tests of its typed failures.
+stack-fault-injection = []
 
 [dependencies]
 verter_debug_assert = { workspace = true }

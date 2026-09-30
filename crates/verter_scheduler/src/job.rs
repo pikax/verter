@@ -32,6 +32,12 @@ pub enum SchedulerError {
         file_id: String,
         adapter_id: verter_language::FrameworkAdapterId,
     },
+    /// The file's source nests deeper than a stack this host can provide:
+    /// its parse, or the walk-stack lease of its program's walks, was
+    /// refused, and nothing was published for it. Typed operational
+    /// incompleteness, produced when a stage executor returns
+    /// [`crate::executor::StageErrorKind::StackUnavailable`].
+    StackUnavailable { file_id: String, needed: usize },
     /// File not found in scheduler or via source loader.
     FileNotFound { file_id: String },
     /// The scheduler was shut down before the request completed.
@@ -115,6 +121,11 @@ impl fmt::Display for SchedulerError {
                 "unsupported framework language for {file_id}: no carrier \
                  implementation is registered for adapter '{adapter_id}'"
             ),
+            SchedulerError::StackUnavailable { file_id, needed } => write!(
+                f,
+                "the source of {file_id} nests deeper than a stack this host can provide \
+                 ({needed} bytes needed)"
+            ),
             SchedulerError::FileNotFound { file_id } => write!(f, "file not found: {file_id}"),
             SchedulerError::Shutdown => write!(f, "scheduler shut down"),
             SchedulerError::DependencyFailed { dep_key, cause } => {
@@ -137,6 +148,7 @@ impl std::error::Error for SchedulerError {
             SchedulerError::DependencyFailed { cause, .. } => Some(cause.as_ref()),
             SchedulerError::StageFailed { .. }
             | SchedulerError::UnsupportedLanguage { .. }
+            | SchedulerError::StackUnavailable { .. }
             | SchedulerError::FileNotFound { .. }
             | SchedulerError::Shutdown => None,
         }

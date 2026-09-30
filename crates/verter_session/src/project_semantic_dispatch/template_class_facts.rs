@@ -263,9 +263,13 @@ pub(crate) fn owner_only_publication_safe(facts: &SessionTemplateClassSemanticFa
                 // one refactor away from becoming `true`, which would
                 // publish a cross-file-dependent compile output under a
                 // key that only tracks the owner's bytes.
+                // A consumed result's receipt stands for another result's
+                // whole evidence, which the owner's bytes cannot vouch for
+                // either.
                 FactAttribution::ProjectScalar
                 | FactAttribution::DomainAggregate(_)
-                | FactAttribution::StrictSelfRootWorld => false,
+                | FactAttribution::StrictSelfRootWorld
+                | FactAttribution::ResultReceipt => false,
             })
 }
 
@@ -692,7 +696,8 @@ fn classify_closed_domain(
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
         StructuralFactDemandOutcome::Complete(node) => node,
-        StructuralFactDemandOutcome::Partial(reasons) => {
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => {
             return ClosedLiteralDomain::Unresolved {
                 reason: unresolved_reasons_from_partial(reasons).0,
                 exactness: ResolutionExactness::Incomplete,
@@ -743,7 +748,8 @@ fn classify_normalized_domain(
                 let normalized =
                     match dispatch.normalize_node_for_structural_fact_demand(member, context) {
                         StructuralFactDemandOutcome::Complete(node) => node,
-                        StructuralFactDemandOutcome::Partial(reasons) => {
+                        StructuralFactDemandOutcome::Recovered { reasons, .. }
+                        | StructuralFactDemandOutcome::Partial(reasons) => {
                             unresolved = Some(ClosedLiteralDomain::Unresolved {
                                 reason: unresolved_reasons_from_partial(reasons).0,
                                 exactness: ResolutionExactness::Incomplete,
@@ -912,6 +918,7 @@ fn unresolved_reasons_from_partial(
         )
     } else if reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+        || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
     {
         (
             ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded,

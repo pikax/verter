@@ -110,6 +110,15 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
 
 /// Drive the producer through its real entry point for the seeded owner.
 fn produce_runtime(host: &VerterHost) -> crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput {
+    try_produce_runtime(host).expect("an uncancelled production publishes")
+}
+
+fn try_produce_runtime(
+    host: &VerterHost,
+) -> Result<
+    crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    crate::semantic_query::ExecutionAbort,
+> {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, OWNER, VueMacroCodegenDemand::Runtime)
     })
@@ -430,11 +439,10 @@ fn factless_footprints_refuse_rooting_instead_of_replaying_nothing() {
 /// The `Unobserved` arm on the REAL path, through the consumer's own tracer.
 ///
 /// A pre-cancelled request short-circuits `execute_scoped_cache_node` before any
-/// closure runs, so `produce_vue_macro_codegen_with_ctx` takes its
-/// `Err(ScopedCacheNodeError::Cancelled)` arm and hands back the terminal
-/// handoff. That handoff observed nothing, so the enclosing compute must be
-/// refused the right to root — otherwise a compile whose macro bundle came from
-/// a cancelled producer publishes a slot rooted only on its own direct reads.
+/// closure runs, so `produce_vue_macro_codegen_with_ctx` returns the abort and
+/// publishes no bundle. The production observed nothing, so the enclosing
+/// compute is ALSO refused the right to root — a consumer that did not itself
+/// abort must never publish a slot rooted only on its own direct reads.
 ///
 /// This asserts on the CONSUMER's tracer, not on the output's enum tag: an
 /// accessor that inspects the tag is satisfied no matter what `replay()` does.
@@ -460,21 +468,18 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
                 probe.non_cacheable_read_observed()
             };
             let _guard = crate::request_context::RequestContextGuard::install(cancelled);
-            (produce_runtime(&host), uncancelled_refused)
+            (try_produce_runtime(&host), uncancelled_refused)
         });
 
     assert!(
         !uncancelled_refused,
         "an ordinary complete producer handoff must not refuse its consumer"
     );
-    assert!(
-        output
-            .completeness
-            .reasons()
-            .contains(crate::semantic_query::PartialReasonSet::CANCELLED),
-        "the fixture must actually drive a cancelled terminal handoff, \
-         not a complete one: {:?}",
-        output.completeness
+    assert_eq!(
+        output.err(),
+        Some(crate::semantic_query::ExecutionAbort::Cancelled),
+        "the fixture must actually drive a cancelled production, which publishes \
+         no bundle"
     );
     assert!(
         read_set.non_cacheable_read_observed(),

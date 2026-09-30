@@ -680,6 +680,10 @@ fn resolution_diagnostic_to_proto(
         F::BudgetExceeded => P::BudgetExceeded,
         F::ProjectionWorkLimit => P::ProjectionWorkLimit,
         F::ConnectedQueryDepthLimit => P::ConnectedQueryDepthLimit,
+        // Schema 12's vocabulary: a released reader knows only kinds 1-14, so
+        // the connected-demand memory rail is published as the work rail it
+        // shares a budget family with.
+        F::ConnectedMemoryLimit => P::ProjectionWorkLimit,
         F::MappedDepthExceeded => P::MappedDepthExceeded,
         F::UnresolvedReference => P::UnresolvedReference,
         F::IndeterminateConditional => P::IndeterminateConditional,
@@ -2503,6 +2507,8 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
         "budgetExceeded" => proto::ExpansionStopReason::BudgetExceeded,
         "projectionWorkLimit" => proto::ExpansionStopReason::ProjectionWorkLimit,
         "connectedQueryDepthLimit" => proto::ExpansionStopReason::ConnectedQueryDepthLimit,
+        // Schema 12's vocabulary: a released reader knows only reasons 1-14.
+        "connectedMemoryLimit" => proto::ExpansionStopReason::ProjectionWorkLimit,
         "mappedDepthExceeded" => proto::ExpansionStopReason::MappedDepthExceeded,
         "unresolvedReference" => proto::ExpansionStopReason::UnresolvedReference,
         "indeterminateConditional" => proto::ExpansionStopReason::IndeterminateConditional,
@@ -2524,13 +2530,21 @@ fn result_completeness_to_proto(value: &FfiResultCompleteness) -> proto::ResultC
             kind: proto::ResultCompletenessKind::Complete as i32,
             partial_reasons: Vec::new(),
         },
-        FfiResultCompleteness::Partial { reasons } => proto::ResultCompleteness {
-            kind: proto::ResultCompletenessKind::Partial as i32,
-            partial_reasons: reasons
-                .iter()
-                .map(|reason| surface_partial_reason_to_proto(*reason) as i32)
-                .collect(),
-        },
+        FfiResultCompleteness::Partial { reasons } => {
+            // Several causes can publish as one legacy reason: each is kept
+            // once, at its first position.
+            let mut partial_reasons: Vec<i32> = Vec::with_capacity(reasons.len());
+            for reason in reasons {
+                let wire = surface_partial_reason_to_proto(*reason) as i32;
+                if !partial_reasons.contains(&wire) {
+                    partial_reasons.push(wire);
+                }
+            }
+            proto::ResultCompleteness {
+                kind: proto::ResultCompletenessKind::Partial as i32,
+                partial_reasons,
+            }
+        }
     }
 }
 
@@ -2565,6 +2579,12 @@ fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::Sur
         FfiSurfacePartialReason::ConnectedQueryDepthLimit => {
             proto::SurfacePartialReason::ConnectedQueryDepthLimit
         }
+        // Schema 12's vocabulary: a released reader knows only reasons 1-17,
+        // so each newer cause is published as the legacy reason it refines.
+        FfiSurfacePartialReason::ConnectedMemoryLimit => {
+            proto::SurfacePartialReason::ProjectionWorkLimit
+        }
+        FfiSurfacePartialReason::OperationBudget => proto::SurfacePartialReason::BudgetExceeded,
         FfiSurfacePartialReason::MissingDependency => {
             proto::SurfacePartialReason::MissingDependency
         }
@@ -2577,6 +2597,7 @@ fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::Sur
         FfiSurfacePartialReason::FlowReturnNoSurface => {
             proto::SurfacePartialReason::FlowReturnNoSurface
         }
+        FfiSurfacePartialReason::UndecidedConditional => proto::SurfacePartialReason::Propagated,
     }
 }
 
@@ -2900,6 +2921,13 @@ mod tests {
     };
     use verter_type_expr::TypeExpr;
 
+    /// The released schema-12 vocabularies: the highest surface partial
+    /// reason, expansion stop reason and resolution diagnostic kind a
+    /// released reader decodes.
+    const SCHEMA_12_SURFACE_PARTIAL_REASONS: i32 = 17;
+    const SCHEMA_12_EXPANSION_STOP_REASONS: i32 = 14;
+    const SCHEMA_12_RESOLUTION_DIAGNOSTIC_KINDS: i32 = 14;
+
     /// The surface-partial reason taxonomy has three hand-written mirrors —
     /// the serialized Rust enum, the proto enum, and the TypeScript decoder's
     /// native names — and only the serde spelling is mechanically derived
@@ -2922,6 +2950,9 @@ mod tests {
     /// The expected name is DERIVED from `as_str_name()`, never hand-listed,
     /// so this is a generated-enum-driven check rather than a second copy of
     /// the taxonomy.
+    /// And the encoder speaks schema 12: a newer cause publishes as the
+    /// legacy reason it refines, so a released reader, which rejects an
+    /// unknown reason, reads every payload.
     #[test]
     fn surface_partial_reason_serde_and_proto_names_agree() {
         use crate::types::FfiSurfacePartialReason as R;
@@ -2947,6 +2978,9 @@ mod tests {
             R::FlowReturnUninferred,
             R::FlowReturnUnverified,
             R::FlowReturnNoSurface,
+            R::UndecidedConditional,
+            R::ConnectedMemoryLimit,
+            R::OperationBudget,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
@@ -2958,47 +2992,169 @@ mod tests {
             .expect("the zero value names itself unspecified")
             .to_string();
 
-        let mut mapped_numbers: Vec<i32> = Vec::with_capacity(ALL.len());
-        for reason in ALL {
-            let proto_value = super::surface_partial_reason_to_proto(*reason);
-            mapped_numbers.push(proto_value as i32);
+        // Every declared non-zero proto tag, by its lowerCamelCase name. The
+        // declared set is probed through the generated `TryFrom` well past
+        // the highest tag, so a new tag above the ceiling cannot hide.
+        let declared: Vec<(i32, String)> = (1..=512)
+            .filter_map(|tag| proto::SurfacePartialReason::try_from(tag).ok())
+            .map(|value| {
+                let name = lower_camel_case(
+                    value
+                        .as_str_name()
+                        .strip_prefix(prefix.as_str())
+                        .expect("every reason shares the taxonomy prefix"),
+                );
+                (value as i32, name)
+            })
+            .collect();
 
-            let expected = lower_camel_case(
-                proto_value
-                    .as_str_name()
-                    .strip_prefix(prefix.as_str())
-                    .expect("every reason shares the taxonomy prefix"),
-            );
-            // The serialized form is the public JSON name the FFI lane emits.
+        let mut named: Vec<String> = Vec::with_capacity(ALL.len());
+        for reason in ALL {
+            // The serialized form is the public JSON name the FFI lane emits:
+            // it names one declared proto value.
             let serialized = serde_json::to_string(reason).expect("a reason serializes");
-            assert_eq!(
-                serialized,
-                format!("\"{expected}\""),
-                "the serde spelling of {reason:?} must be the lowerCamelCase of its proto value \
-                 name ({}) — the FFI JSON lane and the proto lane are two public names for one \
-                 reason and must not diverge",
-                proto_value.as_str_name(),
+            let name = serialized.trim_matches('"').to_string();
+            let own = declared
+                .iter()
+                .find(|(_, declared_name)| *declared_name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the serde spelling of {reason:?} ({name}) names no declared proto value \
+                         — the FFI JSON lane and the proto lane must not diverge"
+                    )
+                });
+            // The encoder publishes a legacy reason as its own value and a
+            // newer one as the legacy reason it refines, never above the
+            // schema-12 vocabulary.
+            let wire = super::surface_partial_reason_to_proto(*reason) as i32;
+            assert!(
+                (1..=SCHEMA_12_SURFACE_PARTIAL_REASONS).contains(&wire),
+                "{reason:?} encodes as {wire}, outside schema 12's reasons"
             );
+            if own.0 <= SCHEMA_12_SURFACE_PARTIAL_REASONS {
+                assert_eq!(
+                    wire, own.0,
+                    "{reason:?} is a schema-12 reason: it encodes as itself"
+                );
+            }
+            named.push(name);
         }
 
-        // COVERAGE: every DECLARED non-zero proto tag must map onto exactly
-        // one Rust variant — keyed on the declared set itself, not on
-        // contiguity, so retiring a reason under the never-reuse rule (a
-        // `reserved` tag leaving a hole) stays a legal change while an
-        // added-but-unmapped tag still fails. The declared set is probed
-        // through the generated `TryFrom` well past the mapped maximum, so
-        // a new tag above the current ceiling cannot hide either.
-        mapped_numbers.sort_unstable();
-        let max_mapped = *mapped_numbers.last().expect("at least one reason maps");
-        let declared_numbers: Vec<i32> = (1..=max_mapped + 256)
-            .filter(|tag| proto::SurfacePartialReason::try_from(*tag).is_ok())
+        // COVERAGE: every declared tag names exactly one Rust variant — keyed
+        // on the declared set itself, so retiring a reason under the
+        // never-reuse rule stays legal while an added-but-unmapped tag fails.
+        named.sort_unstable();
+        let mut declared_names: Vec<String> = declared.into_iter().map(|(_, name)| name).collect();
+        declared_names.sort_unstable();
+        assert_eq!(
+            named, declared_names,
+            "every declared `SurfacePartialReason` tag must name exactly one Rust variant"
+        );
+    }
+
+    /// A payload carrying every cause newer than schema 12 decodes under
+    /// schema 12's vocabulary: its partial reasons, its expansion stop
+    /// reasons and its resolution diagnostic kinds all name values a
+    /// released reader knows, each newer cause as the legacy one it refines,
+    /// and a cause that publishes as one already present appears once.
+    #[test]
+    fn newer_causes_encode_in_the_schema_12_vocabulary() {
+        use crate::types::{
+            FfiExpansionDiagnostic, FfiMacroExpansionDiagnostics, FfiResolutionDiagnostic,
+            FfiResolutionDiagnosticKind as K, FfiResultCompleteness, FfiSurfacePartialReason as R,
+        };
+        let mut meta = super::build_test_meta();
+        meta.result_completeness = FfiResultCompleteness::Partial {
+            reasons: vec![
+                R::UndecidedConditional,
+                R::ConnectedMemoryLimit,
+                R::OperationBudget,
+                R::ProjectionWorkLimit,
+            ],
+        };
+        meta.macro_expansion_diagnostics = vec![FfiMacroExpansionDiagnostics {
+            macro_kind: "defineProps".to_string(),
+            macro_index: 0,
+            exactness: "incomplete".to_string(),
+            execution_status: "completed".to_string(),
+            diagnostics: vec![FfiExpansionDiagnostic {
+                reason: "connectedMemoryLimit".to_string(),
+                context: "props".to_string(),
+                property_name: None,
+            }],
+        }];
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 12);
+        let decoded = ComponentMetaPayload::decode(
+            super::component_meta_payload(&meta)
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .expect("payload must round-trip");
+        assert_eq!(decoded.schema_version, 12);
+        let body = decoded.body.as_ref().expect("component-meta body");
+        let completeness = body
+            .result_completeness
+            .as_ref()
+            .expect("the payload states its completeness");
+        assert_eq!(
+            completeness.partial_reasons,
+            vec![
+                proto::SurfacePartialReason::Propagated as i32,
+                proto::SurfacePartialReason::ProjectionWorkLimit as i32,
+                proto::SurfacePartialReason::BudgetExceeded as i32,
+            ],
+            "undecided, memory and operation budget publish as their legacy reasons, once each"
+        );
+        assert!(completeness
+            .partial_reasons
+            .iter()
+            .all(|reason| (1..=SCHEMA_12_SURFACE_PARTIAL_REASONS).contains(reason)));
+        let reasons: Vec<i32> = body
+            .macro_expansion_diagnostics
+            .iter()
+            .flat_map(|entry| entry.diagnostics.iter().map(|diagnostic| diagnostic.reason))
             .collect();
         assert_eq!(
-            mapped_numbers, declared_numbers,
-            "every declared `SurfacePartialReason` tag must have exactly one Rust variant mapped \
-             onto it — a declared tag missing from the mapped set is a reason the Rust taxonomy \
-             cannot express, and a mapped tag missing from the declared set is a stale variant"
+            reasons,
+            vec![proto::ExpansionStopReason::ProjectionWorkLimit as i32]
         );
+        assert!(reasons
+            .iter()
+            .all(|reason| (1..=SCHEMA_12_EXPANSION_STOP_REASONS).contains(reason)));
+
+        // Every resolution diagnostic kind, the memory rail included.
+        let mut builder = GraphBuilder::new();
+        for kind in [
+            K::BudgetExceeded,
+            K::ProjectionWorkLimit,
+            K::ConnectedQueryDepthLimit,
+            K::MappedDepthExceeded,
+            K::UnresolvedReference,
+            K::IndeterminateConditional,
+            K::InfiniteKeySpace,
+            K::UnsupportedOperator,
+            K::ConditionalContextTruncated,
+            K::IdempotentArm,
+            K::CyclicReference,
+            K::CyclicInstantiation,
+            K::InstantiationError,
+            K::EmptyUnionArm,
+            K::ConnectedMemoryLimit,
+        ] {
+            let encoded = super::resolution_diagnostic_to_proto(
+                &mut builder,
+                &FfiResolutionDiagnostic {
+                    kind,
+                    context: "props".to_string(),
+                    property_name: None,
+                },
+            );
+            assert!(
+                (1..=SCHEMA_12_RESOLUTION_DIAGNOSTIC_KINDS).contains(&encoded.kind),
+                "resolution diagnostic kind {} is outside schema 12's kinds",
+                encoded.kind
+            );
+        }
     }
 
     /// `SCREAMING_SNAKE` -> `lowerCamel`, the transform `serde`'s
@@ -3128,6 +3284,15 @@ mod tests {
         assert_eq!(
             super::proto::ExpansionStopReason::ConnectedQueryDepthLimit as i32,
             14
+        );
+        assert_eq!(
+            super::expansion_reason_to_proto("connectedMemoryLimit") as i32,
+            super::proto::ExpansionStopReason::ProjectionWorkLimit as i32,
+            "schema 12 publishes the memory rail as the work rail"
+        );
+        assert_eq!(
+            super::proto::ExpansionStopReason::ConnectedMemoryLimit as i32,
+            15
         );
     }
 

@@ -382,14 +382,7 @@ fn a_comma_expression_is_its_last_operand_after_its_writes() {
 
 /// `f?.()` over `f?: () => string` is `string | undefined` (`string` without
 /// `strictNullChecks`).
-///
-/// What the lane gives:
-/// - `lgOptionalCall`: the checker answers `string | undefined` (strict),
-///   `string` (strictNullChecks off), `string | undefined` (noImplicitAny off),
-///   `string` (both off); the lane measured `<opaque UnmodeledPosition>`
-///   degraded by FlowGap(UnmodeledExpression).
 #[test]
-#[ignore = "an optional call is the callee's result or undefined"]
 fn an_optional_call_adds_undefined_to_the_callee_result() {
     let matrix = Matrix::new(LOGICAL);
     let failures = matrix.nullness(&[(
@@ -397,6 +390,107 @@ fn an_optional_call_adds_undefined_to_the_callee_result() {
         "string | undefined",
         "string",
     )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Optional chains that hold a call, measured with tsc 7.0.2 under the four
+/// settings (`noImplicitAny` never changes the answer).
+const OPTIONAL_CALLS: &str = r##"
+export interface S { self(): this; v: number }
+export function ocCallee(g?: () => string) { return g?.(); }
+export function ocMember(o: { m?: () => string }) { return o.m?.(); }
+export function ocReceiver(o?: { m(): string }) { return o?.m(); }
+export function ocBoth(o?: { m?: () => string }) { return o?.m?.(); }
+export function ocThen(g?: () => string) { return g?.().length; }
+export function ocDefinite(g: () => string) { return g?.(); }
+export function ocNullReceiverThen(o: { m(): string } | null) { return o?.m().length; }
+export function ocNullCallee(g: (() => string) | null) { return g?.(); }
+export function ocDeep(o?: { a: { m(): string } }) { return o?.a.m(); }
+export function ocObjThen(o?: { m(): { v: number } }) { return o?.m().v; }
+export function ocCallMethod(f?: (a: number) => string) { return f?.call(undefined, 1); }
+export function ocBind(f?: (a: number) => string) { return f?.bind(undefined, 1); }
+export function ocThisParam(o?: { v: number; m<T>(this: T): T }) { return o?.m(); }
+export function pThisParam(o: { v: number; m<T>(this: T): T }) { return o.m(); }
+export function ocThisThen(o?: S) { return o?.self().v; }
+export function ocThis(o: S | undefined) { return o?.self(); }
+export function pThis(o: S) { return o.self(); }
+export function ocNarrowed(o: { m?: () => string }) { if (o.m) { return o.m?.(); } throw 0; }
+"##;
+
+/// An optional chain holding a call short-circuits to `undefined` on every
+/// `?.` edge whose base has nullish arms: the chain is the call's value (and
+/// the links read off it) with `undefined` beside it exactly when a strip
+/// removed arms, and `undefined` is a strict-null fact. A callee that is
+/// never nullish (`ocDefinite`) adds nothing, and a member called off the
+/// stripped receiver reads that receiver (`f?.call(…)`, an interface's
+/// `self(): this` in `o?.self()`). The library
+/// supplies `String` for the `.length` reads and `CallableFunction` for
+/// `call`.
+#[test]
+fn an_optional_chain_call_adds_undefined_on_its_short_circuit_edge() {
+    let matrix =
+        Matrix::new(OPTIONAL_CALLS).lib(super::differential_global_library_tests::GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (Read::Return("ocCallee"), "string | undefined", "string"),
+        (Read::Return("ocMember"), "string | undefined", "string"),
+        (Read::Return("ocReceiver"), "string | undefined", "string"),
+        (Read::Return("ocBoth"), "string | undefined", "string"),
+        (Read::Return("ocThen"), "number | undefined", "number"),
+        (Read::Return("ocDefinite"), "string", "string"),
+        (
+            Read::Return("ocNullReceiverThen"),
+            "number | undefined",
+            "number",
+        ),
+        (Read::Return("ocNullCallee"), "string | undefined", "string"),
+        (Read::Return("ocDeep"), "string | undefined", "string"),
+        (Read::Return("ocObjThen"), "number | undefined", "number"),
+        (Read::Return("ocCallMethod"), "string | undefined", "string"),
+        (Read::Return("pThis"), "S", "S"),
+        (Read::Return("ocThis"), "S | undefined", "S"),
+        (Read::Return("ocThisThen"), "number | undefined", "number"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A guarded root's optional call reads the narrowed member, and a call
+/// infers its type parameters from a `this` parameter.
+///
+/// What the lane gives:
+/// - `ocNarrowed`: the checker answers `string`; the lane measured
+///   `<opaque UnmodeledPosition>` degraded by FlowGap(UnmodeledExpression)
+///   (the write-effect rail every optional chain root takes refuses a root
+///   an in-frame guard changes).
+/// - `pThisParam` (no optional chain) and `ocThisParam`: the checker infers
+///   `T` from the receiver (`{ v: number; m<T>(this: T): T; }`, with
+///   `| undefined` under the chain); the lane measured `<opaque
+///   UnmodeledPosition>` degraded by UnrepresentableCallee.
+/// - `ocBind`: the checker answers `(() => string) | undefined`; the lane
+///   measured `<opaque UnmodeledPosition> | undefined` degraded by
+///   UnrepresentableCallee (`bind` has no modeled call, chain or not).
+#[test]
+#[ignore = "a guarded optional-chain root reads its narrowing; a this parameter infers"]
+fn an_optional_chain_call_reads_a_guarded_root_and_infers_from_this() {
+    let matrix =
+        Matrix::new(OPTIONAL_CALLS).lib(super::differential_global_library_tests::GLOBALS_LIB);
+    let failures = matrix.nullness(&[
+        (Read::Return("ocNarrowed"), "string", "string"),
+        (
+            Read::Return("pThisParam"),
+            "{ v: number; m<T>(this: T): T; }",
+            "{ v: number; m<T>(this: T): T; }",
+        ),
+        (
+            Read::Return("ocThisParam"),
+            "{ v: number; m<T>(this: T): T; } | undefined",
+            "{ v: number; m<T>(this: T): T; }",
+        ),
+        (
+            Read::Return("ocBind"),
+            "(() => string) | undefined",
+            "() => string",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -477,6 +571,42 @@ fn a_nested_closure_keeps_its_outer_parameter_narrowing() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Writes to unannotated `let` / `var` bindings, whose declared type is
+/// their initializer's widened type.
+const INFERRED_DECLARED_WRITES: &str = r##"
+declare function cond(): boolean;
+export function adWrong() { let x = 0; x = "s" as any as string; return x; }
+export function adAny() { let x = 0; x = ("s" as string) as any; return x; }
+export function adUnion() { let x = cond() ? 1 : "s"; x = true as any as boolean; return x; }
+export function adUnionOk() { let x = cond() ? 1 : "s"; x = 2; return x; }
+export function adVar() { var x = "a"; x = 1 as any as number; return x; }
+"##;
+
+/// A write to an unannotated `let` / `var` takes the checker's assignment
+/// rule over the binding's declared type (its initializer's widened type):
+/// a non-union declared type is what the binding holds, and a union selects
+/// the constituents the value may be assigned to, else stays declared
+/// (tsc 7.0.2, all four settings).
+#[test]
+fn a_write_to_an_inferred_declared_local_reduces_by_its_declared_type() {
+    let matrix = Matrix::new(INFERRED_DECLARED_WRITES);
+    let failures = matrix.returns(&[
+        ("adWrong", "number"),
+        ("adAny", "number"),
+        ("adUnion", "string | number"),
+        ("adUnionOk", "number"),
+        ("adVar", "string"),
+    ]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
 /// Writes in `try`, `catch` and `finally` blocks, and catch variables.
 const TRY_CATCH: &str = r##"
 declare function cond(): boolean;
@@ -492,6 +622,11 @@ export function tryCatchVarTyped() { try { risky(); } catch (e: unknown) { retur
 export function tryCatchNarrow() { try { risky(); } catch (e) { if (typeof e === "string") return e; } throw 0; }
 export function tryThrowOnly() { try { throw 1; } catch { return "c"; } }
 export function tryNested() { let x: 1 | 2 | 3 = 1; try { try { x = 2; risky(); } finally { x = 3; } } catch { } return x; }
+export function tryCatchOnly() { let x: 1 | 2 | 3 = 1; try { try { x = 2; } catch { } } catch { return x; } return 3 as const; }
+export function tryInCatch() { let x: 1 | 2 | 3 = 1; try { risky(); } catch { x = 2; } finally { return x; } }
+export function tryFinallyOuter() { let x: 1 | 2 | 3 = 1; try { try { x = 2; } finally { risky(); } } catch { return x; } return 3 as const; }
+export function tryFinallyWrites() { let x: 1 | 2 | 3 = 1; try { try { risky(); } finally { x = 2; risky(); x = 3; } } catch { return x; } return "z" as const; }
+export function tryTwoWrites() { let x: 1 | 2 | 3 = 1; try { x = 2; x = 3; } catch { return x; } return 1 as const; }
 "##;
 
 /// A `finally` block sees and overrides its `try`'s writes, returns in `try`
@@ -515,23 +650,23 @@ fn try_statements_join_as_the_checker_joins_them() {
 
 /// After `try { x = 1; … } catch { … }` the read joins the value before the
 /// `try` (the throw may come first), each write in the `try` block, and the
-/// `catch` block's writes; a `finally` block's write replaces them all.
-///
-/// What the lane gives:
-/// - `tryTry`: the checker answers `string | number`; the lane measured `number
-///   | string` degraded by ConditionalVarDefinition.
-/// - `tryCatch`: the checker answers `number | true`; the lane measured `true |
-///   number` degraded by ConditionalVarDefinition.
-/// - `tryNested`: the checker answers `1 | 3`; the lane measured `3 | 2 | 1`
-///   degraded by ConditionalVarDefinition.
+/// `catch` block's writes; a `finally` block's write replaces them all. A
+/// catch is entered from the try's entry and from every write of its own
+/// block (not of a nested try's); a throw leaving a nested `try` through its
+/// `finally` reaches the outer catch as the state the finally ends in
+/// (tsc 7.0.2, all four settings).
 #[test]
-#[ignore = "the read after a try statement joins the values every point of the try block may have left"]
 fn a_try_catch_join_holds_every_write_that_may_have_run() {
     let matrix = Matrix::new(TRY_CATCH);
     let failures = matrix.returns(&[
         ("tryTry", "string | number"),
         ("tryCatch", "number | true"),
         ("tryNested", "1 | 3"),
+        ("tryCatchOnly", "1 | 3"),
+        ("tryInCatch", "1 | 2"),
+        ("tryFinallyOuter", "1 | 2 | 3"),
+        ("tryTwoWrites", "1 | 2 | 3"),
+        ("tryFinallyWrites", "\"z\" | 1 | 2 | 3"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -602,11 +737,14 @@ export function sTwice(x: "a" | "b") { switch (x) { case "a": return 1; case "b"
 export function nCall(y: string) { fail(); return y; }
 export function nCallConst(y: string) { fail(); const z = "zz"; return z; }
 export function nCallAssign(y: string | number) { fail(); y = "q"; return y; }
+export function dWhile(x: string | number) { if (typeof x === "string") { while (false) { return x; } } return 2; }
+export function dFor(x: string | number) { if (typeof x === "string") { for (; false; ) { return x; } } return true; }
 declare const o: { fail(): never };
 export function nNarrowed(y: string | number) { if (typeof y === "string") { fail(); return y; } return true; }
 export function nMethodNarrowed(y: string | number) { if (typeof y === "string") { o.fail(); return y; } return true; }
 export function nLocal(y: string | number) { let w = y; fail(); return w; }
 export function nNarrowLet(y: string | number) { let w: string | number = 1; fail(); return w; }
+export function nStop(x: string | number, stop: { fail(): never }) { if (typeof x === "string") { stop.fail(); return x; } return 1; }
 "##;
 
 /// The checker aggregates every `return` in the body, the ones past a path
@@ -638,19 +776,98 @@ fn returns_past_a_path_the_checker_proves_dead_contribute() {
         ("nCall", "string"),
         ("nCallConst", "string"),
         ("nCallAssign", "string | number"),
+        ("dWhile", "string | number"),
+        ("dFor", "string | number | true"),
         ("nNarrowed", "string | number | true"),
         ("nLocal", "string | number"),
         ("nNarrowLet", "string | number"),
+        ("nMethodNarrowed", "string | number | true"),
+        ("nStop", "string | number"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A reference narrowed before a call to a `never`-returning METHOD reads
-/// its declared type past the call, as past a `never`-returning function.
+/// A body-derived return the lane evaluates APPROXIMATELY (`writeWhile`: the
+/// write in the loop test is unapplied, so the lane reads `number` where the
+/// checker reads `string | number`), read through type positions; and a
+/// proven return (`okNumber`) whose value is the same primitive node.
+/// Answers measured with tsc 7.0.2, alike under all four settings.
+const APPROXIMATE_RETURNS: &str = r##"
+export function writeWhile(c: boolean) { let x: string | number = 1; while (c && (x = "s")) { return x; } return x; }
+export function okNumber() { const n: number = 1; return n; }
+export class G<T> { m(c: boolean, t: T) { let x: T | number = 1; while (c && (x = t)) { return x; } return x; } }
+export class K { m(c: boolean) { let x: string | number = 1; while (c && (x = "s")) { return x; } return x; } n() { return 1; } }
+"##;
+
+/// Two occurrences of one primitive node keep their own completeness: the
+/// proven `ReturnType<typeof okNumber>` reads `number` clean, while the
+/// approximate `ReturnType<typeof writeWhile>` (the same `number` node) is
+/// never published as a clean `number`.
 #[test]
-#[ignore = "a reference narrowed before a never-returning method call reads its narrowed type past the call"]
-fn a_reference_past_a_never_returning_method_call_reads_its_declared_type() {
-    let matrix = Matrix::new(PAST_DEAD_PATH);
-    let failures = matrix.returns(&[("nMethodNarrowed", "string | number | true")]);
+fn a_proven_and_an_approximate_return_sharing_a_node_keep_their_own_completeness() {
+    let matrix = Matrix::new(APPROXIMATE_RETURNS);
+    let mut failures = matrix.types(&[("ReturnType<typeof okNumber>", "number")]);
+    let rows = [(
+        Read::Type("ReturnType<typeof writeWhile>"),
+        vec!["string | number"; 4],
+    )];
+    failures.extend(
+        matrix
+            .verdicts(&rows)
+            .into_iter()
+            .flatten()
+            .filter(|verdict| verdict.matched || verdict.class != "GAP")
+            .map(|verdict| verdict.lane),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An approximate body-derived return keeps its evidence through every type
+/// position that reads it: the function's own type, a conditional deciding
+/// on it, an indexed access through an object holding it, a class member's
+/// signature and its return.
+///
+/// What the lane gives, in this row order (the answers depend on the
+/// host's warm state — the request-scoped degraded-read counter sees only a
+/// COLD read of the utility, so a read that follows a warming one
+/// publishes clean; run first on a fresh host, `ReturnType<typeof
+/// writeWhile>` is `number` degraded by PartialInterior):
+/// - `typeof writeWhile`: wrong-but-clean: the lane measured `{ (c: boolean):
+///   number; }`.
+/// - `[ReturnType<typeof writeWhile>] extends [number] ? "narrow" : "wide"`:
+///   the lane measured `"narrow"` degraded by PartialInterior (wrong-but-clean
+///   when a prior read warmed the utility).
+/// - `{ r: ReturnType<typeof writeWhile> }['r']`: wrong-but-clean: the lane
+///   measured `number`.
+/// - `ReturnType<typeof writeWhile>`: wrong-but-clean: the lane measured
+///   `number`.
+/// - `ReturnType<G<string>['m']>`, `K['m']`, `ReturnType<K['m']>` and
+///   `ReturnType<K['n']>` (whose own member is exact): the lane reduced to a
+///   partial demand (the class evaluates every member body).
+///
+/// The public TypeInfo route (`evaluate_type_expression_with_audit` then the
+/// raise) publishes `number`, `(c: boolean) => number`, `"narrow"` and
+/// `number` for the first four with no completeness at all: the host type
+/// resolution result is a bare node.
+#[test]
+#[ignore = "an approximate body-derived return keeps its evidence through every type position"]
+fn an_approximate_return_keeps_its_evidence_through_every_type_position() {
+    let matrix = Matrix::new(APPROXIMATE_RETURNS);
+    let failures = matrix.types(&[
+        ("typeof writeWhile", "(c: boolean) => string | number"),
+        (
+            "[ReturnType<typeof writeWhile>] extends [number] ? \"narrow\" : \"wide\"",
+            "\"wide\"",
+        ),
+        (
+            "{ r: ReturnType<typeof writeWhile> }['r']",
+            "string | number",
+        ),
+        ("ReturnType<typeof writeWhile>", "string | number"),
+        ("ReturnType<G<string>['m']>", "string | number"),
+        ("K['m']", "(c: boolean) => string | number"),
+        ("ReturnType<K['m']>", "string | number"),
+        ("ReturnType<K['n']>", "number"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

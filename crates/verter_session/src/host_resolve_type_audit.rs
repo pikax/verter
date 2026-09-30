@@ -144,7 +144,8 @@ impl TypeResolutionRequestError {
             | QueryError::UnrepresentableSurfaceMember
             // The checker's recovered error type is its own answer after a
             // diagnostic, never a request fault.
-            | QueryError::CheckerRecovery(_) => None,
+            | QueryError::PermissiveWildcard
+            | QueryError::CheckerRecovery { .. } => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
             }),

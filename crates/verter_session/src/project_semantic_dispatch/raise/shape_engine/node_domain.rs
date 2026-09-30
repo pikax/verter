@@ -152,9 +152,16 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary::materialized_expanded_leaf(),
         )
     }
-    fn infer(&mut self, name: Arc<str>) -> RaisedShapeResult {
+    fn infer(
+        &mut self,
+        name: Arc<str>,
+        constraint: Option<RaisedShapeResult>,
+    ) -> RaisedShapeResult {
         self.result(
-            RaisedTerm::Infer { name },
+            RaisedTerm::Infer {
+                name,
+                constraint: constraint.map(|constraint| constraint.key),
+            },
             summary::materialized_expanded_leaf(),
         )
     }
@@ -634,7 +641,11 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     fn literal(&mut self, _value: LiteralValue) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
-    fn infer(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
+    fn infer(
+        &mut self,
+        _name: Arc<str>,
+        _constraint: Option<RaisedShapeSummary>,
+    ) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
     fn unknown(&mut self, value: UnknownValue) -> RaisedShapeSummary {
@@ -989,8 +1000,11 @@ impl RaisedShapeAlgebra for DeclarationFactsAlg {
     fn literal(&mut self, _value: LiteralValue) -> DeclarationOut {
         DeclarationOut::leaf(DeclarationTag::Other)
     }
-    fn infer(&mut self, _name: Arc<str>) -> DeclarationOut {
-        DeclarationOut::leaf(DeclarationTag::Other)
+    fn infer(&mut self, _name: Arc<str>, constraint: Option<DeclarationOut>) -> DeclarationOut {
+        match constraint {
+            None => DeclarationOut::leaf(DeclarationTag::Other),
+            Some(constraint) => DeclarationOut::combine(DeclarationTag::Other, vec![constraint]),
+        }
     }
     fn unknown(&mut self, _value: UnknownValue) -> DeclarationOut {
         DeclarationOut::unsafe_leaf()
@@ -1378,8 +1392,11 @@ pub(super) fn type_expr_to_key(interner: &mut ShapeInterner, expr: &TypeExpr) ->
                 .map(|e| type_expr_to_key(interner, e))
                 .collect(),
         },
-        TypeExpr::Infer { name } => RaisedTerm::Infer {
+        TypeExpr::Infer { name, constraint } => RaisedTerm::Infer {
             name: Arc::from(name.as_str()),
+            constraint: constraint
+                .as_ref()
+                .map(|constraint| type_expr_to_key(interner, constraint)),
         },
         TypeExpr::Rest(inner) => RaisedTerm::Rest(type_expr_to_key(interner, inner)),
         TypeExpr::Parenthesized(inner) => {
@@ -1855,7 +1872,7 @@ pub(super) fn project_root_summary(
         ),
         SemanticNodeData::Opaque(err) => match err {
             // A checker recovery raises as its recovery primitive.
-            QueryError::RecursiveRef { .. } | QueryError::CheckerRecovery(_) => {
+            QueryError::RecursiveRef { .. } | QueryError::CheckerRecovery { .. } => {
                 RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
             }
             _ => RootOnlySummary::from_summary(summary::opaque_sentinel(err)),

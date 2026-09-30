@@ -213,23 +213,28 @@ fn template_literal_key_reducer_projects_callable_slots() {
     );
 }
 
-/// FIX 1 guard — the template-literal keyspace product-width budget. A finite
-/// template whose cartesian product `∏ |choice_set_i|` exceeds
-/// `TEMPLATE_LITERAL_KEYSPACE_CAP` must CARRIER-STOP to the deferred
-/// `TemplateLiteral` shell and the result must NOT be warm-admitted (it is a
-/// non-cacheable budget-tainted partial). Discriminates the pre-fix unbounded
-/// cartesian build (which enumerated the full union with `cache_suppress=false`).
+/// A template whose concatenations the connected-work ledger refuses must
+/// CARRIER-STOP to the deferred `TemplateLiteral` shell, and the result must
+/// NOT be warm-admitted (it is a non-cacheable budget-tainted partial). The
+/// checker has no such limit below its own TS2590 product: the same product
+/// under the production ledger enumerates.
 #[test]
 pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     use crate::semantic_query::{QueryResult, SemanticNodeData};
 
     let host = make_host_with_footprint();
 
-    // Two fully-CLOSED finite unions whose product (40 × 40 = 1600) exceeds the
-    // cap (1024). Each union is a wide set of distinct string literals.
+    // Two fully-CLOSED finite unions whose 1,600 concatenations exceed a
+    // 256-unit work limit. Each union is a wide set of distinct string
+    // literals.
     let union_a: Vec<String> = (0..40).map(|i| format!("a{i}")).collect();
     let union_b: Vec<String> = (0..40).map(|i| format!("b{i}")).collect();
-    let (read, graph) = template_literal_reduce_read(&host, &["", "-", ""], &[union_a, union_b]);
+    let (read, graph) = template_literal_reduce_read_with_work_limit(
+        &host,
+        &["", "-", ""],
+        &[union_a.clone(), union_b.clone()],
+        Some(256),
+    );
 
     // (1) Carrier-stops: the value is the deferred TemplateLiteral SHELL, never
     //     an enumerated 1600-arm literal union.
@@ -240,35 +245,29 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     let data = graph.node_data(value).expect("value node must exist");
     assert!(
         matches!(data.as_ref(), SemanticNodeData::TemplateLiteral { .. }),
-        "over-cap keyspace must carrier-stop to the TemplateLiteral shell, got {:?}",
+        "a refused construction must carrier-stop to the TemplateLiteral shell, got {:?}",
         data.as_ref()
     );
     assert!(
         !matches!(data.as_ref(), SemanticNodeData::Union(_)),
-        "over-cap keyspace must NOT enumerate a literal union"
+        "a refused construction must NOT enumerate a literal union"
     );
 
-    // (2) Not warm-admitted: the over-budget product is a non-cacheable,
+    // (2) Not warm-admitted: the refused product is a non-cacheable,
     //     budget-tainted partial.
     assert!(
         read.cache_suppress,
-        "an over-cap template product must be cache-suppressed (never warm-admitted)"
+        "a refused template product must be cache-suppressed (never warm-admitted)"
     );
     assert!(
         read.result_is_partial,
-        "an over-cap template product must be flagged a budget-tainted partial"
+        "a refused template product must be flagged a budget-tainted partial"
     );
 
-    // Control: an UNDER-cap product (2 × 2 = 4) still fully enumerates and is
-    // admissible — the cap must not just always carrier-stop.
-    let (small_read, small_graph) = template_literal_reduce_read(
-        &host,
-        &["", "-", ""],
-        &[
-            vec!["x".to_string(), "y".to_string()],
-            vec!["1".to_string(), "2".to_string()],
-        ],
-    );
+    // Control: the same 1,600-concatenation product under the production
+    // ledger fully enumerates and is admissible.
+    let (small_read, small_graph) =
+        template_literal_reduce_read(&host, &["", "-", ""], &[union_a, union_b]);
     let small_value = match small_read.value {
         QueryResult::Value(id) => id,
         other => panic!("expected a value node, got {other:?}"),
@@ -276,16 +275,16 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     let small_data = small_graph.node_data(small_value).expect("node must exist");
     assert!(
         matches!(small_data.as_ref(), SemanticNodeData::Union(_)),
-        "under-cap product must fully enumerate to a union, got {:?}",
+        "the product must fully enumerate to a union, got {:?}",
         small_data.as_ref()
     );
     assert!(
         !small_read.cache_suppress,
-        "under-cap product is a complete result and must not be suppressed"
+        "the enumerated product is a complete result and must not be suppressed"
     );
     assert!(
         !small_read.result_is_partial,
-        "under-cap product is complete, not a partial"
+        "the enumerated product is complete, not a partial"
     );
 }
 

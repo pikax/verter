@@ -35,6 +35,7 @@ use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest, VueCompileRequest,
 };
 use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
+use verter_parser::oxc_parse::StackUnavailable;
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, LanguageRegistry,
     PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest, VerterHost,
@@ -263,11 +264,22 @@ fn generate_public_api_stubs(
         // `{name}.vue.{dialect.extension()}` below, so a JavaScript SFC's
         // JSDoc-widened rendering lands in a `.js`/`.jsx` file that honors it.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(tsc_response.dialect_labeled_code(), vue_dir);
         // …and canonicalize the NON-relative carrier specifiers the first pass
         // cannot reach, so an aliased root-component reference resolves to its
-        // generated stub instead of the empty `*.vue` wildcard shim.
-        let code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
+        // generated stub instead of the empty `*.vue` wildcard shim. A
+        // specifier inventory refused its stack is the file's typed failure.
+        let code = match rewrite_relative_imports(tsc_response.dialect_labeled_code(), vue_dir)
+            .and_then(|code| {
+                canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host)
+            }) {
+            Ok(code) => code,
+            Err(unavailable) => {
+                let failure = stack_refusal_failure(vue_path, unavailable);
+                outcomes.push(PublicApiOutcome::Failed(failure.clone()));
+                failures.push(failure);
+                continue;
+            }
+        };
 
         let raw_name = vue_path
             .file_stem()
@@ -361,8 +373,9 @@ fn generate_svelte_ide_tsx(
     })?;
 
     let svelte_dir = svelte_path.parent().unwrap_or(Path::new("."));
-    let mut code = rewrite_relative_imports(&ide.code, svelte_dir);
-    code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
+    let mut code = rewrite_relative_imports(&ide.code, svelte_dir)
+        .and_then(|code| canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host))
+        .map_err(|unavailable| stack_refusal_error(svelte_path, unavailable))?;
     if let Some(source_map) = ide.source_map.as_deref() {
         if !source_map.is_empty() {
             let encoded = base64::prelude::BASE64_STANDARD.encode(source_map.as_bytes());
@@ -414,8 +427,14 @@ fn generate_all_tsx(
         .map(|vue_path| {
             let canonical_id = canonical_path_id(vue_path);
             host.vue_macro_semantic_input(&canonical_id, CompileTarget::TSX)
+                .map_err(|abort| {
+                    api_check::TypecheckError::new(format!(
+                        "verter-tsc: macro semantics for {} were aborted: {abort:?}",
+                        vue_path.display()
+                    ))
+                })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let vue_rows: Vec<(PathBuf, String, PathBuf)> = vue_only
         .par_iter()
@@ -487,7 +506,8 @@ fn generate_all_tsx(
             // Rewrite relative imports to absolute paths (the carriers live in a
             // virtual directory, not beside the source)…
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-            let mut code = rewrite_relative_imports(tsx_block.code(), vue_dir);
+            let code = rewrite_relative_imports(tsx_block.code(), vue_dir)
+                .map_err(|unavailable| stack_refusal_error(vue_path, unavailable))?;
             // …and canonicalize the NON-relative carrier specifiers the first
             // pass cannot reach. This is not stub-only work: the IDE codegen
             // deliberately preserves an aliased child import (`@/Child.vue`)
@@ -497,7 +517,8 @@ fn generate_all_tsx(
             // is simply absent for every alias-importing consumer, which is the
             // headline case of issue #97 for a project using `paths`.
             let canonical_id = canonical_path_id(vue_path);
-            code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
+            let mut code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host)
+                .map_err(|unavailable| stack_refusal_error(vue_path, unavailable))?;
 
             // Append inline source map so `map_tsc_position()` can remap errors.
             // An IdeCompanion artifact's projection map is never optional
@@ -610,7 +631,15 @@ fn generate_all_tsc(
         // name below regardless of the SFC's dialect, and a `.tsx` ScriptKind
         // silently ignores the JSDoc-widened JavaScript rendering.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(tsc_out.ts_labeled_code(), vue_dir);
+        let code = match rewrite_relative_imports(tsc_out.ts_labeled_code(), vue_dir) {
+            Ok(code) => code,
+            Err(unavailable) => {
+                let failure = stack_refusal_failure(vue_path, unavailable);
+                outcomes.push(PublicApiOutcome::Failed(failure.clone()));
+                failures.push(failure);
+                continue;
+            }
+        };
 
         let raw_name = vue_path
             .file_stem()
@@ -2088,6 +2117,27 @@ fn collect_dts_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A public-API file whose specifier inventory was refused its stack: the
+/// typed projection failure, whose subject is the whole source.
+fn stack_refusal_failure(source: &Path, unavailable: StackUnavailable) -> PublicApiFailure {
+    PublicApiFailure::new(
+        source,
+        verter_session::PublicApiProjectionError::TscGeneration(
+            verter_compiler::tsc::TscGenerationError::StackUnavailable {
+                needed: unavailable.needed,
+            },
+        ),
+    )
+}
+
+/// A checked file whose specifier inventory was refused its stack.
+fn stack_refusal_error(source: &Path, unavailable: StackUnavailable) -> api_check::TypecheckError {
+    api_check::TypecheckError::new(format!(
+        "verter-tsc: {} is incomplete: {unavailable}",
+        source.display()
+    ))
+}
+
 /// Rewrite relative import paths in generated code to absolute paths.
 ///
 /// The generated files are placed in a temp directory, so relative imports need
@@ -2096,7 +2146,7 @@ fn collect_dts_files(dir: &Path) -> Vec<PathBuf> {
 /// Handles two patterns:
 /// - `import('./types')` — dynamic import syntax
 /// - `from './types'` — ES module import/export syntax
-fn rewrite_relative_imports(code: &str, vue_dir: &Path) -> String {
+fn rewrite_relative_imports(code: &str, vue_dir: &Path) -> Result<String, StackUnavailable> {
     rewrite_import_specifiers(code, |specifier| {
         absolutize_relative_specifier(specifier, vue_dir)
     })
@@ -2119,7 +2169,7 @@ fn canonicalize_nonrelative_carrier_specifiers(
     code: &str,
     owner_canonical_id: &str,
     host: &VerterHost,
-) -> String {
+) -> Result<String, StackUnavailable> {
     rewrite_import_specifiers(code, |specifier| {
         if verter_semantic::resolver_core::is_relative_specifier(specifier) {
             return None;
@@ -2160,9 +2210,15 @@ fn canonicalize_nonrelative_carrier_specifiers(
 /// direction — an un-rewritten specifier surfaces as a module-resolution
 /// diagnostic the user can see, where a wrongly-rewritten one silently
 /// retargets their import.
-fn rewrite_import_specifiers(code: &str, rewrite: impl Fn(&str) -> Option<String>) -> String {
-    let Some(spans) = verter_compiler::tsc::collect_module_specifier_spans(code) else {
-        return code.to_string();
+///
+/// A parse or walk refused its stack is the typed refusal: the inventory is
+/// unknown, not empty, and the code is not served.
+fn rewrite_import_specifiers(
+    code: &str,
+    rewrite: impl Fn(&str) -> Option<String>,
+) -> Result<String, StackUnavailable> {
+    let Some(spans) = verter_compiler::tsc::collect_module_specifier_spans(code)? else {
+        return Ok(code.to_string());
     };
     let mut result = String::with_capacity(code.len());
     let mut cursor = 0usize;
@@ -2181,7 +2237,7 @@ fn rewrite_import_specifiers(code: &str, rewrite: impl Fn(&str) -> Option<String
         cursor = span.end;
     }
     result.push_str(&code[cursor..]);
-    result
+    Ok(result)
 }
 
 /// The absolute form of a RELATIVE specifier, or `None` for every other class.
@@ -4478,7 +4534,8 @@ defineProps<{ value: Unsafe }>()
     #[test]
     fn rewrite_relative_imports_rewrites_dotslash() {
         let code = r#"import('./types').Props"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("/project/src/types"),
             "should resolve relative path: {result}"
@@ -4496,7 +4553,8 @@ defineProps<{ value: Unsafe }>()
     #[test]
     fn rewrite_relative_imports_preserves_absolute() {
         let code = r#"import('vue').DefineComponent"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("'vue'"),
             "absolute import should be preserved: {result}"
@@ -4506,7 +4564,8 @@ defineProps<{ value: Unsafe }>()
     #[test]
     fn rewrite_relative_imports_from_keyword() {
         let code = r#"import type { Props } from './types'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("/project/src/types"),
             "from keyword relative path should be rewritten: {result}"
@@ -4524,7 +4583,8 @@ defineProps<{ value: Unsafe }>()
     #[test]
     fn rewrite_relative_imports_from_keyword_preserves_bare_module() {
         let code = r#"import { defineComponent } from "vue""#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("\"vue\""),
             "bare module import should be preserved: {result}"
@@ -4536,7 +4596,8 @@ defineProps<{ value: Unsafe }>()
         // The instance declaration generates import('./D:/full/path/file.vue.ts')
         // which starts with "./" but is actually already absolute after the prefix.
         let code = r#"import('./D:/project/src/file.vue.ts')['default']"#;
-        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("D:/project/src")).expect("the stack is had");
         // Positive: should contain the absolute path, not doubled
         assert!(
             result.contains("'D:/project/src/file.vue.ts'"),
@@ -4554,7 +4615,8 @@ defineProps<{ value: Unsafe }>()
         // `import('./components/Foo.vue.ts')` with vue_dir = "D:/project/src"
         // should produce "D:/project/src/components/Foo.vue.ts" — NOT "D:/project/src/./components/..."
         let code = r#"import('./components/Foo.vue.ts')['default']"#;
-        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("D:/project/src")).expect("the stack is had");
         // Positive: the resolved absolute path should be clean
         assert!(
             result.contains("'D:/project/src/components/Foo.vue.ts'"),
@@ -4571,7 +4633,8 @@ defineProps<{ value: Unsafe }>()
     fn rewrite_relative_imports_normalizes_dot_slash_from_syntax() {
         // `from './types'` with vue_dir = "D:/project/src"
         let code = r#"import { Foo } from './types'"#;
-        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("D:/project/src")).expect("the stack is had");
         assert!(
             result.contains("'D:/project/src/types'"),
             "from-syntax dot-slash import should resolve cleanly: {result}"
@@ -4589,7 +4652,8 @@ defineProps<{ value: Unsafe }>()
         // temp TSX, TypeScript resolves it against the TEMP directory —
         // spurious missing module on the validation lane.
         let code = r#"import type { Foo } from '..'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("from '/project/src/..'"),
             "bare '..' must absolutize against the vue dir (TS normalizes \
@@ -4605,7 +4669,8 @@ defineProps<{ value: Unsafe }>()
     fn rewrite_relative_imports_absolutizes_bare_dot() {
         // Bare `.` — the importer directory's own index module.
         let code = r#"import type { Foo } from '.'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("from '/project/src'"),
             "bare '.' must absolutize to the vue dir itself: {result}"
@@ -4631,13 +4696,15 @@ defineProps<{ value: Unsafe }>()
         // literal's decoded VALUE and re-emits a whole literal, so the escape
         // round-trips instead of being spliced through.
         let code = r#"import type { Foo } from '..\\x'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("'/project/src/../x'"),
             "'..\\x' must absolutize with normalized separators: {result}"
         );
         let code = r#"import type { Foo } from '.\\x'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("'/project/src/x'"),
             "'.\\x' must absolutize with normalized separators: {result}"
@@ -4650,13 +4717,15 @@ defineProps<{ value: Unsafe }>()
         // the leading `.`) — package-ish, preserved byte-for-byte, like a
         // bare package name.
         let code = r#"import { x } from '.foo'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("from '.foo'"),
             "non-relative dot-prefixed specifier must be preserved: {result}"
         );
         let code = r#"import { x } from 'pkg'"#;
-        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        let result =
+            rewrite_relative_imports(code, Path::new("/project/src")).expect("the stack is had");
         assert!(
             result.contains("from 'pkg'"),
             "bare package specifier must be preserved: {result}"
@@ -7499,7 +7568,8 @@ mod authored_literal_survival_tests {
                  rewriting; an authored literal is not a specifier"
             );
             Some("/abs/src/Child.vue".to_string())
-        });
+        })
+        .expect("the stack is had");
 
         assert!(
             rewritten.contains("import Child from '/abs/src/Child.vue'"),
@@ -7515,6 +7585,42 @@ mod authored_literal_survival_tests {
             rewritten.contains("const alsoMarker = \"from '@/Child.vue'\""),
             "and so must one containing the `from` spelling: {rewritten}"
         );
+    }
+
+    /// A specifier rewrite whose parse of the code is refused its stack is
+    /// the typed refusal, never the code served un-rewritten as if it held
+    /// no specifier; the public-API file it belongs to fails with the typed
+    /// projection failure, whose subject is the whole source. Retried, the
+    /// rewrite answers.
+    #[test]
+    fn a_specifier_rewrite_whose_parse_is_refused_is_the_typed_refusal() {
+        let code = format!(
+            "import Child from './Child.vue'\nconst v = {}1{};\n",
+            "(".repeat(157),
+            ")".repeat(157)
+        );
+        let (refused, retried) = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn_scoped(scope, || {
+                    verter_parser::oxc_parse::faults::fail_next_reservations(1);
+                    let refused = rewrite_relative_imports(&code, Path::new("/project/src"));
+                    (
+                        refused,
+                        rewrite_relative_imports(&code, Path::new("/project/src")),
+                    )
+                })
+                .expect("spawn the thread")
+                .join()
+                .expect("the rewrites return")
+        });
+        let unavailable = refused.expect_err("the refused rewrite is the typed refusal");
+        let failure = stack_refusal_failure(Path::new("/project/src/Deep.vue"), unavailable);
+        assert_eq!(failure.detail_code, "stack-unavailable");
+        assert_eq!(failure.subject, PublicApiProjectionSubject::Source);
+        assert!(retried
+            .expect("the stack is had")
+            .contains("/project/src/Child.vue"));
     }
 
     /// The same property through the REAL producer: `generate_options_api_stub`
@@ -7545,7 +7651,8 @@ mod authored_literal_survival_tests {
              is exactly why a text scan over it reaches user code: {stub}"
         );
 
-        let rewritten = rewrite_relative_imports(&stub, Path::new("/project/src"));
+        let rewritten =
+            rewrite_relative_imports(&stub, Path::new("/project/src")).expect("the stack is had");
         assert!(
             rewritten.contains("const marker = 'import(\"./Child.vue\")' as const"),
             "the authored literal must survive the relative-import pass — a scan \
@@ -7560,7 +7667,8 @@ mod authored_literal_survival_tests {
         // REAL `vue` import is still visited (and correctly left alone, being
         // non-relative), and a genuine relative import IS absolutized.
         let with_real_import = format!("import Sibling from './Sibling.vue'\n{stub}");
-        let rewritten_real = rewrite_relative_imports(&with_real_import, Path::new("/project/src"));
+        let rewritten_real = rewrite_relative_imports(&with_real_import, Path::new("/project/src"))
+            .expect("the stack is had");
         assert!(
             rewritten_real.contains("import Sibling from '/project/src/Sibling.vue'"),
             "control: a REAL relative specifier in the same source must still be \

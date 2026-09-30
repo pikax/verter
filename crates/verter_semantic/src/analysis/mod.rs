@@ -21,6 +21,7 @@
 //!   features (`:deep`, `:global`, `v-bind()`).
 
 mod build;
+pub mod class_field_value;
 mod classify;
 pub mod component_meta;
 pub mod decl_dependencies;
@@ -52,6 +53,7 @@ pub mod html_intrinsics;
 mod imports;
 pub mod jsdoc;
 mod macros;
+mod namespace_walk;
 #[cfg(test)]
 #[path = "script_shallow_index_tests.rs"]
 mod script_shallow_index_tests;

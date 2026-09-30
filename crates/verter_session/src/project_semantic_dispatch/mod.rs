@@ -67,7 +67,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
     SemanticQueryValueTag, SignatureRef,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::semantic_query_memo::{Acquired, ReadCapture, SemanticGraphStore};
 use verter_type_expr::PrimitiveName;
 
 // Module tree. The sub-modules are `pub(crate)` so external callers see only
@@ -91,10 +91,18 @@ mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
+mod conditional_decision;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
 pub(crate) mod connected_demand;
+#[cfg(test)]
+mod connected_demand_tests;
+// The exclusive-cost receipts a connected demand records for each
+// computation and replays when it serves a result warm.
+pub(crate) mod cost_receipt;
+#[cfg(test)]
+mod cost_receipt_tests;
 pub(crate) mod cycle_gate;
 mod enum_type;
 pub(crate) mod enumerate;
@@ -108,6 +116,7 @@ pub(crate) mod lower;
 mod module_object;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
+mod query_frames;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
@@ -162,6 +171,7 @@ mod flow_return_widening;
 // the component close finalizes through it), and the `FlowReturnKey`
 // constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
+mod inference;
 // The product lattice of the flow authority: the per-domain dataflow
 // products and the ONE join route every merge point folds through. The
 // flow evaluator holds its whole semantic state here — the products ARE
@@ -170,13 +180,13 @@ pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
-pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
 pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
+pub(crate) mod relation_variance;
 mod return_equation;
 #[cfg(test)]
 mod return_equation_tests;
@@ -317,6 +327,22 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `build_instantiate` invocations share the active set.
 pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
+/// One build on the active-instantiation stack: the declaration it
+/// materialises and the arguments it materialises it over.
+#[derive(Debug, Clone)]
+pub(super) struct ActiveInstantiation {
+    identity: InstantiateIdentity,
+    args: Arc<[SemanticNodeId]>,
+}
+
+impl ActiveInstantiation {
+    fn is(&self, identity: &InstantiateIdentity) -> bool {
+        self.identity.0.as_ref() == identity.0.as_ref()
+            && self.identity.1 == identity.1
+            && self.identity.2.as_ref() == identity.2.as_ref()
+    }
+}
+
 /// Host-bound dispatcher for [`SemanticQueryApi`].
 ///
 /// The dispatcher borrows the host for the duration of a query — every
@@ -335,7 +361,7 @@ pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwner
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
-    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
@@ -427,6 +453,18 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// Whether each alias the printing walk asked about declares a
+    /// homomorphic mapped type. REQUEST-SCOPED: it lives and dies with the
+    /// dispatch, and every entry is a pure function of declarations the
+    /// request's view pins.
+    pub(super) homomorphic_aliases:
+        std::cell::RefCell<rustc_hash::FxHashMap<crate::semantic_query::DeclIdentity, bool>>,
+    /// How many type-level reads this dispatch made of a member's
+    /// body-derived return whose evaluation closed degraded
+    /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
+    /// the dispatch the request builds, and the host flow-return boundary
+    /// reads it around its one evaluation.
+    pub(super) degraded_member_reads: std::cell::Cell<u32>,
     /// Runtime evidence injected into the cold build for the EXACT key the
     /// active force targets. Paired with that target key so the merge never
     /// leaks into a transitively nested build the target key's own
@@ -494,6 +532,13 @@ pub struct ProjectSemanticDispatch<'a> {
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
+    /// Monotonic count of operation-budget recoveries this dispatcher
+    /// folded ([`PartialReasonSet::OPERATION_BUDGET`](crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)).
+    /// A structural-fact demand snapshots it and compares at its settle, so
+    /// a recovery made anywhere under the demand — inside a relation, a
+    /// nested build or a canonical construction — leaves the demand a
+    /// resource partial even where no read carried the reason to it.
+    pub(super) operation_budget_epoch: std::cell::Cell<u64>,
     /// Operational work/depth/cancellation accounting for the connected
     /// demands rooted at this dispatcher. The dispatcher holds the ledger but
     /// owns none of its logic — see [`connected_demand`].
@@ -547,6 +592,32 @@ pub(super) struct BuildLocalTaint {
 /// relation's non-admission decision), marking the guard finished so
 /// `drop` is a no-op. Panic / early-return path: `drop` pops the frame so
 /// the stack stays balanced.
+/// A continuation frame's build-local taint, installed as the top of the
+/// dispatch's taint stack for one of the frame's steps: nested reads in the
+/// step fold into it exactly as into a synchronous build's frame, and
+/// dropping the installation — unwinding included — takes it back into the
+/// frame.
+pub(super) struct StepTaint<'g, 'f> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    slot: &'f mut BuildLocalTaint,
+}
+
+impl<'g, 'f> StepTaint<'g, 'f> {
+    pub(super) fn install(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+        slot: &'f mut BuildLocalTaint,
+    ) -> Self {
+        stack.borrow_mut().push(std::mem::take(slot));
+        Self { stack, slot }
+    }
+}
+
+impl Drop for StepTaint<'_, '_> {
+    fn drop(&mut self) {
+        *self.slot = self.stack.borrow_mut().pop().unwrap_or_default();
+    }
+}
+
 pub(super) struct BuildLocalTaintGuard<'g> {
     stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
     finished: bool,
@@ -582,6 +653,20 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
         // stack stays balanced. The popped frame is discarded — the build
         // that owned it is unwinding, so its memo admission never happens.
         self.stack.borrow_mut().pop();
+    }
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// `key`'s flow return, and whether its evaluation read a member's
+    /// degraded body-derived return as a type — a fact the value's own
+    /// nodes do not carry, which the published answer must not drop.
+    pub(crate) fn execute_flow_return_observing_degraded_read(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> (crate::semantic_query::FlowReturnStep, bool) {
+        let before = self.degraded_member_reads.get();
+        let step = self.execute_flow_return(key);
+        (step, self.degraded_member_reads.get() != before)
     }
 }
 
@@ -667,6 +752,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            homomorphic_aliases: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            degraded_member_reads: std::cell::Cell::new(0),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             dispatch_txn: std::cell::RefCell::new(
@@ -676,6 +763,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
+            operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
             ),
@@ -713,6 +801,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
         self.connected_demand.charge()
+    }
+
+    /// The limit of the connected-work rail the active demand tripped (the
+    /// work limit when none has): the cap a budget verdict reports.
+    pub(super) fn connected_trip_limit(&self) -> u32 {
+        let reasons = self
+            .connected_demand
+            .active_trip()
+            .unwrap_or(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
+        u32::try_from(self.connected_demand.limit_report(reasons).0).unwrap_or(u32::MAX)
+    }
+
+    /// What the last connected demand charged: its work units and its
+    /// construction bytes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn connected_demand_usage(&self) -> connected_demand::DemandUsage {
+        self.connected_demand.usage()
+    }
+
+    /// Replace the construction-byte allowance for the next connected
+    /// demand. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_construction_byte_limit_for_tests(&self, bytes: usize) {
+        self.connected_demand.set_byte_limit_for_tests(bytes);
     }
 
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
@@ -788,8 +900,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
                 let (limit, actual, rail) = self.connected_demand.limit_report(reasons);
+                let domain = if reasons
+                    .contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+                {
+                    BudgetDomain::ConstructionBytes
+                } else {
+                    BudgetDomain::ProjectionOperation
+                };
                 self.opaque(QueryError::BudgetExceeded(BudgetExceededFailure {
-                    domain: BudgetDomain::ProjectionOperation,
+                    domain,
                     limit,
                     actual,
                     context: format!("semantic-dispatch:{rail}"),
@@ -835,6 +954,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
             diagnostics.push(ShallowDiagnostic::ConnectedQueryDepthLimit { root });
         }
+        if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
+            diagnostics.push(ShallowDiagnostic::ConnectedMemoryLimit { root });
+        }
         Arc::from(diagnostics.into_boxed_slice())
     }
 
@@ -859,7 +981,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
+    pub(crate) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
         self.connected_demand.set_limits_for_tests(work, depth);
     }
 
@@ -898,9 +1020,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         evidence: canonical_algebra::CanonicalEvidence,
     ) {
-        if evidence.incomplete || !evidence.inspected_file_roots.is_empty() {
+        if evidence.incomplete
+            || evidence.refusal.is_some()
+            || !evidence.inspected_file_roots.is_empty()
+        {
             self.canonical_evidence_epoch
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        // A refused operation's recovery is a resource partial of its own
+        // class, whatever else the canonicalization proved.
+        if evidence.refusal.is_some() {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+            );
         }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
@@ -1528,22 +1660,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Push `identity` onto the active-instantiation stack. Returns `true`
-    /// when the identity was not already present (caller MUST pair with
-    /// `pop_instantiate_active` on the same identity). Returns `false`
-    /// when the identity is already active — caller should emit
-    /// `Opaque(RecursiveRef)` and must NOT pop.
-    pub(super) fn push_instantiate_active(&self, identity: InstantiateIdentity) -> bool {
+    /// Push `identity` over `args` onto the active-instantiation stack.
+    /// Returns `true` when that same instantiation was not already present
+    /// (caller MUST pair with `pop_instantiate_active`). Returns `false`
+    /// when it is already active — caller should emit
+    /// `Opaque(RecursiveRef)` and must NOT pop. The same declaration over
+    /// other arguments is another instantiation, as the checker's
+    /// instantiations are: it may be active beside this one.
+    pub(super) fn push_instantiate_active(
+        &self,
+        identity: InstantiateIdentity,
+        args: Arc<[SemanticNodeId]>,
+    ) -> bool {
         let mut active = self.instantiate_active.borrow_mut();
-        if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref()
-                && existing.1 == identity.1
-                && existing.2.as_ref() == identity.2.as_ref()
-        }) {
+        if active
+            .iter()
+            .any(|existing| existing.is(&identity) && existing.args == args)
+        {
             return false;
         }
-        active.push(identity);
+        active.push(ActiveInstantiation { identity, args });
         true
+    }
+
+    /// Leave `identity`'s active instantiation over `args` wherever it
+    /// stands: a build stopped between the steps of a continuation frame,
+    /// whose later entries have already left.
+    pub(super) fn leave_instantiate_active(
+        &self,
+        identity: &InstantiateIdentity,
+        args: &Arc<[SemanticNodeId]>,
+    ) {
+        let mut active = self.instantiate_active.borrow_mut();
+        if let Some(position) = active
+            .iter()
+            .rposition(|existing| existing.is(identity) && existing.args == *args)
+        {
+            active.remove(position);
+        }
     }
 
     /// Pop the most-recent active-instantiation entry. Caller MUST only
@@ -1587,13 +1741,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
     ) -> bool {
         let active = self.instantiate_active.borrow();
-        active
-            .iter()
-            .any(|(existing_canonical, existing_owner, existing_name)| {
-                existing_canonical.as_ref() == canonical_id
-                    && *existing_owner == owner
-                    && existing_name.as_ref() == name
-            })
+        active.iter().any(|existing| {
+            existing.identity.0.as_ref() == canonical_id
+                && existing.identity.1 == owner
+                && existing.identity.2.as_ref() == name
+        })
     }
 
     pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
@@ -2027,22 +2179,27 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Tri-state outcome of
-/// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
-/// shared conditional branch-selection oracle, factored out of
-/// `build_conditional`'s relation path (the infer-pattern cases and the
-/// full memoised relation engine, both through the sole relation
-/// authority `execute(SemanticQueryKey::Relate)`) and reused by the
-/// key-domain closedness classifiers in `raise.rs` for
-/// selected-branch-only classification.
-/// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
-/// the lattice-extreme checks that semantically use both branches
-/// (`any`) or dominate (`error`).
+/// Outcome of [`ProjectSemanticDispatch::conditional_branch_selection`],
+/// the branch-selection step of the conditional query's decision procedure
+/// (`conditional_decision.rs`), through the sole relation authority
+/// `execute(SemanticQueryKey::Relate)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConditionalBranchSelection {
     True,
     False,
+    /// The checker defers the conditional (`getConditionalType`): an
+    /// operand is generic, or the check fails the restrictive relation
+    /// while its permissive instantiation still relates. An `error` check
+    /// is kept too, the carrier dominating both branches.
     Deferred,
+    /// The checker decides the conditional and the lane cannot: the
+    /// relation it asks is undecided (`Unknown`, a budget, a coinductive
+    /// assumption), the `extends` pattern is one the lane does not infer
+    /// from, or an `any` check meets a pattern. The conditional is
+    /// published as a typed gap
+    /// ([`PartialReasonSet::UNDECIDED_CONDITIONAL`](crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL)),
+    /// never as the checker's answer.
+    Undecided,
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -2145,20 +2302,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`SemanticQueryApi::execute`] and [`Self::execute_read`].
     ///
     /// **Single-call-site invariant.** This method holds the only
-    /// production `graph.execute_cooperative_value(...)` call site dispatched
-    /// from `ProjectSemanticDispatch`. The architecture guard
+    /// production `graph.acquire_query(...)` call site dispatched from
+    /// `ProjectSemanticDispatch`. The architecture guard
     /// `dispatch_cold_build_has_one_call_site.rs` asserts this with a
     /// static scan that strips test files + `#[cfg(test)]` regions and
     /// counts matches. A second production call site would mean a
     /// second cold-build path slipped through bypassing the tracer.
     ///
     /// **Tracer scope.** The fact tracer is installed ONLY around the
-    /// cold-build closure passed to `execute_cooperative`. Warm hits
-    /// (when the slot is already populated) MUST NOT allocate a
-    /// tracer — they short-circuit at the `try_warm_hit_fast_path`
-    /// inside `execute_cooperative`. The closure here only runs on
-    /// cold misses or when the prior winner aborted; the tracer cost
-    /// is bounded by the cold-build cost it observes.
+    /// cold build this helper runs once the memo hands it the key's
+    /// producer. Warm hits (when the slot is already populated) MUST NOT
+    /// allocate a tracer — the memo's lookup answers them before any
+    /// claim. The build runs only on cold misses or when the prior
+    /// producer aborted; the tracer cost is bounded by the cold-build
+    /// cost it observes.
     ///
     /// **Build-output threading.** On `FactReadSetFinalise::Ok`, the
     /// self-version-rooted carrier is stored on
@@ -2168,8 +2325,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `cache_suppress = true` so the memo refuses to publish the
     /// entry — the caller cold-recomputes on the next request.
     //
-    // arch-guard:single-execute-cooperative-call — the helper holds
-    // the only production `graph.execute_cooperative_value(` call site. The
+    // arch-guard:single-acquire-query-call — the helper holds the only
+    // production `graph.acquire_query(` call site. The
     // arch test parses `crates/verter_session/src/**/*.rs` (excluding
     // tests, stripping cfg(test) regions) and asserts exactly one
     // match.
@@ -2332,6 +2489,443 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute_via_cold_build_helper_with_publication_capture(key, None, Some(evidence))
     }
 
+    /// The start of every cold build, inside its tracer and taint frame: the
+    /// test forcing seams, and the runtime evidence an active operand force
+    /// merges into the EXACT key it targets.
+    fn open_cold_build(&self, evidence_target_key: Option<&SemanticQueryKey>) {
+        #[cfg(test)]
+        let host = self.ctx.host_for_fact_tracer_install();
+        // Test-only fact-injection hook. When the
+        // `dispatch_test_inject_parse_fact` slot is non-None,
+        // observe the recorded `Parse(...)` fact onto the
+        // active tracer cell BEFORE running the inner build.
+        dispatch_test_inject_parse_fact_if_set();
+        // Test-only per-host forced-fenced-serve knob. When set, note
+        // a FENCED (ReturnOnly) serve onto the active tracer BEFORE
+        // the inner build runs, so this build finalises
+        // `cache_suppress = true` (deterministic in-process
+        // equivalent of a mid-flight-supersession fenced serve — the
+        // only clean way to force `cache_suppress` on a nested read
+        // whose subject is NOT a carrier, e.g. the ImportType
+        // qualified-path `ProjectPath`). Per-host, so concurrent
+        // tests on distinct hosts never contaminate one another.
+        #[cfg(test)]
+        if host
+            .test_force
+            .force_fenced_serve_for_tests
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
+        }
+        // Test-only per-host forced-result-partial knob. When set,
+        // taint THIS build's frame `result_is_partial` BEFORE the
+        // inner build runs (deterministic in-process equivalent of a
+        // budget-/recursion-truncated nested read). Folds inline
+        // because it needs the dispatch's taint frame. Per-host.
+        #[cfg(test)]
+        if host
+            .test_force
+            .force_result_partial_for_tests
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.fold_into_top_build_local_taint(true, false);
+        }
+        #[cfg(test)]
+        host.test_force.semantic_operand_cold_build_seam.fire_once();
+        if let Some(target) = evidence_target_key {
+            self.merge_active_operand_evidence_for_build(target);
+        }
+    }
+
+    /// The end of every cold build: fold its build-local taint and its
+    /// tracer's verdict into its output, and root the output on what the
+    /// build observed.
+    fn close_cold_build(
+        &self,
+        mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
+        build_local: BuildLocalTaint,
+        finalise: crate::resolver_core::FactReadSetFinalise,
+        carrier_prelude: &CarrierNormalizationPrelude,
+        evidence_target_key: Option<&SemanticQueryKey>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        output.result_is_partial |= build_local.result_is_partial;
+        output.cache_suppress |= build_local.cache_suppress;
+        output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
+        // Canonical-construction self-roots deposited during this build
+        // (discarded structural duplicates included) join the build's
+        // own observed roots on the memo entry.
+        for root in build_local.observed_self_roots {
+            if !output
+                .observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == root.0 && *h == root.1)
+            {
+                output.observed_self_roots.push(root);
+            }
+        }
+        // ReturnOnly never publishes — fenced-serve arm. A build
+        // whose traced scope consumed a FENCED (ReturnOnly)
+        // `IndexedReady` serve computed its value basis from a
+        // served-without-publication artifact, while the memo
+        // entry's fact stamps (`dep_signature_for` reads the LIVE
+        // project generation; the traced facts validate against a
+        // fresh view) cannot be rejected read-side. The value still
+        // flows to the caller; the memo refuses admission.
+        output.cache_suppress |= matches!(
+            &finalise,
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        );
+        let provenance = &self.ctx.host_for_fact_tracer_install().provenance;
+        provenance
+            .memo_entry_fact_tracer_installs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // `true` only for the exact build an active force targets —
+        // never a nested build reached underneath it, and never an
+        // unrelated caller's build (see `evidence_target_key` above and
+        // `finalise_traced_build_output`'s parameter doc).
+        let operand_force_active = evidence_target_key.is_some_and(|target| {
+            self.active_operand_evidence
+                .borrow()
+                .iter()
+                .any(|(entry, _)| entry == target)
+        });
+        finalise_traced_build_output(
+            self.ctx,
+            output,
+            finalise,
+            provenance,
+            carrier_prelude,
+            operand_force_active,
+        )
+    }
+
+    /// Attribute one query read by its key's kind and whether a cold build
+    /// produced it, and fold the carrier-normalization prelude's verdict into
+    /// it: a suppressed or partial rewrite of the key's subject taints the
+    /// read, warm hits included.
+    fn attribute_query_read(
+        &self,
+        key: &SemanticQueryKey,
+        is_cold: bool,
+        mut cache_read: CacheRead<QueryResult<SemanticQueryValue>>,
+        carrier_prelude: &CarrierNormalizationPrelude,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        // Attribute the dispatch by `SemanticQueryKey` kind +
+        // cold/warm. Cold = the `traced_build` closure ran. Warm = the
+        // memo short-circuited before the closure fired.
+        // Same cold/warm decision, on the work-attribution rail: the two
+        // sites are mutually exclusive, so `cold + warm` reconstructs the
+        // dispatch total and `cold / total` is the miss rate directly.
+        if is_cold {
+            verter_audit::attribute!(SemanticColdBuild);
+        } else {
+            verter_audit::attribute!(SemanticWarmHit);
+        }
+        if let Some(observer) = verter_audit::current_observer() {
+            use verter_audit::AuditEvent;
+            let event = match key {
+                SemanticQueryKey::TypeOf { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryTypeOfCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryTypeOfWarm)
+                    }
+                }
+                SemanticQueryKey::Instantiate(_) => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryInstantiateCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryInstantiateWarm)
+                    }
+                }
+                SemanticQueryKey::Conditional { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryConditionalCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryConditionalWarm)
+                    }
+                }
+                SemanticQueryKey::MappedType { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryMappedTypeCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryMappedTypeWarm)
+                    }
+                }
+                // Post-admission-time `IndexedAccess` is rewritten to
+                // `ProjectPath` BEFORE the memo sees it, so live keys
+                // are always `ProjectPath`. The arm stays for
+                // exhaustiveness should the canonicalisation ever
+                // shift.
+                SemanticQueryKey::IndexedAccess { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryIndexedAccessCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryIndexedAccessWarm)
+                    }
+                }
+                SemanticQueryKey::KeyOf { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryKeyOfCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryKeyOfWarm)
+                    }
+                }
+                SemanticQueryKey::ProjectPath { .. } | SemanticQueryKey::ProjectMember { .. } => {
+                    if is_cold {
+                        Some(AuditEvent::SemanticQueryProjectPathCold)
+                    } else {
+                        Some(AuditEvent::SemanticQueryProjectPathWarm)
+                    }
+                }
+                // ResolveDecl, ReduceUnion, ReduceIntersection,
+                // Relate, ResolveMacroPayload — not in the focused
+                // counter set.
+                _ => None,
+            };
+            if let Some(event) = event {
+                observer.record_event(event);
+            }
+        }
+        // UNIVERSAL READ-BOUNDARY FOLD (the single fold point). Every
+        // cold-build subquery read — issued through `execute`,
+        // `execute_read`, the `execute_type_node` override, OR any direct
+        // `execute_read` cold-build consumer in build / evaluate /
+        // enumerate / walk — funnels through THIS helper, so folding the
+        // returned `CacheRead`'s metadata into the active build-local taint
+        // frame HERE closes the read-leak class in ONE place:
+        //   - `cache_read.cache_suppress`  → the build-local frame (a
+        //     benign non-cacheable but COMPLETE nested read taints the
+        //     enclosing build's memo non-admission, but NOT the request
+        //     partial sticky — component-meta still warms).
+        //   - `cache_read.result_is_partial` → the build-local frame AND
+        //     the per-request sticky (a genuine partial must gate
+        //     component-meta / shape / materialize warm for the whole
+        //     request).
+        // At this point `traced_build` (if it ran a child build) has already
+        // popped its OWN child frame inside `execute_cooperative`, so the
+        // top of the stack is the PARENT build frame — folding the child's
+        // returned metadata here propagates it exactly one level up. A
+        // top-level read with no active build frame naturally no-ops
+        // (`fold_into_top_build_local_taint` finds an empty stack).
+        // A WARM resolved-key hit short-circuits `traced_build`, so the prelude
+        // never reached `finalise_traced_build_output`. OR its suppress into the
+        // returned `CacheRead` here so a warm hit on the resolved key cannot let
+        // an ENCLOSING cache admit a result whose carrier rewrite was
+        // ReturnOnly / overflow / fenced-serve. (On a cold build the same OR
+        // already landed via `finalise_traced_build_output`; OR-ing again is
+        // idempotent.)
+        if carrier_prelude.cache_suppress() {
+            cache_read.cache_suppress = true;
+        }
+        if carrier_prelude.is_partial() {
+            cache_read.result_is_partial = true;
+            cache_read.cache_suppress = true;
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(
+                    carrier_prelude.partial_reasons(),
+                ),
+            );
+        }
+        cache_read
+    }
+
+    /// The operational refusal of a cold build before it starts: the
+    /// connected demand cannot pay for one more build of a work-consuming
+    /// kind, or the request's projection-operation budget is spent. The
+    /// refusal is the budget carrier, a partial the memo never admits.
+    fn cold_build_budget_refusal(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        if semantic_query_consumes_connected_work(key) {
+            if let Err(reasons) = self.charge_connected_work() {
+                let carrier = self.connected_limit_carrier(key, reasons);
+                self.fold_local_partial_completeness(reasons);
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                    QueryResult::Value(carrier),
+                    self.project_generation_signature(),
+                )
+                    .into();
+                output.result_is_partial = true;
+                output.cache_suppress = true;
+                return Some(output);
+            }
+        }
+        if semantic_query_counts_toward_projection_budget(key) {
+            if let Some(budget) = crate::request_context::current_request_budget() {
+                if budget.check_projection_op_count() {
+                    let reasons = self.trip_connected_demand(
+                        crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+                    );
+                    let carrier = self.connected_limit_carrier(key, reasons);
+                    self.fold_local_partial_completeness(reasons);
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                        QueryResult::Value(carrier),
+                        self.project_generation_signature(),
+                    )
+                        .into();
+                    output.walker_diagnostics =
+                        self.connected_limit_diagnostics(carrier, reasons).to_vec();
+                    output.cache_suppress = true;
+                    output.result_is_partial = true;
+                    return Some(output);
+                }
+            }
+        }
+        None
+    }
+
+    /// Charge one query entry to the connected demand: a same-path entry
+    /// charges nothing (its recursion carrier answers it); any other entry
+    /// is refused by a tripped or cancelled demand, enters one nested query
+    /// level when `charge_depth` (a native re-entry), and pays one work
+    /// unit. After the demand's projection budget is spent, an operator
+    /// entry answers with the budget carrier without reaching the memo.
+    /// `Err` is the read that answers the entry in place of a build.
+    fn charge_query_entry(
+        &self,
+        key: &SemanticQueryKey,
+        preexisting_trip: Option<crate::semantic_query::PartialReasonSet>,
+        charge_depth: bool,
+    ) -> Result<
+        Option<connected_demand::ConnectedDemandGuard<'_>>,
+        CacheRead<QueryResult<SemanticQueryValue>>,
+    > {
+        let exact_same_path = self.graph().is_same_path_claim(key);
+        let mut query_depth_guard = None;
+        if preexisting_trip.is_some_and(|reasons| {
+            reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
+        }) {
+            return Err(widen_node_cache_read(self.connected_limit_read(
+                key,
+                preexisting_trip.expect("checked as Some"),
+            )));
+        }
+        if !exact_same_path {
+            if let Some(reasons) = preexisting_trip {
+                return Err(widen_node_cache_read(
+                    self.connected_limit_read(key, reasons),
+                ));
+            }
+            if charge_depth {
+                let (guard, depth_trip) = self.enter_connected_demand(true);
+                if let Some(reasons) = depth_trip {
+                    return Err(widen_node_cache_read(
+                        self.connected_limit_read(key, reasons),
+                    ));
+                }
+                query_depth_guard = Some(guard);
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                return Err(widen_node_cache_read(
+                    self.connected_limit_read(key, reasons),
+                ));
+            }
+        }
+
+        // Post-trip fast-path early-exit. Once the request's
+        // projection-op fuse has already tripped, every subsequent
+        // projection-op query (MappedType / KeyOf / ProjectPath /
+        // ProjectMember / IndexedAccess) entering the cooperative-
+        // admission machinery would burn ~μs on the in-flight table
+        // mutex, fact-tracer install, per-key warm probe, and joiner-
+        // condvar entry path — only to have the build closure return
+        // `BudgetExceeded` and the publish be suppressed. Empirically
+        // observed on `ChatMessages.vue`: 253K post-trip MappedType
+        // builds each averaging ~1ms in the materialisation lane, for
+        // ~250s of pure dispatch overhead past the fuse point.
+        //
+        // The early-exit collapses every post-trip projection-op query
+        // to a single peek + sentinel allocation, without ever entering
+        // `execute_cooperative`. The published audit semantics are
+        // preserved: the per-kind cold counter is bumped via the same
+        // attribution arms used by the slow path, the
+        // `BudgetExceeded(cache_suppress=true)` carrier is the same
+        // sentinel the build closure would have produced, and
+        // `failure.actual` continues to reflect the pre-trip executed
+        // count (the peek is non-incrementing — see
+        // [`RequestBudget::is_exhausted`]).
+        //
+        // The check is gated on `semantic_query_counts_toward_projection_budget`,
+        // the aggregate work-budget gate: the projection operators PLUS
+        // `Instantiate` / `Conditional` (the generic-expansion-storm
+        // kinds) and the demand-bearing `TypeOf`. Kinds outside that
+        // set (ResolveDecl, ReduceUnion, …) bypass the early-exit —
+        // their cost is not what the work budget bounds.
+        if !exact_same_path && semantic_query_counts_toward_projection_budget(key) {
+            if let Some(budget) = crate::request_context::current_request_budget() {
+                if budget.is_exhausted() {
+                    // Attribute the post-trip dispatch via the SAME
+                    // per-kind cold counters the slow path bumps from
+                    // `execute_via_cold_build_helper`'s post-cooperative
+                    // attribution block. Without this the audit's
+                    // `semantic_query_*_cold` rails would silently
+                    // under-count post-trip dispatches once the
+                    // early-exit lands, and bench attribution would lose
+                    // the runaway signal.
+                    if let Some(observer) = verter_audit::current_observer() {
+                        use verter_audit::AuditEvent;
+                        // The early-exit attribution must mirror EVERY kind
+                        // the aggregate work-budget gate counts — including
+                        // `Instantiate` and `Conditional`. Once those two
+                        // count toward the budget they can reach this
+                        // post-trip early-exit; omitting their cold-event
+                        // arms here would silently under-count post-trip
+                        // instantiate/conditional dispatches and lose the
+                        // open-generic-storm signal in bench attribution.
+                        let event = match key {
+                            SemanticQueryKey::MappedType { .. } => {
+                                Some(AuditEvent::SemanticQueryMappedTypeCold)
+                            }
+                            SemanticQueryKey::KeyOf { .. } => {
+                                Some(AuditEvent::SemanticQueryKeyOfCold)
+                            }
+                            SemanticQueryKey::ProjectPath { .. }
+                            | SemanticQueryKey::ProjectMember { .. } => {
+                                Some(AuditEvent::SemanticQueryProjectPathCold)
+                            }
+                            SemanticQueryKey::IndexedAccess { .. } => {
+                                Some(AuditEvent::SemanticQueryIndexedAccessCold)
+                            }
+                            SemanticQueryKey::Instantiate(_) => {
+                                Some(AuditEvent::SemanticQueryInstantiateCold)
+                            }
+                            SemanticQueryKey::Conditional { .. } => {
+                                Some(AuditEvent::SemanticQueryConditionalCold)
+                            }
+                            SemanticQueryKey::TypeOf { .. } => {
+                                Some(AuditEvent::SemanticQueryTypeOfCold)
+                            }
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            observer.record_event(event);
+                        }
+                    }
+                    // CRITICAL: the post-trip budget early-exit is a SECOND
+                    // return point of this helper. It must fold its rails into
+                    // the request sticky + active build-local frame BEFORE
+                    // returning — identical to the post-cooperative normal tail
+                    // — or a budget-tripped sub-read (whose rails a value-only
+                    // caller like `execute_type_node` discards into
+                    // `Opaque(Miss)`) would never taint the enclosing cold
+                    // build, which would then admit a complete `Value`
+                    // (`result_is_partial=false`) and launder the partial.
+                    let reasons = self.trip_connected_demand(
+                        crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+                    );
+                    return Err(widen_node_cache_read(
+                        self.connected_limit_read(key, reasons),
+                    ));
+                }
+            }
+        }
+        Ok(query_depth_guard)
+    }
+
     fn execute_via_cold_build_helper_with_publication_capture(
         &self,
         key: SemanticQueryKey,
@@ -2359,6 +2953,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 };
             }
+        }
+        // An instantiation read for its value alone, outside any drive, runs
+        // on the continuation runtime: the chain of instantiations its body
+        // reaches waits in heap-owned frames instead of nesting natively.
+        if publication.is_none() && operand_evidence.is_none() && self.drives_on_the_runtime(&key) {
+            return self.drive_query(key);
         }
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
@@ -2476,125 +3076,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
-        let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
-        let mut query_depth_guard = None;
-        if preexisting_trip.is_some_and(|reasons| {
-            reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
-        }) {
-            return widen_node_cache_read(
-                self.connected_limit_read(&key, preexisting_trip.expect("checked as Some")),
-            );
-        }
-        if !exact_same_path {
-            if let Some(reasons) = preexisting_trip {
-                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
-            }
-            let (guard, depth_trip) = self.enter_connected_demand(true);
-            if let Some(reasons) = depth_trip {
-                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
-            }
-            query_depth_guard = Some(guard);
-            if let Err(reasons) = self.charge_connected_work() {
-                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
-            }
-        }
-
-        // Post-trip fast-path early-exit. Once the request's
-        // projection-op fuse has already tripped, every subsequent
-        // projection-op query (MappedType / KeyOf / ProjectPath /
-        // ProjectMember / IndexedAccess) entering the cooperative-
-        // admission machinery would burn ~μs on the in-flight table
-        // mutex, fact-tracer install, per-key warm probe, and joiner-
-        // condvar entry path — only to have the build closure return
-        // `BudgetExceeded` and the publish be suppressed. Empirically
-        // observed on `ChatMessages.vue`: 253K post-trip MappedType
-        // builds each averaging ~1ms in the materialisation lane, for
-        // ~250s of pure dispatch overhead past the fuse point.
-        //
-        // The early-exit collapses every post-trip projection-op query
-        // to a single peek + sentinel allocation, without ever entering
-        // `execute_cooperative`. The published audit semantics are
-        // preserved: the per-kind cold counter is bumped via the same
-        // attribution arms used by the slow path, the
-        // `BudgetExceeded(cache_suppress=true)` carrier is the same
-        // sentinel the build closure would have produced, and
-        // `failure.actual` continues to reflect the pre-trip executed
-        // count (the peek is non-incrementing — see
-        // [`RequestBudget::is_exhausted`]).
-        //
-        // The check is gated on `semantic_query_counts_toward_projection_budget`,
-        // the aggregate work-budget gate: the projection operators PLUS
-        // `Instantiate` / `Conditional` (the generic-expansion-storm
-        // kinds) and the demand-bearing `TypeOf`. Kinds outside that
-        // set (ResolveDecl, ReduceUnion, …) bypass the early-exit —
-        // their cost is not what the work budget bounds.
-        if !exact_same_path && semantic_query_counts_toward_projection_budget(&key) {
-            if let Some(budget) = crate::request_context::current_request_budget() {
-                if budget.is_exhausted() {
-                    // Attribute the post-trip dispatch via the SAME
-                    // per-kind cold counters the slow path bumps from
-                    // `execute_via_cold_build_helper`'s post-cooperative
-                    // attribution block. Without this the audit's
-                    // `semantic_query_*_cold` rails would silently
-                    // under-count post-trip dispatches once the
-                    // early-exit lands, and bench attribution would lose
-                    // the runaway signal.
-                    if let Some(observer) = verter_audit::current_observer() {
-                        use verter_audit::AuditEvent;
-                        // The early-exit attribution must mirror EVERY kind
-                        // the aggregate work-budget gate counts — including
-                        // `Instantiate` and `Conditional`. Once those two
-                        // count toward the budget they can reach this
-                        // post-trip early-exit; omitting their cold-event
-                        // arms here would silently under-count post-trip
-                        // instantiate/conditional dispatches and lose the
-                        // open-generic-storm signal in bench attribution.
-                        let event = match &key {
-                            SemanticQueryKey::MappedType { .. } => {
-                                Some(AuditEvent::SemanticQueryMappedTypeCold)
-                            }
-                            SemanticQueryKey::KeyOf { .. } => {
-                                Some(AuditEvent::SemanticQueryKeyOfCold)
-                            }
-                            SemanticQueryKey::ProjectPath { .. }
-                            | SemanticQueryKey::ProjectMember { .. } => {
-                                Some(AuditEvent::SemanticQueryProjectPathCold)
-                            }
-                            SemanticQueryKey::IndexedAccess { .. } => {
-                                Some(AuditEvent::SemanticQueryIndexedAccessCold)
-                            }
-                            SemanticQueryKey::Instantiate(_) => {
-                                Some(AuditEvent::SemanticQueryInstantiateCold)
-                            }
-                            SemanticQueryKey::Conditional { .. } => {
-                                Some(AuditEvent::SemanticQueryConditionalCold)
-                            }
-                            SemanticQueryKey::TypeOf { .. } => {
-                                Some(AuditEvent::SemanticQueryTypeOfCold)
-                            }
-                            _ => None,
-                        };
-                        if let Some(event) = event {
-                            observer.record_event(event);
-                        }
-                    }
-                    // CRITICAL: the post-trip budget early-exit is a SECOND
-                    // return point of this helper. It must fold its rails into
-                    // the request sticky + active build-local frame BEFORE
-                    // returning — identical to the post-cooperative normal tail
-                    // — or a budget-tripped sub-read (whose rails a value-only
-                    // caller like `execute_type_node` discards into
-                    // `Opaque(Miss)`) would never taint the enclosing cold
-                    // build, which would then admit a complete `Value`
-                    // (`result_is_partial=false`) and launder the partial.
-                    let reasons = self.trip_connected_demand(
-                        crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
-                    );
-                    return widen_node_cache_read(self.connected_limit_read(&key, reasons));
-                }
-            }
-        }
-
+        let query_depth_guard = match self.charge_query_entry(&key, preexisting_trip, true) {
+            Ok(guard) => guard,
+            Err(read) => return read,
+        };
         let graph = Arc::clone(self.graph());
         // Per-key recursion sentinel: when the memo detects same-path
         // re-entry on an `Instantiate` key, extract the decl name and
@@ -2667,41 +3152,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return self.build_project_object_spread(*program, selector, *context);
             }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            if semantic_query_consumes_connected_work(&key_for_build) {
-                if let Err(reasons) = self.charge_connected_work() {
-                    let carrier = self.connected_limit_carrier(&key_for_build, reasons);
-                    self.fold_local_partial_completeness(reasons);
-                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
-                        QueryResult::Value(carrier),
-                        self.project_generation_signature(),
-                    )
-                        .into();
-                    output.result_is_partial = true;
-                    output.cache_suppress = true;
-                    return output;
-                }
-            }
-            if semantic_query_counts_toward_projection_budget(&key_for_build) {
-                if let Some(budget) = crate::request_context::current_request_budget() {
-                    if budget.check_projection_op_count() {
-                        let reasons = self.trip_connected_demand(
-                            crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
-                        );
-                        let carrier = self.connected_limit_carrier(&key_for_build, reasons);
-                        self.fold_local_partial_completeness(reasons);
-                        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                            (
-                                QueryResult::Value(carrier),
-                                self.project_generation_signature(),
-                            )
-                                .into();
-                        output.walker_diagnostics =
-                            self.connected_limit_diagnostics(carrier, reasons).to_vec();
-                        output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        return output;
-                    }
-                }
+            if let Some(refusal) = self.cold_build_budget_refusal(&key_for_build) {
+                return refusal;
             }
             match &key_for_build {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
@@ -2949,8 +3401,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // circuit before `traced_build` fires).
         let cold_build_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cold_build_ran_for_closure = Arc::clone(&cold_build_ran);
-        let host = self.ctx.host_for_fact_tracer_install();
-        let provenance = Arc::clone(&host.provenance);
         let carrier_prelude_for_build = carrier_prelude.clone();
         let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         // Operand evidence merges ONLY into the build for the EXACT key the
@@ -2977,244 +3427,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
-            let (mut output, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-                &basis_source,
-                || {
-                    // Test-only fact-injection hook. When the
-                    // `dispatch_test_inject_parse_fact` slot is non-None,
-                    // observe the recorded `Parse(...)` fact onto the
-                    // active tracer cell BEFORE running the inner build.
-                    dispatch_test_inject_parse_fact_if_set();
-                    // Test-only per-host forced-fenced-serve knob. When set, note
-                    // a FENCED (ReturnOnly) serve onto the active tracer BEFORE
-                    // the inner build runs, so this build finalises
-                    // `cache_suppress = true` (deterministic in-process
-                    // equivalent of a mid-flight-supersession fenced serve — the
-                    // only clean way to force `cache_suppress` on a nested read
-                    // whose subject is NOT a carrier, e.g. the ImportType
-                    // qualified-path `ProjectPath`). Per-host, so concurrent
-                    // tests on distinct hosts never contaminate one another.
-                    #[cfg(test)]
-                    if host
-                        .test_force
-                        .force_fenced_serve_for_tests
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
-                        );
-                    }
-                    // Test-only per-host forced-result-partial knob. When set,
-                    // taint THIS build's frame `result_is_partial` BEFORE the
-                    // inner build runs (deterministic in-process equivalent of a
-                    // budget-/recursion-truncated nested read). Folds inline
-                    // because it needs the dispatch's taint frame. Per-host.
-                    #[cfg(test)]
-                    if host
-                        .test_force
-                        .force_result_partial_for_tests
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        self.fold_into_top_build_local_taint(true, false);
-                    }
-                    #[cfg(test)]
-                    host.test_force.semantic_operand_cold_build_seam.fire_once();
-                    if let Some(target) = &evidence_target_key {
-                        self.merge_active_operand_evidence_for_build(target);
-                    }
+            let (output, finalise) =
+                crate::fact_signature_helpers::install_fact_tracer(&basis_source, || {
+                    self.open_cold_build(evidence_target_key.as_ref());
                     raw_build()
-                },
-            );
+                });
             let build_local = taint_guard.finish();
-            output.result_is_partial |= build_local.result_is_partial;
-            output.cache_suppress |= build_local.cache_suppress;
-            output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
-            // Canonical-construction self-roots deposited during this build
-            // (discarded structural duplicates included) join the build's
-            // own observed roots on the memo entry.
-            for root in build_local.observed_self_roots {
-                if !output
-                    .observed_self_roots
-                    .iter()
-                    .any(|(c, h)| *c == root.0 && *h == root.1)
-                {
-                    output.observed_self_roots.push(root);
-                }
-            }
-            // ReturnOnly never publishes — fenced-serve arm. A build
-            // whose traced scope consumed a FENCED (ReturnOnly)
-            // `IndexedReady` serve computed its value basis from a
-            // served-without-publication artifact, while the memo
-            // entry's fact stamps (`dep_signature_for` reads the LIVE
-            // project generation; the traced facts validate against a
-            // fresh view) cannot be rejected read-side. The value still
-            // flows to the caller; the memo refuses admission.
-            output.cache_suppress |= matches!(
-                &finalise,
-                crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
-            );
-            provenance
-                .memo_entry_fact_tracer_installs
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // `true` only for the exact build an active force targets —
-            // never a nested build reached underneath it, and never an
-            // unrelated caller's build (see `evidence_target_key` above and
-            // `finalise_traced_build_output`'s parameter doc).
-            let operand_force_active = evidence_target_key.as_ref().is_some_and(|target| {
-                self.active_operand_evidence
-                    .borrow()
-                    .iter()
-                    .any(|(entry, _)| entry == target)
-            });
-            finalise_traced_build_output(
-                self.ctx,
+            self.close_cold_build(
                 output,
+                build_local,
                 finalise,
-                &provenance,
                 &carrier_prelude_for_build,
-                operand_force_active,
+                evidence_target_key.as_ref(),
             )
         };
-        let cache_read = match (publication, operand_evidence) {
-            (Some(publication), None) => graph.execute_cooperative_value_capturing_publication(
-                self.ctx,
-                key.clone(),
-                sentinel,
-                traced_build,
-                publication,
-            ),
-            (None, Some(evidence)) => graph.execute_cooperative_value_capturing_operand_evidence(
-                self.ctx,
-                key.clone(),
-                sentinel,
-                traced_build,
-                evidence,
-                &SemanticOperandAuthority::mint_for_forcing_boundary(),
-            ),
-            (None, None) => {
-                graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build)
-            }
+        let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
+        let mut capture = match (publication, operand_evidence) {
+            (Some(publication), None) => ReadCapture::publication(publication),
+            (None, Some(evidence)) => ReadCapture::operand_evidence(evidence, &authority),
+            (None, None) => ReadCapture::default(),
             (Some(_), Some(_)) => unreachable!("capture modes are mutually exclusive"),
         };
-        // Attribute the dispatch by `SemanticQueryKey` kind +
-        // cold/warm. Cold = the `traced_build` closure ran. Warm = the
-        // memo short-circuited before the closure fired.
-        let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
-        // Same cold/warm decision, on the work-attribution rail: the two
-        // sites are mutually exclusive, so `cold + warm` reconstructs the
-        // dispatch total and `cold / total` is the miss rate directly.
-        if is_cold {
-            verter_audit::attribute!(SemanticColdBuild);
-        } else {
-            verter_audit::attribute!(SemanticWarmHit);
-        }
-        if let Some(observer) = verter_audit::current_observer() {
-            use verter_audit::AuditEvent;
-            let event = match &key {
-                SemanticQueryKey::TypeOf { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryTypeOfCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryTypeOfWarm)
-                    }
+        // The memo protocol: a warm lookup, then a claim for this
+        // execution's task — the recursion carrier, another task's result
+        // (waited out here, at the synchronous entry), or this key's
+        // producer, which runs the traced build and then settles, is
+        // admitted and completes.
+        let mut execution = None;
+        let cache_read =
+            match graph.acquire_query(self.ctx, key.clone(), &mut execution, &mut capture) {
+                Acquired::Read(read) => read,
+                Acquired::Recursive(recursion) => {
+                    SemanticGraphStore::recursion_read(recursion, sentinel())
                 }
-                SemanticQueryKey::Instantiate(_) => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryInstantiateCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryInstantiateWarm)
-                    }
-                }
-                SemanticQueryKey::Conditional { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryConditionalCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryConditionalWarm)
-                    }
-                }
-                SemanticQueryKey::MappedType { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryMappedTypeCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryMappedTypeWarm)
-                    }
-                }
-                // Post-admission-time `IndexedAccess` is rewritten to
-                // `ProjectPath` BEFORE the memo sees it, so live keys
-                // are always `ProjectPath`. The arm stays for
-                // exhaustiveness should the canonicalisation ever
-                // shift.
-                SemanticQueryKey::IndexedAccess { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryIndexedAccessCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryIndexedAccessWarm)
-                    }
-                }
-                SemanticQueryKey::KeyOf { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryKeyOfCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryKeyOfWarm)
-                    }
-                }
-                SemanticQueryKey::ProjectPath { .. } | SemanticQueryKey::ProjectMember { .. } => {
-                    if is_cold {
-                        Some(AuditEvent::SemanticQueryProjectPathCold)
-                    } else {
-                        Some(AuditEvent::SemanticQueryProjectPathWarm)
-                    }
-                }
-                // ResolveDecl, ReduceUnion, ReduceIntersection,
-                // Relate, ResolveMacroPayload — not in the focused
-                // counter set.
-                _ => None,
+                Acquired::Produce(lease) => match lease.settle(self.ctx, traced_build()) {
+                    Err(read) => read,
+                    Ok(mut settled) => match settled.admit(self.ctx, &mut capture) {
+                        Err(read) => read,
+                        Ok(()) => settled.complete(self.ctx, &mut capture),
+                    },
+                },
             };
-            if let Some(event) = event {
-                observer.record_event(event);
-            }
-        }
-        // UNIVERSAL READ-BOUNDARY FOLD (the single fold point). Every
-        // cold-build subquery read — issued through `execute`,
-        // `execute_read`, the `execute_type_node` override, OR any direct
-        // `execute_read` cold-build consumer in build / evaluate /
-        // enumerate / walk — funnels through THIS helper, so folding the
-        // returned `CacheRead`'s metadata into the active build-local taint
-        // frame HERE closes the read-leak class in ONE place:
-        //   - `cache_read.cache_suppress`  → the build-local frame (a
-        //     benign non-cacheable but COMPLETE nested read taints the
-        //     enclosing build's memo non-admission, but NOT the request
-        //     partial sticky — component-meta still warms).
-        //   - `cache_read.result_is_partial` → the build-local frame AND
-        //     the per-request sticky (a genuine partial must gate
-        //     component-meta / shape / materialize warm for the whole
-        //     request).
-        // At this point `traced_build` (if it ran a child build) has already
-        // popped its OWN child frame inside `execute_cooperative`, so the
-        // top of the stack is the PARENT build frame — folding the child's
-        // returned metadata here propagates it exactly one level up. A
-        // top-level read with no active build frame naturally no-ops
-        // (`fold_into_top_build_local_taint` finds an empty stack).
-        // A WARM resolved-key hit short-circuits `traced_build`, so the prelude
-        // never reached `finalise_traced_build_output`. OR its suppress into the
-        // returned `CacheRead` here so a warm hit on the resolved key cannot let
-        // an ENCLOSING cache admit a result whose carrier rewrite was
-        // ReturnOnly / overflow / fenced-serve. (On a cold build the same OR
-        // already landed via `finalise_traced_build_output`; OR-ing again is
-        // idempotent.)
-        let mut cache_read = cache_read;
-        if carrier_prelude.cache_suppress() {
-            cache_read.cache_suppress = true;
-        }
-        if carrier_prelude.is_partial() {
-            cache_read.result_is_partial = true;
-            cache_read.cache_suppress = true;
-            crate::request_context::fold_result_completeness(
-                crate::semantic_query::ResultCompleteness::partial(
-                    carrier_prelude.partial_reasons(),
-                ),
-            );
-        }
+        drop(execution);
+        let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
+        let mut cache_read = self.attribute_query_read(&key, is_cold, cache_read, &carrier_prelude);
         if connected_guard.is_root() {
             if let Some(reasons) = self.connected_demand_trip() {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
@@ -3536,10 +3792,10 @@ fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
 ///
 /// `TemplateLiteralReduce` counts too: a template over wide finite unions
 /// enumerates a cartesian product, so an unbounded re-dispatch storm over
-/// template reductions is the same expansion-storm shape. (The reducer also
-/// applies its own per-call product-width cap — `TEMPLATE_LITERAL_KEYSPACE_CAP`
-/// — which bounds a SINGLE reduction; this gate bounds the aggregate dispatch
-/// count across the request.)
+/// template reductions is the same expansion-storm shape. (A SINGLE
+/// reduction is bounded by the checker's product rule and charges each
+/// concatenation it builds to the connected-work ledger; this gate bounds the
+/// aggregate dispatch count across the request.)
 ///
 /// `TypeOf` counts too: it is a demand-bearing projection reducer
 /// (`build_typeof` lowers a value's declaration graph at the requested
@@ -4173,7 +4429,19 @@ mod carrier_head_resolution_tests;
 #[cfg(test)]
 mod closedness_evaluator_tests;
 #[cfg(test)]
+mod conditional_decision_tests;
+#[cfg(test)]
+mod constrained_infer_tests;
+#[cfg(test)]
+mod generic_source_inference_tests;
+#[cfg(test)]
+mod infer_inventory_tests;
+#[cfg(test)]
+mod inference_fixation_tests;
+#[cfg(test)]
 mod mapped_key_domain_carrier_tests;
+#[cfg(test)]
+mod reference_inference_tests;
 
 #[cfg(test)]
 mod raised_shape_tests;
@@ -4211,7 +4479,13 @@ mod closure_narrowing_tests;
 #[cfg(test)]
 mod conditional_indexed_check_tests;
 #[cfg(test)]
+mod conditional_operand_tests;
+#[cfg(test)]
+mod conditional_tail_tests;
+#[cfg(test)]
 mod const_literal_widening_tests;
+#[cfg(test)]
+mod continuation_depth_tests;
 #[cfg(test)]
 mod deep_input_tests;
 #[cfg(test)]
@@ -4221,11 +4495,15 @@ mod differential_class_tests;
 #[cfg(test)]
 mod differential_depth_tests;
 #[cfg(test)]
+mod differential_fishing_tests;
+#[cfg(test)]
 mod differential_flow_tests;
 #[cfg(test)]
 mod differential_global_library_tests;
 #[cfg(test)]
 mod differential_harness_tests;
+#[cfg(test)]
+mod differential_inference_tests;
 #[cfg(test)]
 mod differential_literal_tests;
 #[cfg(test)]
@@ -4239,6 +4517,8 @@ mod differential_type_operator_tests;
 #[cfg(test)]
 mod enum_literal_tests;
 #[cfg(test)]
+mod helper_depth_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
@@ -4248,6 +4528,10 @@ mod index_signature_access_tests;
 mod indexed_access_name_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
+#[cfg(test)]
+mod inference_census_tests;
+#[cfg(test)]
+mod intersection_complexity_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
 #[cfg(test)]
@@ -4285,9 +4569,15 @@ mod relation_depth_tests;
 #[cfg(test)]
 mod relation_operand_tests;
 #[cfg(test)]
+mod relation_variance_tests;
+#[cfg(test)]
+mod relation_work_tests;
+#[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]
 mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_complexity_tests;
 #[cfg(test)]
 mod template_pattern_relation_tests;
 #[cfg(test)]
@@ -4298,6 +4588,12 @@ mod truthiness_domain_tests;
 mod tuple_length_and_apparent_member_tests;
 #[cfg(test)]
 mod type_syntax_depth_tests;
+#[cfg(test)]
+mod undecided_call_tests;
+#[cfg(test)]
+mod undecided_conditional_tests;
+#[cfg(test)]
+mod unique_symbol_key_tests;
 #[cfg(test)]
 mod unique_symbol_widening_tests;
 #[cfg(test)]

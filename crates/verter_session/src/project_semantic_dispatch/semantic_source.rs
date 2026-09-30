@@ -94,7 +94,8 @@ impl SourceRaiseOutcome {
             QueryErrorDisposition::OptionalAbsence => Self::Absent,
             QueryErrorDisposition::RecursionCarrier
             | QueryErrorDisposition::ExpandableDecl
-            | QueryErrorDisposition::CheckerRecovery => {
+            | QueryErrorDisposition::CheckerRecovery
+            | QueryErrorDisposition::BudgetRecovery => {
                 match carrier(&err) {
                     Some(node) => Self::Raised(HotTypeRef::new(node)),
                     // The carrier could not be interned (no scope to intern

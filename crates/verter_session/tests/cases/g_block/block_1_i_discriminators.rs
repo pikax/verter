@@ -58,10 +58,20 @@ fn execute_read_cold_build_persists_traced_facts() {
         "shared cold-build helper must exist on ProjectSemanticDispatch"
     );
     assert!(
-        mod_src.contains("install_fact_tracer(\n                &basis_source,"),
+        mod_src.contains("install_fact_tracer(&basis_source, || {"),
         "shared cold-build helper must wrap the cold-build closure with install_fact_tracer, \
          seeded from the request-bound basis source it captured before the closure — a \
          host-only or unbound tracer disarms the cold build's compaction basis"
+    );
+    let frames_src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/project_semantic_dispatch/query_frames.rs"),
+    )
+    .expect("read query_frames.rs");
+    assert!(
+        frames_src.contains("FactTracerBasisSource::from_ctx(frame.dispatch.ctx)"),
+        "a cold build run as a continuation frame traces its steps from the same \
+         request-bound basis source"
     );
     assert!(
         mod_src.contains("let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);"),
@@ -73,9 +83,9 @@ fn execute_read_cold_build_persists_traced_facts() {
          install the fact tracer"
     );
     assert!(
-        !raise_src.contains("graph.execute_cooperative_value("),
-        "execute_read must NOT call graph.execute_cooperative_value directly. A separate \
-         `graph.execute_cooperative_value(...)` call inside execute_read \
+        !raise_src.contains("graph.acquire_query("),
+        "execute_read must NOT call graph.acquire_query directly. A separate \
+         `graph.acquire_query(...)` call inside execute_read \
          would bypass install_fact_tracer."
     );
 }

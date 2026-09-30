@@ -69,162 +69,156 @@ pub fn collect_type_references(ts_type: &TSType<'_>) -> Vec<String> {
     refs
 }
 
+/// The type references in `ts_type`, in source order, collected from an
+/// explicit stack of pending types, so a deeply nested type costs heap, not
+/// native stack.
 fn collect_type_references_recursive(ts_type: &TSType<'_>, refs: &mut Vec<String>) {
-    match ts_type {
-        TSType::TSTypeReference(type_ref) => {
-            // Collect the type name
-            match &type_ref.type_name {
-                TSTypeName::IdentifierReference(id) => {
-                    refs.push(id.name.to_string());
-                }
-                TSTypeName::QualifiedName(qualified) => {
-                    collect_qualified_name_root(qualified, refs);
-                }
-                _ => {}
-            }
-            // Also recurse into type arguments: e.g., Partial<MyType>
-            if let Some(params) = &type_ref.type_arguments {
-                for param in &params.params {
-                    collect_type_references_recursive(param, refs);
-                }
-            }
-        }
-        TSType::TSUnionType(union_type) => {
-            for ty in &union_type.types {
-                collect_type_references_recursive(ty, refs);
-            }
-        }
-        TSType::TSIntersectionType(intersection) => {
-            for ty in &intersection.types {
-                collect_type_references_recursive(ty, refs);
-            }
-        }
-        TSType::TSTypeLiteral(literal) => {
-            for member in &literal.members {
-                match member {
-                    TSSignature::TSPropertySignature(prop) => {
-                        if let Some(ref ta) = prop.type_annotation {
-                            collect_type_references_recursive(&ta.type_annotation, refs);
-                        }
+    let mut pending = vec![ts_type];
+    while let Some(ts_type) = pending.pop() {
+        // Types are pushed in order, then reversed, so they pop in order.
+        let from = pending.len();
+        match ts_type {
+            TSType::TSTypeReference(type_ref) => {
+                // Collect the type name
+                match &type_ref.type_name {
+                    TSTypeName::IdentifierReference(id) => {
+                        refs.push(id.name.to_string());
                     }
-                    TSSignature::TSMethodSignature(method) => {
-                        if let Some(ref ret) = method.return_type {
-                            collect_type_references_recursive(&ret.type_annotation, refs);
+                    TSTypeName::QualifiedName(qualified) => {
+                        refs.extend(type_ref_root_name(&qualified.left));
+                    }
+                    _ => {}
+                }
+                // Also recurse into type arguments: e.g., Partial<MyType>
+                if let Some(params) = &type_ref.type_arguments {
+                    for param in &params.params {
+                        pending.push(param);
+                    }
+                }
+            }
+            TSType::TSUnionType(union_type) => {
+                for ty in &union_type.types {
+                    pending.push(ty);
+                }
+            }
+            TSType::TSIntersectionType(intersection) => {
+                for ty in &intersection.types {
+                    pending.push(ty);
+                }
+            }
+            TSType::TSTypeLiteral(literal) => {
+                for member in &literal.members {
+                    match member {
+                        TSSignature::TSPropertySignature(prop) => {
+                            if let Some(ref ta) = prop.type_annotation {
+                                pending.push(&ta.type_annotation);
+                            }
                         }
-                        // In OXC 0.112, type annotations are on FormalParameter, not BindingPattern
-                        for param in &method.params.items {
-                            if let Some(ref ta) = param.type_annotation {
-                                collect_type_references_recursive(&ta.type_annotation, refs);
+                        TSSignature::TSMethodSignature(method) => {
+                            if let Some(ref ret) = method.return_type {
+                                pending.push(&ret.type_annotation);
+                            }
+                            // In OXC 0.112, type annotations are on FormalParameter, not BindingPattern
+                            for param in &method.params.items {
+                                if let Some(ref ta) = param.type_annotation {
+                                    pending.push(&ta.type_annotation);
+                                }
+                            }
+                        }
+                        TSSignature::TSCallSignatureDeclaration(call) => {
+                            if let Some(ref ret) = call.return_type {
+                                pending.push(&ret.type_annotation);
+                            }
+                            for param in &call.params.items {
+                                if let Some(ref ta) = param.type_annotation {
+                                    pending.push(&ta.type_annotation);
+                                }
+                            }
+                        }
+                        TSSignature::TSIndexSignature(idx) => {
+                            pending.push(&idx.type_annotation.type_annotation);
+                        }
+                        TSSignature::TSConstructSignatureDeclaration(_) => {}
+                    }
+                }
+            }
+            TSType::TSArrayType(arr) => {
+                pending.push(&arr.element_type);
+            }
+            TSType::TSTupleType(tuple) => {
+                for elem in &tuple.element_types {
+                    match elem {
+                        TSTupleElement::TSOptionalType(opt) => {
+                            pending.push(&opt.type_annotation);
+                        }
+                        TSTupleElement::TSRestType(rest) => {
+                            pending.push(&rest.type_annotation);
+                        }
+                        TSTupleElement::TSNamedTupleMember(named) => {
+                            if let Some(t) = named.element_type.as_ts_type() {
+                                pending.push(t);
+                            }
+                        }
+                        _ => {
+                            if let Some(t) = elem.as_ts_type() {
+                                pending.push(t);
                             }
                         }
                     }
-                    TSSignature::TSCallSignatureDeclaration(call) => {
-                        if let Some(ref ret) = call.return_type {
-                            collect_type_references_recursive(&ret.type_annotation, refs);
-                        }
-                        for param in &call.params.items {
-                            if let Some(ref ta) = param.type_annotation {
-                                collect_type_references_recursive(&ta.type_annotation, refs);
-                            }
-                        }
-                    }
-                    TSSignature::TSIndexSignature(idx) => {
-                        collect_type_references_recursive(
-                            &idx.type_annotation.type_annotation,
-                            refs,
-                        );
-                    }
-                    TSSignature::TSConstructSignatureDeclaration(_) => {}
                 }
             }
-        }
-        TSType::TSArrayType(arr) => {
-            collect_type_references_recursive(&arr.element_type, refs);
-        }
-        TSType::TSTupleType(tuple) => {
-            for elem in &tuple.element_types {
-                match elem {
-                    TSTupleElement::TSOptionalType(opt) => {
-                        collect_type_references_recursive(&opt.type_annotation, refs);
-                    }
-                    TSTupleElement::TSRestType(rest) => {
-                        collect_type_references_recursive(&rest.type_annotation, refs);
-                    }
-                    TSTupleElement::TSNamedTupleMember(named) => {
-                        if let Some(t) = named.element_type.as_ts_type() {
-                            collect_type_references_recursive(t, refs);
-                        }
-                    }
-                    _ => {
-                        if let Some(t) = elem.as_ts_type() {
-                            collect_type_references_recursive(t, refs);
-                        }
+            TSType::TSConditionalType(cond) => {
+                pending.push(&cond.check_type);
+                pending.push(&cond.extends_type);
+                pending.push(&cond.true_type);
+                pending.push(&cond.false_type);
+            }
+            TSType::TSMappedType(mapped) => {
+                // In OXC 0.112, constraint is directly on TSMappedType (not optional)
+                pending.push(&mapped.constraint);
+                if let Some(ref type_annotation) = mapped.type_annotation {
+                    pending.push(type_annotation);
+                }
+            }
+            TSType::TSIndexedAccessType(idx) => {
+                pending.push(&idx.object_type);
+                pending.push(&idx.index_type);
+            }
+            TSType::TSTypeOperatorType(op) => {
+                pending.push(&op.type_annotation);
+            }
+            TSType::TSParenthesizedType(paren) => {
+                pending.push(&paren.type_annotation);
+            }
+            TSType::TSTemplateLiteralType(tpl) => {
+                for ty in &tpl.types {
+                    pending.push(ty);
+                }
+            }
+            TSType::TSFunctionType(func) => {
+                // return_type is Box<TSTypeAnnotation>, not optional
+                pending.push(&func.return_type.type_annotation);
+                for param in &func.params.items {
+                    if let Some(ref ta) = param.type_annotation {
+                        pending.push(&ta.type_annotation);
                     }
                 }
             }
-        }
-        TSType::TSConditionalType(cond) => {
-            collect_type_references_recursive(&cond.check_type, refs);
-            collect_type_references_recursive(&cond.extends_type, refs);
-            collect_type_references_recursive(&cond.true_type, refs);
-            collect_type_references_recursive(&cond.false_type, refs);
-        }
-        TSType::TSMappedType(mapped) => {
-            // In OXC 0.112, constraint is directly on TSMappedType (not optional)
-            collect_type_references_recursive(&mapped.constraint, refs);
-            if let Some(ref type_annotation) = mapped.type_annotation {
-                collect_type_references_recursive(type_annotation, refs);
+            TSType::TSConstructorType(ctor) => {
+                // return_type is Box<TSTypeAnnotation>, not optional
+                pending.push(&ctor.return_type.type_annotation);
             }
-        }
-        TSType::TSIndexedAccessType(idx) => {
-            collect_type_references_recursive(&idx.object_type, refs);
-            collect_type_references_recursive(&idx.index_type, refs);
-        }
-        TSType::TSTypeOperatorType(op) => {
-            collect_type_references_recursive(&op.type_annotation, refs);
-        }
-        TSType::TSParenthesizedType(paren) => {
-            collect_type_references_recursive(&paren.type_annotation, refs);
-        }
-        TSType::TSTemplateLiteralType(tpl) => {
-            for ty in &tpl.types {
-                collect_type_references_recursive(ty, refs);
-            }
-        }
-        TSType::TSFunctionType(func) => {
-            // return_type is Box<TSTypeAnnotation>, not optional
-            collect_type_references_recursive(&func.return_type.type_annotation, refs);
-            for param in &func.params.items {
-                if let Some(ref ta) = param.type_annotation {
-                    collect_type_references_recursive(&ta.type_annotation, refs);
+            TSType::TSInferType(_) => {}
+            TSType::TSTypeQuery(query) => {
+                if let Some(root) = type_query_root_name(&query.expr_name) {
+                    refs.push(root);
                 }
             }
+            TSType::TSImportType(_) => {}
+            // Primitives and literals — no type references
+            _ => {}
         }
-        TSType::TSConstructorType(ctor) => {
-            // return_type is Box<TSTypeAnnotation>, not optional
-            collect_type_references_recursive(&ctor.return_type.type_annotation, refs);
-        }
-        TSType::TSInferType(_) => {}
-        TSType::TSTypeQuery(query) => {
-            if let Some(root) = type_query_root_name(&query.expr_name) {
-                refs.push(root);
-            }
-        }
-        TSType::TSImportType(_) => {}
-        // Primitives and literals — no type references
-        _ => {}
-    }
-}
-
-fn collect_qualified_name_root(name: &TSQualifiedName<'_>, refs: &mut Vec<String>) {
-    match &name.left {
-        TSTypeName::IdentifierReference(id) => {
-            refs.push(id.name.to_string());
-        }
-        TSTypeName::QualifiedName(inner) => {
-            collect_qualified_name_root(inner, refs);
-        }
-        _ => {}
+        pending[from..].reverse();
     }
 }
 
@@ -309,7 +303,7 @@ struct RoleWalk<'program, 'registry> {
     visited: FxHashSet<(TopLevelOwnerId, String, MacroTypeDepUsage)>,
 }
 
-impl<'program> RoleWalk<'program, '_> {
+impl<'program, 'registry> RoleWalk<'program, 'registry> {
     fn record(&mut self, name: String, role: MacroTypeDepUsage) {
         if let Some(&at) = self.role_index.get(&name) {
             let existing = self.roles[at].1;
@@ -328,13 +322,48 @@ impl<'program> RoleWalk<'program, '_> {
         }
     }
 
+    /// Walk a type in a SURFACE position (the argument root or a
+    /// composition arm of it). The walk runs from an explicit stack of
+    /// steps: each step does what it does at once and pushes the steps
+    /// after it in order, so the steps run in the order the recursive walk
+    /// made them, and a deeply nested type costs heap, not native stack.
+    fn surface_type(&mut self, ts_type: &TSType<'program>) {
+        let mut pending = vec![RoleStep::Surface(self.registry, ts_type)];
+        while let Some(step) = pending.pop() {
+            let from = pending.len();
+            match step {
+                RoleStep::Surface(registry, ts_type) => {
+                    self.surface_type_in(registry, ts_type, &mut pending);
+                }
+                RoleStep::Flat(registry, ts_type) => {
+                    self.surface_flat_in(registry, ts_type, &mut pending);
+                }
+                RoleStep::FollowSurface(registry, name) => {
+                    self.follow_local_surface_in(registry, &name, &mut pending);
+                }
+                RoleStep::Members(registry, members) => {
+                    Self::literal_members_in(registry, members, &mut pending);
+                }
+                RoleStep::Member(registry, ts_type) => {
+                    self.member_type_in(registry, ts_type, &mut pending);
+                }
+                RoleStep::FollowMember(registry, name) => {
+                    self.follow_local_member_in(registry, &name, &mut pending);
+                }
+                RoleStep::Record(name, role) => self.record(name, role),
+            }
+            pending[from..].reverse();
+        }
+    }
+
     /// Conservative flat collection: every reference inside `ts_type` is
     /// recorded as SURFACE and its local chain followed — used for argument
     /// shapes whose surface cannot be enumerated syntactically.
-    fn surface_flat_in(
+    fn surface_flat_in<'t>(
         &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
-        ts_type: &TSType<'program>,
+        registry: LocalTypeRegistryView<'program, 'registry>,
+        ts_type: &'t TSType<'program>,
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
     ) {
         if let TSType::TSTypeQuery(query) = ts_type {
             if let Some(root) = type_query_root_name(&query.expr_name) {
@@ -343,21 +372,16 @@ impl<'program> RoleWalk<'program, '_> {
             }
         }
         for name in collect_type_references(ts_type) {
-            self.record(name.clone(), MacroTypeDepUsage::Surface);
-            self.follow_local_surface_in(registry, &name);
+            pending.push(RoleStep::Record(name.clone(), MacroTypeDepUsage::Surface));
+            pending.push(RoleStep::FollowSurface(registry, name));
         }
     }
 
-    /// Walk a type in a SURFACE position (the argument root or a
-    /// composition arm of it).
-    fn surface_type(&mut self, ts_type: &TSType<'program>) {
-        self.surface_type_in(self.registry, ts_type);
-    }
-
-    fn surface_type_in(
+    fn surface_type_in<'t>(
         &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
-        ts_type: &TSType<'program>,
+        registry: LocalTypeRegistryView<'program, 'registry>,
+        ts_type: &'t TSType<'program>,
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
     ) {
         match ts_type {
             TSType::TSTypeReference(type_ref) => {
@@ -371,25 +395,27 @@ impl<'program> RoleWalk<'program, '_> {
                 // `Partial<T>` / `Pick<T, K>`, local generic aliases).
                 if let Some(args) = &type_ref.type_arguments {
                     for param in &args.params {
-                        self.surface_type_in(registry, param);
+                        pending.push(RoleStep::Surface(registry, param));
                     }
                 }
-                self.follow_local_surface_in(registry, &name);
+                pending.push(RoleStep::FollowSurface(registry, name));
             }
             TSType::TSIntersectionType(intersection) => {
                 for arm in &intersection.types {
-                    self.surface_type_in(registry, arm);
+                    pending.push(RoleStep::Surface(registry, arm));
                 }
             }
             TSType::TSUnionType(union) => {
                 for arm in &union.types {
-                    self.surface_type_in(registry, arm);
+                    pending.push(RoleStep::Surface(registry, arm));
                 }
             }
             TSType::TSParenthesizedType(paren) => {
-                self.surface_type_in(registry, &paren.type_annotation)
+                pending.push(RoleStep::Surface(registry, &paren.type_annotation));
             }
-            TSType::TSTypeLiteral(literal) => self.literal_members_in(registry, &literal.members),
+            TSType::TSTypeLiteral(literal) => {
+                pending.push(RoleStep::Members(registry, &literal.members));
+            }
             TSType::TSTypeQuery(query) => {
                 if let Some(root) = type_query_root_name(&query.expr_name) {
                     self.record(root, MacroTypeDepUsage::ValueQuerySurface);
@@ -398,15 +424,15 @@ impl<'program> RoleWalk<'program, '_> {
             TSType::TSMappedType(mapped) => {
                 // The key domain enumerates the surface; the value is a
                 // per-member annotation.
-                self.surface_type_in(registry, &mapped.constraint);
+                pending.push(RoleStep::Surface(registry, &mapped.constraint));
                 if let Some(value) = &mapped.type_annotation {
-                    self.member_type_in(registry, value);
+                    pending.push(RoleStep::Member(registry, value));
                 }
             }
             // Indexed access, conditionals, `keyof`, template literals, …:
             // the surface cannot be enumerated syntactically — every inner
             // reference is required — the conservative fatal tier.
-            other => self.surface_flat_in(registry, other),
+            other => self.surface_flat_in(registry, other, pending),
         }
     }
 
@@ -414,11 +440,14 @@ impl<'program> RoleWalk<'program, '_> {
     /// SURFACE (an unresolvable parent hides members), alias bodies re-enter
     /// the surface walk, and the declaration's own literal members classify
     /// as member annotations.
-    fn follow_local_surface_in(
+    fn follow_local_surface_in<'t>(
         &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
+        registry: LocalTypeRegistryView<'program, 'registry>,
         name: &str,
-    ) {
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
+    ) where
+        'program: 't,
+    {
         let Some((declaration_registry, declaration)) = registry.resolve(name) else {
             return;
         };
@@ -433,23 +462,23 @@ impl<'program> RoleWalk<'program, '_> {
             LocalTypeDecl::Interface { body, extends } => {
                 for heritage in extends.iter() {
                     if let Some(parent) = heritage_name(&heritage.type_name) {
-                        self.record(parent.clone(), MacroTypeDepUsage::Surface);
-                        self.follow_local_surface_in(declaration_registry, &parent);
+                        pending.push(RoleStep::Record(parent.clone(), MacroTypeDepUsage::Surface));
+                        pending.push(RoleStep::FollowSurface(declaration_registry, parent));
                     }
                     // Heritage type arguments (`extends Base<X>`,
                     // `extends Pick<X, K>`) stay SURFACE — conservative:
                     // they can shape the inherited member set.
                     if let Some(args) = &heritage.type_arguments {
                         for param in &args.params {
-                            self.surface_type_in(declaration_registry, param);
+                            pending.push(RoleStep::Surface(declaration_registry, param));
                         }
                     }
                 }
-                self.literal_members_in(declaration_registry, &body.body);
+                pending.push(RoleStep::Members(declaration_registry, &body.body));
             }
             LocalTypeDecl::Alias(aliased) => {
                 let aliased = *aliased;
-                self.surface_type_in(declaration_registry, aliased);
+                pending.push(RoleStep::Surface(declaration_registry, aliased));
             }
             LocalTypeDecl::Class => {}
         }
@@ -457,16 +486,16 @@ impl<'program> RoleWalk<'program, '_> {
 
     /// Classify the member annotations of a type-literal / interface body in
     /// a surface position.
-    fn literal_members_in(
-        &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
-        members: &[TSSignature<'program>],
+    fn literal_members_in<'t>(
+        registry: LocalTypeRegistryView<'program, 'registry>,
+        members: &'t [TSSignature<'program>],
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
     ) {
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
                     if let Some(annotation) = &prop.type_annotation {
-                        self.member_type_in(registry, &annotation.type_annotation);
+                        pending.push(RoleStep::Member(registry, &annotation.type_annotation));
                     }
                 }
                 TSSignature::TSCallSignatureDeclaration(call_sig) => {
@@ -475,7 +504,7 @@ impl<'program> RoleWalk<'program, '_> {
                     // payload, which runtime codegen never reads.
                     if let Some(first) = call_sig.params.items.first() {
                         if let Some(annotation) = &first.type_annotation {
-                            self.surface_flat_in(registry, &annotation.type_annotation);
+                            pending.push(RoleStep::Flat(registry, &annotation.type_annotation));
                         }
                     }
                 }
@@ -490,10 +519,11 @@ impl<'program> RoleWalk<'program, '_> {
     /// Walk a top-level member's value annotation: its root references are
     /// MEMBER tier (constructor inference), local alias chains stay
     /// transparent, and anything deeper is nested (not collected).
-    fn member_type_in(
+    fn member_type_in<'t>(
         &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
-        ts_type: &TSType<'program>,
+        registry: LocalTypeRegistryView<'program, 'registry>,
+        ts_type: &'t TSType<'program>,
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
     ) {
         match ts_type {
             TSType::TSTypeReference(type_ref) => {
@@ -503,20 +533,20 @@ impl<'program> RoleWalk<'program, '_> {
                 self.record(name.clone(), MacroTypeDepUsage::Member);
                 // Type arguments are nested (`foo: Array<X>` — the
                 // constructor derives from the head).
-                self.follow_local_member_in(registry, &name);
+                pending.push(RoleStep::FollowMember(registry, name));
             }
             TSType::TSUnionType(union) => {
                 for arm in &union.types {
-                    self.member_type_in(registry, arm);
+                    pending.push(RoleStep::Member(registry, arm));
                 }
             }
             TSType::TSIntersectionType(intersection) => {
                 for arm in &intersection.types {
-                    self.member_type_in(registry, arm);
+                    pending.push(RoleStep::Member(registry, arm));
                 }
             }
             TSType::TSParenthesizedType(paren) => {
-                self.member_type_in(registry, &paren.type_annotation)
+                pending.push(RoleStep::Member(registry, &paren.type_annotation));
             }
             TSType::TSTypeQuery(query) => {
                 if let Some(root) = type_query_root_name(&query.expr_name) {
@@ -532,11 +562,14 @@ impl<'program> RoleWalk<'program, '_> {
 
     /// A local ALIAS is transparent for constructor inference; a local
     /// interface / class is an `Object` constructor regardless of its body.
-    fn follow_local_member_in(
+    fn follow_local_member_in<'t>(
         &mut self,
-        registry: LocalTypeRegistryView<'program, '_>,
+        registry: LocalTypeRegistryView<'program, 'registry>,
         name: &str,
-    ) {
+        pending: &mut Vec<RoleStep<'t, 'program, 'registry>>,
+    ) where
+        'program: 't,
+    {
         let Some((declaration_registry, declaration)) = registry.resolve(name) else {
             return;
         };
@@ -549,9 +582,39 @@ impl<'program> RoleWalk<'program, '_> {
         }
         if let LocalTypeDecl::Alias(aliased) = declaration {
             let aliased = *aliased;
-            self.member_type_in(declaration_registry, aliased);
+            pending.push(RoleStep::Member(declaration_registry, aliased));
         }
     }
+}
+
+/// A step of [`RoleWalk`]'s walk.
+enum RoleStep<'t, 'program, 'registry> {
+    /// Walk a type in a SURFACE position.
+    Surface(
+        LocalTypeRegistryView<'program, 'registry>,
+        &'t TSType<'program>,
+    ),
+    /// Collect every reference inside a type as SURFACE.
+    Flat(
+        LocalTypeRegistryView<'program, 'registry>,
+        &'t TSType<'program>,
+    ),
+    /// Follow a local declaration's surface chain.
+    FollowSurface(LocalTypeRegistryView<'program, 'registry>, String),
+    /// Classify a type-literal / interface body's members.
+    Members(
+        LocalTypeRegistryView<'program, 'registry>,
+        &'t [TSSignature<'program>],
+    ),
+    /// Walk a top-level member's value annotation.
+    Member(
+        LocalTypeRegistryView<'program, 'registry>,
+        &'t TSType<'program>,
+    ),
+    /// Follow a local alias for constructor inference.
+    FollowMember(LocalTypeRegistryView<'program, 'registry>, String),
+    /// Record a reference's role.
+    Record(String, MacroTypeDepUsage),
 }
 
 /// Detect Vue macros from a parsed program's body.
@@ -2137,12 +2200,16 @@ fn collect_macro_call_from_stmt<'a>(
     }
 }
 
+/// The macro call `expr` is, and for `defineProps` the ones under it as a
+/// first argument (`withDefaults(defineProps<T>(), …)`), walked down those
+/// first arguments in a loop.
 fn collect_macro_call_from_expr<'a>(
     expr: &'a Expression<'a>,
     callee_name: &str,
     result: &mut Vec<(u32, &'a TSType<'a>)>,
 ) {
-    if let Expression::CallExpression(call) = expr {
+    let mut expr = expr;
+    while let Expression::CallExpression(call) = expr {
         let is_target =
             matches!(&call.callee, Expression::Identifier(id) if id.name == callee_name);
         if is_target {
@@ -2153,12 +2220,9 @@ fn collect_macro_call_from_expr<'a>(
             }
         }
         // Also check for withDefaults(defineProps<T>(), ...) — only relevant for defineProps
-        if callee_name == "defineProps" {
-            if let Some(first_arg) = call.arguments.first() {
-                if let Some(inner_expr) = first_arg.as_expression() {
-                    collect_macro_call_from_expr(inner_expr, callee_name, result);
-                }
-            }
+        match call.arguments.first().and_then(|arg| arg.as_expression()) {
+            Some(inner_expr) if callee_name == "defineProps" => expr = inner_expr,
+            _ => return,
         }
     }
 }

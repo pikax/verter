@@ -81,7 +81,20 @@ impl VerterLanguageServer {
         let output = match host.get_component_meta_output_with_resolution(&canonical_id) {
             Ok((Some(output), _request_id)) => output,
             Ok((None, _request_id)) => return Ok(None),
-            Err((err, _request_id)) => return Err(component_meta_output_error(&err)),
+            Err((verter_session::meta_resolve::ComponentMetaFailure::Output(err), _request_id)) => {
+                return Err(component_meta_output_error(&err))
+            }
+            // An aborted computation publishes nothing: the request is
+            // answered as cancelled, or as outdated by a newer view.
+            Err((
+                verter_session::meta_resolve::ComponentMetaFailure::Aborted(abort),
+                _request_id,
+            )) => {
+                return Err(component_meta_aborted_error(
+                    abort.is_superseded(),
+                    format!("{abort:?}"),
+                ))
+            }
         };
 
         let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
@@ -193,6 +206,21 @@ fn invalid_uri_error(uri: &str) -> tower_lsp_server::jsonrpc::Error {
 /// indices, and the failure class ride the `data` payload so a client can
 /// distinguish a real materialization failure from the `null`
 /// "component does not resolve" absence result.
+fn component_meta_aborted_error(
+    superseded: bool,
+    abort: String,
+) -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: if superseded {
+            tower_lsp_server::jsonrpc::ErrorCode::ContentModified
+        } else {
+            tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled
+        },
+        message: std::borrow::Cow::Owned(format!("getComponentMeta: aborted ({abort})")),
+        data: None,
+    }
+}
+
 fn component_meta_output_error(
     err: &verter_session::meta_resolve::ComponentMetaOutputError,
 ) -> tower_lsp_server::jsonrpc::Error {

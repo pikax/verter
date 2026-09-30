@@ -669,7 +669,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         // into a committed object surface — the SAME gate
         // `navigate_param_to_object_surface` applies, keeping both binding paths
         // in agreement.
-        if slot_param_root_is_symbolic_only(self.dispatch, first_param, 0) {
+        if slot_param_root_is_symbolic_only(self.dispatch, first_param) {
             return None;
         }
         ctx.host_for_fact_tracer_install()

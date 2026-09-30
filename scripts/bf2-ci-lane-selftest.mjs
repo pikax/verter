@@ -199,37 +199,10 @@ test("release.yml leaves BF2 to CI and publishes only after proving that CI pass
   }
 });
 
-test("nextest retains base, provider, and deep-input timeout policies without Windows-only serialized groups", () => {
+test("nextest retains the two base hang-protection policies without Windows-only serialized groups", () => {
   const config = readFileSync(join(REPO_ROOT, ".config", "nextest.toml"), "utf8");
   assert.doesNotMatch(config, /max-threads\s*=\s*1/);
   assert.doesNotMatch(config, /test-group\s*=\s*'(?:shared-provider-live|lsp-server-unit)'/);
-  for (const profile of ["default", "ci"]) {
-    const base = config.match(
-      new RegExp(
-        `\\[profile\\.${profile}\\]\\n[^\\[]*?slow-timeout = \\{ period = "60s", terminate-after = 3 \\}`,
-      ),
-    );
-    assert.ok(base, `${profile} must retain its 180-second base backstop`);
-  }
-  const overrides = [
-    ...config.matchAll(
-      /^\[\[profile\.(default|ci)\.overrides\]\]\nfilter = '([^']+)'\n(?:#[^\n]*\n)*slow-timeout = \{ period = "60s", terminate-after = (\d+) \}/gm,
-    ),
-  ];
-  assert.equal(
-    overrides.length,
-    (config.match(/^\[\[profile\.(?:default|ci)\.overrides\]\]/gm) || []).length,
-  );
-  for (const profile of ["default", "ci"]) {
-    for (const selector of [
-      "shared_provider_live::",
-      "project_semantic_dispatch::deep_input_tests::",
-    ]) {
-      const matches = overrides.filter(
-        ([, owner, filter]) => owner === profile && filter.includes(selector),
-      );
-      assert.equal(matches.length, 1, `${profile} must have one ${selector} backstop`);
-      assert.equal(matches[0][3], "6");
-    }
-  }
+  assert.equal((config.match(/terminate-after\s*=\s*5/g) || []).length, 2);
+  assert.equal((config.match(/terminate-after\s*=/g) || []).length, 2);
 });

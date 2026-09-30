@@ -69,7 +69,6 @@ impl ProjectSemanticDispatch<'_> {
             for (input, returned) in inputs.iter_mut().zip(returned) {
                 if input.candidates.is_empty() {
                     input.candidates = returned.candidates;
-                    input.variance = returned.variance;
                 }
             }
         }

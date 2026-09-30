@@ -281,6 +281,27 @@ fn an_oversized_entry_is_refused_on_an_empty_account() {
     assert_eq!(account.snapshot().refusals_oversized, 1);
 }
 
+/// The per-entry cap is a rule about what a cache retains: an in-flight
+/// construction larger than one cache entry is admitted within the active
+/// sub-limit, while a retained entry of the same size is refused as
+/// oversized.
+#[test]
+fn the_entry_cap_bounds_retention_not_construction() {
+    let account = account(10_000, 5_000, 500);
+    let construction = account
+        .reserve(ChargeClass::Active, 4_000)
+        .admitted()
+        .expect("an active construction past the entry cap fits the active sub-limit");
+    let refusal = account
+        .reserve(ChargeClass::Retained, 4_000)
+        .refusal()
+        .expect("a retained entry past the entry cap is refused");
+    assert!(matches!(refusal, RetentionRefusal::Oversized { .. }));
+    assert_eq!(account.snapshot().active_bytes, 4_000);
+    drop(construction);
+    assert_eq!(account.snapshot().active_bytes, 0);
+}
+
 /// Exhausted ACTIVE work reports its own typed outcome, distinct from
 /// ordinary retention pressure: the request is out of resource, not
 /// merely unable to warm a cache.

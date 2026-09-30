@@ -370,6 +370,34 @@ describe("compileFile — descriptor-driven framework dispatch", () => {
     }
   });
 
+  it("names the whole source in a stack refusal's diagnostic", async () => {
+    const projectionError: PublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "stack-unavailable",
+      subject: { kind: "source" },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: null,
+      outcomeReason: null,
+      outcomeDiagnostic: null,
+    };
+    const fixture = createMockHost({
+      publicApiResult: { value: null, error: projectionError },
+    });
+    const teardown = __setHostForTest(new fixture.MockHost() as any);
+    try {
+      const file = new File("Deep.svelte", "<h1>deep</h1>");
+      await compileFile(file);
+
+      expect(file.compiled.compilerDiagnostics).toHaveLength(1);
+      expect(file.compiled.compilerDiagnostics[0]?.projectionError).toEqual(projectionError);
+      expect(file.compiled.compilerDiagnostics[0]?.code).toBe("tsc-generation/stack-unavailable");
+      expect(file.compiled.compilerDiagnostics[0]?.message).toContain("(subject=source,");
+    } finally {
+      teardown();
+    }
+  });
+
   it("compiles a .svelte file with fileKind:'svelte' and populates output panels", async () => {
     const mock = createMockHost({
       virtualFileCode: "export default class App {}",

@@ -194,7 +194,7 @@ pub fn collect_statement_dependency_names(
             // on the per-contributor `FileWholeHash` rail — nothing to
             // collect here.
             let mut out = Vec::new();
-            collect_module_dependencies(module, owner, None, &mut out);
+            collect_module_dependencies(module, owner, &mut out);
             out
         }
         Statement::ExportDeclaration(export) => {
@@ -251,96 +251,98 @@ pub fn collect_statement_dependency_names(
 /// `extract_module_declaration` / `extract_namespaced_statement` so the
 /// dep-record keys match the `Ns.Name` keys the env walk lowers under.
 /// A string-literal ambient module (augmentation scope) contributes
-/// nothing here.
+/// nothing here. The namespace and every namespace nested in it are walked
+/// from an explicit stack
+/// ([`crate::analysis::namespace_walk::for_each_namespace`]).
 fn collect_module_dependencies(
     module: &TSNamespaceDeclaration<'_>,
     owner: TopLevelOwnerId,
-    parent: Option<&DeclarationPath>,
     out: &mut Vec<(DeclarationPath, DeclDependencyNames)>,
 ) {
-    let id = &module.id;
-    let namespace = parent.map_or_else(
-        || DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
-        |parent| parent.appended(id.name.as_str()),
+    crate::analysis::namespace_walk::for_each_namespace(
+        module,
+        &mut ModuleDependencies {
+            owner,
+            members: Vec::new(),
+            out,
+        },
     );
-    match &module.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_module_dependencies(inner, owner, Some(&namespace), out);
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                collect_namespaced_statement_dependencies(stmt, &namespace, out);
-            }
-        }
+}
+
+/// [`collect_module_dependencies`]'s walk: the namespace path it is in,
+/// the root's name first, grown and cut back as it enters and leaves a
+/// namespace.
+struct ModuleDependencies<'o> {
+    owner: TopLevelOwnerId,
+    members: Vec<String>,
+    out: &'o mut Vec<(DeclarationPath, DeclDependencyNames)>,
+}
+
+impl ModuleDependencies<'_> {
+    /// The path of the namespace member `name`.
+    fn member(&self, name: &str) -> DeclarationPath {
+        let (root, members) = self
+            .members
+            .split_first()
+            .expect("a member sits in a namespace");
+        DeclarationPath::new(
+            DeclBindingKey::new(self.owner, root.as_str()),
+            members
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(name)),
+        )
     }
 }
 
-fn collect_namespaced_statement_dependencies(
-    stmt: &Statement<'_>,
-    namespace: &DeclarationPath,
-    out: &mut Vec<(DeclarationPath, DeclDependencyNames)>,
-) {
-    match stmt {
-        Statement::TSTypeAliasDeclaration(alias) => {
-            out.push((
-                namespace.appended(alias.id.name.as_str()),
-                type_alias_dependency_names(alias),
-            ));
-        }
-        Statement::TSInterfaceDeclaration(interface) => {
-            out.push((
-                namespace.appended(interface.id.name.as_str()),
-                interface_dependency_names(interface),
-            ));
-        }
-        Statement::ClassDeclaration(class) => {
-            if let Some(id) = &class.id {
-                out.push((
-                    namespace.appended(id.name.as_str()),
-                    class_dependency_names(class),
-                ));
-            }
-        }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_module_dependencies(module, namespace.root.owner, Some(namespace), out);
-        }
-        Statement::ExportDeclaration(export) => {
-            collect_namespaced_declaration_dependencies(&export.declaration, namespace, out);
-        }
-        _ => {}
-    }
-}
+impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a> for ModuleDependencies<'_> {
+    type Frame = ();
 
-fn collect_namespaced_declaration_dependencies(
-    decl: &Declaration<'_>,
-    namespace: &DeclarationPath,
-    out: &mut Vec<(DeclarationPath, DeclDependencyNames)>,
-) {
-    match decl {
-        Declaration::TSTypeAliasDeclaration(alias) => {
-            out.push((
-                namespace.appended(alias.id.name.as_str()),
+    fn enter(
+        &mut self,
+        decl: &'s TSNamespaceDeclaration<'a>,
+        _parent: Option<&()>,
+        _nesting: crate::analysis::namespace_walk::Nesting,
+    ) {
+        self.members.push(decl.id.name.to_string());
+    }
+
+    fn statement(&mut self, _frame: &mut (), statement: &'s Statement<'a>) {
+        let entry = match statement {
+            Statement::TSTypeAliasDeclaration(alias) => Some((
+                self.member(alias.id.name.as_str()),
                 type_alias_dependency_names(alias),
-            ));
-        }
-        Declaration::TSInterfaceDeclaration(interface) => {
-            out.push((
-                namespace.appended(interface.id.name.as_str()),
+            )),
+            Statement::TSInterfaceDeclaration(interface) => Some((
+                self.member(interface.id.name.as_str()),
                 interface_dependency_names(interface),
-            ));
-        }
-        Declaration::ClassDeclaration(class) => {
-            if let Some(id) = &class.id {
-                out.push((
-                    namespace.appended(id.name.as_str()),
-                    class_dependency_names(class),
-                ));
-            }
-        }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_module_dependencies(module, namespace.root.owner, Some(namespace), out);
-        }
-        _ => {}
+            )),
+            Statement::ClassDeclaration(class) => class
+                .id
+                .as_ref()
+                .map(|id| (self.member(id.name.as_str()), class_dependency_names(class))),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::TSTypeAliasDeclaration(alias) => Some((
+                    self.member(alias.id.name.as_str()),
+                    type_alias_dependency_names(alias),
+                )),
+                Declaration::TSInterfaceDeclaration(interface) => Some((
+                    self.member(interface.id.name.as_str()),
+                    interface_dependency_names(interface),
+                )),
+                Declaration::ClassDeclaration(class) => class
+                    .id
+                    .as_ref()
+                    .map(|id| (self.member(id.name.as_str()), class_dependency_names(class))),
+                _ => None,
+            },
+            _ => None,
+        };
+        self.out.extend(entry);
+    }
+
+    fn exit(&mut self, _frame: (), _parent: Option<&mut ()>) {
+        self.members.pop();
     }
 }
 
@@ -371,7 +373,7 @@ fn collect_declaration_dependencies(
             // `export namespace N { … }` — collect its inner type
             // declarations under qualified `N.Name` keys.
             let mut out = Vec::new();
-            collect_module_dependencies(module, owner, None, &mut out);
+            collect_module_dependencies(module, owner, &mut out);
             out
         }
         _ => Vec::new(),

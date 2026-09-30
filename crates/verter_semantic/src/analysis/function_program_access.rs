@@ -28,6 +28,15 @@ fn named(identifier: &IdentifierReference<'_>, kind: FunctionWriteKind) -> Funct
 pub(crate) fn static_member_reference(
     member: &oxc_ast::ast::StaticMemberExpression<'_>,
 ) -> Option<FunctionReferenceRecord> {
+    // The chain's root decides first, before any link is copied: a chain
+    // rooted at no identifier (`new C().a.b`) names no reference.
+    let mut root = &member.object;
+    while let Expression::StaticMemberExpression(parent) = root {
+        root = &parent.object;
+    }
+    if !matches!(root, Expression::Identifier(_)) {
+        return None;
+    }
     let mut path = Vec::new();
     let mut current = member;
     loop {
@@ -217,6 +226,12 @@ pub(crate) struct EscapingAssignments {
     scopes: Vec<EscapeScope>,
     stack: Vec<usize>,
     writes: Vec<(FunctionReferenceRecord, usize)>,
+    /// Every identifier the walked code reads, by the scope it reads in —
+    /// the reads that escape are its captures.
+    reads: Vec<(FunctionReferenceRecord, usize)>,
+    /// The identifiers a plain `=` or a `for…in` / `for…of` head
+    /// replaces wholesale: written, never read.
+    pure_writes: rustc_hash::FxHashSet<verter_span::Span>,
     /// The span of a declaration name the walk binds itself, in the scope
     /// the checker binds it in, so the generic binding visit skips it.
     bound_elsewhere: Option<oxc_span::Span>,
@@ -244,6 +259,8 @@ impl Default for EscapingAssignments {
             }],
             stack: vec![0],
             writes: Vec::new(),
+            reads: Vec::new(),
+            pure_writes: rustc_hash::FxHashSet::default(),
             bound_elsewhere: None,
             var_declaration: false,
             class_expression_name: None,
@@ -254,21 +271,41 @@ impl Default for EscapingAssignments {
 impl EscapingAssignments {
     /// The assignments that escape every scope the walk declares.
     pub(crate) fn into_escaping(self) -> Vec<FunctionReferenceRecord> {
-        let Self { scopes, writes, .. } = self;
-        writes
-            .into_iter()
-            .filter(|(reference, scope)| {
-                let mut current = Some(*scope);
-                while let Some(index) = current {
-                    if scopes[index].names.contains(&reference.name) {
-                        return false;
-                    }
-                    current = scopes[index].parent;
+        self.into_escaping_references().0
+    }
+
+    /// The assignments and the reads that escape every scope the walk
+    /// declares: the names the walked code writes and reads from around it.
+    pub(crate) fn into_escaping_references(
+        self,
+    ) -> (Vec<FunctionReferenceRecord>, Vec<FunctionReferenceRecord>) {
+        let Self {
+            scopes,
+            writes,
+            reads,
+            ..
+        } = self;
+        let escapes = |reference: &FunctionReferenceRecord, scope: usize| {
+            let mut current = Some(scope);
+            while let Some(index) = current {
+                if scopes[index].names.contains(&reference.name) {
+                    return false;
                 }
-                true
-            })
+                current = scopes[index].parent;
+            }
+            true
+        };
+        let writes = writes
+            .into_iter()
+            .filter(|(reference, scope)| escapes(reference, *scope))
             .map(|(reference, _)| reference)
-            .collect()
+            .collect();
+        let reads = reads
+            .into_iter()
+            .filter(|(reference, scope)| escapes(reference, *scope))
+            .map(|(reference, _)| reference)
+            .collect();
+        (writes, reads)
     }
 
     fn current(&self) -> usize {
@@ -290,9 +327,19 @@ impl EscapingAssignments {
         self.scopes[scope].names.push(Arc::from(name));
     }
 
-    fn record(&mut self, targets: Vec<FunctionWriteTarget>) {
+    fn record(&mut self, targets: Vec<FunctionWriteTarget>, pure: bool) {
         let scope = self.current();
         for target in targets {
+            if let (
+                true,
+                FunctionWriteTarget::Binding {
+                    reference,
+                    kind: FunctionWriteKind::Whole,
+                },
+            ) = (pure, &target)
+            {
+                self.pure_writes.insert(reference.span);
+            }
             if let FunctionWriteTarget::Binding {
                 reference,
                 kind: FunctionWriteKind::Whole,
@@ -321,6 +368,23 @@ impl<'a> oxc_ast_visit::Visit<'a> for EscapingAssignments {
 
     fn leave_scope(&mut self) {
         self.stack.pop();
+    }
+
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        if self.pure_writes.contains(&verter_span::Span::from(it.span)) {
+            return;
+        }
+        let scope = self.current();
+        self.reads.push((
+            FunctionReferenceRecord {
+                name: Arc::from(it.name.as_str()),
+                span: it.span.into(),
+                binding: FunctionReferenceBinding::Free,
+                read_role: Some(FunctionReadRole::Value),
+                path: Arc::from([]),
+            },
+            scope,
+        ));
     }
 
     fn visit_ts_type(&mut self, _it: &oxc_ast::ast::TSType<'a>) {}
@@ -387,25 +451,31 @@ impl<'a> oxc_ast_visit::Visit<'a> for EscapingAssignments {
     }
 
     fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
-        self.record(assignment_targets(&it.left));
+        self.record(
+            assignment_targets(&it.left),
+            it.operator == oxc_syntax::operator::AssignmentOperator::Assign,
+        );
         oxc_ast_visit::walk::walk_assignment_expression(self, it);
     }
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
-        self.record(simple_assignment_target(&it.argument).into_iter().collect());
+        self.record(
+            simple_assignment_target(&it.argument).into_iter().collect(),
+            false,
+        );
         oxc_ast_visit::walk::walk_update_expression(self, it);
     }
 
     fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'a>) {
         if let Some(target) = it.left.as_assignment_target() {
-            self.record(assignment_targets(target));
+            self.record(assignment_targets(target), true);
         }
         oxc_ast_visit::walk::walk_for_in_statement(self, it);
     }
 
     fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'a>) {
         if let Some(target) = it.left.as_assignment_target() {
-            self.record(assignment_targets(target));
+            self.record(assignment_targets(target), true);
         }
         oxc_ast_visit::walk::walk_for_of_statement(self, it);
     }

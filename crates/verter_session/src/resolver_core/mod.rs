@@ -412,15 +412,17 @@ pub trait StoreView {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
+        let mut walk = verter_workspace::ReceiptWalk::default();
         for (index, fact) in sig.iter().enumerate() {
-            let ok = match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                {
-                    self.validates_self_root_whole_hash(canonical_id, hash)
-                }
-                other => self.validates(other),
-            };
+            let ok =
+                verter_workspace::validates_through_receipts(fact, &mut walk, |leaf| match leaf {
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                    {
+                        self.validates_self_root_whole_hash(canonical_id, hash)
+                    }
+                    other => self.validates(other),
+                });
             if !ok {
                 return Err(index);
             }
@@ -503,6 +505,13 @@ impl verter_workspace::FactVersionValidator for dyn StoreView + '_ {
     #[inline]
     fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
         StoreView::validates(self, fact)
+    }
+
+    /// The view's own whole-signature rule, one receipt walk shared by
+    /// the signature, never a fresh walk per fact.
+    #[inline]
+    fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
+        StoreView::validates_fact_signature(self, facts)
     }
 }
 
@@ -5517,5 +5526,107 @@ mod central_signature_rail_tests {
         );
         assert!(view.validates_fact_signature(&sig));
         assert!(!view.validates_fact_signature_with_self_roots(&sig, &["/own.ts"]));
+    }
+}
+
+#[cfg(test)]
+mod receipt_validation_tests {
+    use super::*;
+
+    /// Counts every fact it is asked to validate, rejecting one canonical
+    /// and every self-root it is told to reject.
+    #[derive(Default)]
+    struct CountingView {
+        validated: std::cell::Cell<usize>,
+        rejected: Option<&'static str>,
+        rejected_self_root: Option<&'static str>,
+    }
+
+    impl StoreView for CountingView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            StoreViewCompatToken {
+                epoch: 0,
+                session: None,
+                validity_fingerprint: 0,
+            }
+        }
+        fn validates(&self, fact: &FactVersionRef) -> bool {
+            self.validated.set(self.validated.get() + 1);
+            fact.canonical_id() != self.rejected
+        }
+        fn validates_self_root_whole_hash(
+            &self,
+            canonical_id: &str,
+            _hash: &ResolverHash16,
+        ) -> bool {
+            self.validated.set(self.validated.get() + 1);
+            Some(canonical_id) != self.rejected_self_root
+        }
+    }
+
+    fn whole_hash(canonical: &str, byte: u8) -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: [byte; 16],
+        }
+    }
+
+    fn receipt(facts: Vec<FactVersionRef>) -> FactVersionRef {
+        FactVersionRef::Receipt(verter_workspace::ResultReceipt::new(facts))
+    }
+
+    /// A signature is valid exactly when every fact its receipts reach is,
+    /// and validating it visits a dependency graph its receipts share once:
+    /// a chain's top receipt beside the middle one it consumed validates
+    /// each level's fact once, not once per receipt that reaches it.
+    #[test]
+    fn a_signature_validates_through_its_receipts_once_per_shared_fact() {
+        let mut below = receipt(vec![whole_hash("/0.ts", 0)]);
+        let mut middle = None;
+        for level in 1..64u8 {
+            below = receipt(vec![below, whole_hash(&format!("/{level}.ts"), level)]);
+            if level == 32 {
+                middle = Some(below.clone());
+            }
+        }
+        let signature = vec![below, middle.expect("a middle level")];
+        let view = CountingView::default();
+        assert!(view.validates_fact_signature(&signature));
+        assert_eq!(
+            view.validated.get(),
+            64,
+            "each of the 64 levels' facts validated once"
+        );
+
+        let stale = CountingView {
+            rejected: Some("/7.ts"),
+            ..CountingView::default()
+        };
+        assert!(
+            !stale.validates_fact_signature(&signature),
+            "a fact deep inside a receipt that no longer holds invalidates the signature"
+        );
+    }
+
+    /// The strict self-root rule applies to a self-root fact inside a
+    /// receipt exactly as outside one.
+    #[test]
+    fn a_self_root_inside_a_receipt_is_validated_strictly() {
+        let signature = vec![receipt(vec![
+            whole_hash("/self.ts", 1),
+            whole_hash("/other.ts", 2),
+        ])];
+        let view = CountingView {
+            rejected_self_root: Some("/self.ts"),
+            ..CountingView::default()
+        };
+        assert!(
+            view.validates_fact_signature(&signature),
+            "lazily, the self file's hash holds"
+        );
+        assert!(
+            !view.validates_fact_signature_with_self_roots(&signature, &["/self.ts"]),
+            "as a self-root it is validated strictly, inside the receipt too"
+        );
     }
 }

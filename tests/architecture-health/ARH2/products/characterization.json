@@ -488,8 +488,8 @@
             "test": "cancelled_joiner_detaches_without_aborting_live_winner"
           },
           {
-            "file": "crates/verter_session/src/semantic_query_memo/wait_cycle_tests.rs",
-            "test": "two_owner_wait_cycle_is_detected_before_parking"
+            "file": "crates/verter_session/src/semantic_query_memo/tasks_tests.rs",
+            "test": "two_task_wait_cycle_is_detected_before_parking"
           }
         ],
         "note": "query-memo cancellation and wait-cycle detection, not scheduler latches alone"

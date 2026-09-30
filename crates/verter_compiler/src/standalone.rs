@@ -758,6 +758,11 @@ pub enum DirectCompileError {
     /// The compile transaction was cancelled before admission; sealed
     /// unpublished output cannot be admitted as a complete result.
     Cancelled,
+    /// A parse or walk-stack lease the compile needed (its own, or the
+    /// preparation's it reused) was refused its stack: typed operational
+    /// incompleteness, not a verdict on the source. Nothing publishes, since
+    /// the refused parse returned an empty program in the source's place.
+    StackUnavailable(verter_parser::oxc_parse::StackUnavailable),
 }
 
 /// Why [`DirectCompileError::StalePreparedInput`] was raised.
@@ -806,6 +811,9 @@ pub struct VuePreparedCarrier {
     /// [`StandaloneCompiler::prepare_owned`] — the caller-chosen owned
     /// source, counted in [`PreparedCarrier::retained_weight`].
     owned_source: Option<String>,
+    /// The stack refusal of a parse the preparation made, which leaves the
+    /// retained parse incomplete: every compile from it is refused.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
     _single_owner: SingleOwner,
 }
 
@@ -819,6 +827,9 @@ pub struct SveltePreparedCarrier {
     parsed: ParsedSvelte,
     source_digest: [u8; 32],
     owned_source: Option<String>,
+    /// The stack refusal of a parse the preparation made, which leaves the
+    /// retained parse incomplete: every compile from it is refused.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
     _single_owner: SingleOwner,
 }
 
@@ -2862,6 +2873,19 @@ fn record_runtime_backend_delegation() {
     RUNTIME_BACKEND_DELEGATIONS.with(|count| count.set(count.get() + 1));
 }
 
+/// A compile's outcome, or its stack refusal when it made one.
+fn refused_as_stack_unavailable(
+    (compiled, refused): (
+        Result<DirectCompileOutput, DirectCompileError>,
+        Option<verter_parser::oxc_parse::StackUnavailable>,
+    ),
+) -> Result<DirectCompileOutput, DirectCompileError> {
+    match refused {
+        Some(unavailable) => Err(DirectCompileError::StackUnavailable(unavailable)),
+        None => compiled,
+    }
+}
+
 /// Stateless compiler for callers that do not participate in a registered
 /// host.
 #[derive(Debug, Default, Clone, Copy)]
@@ -2884,7 +2908,22 @@ impl StandaloneCompiler {
     /// BOTH `RuntimeClient` and `RuntimeServer` (independent,
     /// co-requestable products) publishes both, in the SAME atomic
     /// `publish()` call.
+    ///
+    /// The compile is one operation: a parse or walk-stack lease refused its
+    /// stack anywhere inside it is [`DirectCompileError::StackUnavailable`],
+    /// never an output built from the empty program in the source's place.
     pub fn compile<'a>(
+        &self,
+        source: &'a str,
+        request: &CompileRequest,
+        inputs: DirectExecutionInputs<'a>,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        refused_as_stack_unavailable(verter_parser::oxc_parse::refusals_within(|| {
+            self.compile_unrecorded(source, request, inputs)
+        }))
+    }
+
+    fn compile_unrecorded<'a>(
         &self,
         source: &'a str,
         request: &CompileRequest,
@@ -3382,6 +3421,16 @@ impl StandaloneCompiler {
     /// returned [`ParsedSfc`]/[`ParsedSvelte`]; refusal only happens later,
     /// at [`Self::compile_prepared`] time, exactly like the direct route.
     pub fn prepare(&self, source: &str, request: &CompileRequest) -> PreparedCarrier {
+        let (mut prepared, refused) =
+            verter_parser::oxc_parse::refusals_within(|| self.prepare_unrecorded(source, request));
+        match &mut prepared {
+            PreparedCarrier::Vue(carrier) => carrier.refused = refused,
+            PreparedCarrier::Svelte(carrier) => carrier.refused = refused,
+        }
+        prepared
+    }
+
+    fn prepare_unrecorded(&self, source: &str, request: &CompileRequest) -> PreparedCarrier {
         match request.framework() {
             FrameworkCompileRequest::Vue(_) => {
                 let vue = request.vue().expect("dispatch already matched Vue");
@@ -3397,6 +3446,7 @@ impl StandaloneCompiler {
                     source_digest: source_digest(source),
                     parse_identity_digest: vue_parse_identity_digest(vue),
                     owned_source: None,
+                    refused: None,
                     _single_owner: SingleOwner,
                 })
             }
@@ -3406,6 +3456,7 @@ impl StandaloneCompiler {
                     parsed,
                     source_digest: source_digest(source),
                     owned_source: None,
+                    refused: None,
                     _single_owner: SingleOwner,
                 })
             }
@@ -3444,7 +3495,27 @@ impl StandaloneCompiler {
     /// compiled result. The carrier's retained parse is reused; the
     /// request and inputs are always the caller's fresh values, exactly
     /// like the direct route.
+    ///
+    /// A carrier whose preparation was refused its stack, and a compile
+    /// refused one of its own, are [`DirectCompileError::StackUnavailable`].
     pub fn compile_prepared<'a>(
+        &self,
+        source: &'a str,
+        prepared: &PreparedCarrier,
+        request: &CompileRequest,
+        inputs: DirectExecutionInputs<'a>,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        let (PreparedCarrier::Vue(VuePreparedCarrier { refused, .. })
+        | PreparedCarrier::Svelte(SveltePreparedCarrier { refused, .. })) = prepared;
+        if let Some(unavailable) = refused {
+            return Err(DirectCompileError::StackUnavailable(*unavailable));
+        }
+        refused_as_stack_unavailable(verter_parser::oxc_parse::refusals_within(|| {
+            self.compile_prepared_unrecorded(source, prepared, request, inputs)
+        }))
+    }
+
+    fn compile_prepared_unrecorded<'a>(
         &self,
         source: &'a str,
         prepared: &PreparedCarrier,

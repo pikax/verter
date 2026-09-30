@@ -122,6 +122,7 @@ fn pending_display_preserves_exact_infer_scope_in_nested_conditionals() {
     let infer = store.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: binder.clone(),
+        constraint: None,
     });
     let reference = store.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),
@@ -130,6 +131,7 @@ fn pending_display_preserves_exact_infer_scope_in_nested_conditionals() {
     let foreign = store.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: store.alloc_infer_binder_id(),
+        constraint: None,
     });
     for (extends, expected) in [
         (
@@ -161,6 +163,7 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
     let infer = store.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
         binder: binder.clone(),
+        constraint: None,
     });
     let reference = store.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),

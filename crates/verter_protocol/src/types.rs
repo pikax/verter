@@ -786,8 +786,15 @@ pub struct FfiTscResponse {
     rename_all_fields = "camelCase"
 )]
 pub enum PublicApiProjectionSubject {
-    Macro { syntax_index: u32 },
-    ScriptSetupAttrs { source_range: verter_span::Span },
+    Macro {
+        syntax_index: u32,
+    },
+    ScriptSetupAttrs {
+        source_range: verter_span::Span,
+    },
+    /// The whole source: a failure not attributable to one syntax slot (a
+    /// parse of the source refused its stack).
+    Source,
 }
 
 impl std::fmt::Display for PublicApiProjectionSubject {
@@ -801,6 +808,7 @@ impl std::fmt::Display for PublicApiProjectionSubject {
                 "script setup attrs source range {}..{}",
                 source_range.start, source_range.end
             ),
+            Self::Source => formatter.write_str("the source"),
         }
     }
 }
@@ -824,6 +832,10 @@ mod public_api_projection_subject_tests {
                 "kind": "scriptSetupAttrs",
                 "sourceRange": { "start": 31, "end": 37 },
             })
+        );
+        assert_eq!(
+            serde_json::to_value(PublicApiProjectionSubject::Source).unwrap(),
+            serde_json::json!({ "kind": "source" })
         );
     }
 }
@@ -1140,6 +1152,14 @@ pub enum FfiSurfacePartialReason {
     FlowReturnUnverified,
     /// A body-derived demand produced no value at all.
     FlowReturnNoSurface,
+    /// A conditional type the checker decides stands undecided where its
+    /// answer should be.
+    UndecidedConditional,
+    /// The connected demand exhausted its construction-byte allowance.
+    ConnectedMemoryLimit,
+    /// A type operation exhausted Verter's own budget for it; the value is
+    /// the checker's recovery for that operation.
+    OperationBudget,
 }
 
 #[derive(Serialize, Clone)]
@@ -1281,6 +1301,7 @@ pub enum FfiResolutionDiagnosticKind {
     CyclicInstantiation,
     InstantiationError,
     EmptyUnionArm,
+    ConnectedMemoryLimit,
 }
 
 #[derive(Serialize, Clone)]

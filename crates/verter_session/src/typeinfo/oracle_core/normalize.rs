@@ -176,7 +176,7 @@ fn frame_for(
 /// `extends` clause (they are in scope for the conditional's `true_type`).
 fn collect_infer_names(node: &TypeExpr, out: &mut Vec<String>) {
     match node {
-        TypeExpr::Infer { name } => out.push(name.clone()),
+        TypeExpr::Infer { name, .. } => out.push(name.clone()),
         TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
             collect_infer_names(inner, out)
         }
@@ -399,11 +399,18 @@ fn normalize_node(
             })
         }
 
-        TypeExpr::Infer { name } => {
+        TypeExpr::Infer { name, constraint } => {
             // An infer use/binding site: rename to its in-scope placeholder if
             // bound (it normally is, since its conditional pushed the frame).
             let renamed = scope.resolve(name).unwrap_or_else(|| name.clone());
-            Ok(TypeExpr::Infer { name: renamed })
+            let constraint = match constraint {
+                Some(constraint) => Some(Arc::new(normalize_node(constraint, mode, scope)?)),
+                None => None,
+            };
+            Ok(TypeExpr::Infer {
+                name: renamed,
+                constraint,
+            })
         }
 
         TypeExpr::Rest(inner) => Ok(TypeExpr::Rest(Arc::new(normalize_node(

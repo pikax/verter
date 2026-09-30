@@ -782,7 +782,6 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
 fn budget_exceeded_admits_nothing_at_any_layer() {
     let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let tiny = FlowSliceBudget {
-        max_return_sites: 256,
         max_selected_nodes: 1,
         ..FlowSliceBudget::default()
     };

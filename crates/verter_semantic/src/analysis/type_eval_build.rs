@@ -9,6 +9,8 @@
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
+use crate::analysis::class_field_value::ClassFieldValues;
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
@@ -30,6 +32,8 @@ use oxc_ast::ast::{
     VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
+
+use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
@@ -56,6 +60,9 @@ use verter_type_expr::{
 };
 use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts_type};
 
+#[path = "type_eval_build_shallow.rs"]
+mod shallow;
+
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
@@ -81,21 +88,62 @@ pub enum IndexedCallReadSite {
 }
 
 /// Rebase substring-relative program points to their containing source file.
+/// The records nested in a record are rebased from an explicit stack.
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
-    match expression {
-        IndexedValueExpression::Value(_) => {}
-        IndexedValueExpression::UnsupportedCall { point }
-        | IndexedValueExpression::TemplateStrings { point } => *point = point.saturating_add(base),
-        IndexedValueExpression::Call(call) => {
-            call.point = call.point.saturating_add(base);
-            offset_indexed_value_expression(&mut call.callee, base);
-            if let Some(receiver) = call.receiver.as_mut() {
-                offset_indexed_value_expression(receiver, base);
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            IndexedValueExpression::Value(_) => {}
+            IndexedValueExpression::UnsupportedCall { point }
+            | IndexedValueExpression::TemplateStrings { point } => {
+                *point = point.saturating_add(base)
             }
-            for argument in Arc::make_mut(&mut call.args) {
-                argument.point = argument.point.saturating_add(base);
-                offset_indexed_value_expression(&mut argument.expression, base);
+            IndexedValueExpression::Member { object, .. } => pending.push(object),
+            IndexedValueExpression::Call(call) => {
+                call.point = call.point.saturating_add(base);
+                let IndexedValueCall {
+                    callee,
+                    receiver,
+                    args,
+                    ..
+                } = call;
+                pending.push(callee);
+                if let Some(receiver) = receiver.as_mut() {
+                    pending.push(receiver);
+                }
+                for argument in Arc::make_mut(args) {
+                    argument.point = argument.point.saturating_add(base);
+                    pending.push(&mut argument.expression);
+                }
             }
+        }
+    }
+}
+
+/// The object and name of a static member read whose object is a value the
+/// indexed domain evaluates: a direct call, construct or tagged template,
+/// or a member read off one (`f().a.b`). Its value is the object's member
+/// ([`IndexedValueExpression::Member`]).
+fn member_of_evaluated_value<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<(&'a Expression<'a>, &'a str)> {
+    let Expression::StaticMemberExpression(member) = unwrap_expression_wrappers(expr) else {
+        return None;
+    };
+    if member.optional {
+        return None;
+    }
+    let mut root = &member.object;
+    loop {
+        match unwrap_expression_wrappers(root) {
+            Expression::CallExpression(call) if !call.optional => {
+                return Some((&member.object, member.property.name.as_str()));
+            }
+            Expression::NewExpression(_) | Expression::TaggedTemplateExpression(_) => {
+                return Some((&member.object, member.property.name.as_str()));
+            }
+            Expression::StaticMemberExpression(inner) if !inner.optional => root = &inner.object,
+            _ => return None,
         }
     }
 }
@@ -369,6 +417,20 @@ pub struct LoweredStatementParts {
     /// registration, mirror the declared-name type symbol under the `default`
     /// export name (see [`alias_default_export_type_symbol`]).
     pub alias_default_type_to: Option<String>,
+    /// INPUT, not output: the header walk's classification of the class
+    /// fields this lowering meets ([`ClassFieldValues`]), read instead of
+    /// walking an initializer again.
+    pub class_fields: Arc<ClassFieldValues>,
+}
+
+impl LoweredStatementParts {
+    /// Empty parts that read `class_fields`.
+    fn reading(class_fields: &Arc<ClassFieldValues>) -> Self {
+        Self {
+            class_fields: Arc::clone(class_fields),
+            ..Self::default()
+        }
+    }
 }
 
 /// Build an inventory environment from an OXC program AST.
@@ -382,15 +444,21 @@ pub struct LoweredStatementParts {
 ///   signature / shape / enum facts)
 pub fn build_eval_env(program: &Program<'_>, source: &str, ctx: &BuildEvalEnvContext) -> EvalEnv {
     let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
-    build_eval_env_with_owners(program, source, ctx, &owners)
+    // No header walk ran: each class's fields are classified as it lowers.
+    build_eval_env_with_owners(program, source, ctx, &owners, &Arc::default())
 }
 
 /// Build an eval environment under an explicit validated lexical-owner table.
+///
+/// `class_fields` is the header walk's classification of the program's
+/// class fields ([`ClassFieldValues`]); a class it does not cover is
+/// classified as it lowers.
 pub fn build_eval_env_with_owners(
     program: &Program<'_>,
     source: &str,
     ctx: &BuildEvalEnvContext,
     owners: &TopLevelOwnerTable,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> EvalEnv {
     assert_eq!(
         owners.len(),
@@ -413,6 +481,7 @@ pub fn build_eval_env_with_owners(
             },
             source,
             program.source_type.is_typescript_definition(),
+            class_fields,
             &mut env,
         );
     }
@@ -456,9 +525,10 @@ pub fn lower_top_level_statement(
     ctx: StatementLowerCtx<'_>,
     source: &str,
     declaration_file: bool,
+    class_fields: &Arc<ClassFieldValues>,
     env: &mut EvalEnv,
 ) {
-    let parts = lower_statement_parts(stmt, source, declaration_file);
+    let parts = lower_statement_parts(stmt, source, declaration_file, class_fields);
     register_statement_parts(parts, ctx, env);
 }
 
@@ -467,13 +537,15 @@ pub fn lower_top_level_statement(
 /// walk and the in-crate lowering tests consume — one lowering path, no fork.
 ///
 /// `declaration_file` says the statement belongs to a declaration file,
-/// where every declaration is ambient.
+/// where every declaration is ambient. `class_fields` is the header walk's
+/// classification of the class fields ([`ClassFieldValues`]).
 pub fn lower_statement_parts(
     stmt: &Statement<'_>,
     source: &str,
     declaration_file: bool,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> LoweredStatementParts {
-    let mut out = LoweredStatementParts::default();
+    let mut out = LoweredStatementParts::reading(class_fields);
     collect_statement_parts(stmt, source, declaration_file, &mut out);
     out
 }
@@ -493,8 +565,9 @@ pub fn lower_statement_parts(
 pub fn lower_svelte_runes_statement_parts(
     stmt: &Statement<'_>,
     source: &str,
+    class_fields: &Arc<ClassFieldValues>,
 ) -> LoweredStatementParts {
-    let mut out = lower_statement_parts(stmt, source, false);
+    let mut out = lower_statement_parts(stmt, source, false, class_fields);
     apply_svelte_rune_initializer_inference(stmt, source, &mut out.value_decls);
     out
 }
@@ -519,6 +592,7 @@ pub fn register_statement_parts(
         aug_type_decls,
         aug_value_decls,
         alias_default_type_to,
+        class_fields: _,
     } = parts;
     for parts in type_decls {
         env.add_type(mint_type_decl(
@@ -1755,30 +1829,18 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
     format!("{class_name}:extends")
 }
 
-/// The synthetic value declaration a class field reads its type through,
-/// when the field's initializer is an expression whose type derives from
-/// a call (`static origin = new Pt()`): its value reads through the indexed
-/// program expression at the initializer, as a declarator initializer's
-/// does. `None` for a field with an annotation, without an initializer, with
-/// a function value (served at its own member position), with an
-/// authoritative assertion, or without a static name.
+/// The name of the synthetic value declaration a class field reads its type
+/// through (`C:field:x`, `C:static:x`), when its initializer's type derives
+/// from a call (`static origin = new Pt()`: the indexed program expression
+/// at the initializer, as a declarator initializer's) or it reads `this`
+/// (`b = this.a + 1`: the initializer's served position, whose frame reads
+/// the receiver). Which fields those are is the one classification
+/// [`ClassFieldValues`] records; this is only the name, `None` for a field
+/// without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
     prop: &oxc_ast::ast::PropertyDefinition<'_>,
-    source: &str,
 ) -> Option<String> {
-    if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
-        return None;
-    }
-    let value = prop.value.as_ref()?;
-    if matches!(
-        value,
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    ) || !value_type_derives_from_a_call(value, source)
-        || has_authoritative_value_assertion(value)
-    {
-        return None;
-    }
     let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
     let side = if prop.r#static { "static" } else { "field" };
     Some(format!("{class_name}:{side}:{key}"))
@@ -1917,7 +1979,9 @@ fn collect_external_module_declaration(
     }
 }
 
-/// The identifier-named half of [`collect_external_module_declaration`].
+/// The identifier-named half of [`collect_external_module_declaration`]:
+/// the namespace and every namespace nested in it, walked from an explicit
+/// stack ([`for_each_namespace`]).
 fn collect_module_declaration(
     decl: &TSNamespaceDeclaration<'_>,
     source: &str,
@@ -1925,25 +1989,90 @@ fn collect_module_declaration(
     prefix: Option<&str>,
     ambient: bool,
 ) {
-    let module_name = qualified_module_name(prefix, &decl.id);
-    let ambient = ambient || decl.declare;
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient,
+            scope: None,
+        },
+    );
+}
 
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement(
-                    stmt,
-                    source,
-                    out,
-                    module_name.as_str(),
-                    ambient,
-                    implicit_export,
-                );
+/// [`collect_module_declaration`]'s walk, and
+/// [`collect_augmentation_module_declaration`]'s under its `scope`.
+struct CollectedNamespaces<'o, 'x> {
+    source: &'o str,
+    out: &'o mut LoweredStatementParts,
+    /// The qualified name of the namespace being walked.
+    path: crate::analysis::namespace_walk::QualifiedPath,
+    /// Whether the root namespace is in an ambient context.
+    ambient: bool,
+    /// The augmentation scope the members register in, or none for the
+    /// file scope.
+    scope: Option<&'x AugmentationScopeKind>,
+}
+
+/// One namespace being collected.
+struct CollectedNamespace {
+    /// The qualified path's length before it was entered.
+    enclosing: usize,
+    ambient: bool,
+    implicit_export: bool,
+}
+
+impl<'s, 'a> crate::analysis::namespace_walk::NamespaceVisitor<'s, 'a>
+    for CollectedNamespaces<'_, '_>
+{
+    type Frame = CollectedNamespace;
+
+    fn enter(
+        &mut self,
+        decl: &'s TSNamespaceDeclaration<'a>,
+        parent: Option<&CollectedNamespace>,
+        _nesting: crate::analysis::namespace_walk::Nesting,
+    ) -> CollectedNamespace {
+        let ambient = parent.map_or(self.ambient, |parent| parent.ambient) || decl.declare;
+        let enclosing = self.path.enter(decl.id.name.as_str());
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member.
+        let implicit_export = match &decl.body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => false,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                (ambient || self.scope.is_some())
+                    && !statements_have_export_declarations(&block.body)
             }
+        };
+        CollectedNamespace {
+            enclosing,
+            ambient,
+            implicit_export,
+        }
+    }
+
+    fn exit(&mut self, frame: CollectedNamespace, _parent: Option<&mut CollectedNamespace>) {
+        self.path.leave(frame.enclosing);
+    }
+
+    fn statement(&mut self, frame: &mut CollectedNamespace, statement: &'s Statement<'a>) {
+        match self.scope {
+            None => collect_namespaced_statement(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                frame.ambient,
+            ),
+            Some(scope) => collect_namespaced_statement_into_augmentation(
+                statement,
+                self.source,
+                self.out,
+                self.path.name(),
+                scope,
+                frame.implicit_export,
+            ),
         }
     }
 }
@@ -2034,7 +2163,7 @@ fn collect_augmentation_declaration(
         Declaration::VariableDeclaration(_)
         | Declaration::FunctionDeclaration(_)
         | Declaration::ClassDeclaration(_) => {
-            let mut inner = LoweredStatementParts::default();
+            let mut inner = LoweredStatementParts::reading(&out.class_fields);
             collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
@@ -2070,31 +2199,18 @@ fn collect_augmentation_module_declaration(
     // A string-literal module name (`declare module "X"`) nested inside another
     // augmentation block is not a namespace-member contributor; only
     // identifier-named namespaces (`namespace JSX`) qualify members here.
-    let namespace = qualified_module_name(prefix, &decl.id);
-    match &decl.body {
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
-            collect_augmentation_module_declaration(
-                inner,
-                source,
-                out,
-                scope,
-                Some(namespace.as_str()),
-            );
-        }
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            let implicit_export = !statements_have_export_declarations(&block.body);
-            for stmt in &block.body {
-                collect_namespaced_statement_into_augmentation(
-                    stmt,
-                    source,
-                    out,
-                    namespace.as_str(),
-                    scope,
-                    implicit_export,
-                );
-            }
-        }
-    }
+    // The namespace and every namespace nested in it are walked from an
+    // explicit stack ([`for_each_namespace`]).
+    for_each_namespace(
+        decl,
+        &mut CollectedNamespaces {
+            source,
+            out,
+            path: crate::analysis::namespace_walk::QualifiedPath::under(prefix),
+            ambient: true,
+            scope: Some(scope),
+        },
+    );
 }
 
 /// Augmentation-scope mirror of [`collect_namespaced_statement`]: register a
@@ -2129,9 +2245,9 @@ fn collect_namespaced_statement_into_augmentation(
                 ),
             ));
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         // An augmentation block is ambient, so a namespace body inside it
         // without an export declaration exports every member, written
         // `export` or not (an ambient namespace in
@@ -2190,9 +2306,9 @@ fn collect_namespaced_declaration_into_augmentation(
                 ),
             ));
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
-        }
+        // A nested namespace is a frame of
+        // [`collect_augmentation_module_declaration`]'s walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::VariableDeclaration(var_decl) => {
             // A namespaced value member registers under its qualified `NS.M`
             // name into the augmentation VALUE scope (lowered exactly as the
@@ -2222,7 +2338,7 @@ fn collect_value_statement_into_augmentation(
     out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
 ) {
-    let mut inner = LoweredStatementParts::default();
+    let mut inner = LoweredStatementParts::reading(&out.class_fields);
     match stmt {
         Statement::ClassDeclaration(decl) => collect_class(decl, source, &mut inner),
         Statement::FunctionDeclaration(func) => {
@@ -2282,7 +2398,6 @@ fn collect_namespaced_statement(
     out: &mut LoweredStatementParts,
     namespace: &str,
     ambient: bool,
-    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -2309,9 +2424,9 @@ fn collect_namespaced_statement(
                 );
             }
         }
-        Statement::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Statement::TSNamespaceDeclaration(_) => {}
         Statement::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2326,19 +2441,18 @@ fn collect_namespaced_statement(
                 out,
             );
         }
-        // Namespace value indexing is EXPORT-ONLY: a non-exported
-        // `namespace N { const hidden = … }` is private to the namespace body
-        // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
-        // `Statement::VariableDeclaration` is NOT indexed under its qualified
-        // name. The exported path below (`export const VERSION = …` →
-        // `collect_namespaced_declaration`) registers a qualified value member
-        // such as `N.VERSION` — and a namespace body that is an export
-        // context exports every member, written `export` or not.
+        // A namespace's values register under their qualified names: the
+        // exported path below (`export const VERSION = …` →
+        // `collect_namespaced_declaration`) and a direct declaration alike.
+        // A non-exported `namespace N { const hidden = … }` is private to
+        // its block (TS: `N.hidden` does not exist on `typeof N`); the
+        // header index records it private, so only a reference inside the
+        // block names it.
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             collect_namespaced_declaration(decl, source, out, namespace, ambient);
         }
-        Statement::VariableDeclaration(var_decl) if implicit_export => {
+        Statement::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
                 for parts in
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
@@ -2347,7 +2461,7 @@ fn collect_namespaced_statement(
                 }
             }
         }
-        Statement::FunctionDeclaration(func) if implicit_export => {
+        Statement::FunctionDeclaration(func) => {
             if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
                 out.value_decls.push(parts);
             }
@@ -2388,9 +2502,9 @@ fn collect_namespaced_declaration(
                 );
             }
         }
-        Declaration::TSNamespaceDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace), ambient);
-        }
+        // A nested namespace is a frame of [`collect_module_declaration`]'s
+        // walk.
+        Declaration::TSNamespaceDeclaration(_) => {}
         Declaration::TSExternalModuleDeclaration(module) => {
             collect_external_module_declaration(module, source, out);
         }
@@ -2420,13 +2534,6 @@ fn collect_namespaced_declaration(
             }
         }
         _ => {}
-    }
-}
-
-fn qualified_module_name(prefix: Option<&str>, id: &oxc_ast::ast::BindingIdentifier<'_>) -> String {
-    match prefix {
-        Some(prefix) => qualified_name(prefix, &id.name),
-        None => id.name.to_string(),
     }
 }
 
@@ -2745,8 +2852,9 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| class_field_value_name(&name, prop, source))
+                    .then(|| out.class_fields.field(decl, prop, source))
                     .flatten()
+                    .and_then(|_| class_field_value_name(&name, prop))
                     .map(|field_name| {
                         out.value_decls.push(LoweredValueDeclParts {
                             name: field_name.clone(),
@@ -3238,8 +3346,9 @@ fn infer_declaration_or_unknown(
 ///
 /// Member VALUES follow the checker's enum member value computation: an
 /// initializer is read into the constant evaluator's program
-/// ([`enum_constant_expr`]) and evaluated against the earlier members of
-/// this declaration; a member without one takes the previous member's
+/// ([`enum_constant_expr`]) and evaluated against the members of this
+/// declaration by position ([`own_references_read`]); a member without one
+/// takes the previous member's
 /// numeric value plus one (0 for the first member) — except in an AMBIENT
 /// non-`const` enum (a `declare enum`, or any enum of a declaration file or
 /// an ambient namespace), where a member without an initializer is
@@ -3258,12 +3367,21 @@ fn collect_enum(
 ) {
     use crate::analysis::enum_constant::{
         enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
-        EnumConstant,
     };
     let enum_name = decl.id.name.as_str();
     let ambient = ambient || decl.declare;
+    // Where each member name is first declared in this body: a reference
+    // to a member of the body reads it by position, as the checker's
+    // declared-before-use rule reads it.
+    let mut declared: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
+        declared
+            .entry(member.id.static_name().to_string())
+            .or_insert(position);
+    }
     let mut members: Vec<(String, EnumMemberValue)> = Vec::new();
-    for member in &decl.body.members {
+    let mut member_slot: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (position, member) in decl.body.members.iter().enumerate() {
         // Member NAME resolution is SHARED with `index_enum`'s header walk.
         let member_name = member.id.static_name().to_string();
         let program = match &member.initializer {
@@ -3276,42 +3394,34 @@ fn collect_enum(
         };
         let value = match program {
             None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
-            Some(program) => {
+            Some(program) => match own_references_read(
+                &program,
+                enum_name,
+                position,
+                ambient,
+                &declared,
+                |name| member_slot.get(name).map(|&slot| &members[slot].1),
+            ) {
                 // A reference this declaration cannot answer — another
                 // declaration's value, or an earlier member that is itself
                 // pending — leaves the program for the session to evaluate.
-                let mut pending = false;
-                let constant = evaluate_enum_constant(&program, |path| {
-                    let member = match path {
-                        [member] => member,
-                        [owner, member] if owner == enum_name => member,
-                        _ => {
-                            pending = true;
-                            return None;
-                        }
-                    };
-                    match members.iter().find(|(earlier, _)| earlier == member) {
-                        Some((_, EnumMemberValue::Folded(scalar))) => {
-                            EnumConstant::from_scalar(scalar)
-                        }
-                        Some((_, EnumMemberValue::Pending(_))) | None => {
-                            pending = true;
-                            None
-                        }
-                        Some((_, EnumMemberValue::Deferred(_))) => None,
+                OwnReferences::Open(program) => EnumMemberValue::Pending(program),
+                OwnReferences::Closed(program) => {
+                    match evaluate_enum_constant(&program, |_| None) {
+                        Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
+                        None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                     }
-                });
-                match constant {
-                    Some(constant) => EnumMemberValue::Folded(constant.to_scalar()),
-                    None if pending => EnumMemberValue::Pending(program),
-                    None => EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
                 }
-            }
+                OwnReferences::NotConstant => {
+                    EnumMemberValue::Deferred(EnumPrimitiveDomain::Number)
+                }
+            },
         };
         // Members are unique within a single enum body (TS forbids a repeated
         // member name); dedup defensively so a malformed repeat does not
         // double-count, keeping the first occurrence's entry.
-        if !members.iter().any(|(existing, _)| existing == &member_name) {
+        if !member_slot.contains_key(&member_name) {
+            member_slot.insert(member_name.clone(), members.len());
             members.push((member_name, value));
         }
     }
@@ -3366,6 +3476,90 @@ fn collect_enum(
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
     });
+}
+
+/// A member's program once the references its own declaration answers are
+/// read.
+enum OwnReferences {
+    /// No constant: it names the member itself, a computed member, or (in
+    /// an ambient enum) a member declared after it.
+    NotConstant,
+    /// Every reference read: the program evaluates alone.
+    Closed(verter_type_expr::facts::EnumConstantExpr),
+    /// References another declaration, or a pending earlier member, answers.
+    Open(verter_type_expr::facts::EnumConstantExpr),
+}
+
+/// Read the references `program` — the initializer of the member at
+/// `position` of the enum body named `enum_name` — makes to members of that
+/// body (a bare `A`, or `E.A` through the enum's own name), as the checker's
+/// evaluator reads an enum member reference: an earlier member stands for
+/// its value; the member itself is used before it is assigned, and is no
+/// constant; a member declared after it reads `0`, the value the checker
+/// gives a member referenced before its declaration — except in an ambient
+/// enum, whose later members are not yet computed and so are no constant.
+/// `earlier` reads the value of a member already lowered.
+fn own_references_read<'m>(
+    program: &verter_type_expr::facts::EnumConstantExpr,
+    enum_name: &str,
+    position: usize,
+    ambient: bool,
+    declared: &rustc_hash::FxHashMap<String, usize>,
+    earlier: impl Fn(&str) -> Option<&'m EnumMemberValue>,
+) -> OwnReferences {
+    use crate::analysis::enum_constant::EnumConstant;
+    use verter_type_expr::facts::{EnumConstantExpr, EnumConstantStep, EnumScalar};
+    let literal = |constant: EnumConstant| match constant.to_scalar() {
+        EnumScalar::Number(text) => EnumConstantStep::Number(text),
+        EnumScalar::String(text) => EnumConstantStep::String(text),
+        EnumScalar::Primitive(_) => unreachable!("a constant stores a literal scalar"),
+    };
+    let mut open = false;
+    let mut steps = Vec::with_capacity(program.steps.len());
+    for step in program.steps.iter() {
+        let EnumConstantStep::Reference(path) = step else {
+            steps.push(step.clone());
+            continue;
+        };
+        let own = match &path[..] {
+            [member] => Some(member),
+            [owner, member] if owner == enum_name => Some(member),
+            _ => None,
+        };
+        let Some((member, at)) =
+            own.and_then(|member| declared.get(member.as_str()).map(|&at| (member, at)))
+        else {
+            open = true;
+            steps.push(step.clone());
+            continue;
+        };
+        if at == position || (at > position && ambient) {
+            return OwnReferences::NotConstant;
+        }
+        if at > position {
+            steps.push(literal(EnumConstant::Number(0.0)));
+            continue;
+        }
+        match earlier(member) {
+            Some(EnumMemberValue::Folded(scalar)) => match EnumConstant::from_scalar(scalar) {
+                Some(constant) => steps.push(literal(constant)),
+                None => return OwnReferences::NotConstant,
+            },
+            Some(EnumMemberValue::Deferred(_)) => return OwnReferences::NotConstant,
+            Some(EnumMemberValue::Pending(_)) | None => {
+                open = true;
+                steps.push(step.clone());
+            }
+        }
+    }
+    let program = EnumConstantExpr {
+        steps: Arc::from(steps.into_boxed_slice()),
+    };
+    if open {
+        OwnReferences::Open(program)
+    } else {
+        OwnReferences::Closed(program)
+    }
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
@@ -3619,7 +3813,7 @@ fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>, source: &str)
     };
     let mut budget = InferenceBudget::default();
     if !matches!(
-        classify_svelte_rune_initializer(&call.callee, &mut budget, 0),
+        classify_svelte_rune_initializer(&call.callee, &mut budget),
         Ok(Some(_))
     ) {
         return false;
@@ -3636,7 +3830,7 @@ fn inline_svelte_derived_by_callback_point(expr: &Expression<'_>) -> Option<u32>
     };
     let mut budget = InferenceBudget::default();
     if !matches!(
-        classify_svelte_rune_initializer(&call.callee, &mut budget, 0),
+        classify_svelte_rune_initializer(&call.callee, &mut budget),
         Ok(Some(SvelteRuneInitializer::DerivedBy))
     ) {
         return None;
@@ -3654,21 +3848,20 @@ fn infer_svelte_rune_initializer(
     source: &str,
 ) -> InferenceResult<Option<TypeExpr>> {
     let mut budget = InferenceBudget::default();
-    infer_svelte_rune_initializer_with_budget(expr, source, &mut budget, 0)
+    infer_svelte_rune_initializer_with_budget(expr, source, &mut budget)
 }
 
 fn infer_svelte_rune_initializer_with_budget(
     expr: &Expression<'_>,
     source: &str,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<Option<TypeExpr>> {
-    budget.visit(depth)?;
-    let expr = unwrap_expression_wrappers_with_budget(expr, budget, depth + 1)?;
+    budget.visit()?;
+    let expr = unwrap_expression_wrappers_with_budget(expr, budget)?;
     let Expression::CallExpression(call) = expr else {
         return Ok(None);
     };
-    let Some(kind) = classify_svelte_rune_initializer(&call.callee, budget, depth + 1)? else {
+    let Some(kind) = classify_svelte_rune_initializer(&call.callee, budget)? else {
         return Ok(None);
     };
 
@@ -3702,13 +3895,7 @@ fn infer_svelte_rune_initializer_with_budget(
         ]))),
         SvelteRuneInitializer::State { .. } | SvelteRuneInitializer::Derived => first_argument
             .map(|argument| {
-                infer_expression_type_ctx(
-                    argument,
-                    source,
-                    MemberLiteralPolicy::Widen,
-                    budget,
-                    depth + 1,
-                )
+                infer_expression_type_ctx(argument, source, MemberLiteralPolicy::Widen, budget)
             })
             .transpose(),
         SvelteRuneInitializer::DerivedBy => {
@@ -3723,9 +3910,8 @@ fn infer_svelte_rune_initializer_with_budget(
 fn classify_svelte_rune_initializer(
     callee: &Expression<'_>,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<Option<SvelteRuneInitializer>> {
-    match unwrap_expression_wrappers_with_budget(callee, budget, depth)? {
+    match unwrap_expression_wrappers_with_budget(callee, budget)? {
         Expression::Identifier(identifier) => Ok(match identifier.name.as_str() {
             "$state" => Some(SvelteRuneInitializer::State {
                 allows_omitted_initial: true,
@@ -3735,7 +3921,7 @@ fn classify_svelte_rune_initializer(
         }),
         Expression::StaticMemberExpression(member) => {
             let Expression::Identifier(root) =
-                unwrap_expression_wrappers_with_budget(&member.object, budget, depth + 1)?
+                unwrap_expression_wrappers_with_budget(&member.object, budget)?
             else {
                 return Ok(None);
             };
@@ -3757,10 +3943,9 @@ fn classify_svelte_rune_initializer(
 fn unwrap_expression_wrappers_with_budget<'a>(
     mut expr: &'a Expression<'a>,
     budget: &mut InferenceBudget,
-    mut depth: usize,
 ) -> InferenceResult<&'a Expression<'a>> {
     loop {
-        budget.visit(depth)?;
+        budget.visit()?;
         expr = match expr {
             Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
             Expression::TSAsExpression(assertion) => &assertion.expression,
@@ -3768,7 +3953,6 @@ fn unwrap_expression_wrappers_with_budget<'a>(
             Expression::TSNonNullExpression(non_null) => &non_null.expression,
             _ => return Ok(expr),
         };
-        depth += 1;
     }
 }
 
@@ -3784,7 +3968,7 @@ fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expressio
     }
 }
 
-fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
+pub(crate) fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
     loop {
         match expr {
             Expression::ParenthesizedExpression(parenthesized) => {
@@ -3899,7 +4083,7 @@ pub(crate) fn for_each_indexed_call_source_type_query<'a>(
 
 /// The class expression a declarator's initializer is, through
 /// parentheses.
-fn initializer_class_expression<'a>(init: &'a Expression<'a>) -> Option<&'a Class<'a>> {
+pub(crate) fn initializer_class_expression<'a>(init: &'a Expression<'a>) -> Option<&'a Class<'a>> {
     match init {
         Expression::ClassExpression(class) => Some(class),
         Expression::ParenthesizedExpression(inner) => {
@@ -4666,62 +4850,44 @@ fn extract_initializer_object_shape(
     policy: MemberLiteralPolicy,
 ) -> InferenceResult<Option<ObjectExpr>> {
     let mut budget = InferenceBudget::default();
-    extract_initializer_object_shape_with_budget(expr, source, policy, &mut budget, 0)
+    extract_initializer_object_shape_with_budget(expr, source, policy, &mut budget)
 }
 
+/// The object literal an initializer is, through parentheses, `as` and
+/// `satisfies`, extracted under the policy they establish: `… as const`
+/// is a const context (properties keep literals and become `readonly`);
+/// `satisfies` preserves members without widening, unless an enclosing
+/// `as const` already pinned the readonly context. `None` for any other
+/// initializer.
 fn extract_initializer_object_shape_with_budget(
-    expr: &Expression<'_>,
+    mut expr: &Expression<'_>,
     source: &str,
-    policy: MemberLiteralPolicy,
+    mut policy: MemberLiteralPolicy,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<Option<ObjectExpr>> {
-    budget.visit(depth)?;
-    match expr {
-        Expression::ObjectExpression(obj) => {
-            extract_object_literal(obj, source, policy, budget, depth + 1).map(Some)
-        }
-        Expression::TSAsExpression(ts_as) => {
-            // `… as const` establishes a const context for the underlying
-            // object shape (properties keep literals + become `readonly`).
-            let inner_policy =
+    loop {
+        budget.visit()?;
+        match expr {
+            Expression::ObjectExpression(object) => {
+                let frame = shallow::ObjectFrame::new(object, policy, false, budget)?;
+                return shallow::run(shallow::Task::Object(frame), source, budget, None)
+                    .map(|value| Some(value.into_object()));
+            }
+            Expression::TSAsExpression(ts_as) => {
                 if is_const_assertion_type_expr(&lower_ts_type(&ts_as.type_annotation, source)) {
-                    MemberLiteralPolicy::ConstAssert
-                } else {
-                    policy
-                };
-            extract_initializer_object_shape_with_budget(
-                &ts_as.expression,
-                source,
-                inner_policy,
-                budget,
-                depth + 1,
-            )
+                    policy = MemberLiteralPolicy::ConstAssert;
+                }
+                expr = &ts_as.expression;
+            }
+            Expression::TSSatisfiesExpression(sat) => {
+                if policy != MemberLiteralPolicy::ConstAssert {
+                    policy = MemberLiteralPolicy::Preserve;
+                }
+                expr = &sat.expression;
+            }
+            Expression::ParenthesizedExpression(paren) => expr = &paren.expression,
+            _ => return Ok(None),
         }
-        Expression::TSSatisfiesExpression(sat) => {
-            // `satisfies` preserves members without widening, unless an
-            // enclosing `as const` already pinned the readonly context.
-            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
-                MemberLiteralPolicy::ConstAssert
-            } else {
-                MemberLiteralPolicy::Preserve
-            };
-            extract_initializer_object_shape_with_budget(
-                &sat.expression,
-                source,
-                inner_policy,
-                budget,
-                depth + 1,
-            )
-        }
-        Expression::ParenthesizedExpression(paren) => extract_initializer_object_shape_with_budget(
-            &paren.expression,
-            source,
-            policy,
-            budget,
-            depth + 1,
-        ),
-        _ => Ok(None),
     }
 }
 
@@ -4731,7 +4897,7 @@ fn extract_initializer_object_shape_with_budget(
 
 fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSignatureParts {
     let mut budget = InferenceBudget::default();
-    match extract_function_signature_with_budget(func, source, &mut budget, 0) {
+    match extract_function_signature_with_budget(func, source, &mut budget) {
         Ok(signature) => signature,
         Err(_reason) => unavailable_function_signature(
             &func.params,
@@ -4747,48 +4913,15 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSigna
     }
 }
 
+/// A function's signature (see [`shallow::FunctionFrame`]).
 fn extract_function_signature_with_budget(
     func: &Function<'_>,
     source: &str,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<LoweredSignatureParts> {
-    budget.visit(depth)?;
-    let has_authored_return = func.return_type.is_some();
-    let parameters = lower_function_params_with_budget(
-        &func.params,
-        func.this_param.as_deref(),
-        source,
-        budget,
-        depth + 1,
-    )?;
-    // The return carrier is AUTHORED-only: an unannotated function's return
-    // is body-derived and names its served function position (the
-    // whole-function producer answers it), never a body scan.
-    let (return_type, predicate) = match func.return_type.as_ref() {
-        Some(return_type) => {
-            let (return_type, predicate) =
-                lower_return_annotation(&return_type.type_annotation, source);
-            (Some(return_type), predicate)
-        }
-        None => (None, None),
-    };
-    let type_parameters = func
-        .type_parameters
-        .as_ref()
-        .map(|tp| lower_type_param_decls(tp, source))
-        .unwrap_or_default();
-
-    Ok(LoweredSignatureParts {
-        parameters,
-        return_type,
-        predicate,
-        type_parameters,
-        has_implementation_body: func.body.is_some(),
-        has_authored_return,
-        jsdoc_return: false,
-        origin: LoweredSignatureOrigin::DeclBody,
-    })
+    let frame = shallow::FunctionFrame::new(func, budget)?;
+    shallow::run(shallow::Task::Function(frame), source, budget, None)
+        .map(shallow::Value::into_signature)
 }
 
 fn extract_arrow_signature(
@@ -4796,7 +4929,7 @@ fn extract_arrow_signature(
     source: &str,
 ) -> LoweredSignatureParts {
     let mut budget = InferenceBudget::default();
-    match extract_arrow_signature_with_budget(arrow, source, &mut budget, 0) {
+    match extract_arrow_signature_with_budget(arrow, source, &mut budget) {
         Ok(signature) => signature,
         Err(_reason) => unavailable_function_signature(
             &arrow.params,
@@ -4813,56 +4946,15 @@ fn extract_arrow_signature(
     }
 }
 
+/// An arrow's signature (see [`shallow::ArrowFrame`]).
 fn extract_arrow_signature_with_budget(
     arrow: &ArrowFunctionExpression<'_>,
     source: &str,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<LoweredSignatureParts> {
-    budget.visit(depth)?;
-    let has_authored_return = arrow.return_type.is_some();
-    let parameters =
-        lower_function_params_with_budget(&arrow.params, None, source, budget, depth + 1)?;
-    // An AUTHORED annotation is the declared carrier. An expression-bodied
-    // arrow's body IS one expression — the generic declaration-expression
-    // lowering answers it directly (there is no statement scan). A
-    // block-bodied arrow's return is body-derived and names its served
-    // function position instead.
-    let mut predicate = None;
-    let return_type = if let Some(return_type) = &arrow.return_type {
-        let (return_type, authored_predicate) =
-            lower_return_annotation(&return_type.type_annotation, source);
-        predicate = authored_predicate;
-        Some(return_type)
-    } else if let Some(expression) = arrow.get_expression() {
-        Some(infer_expression_type_ctx(
-            expression,
-            source,
-            MemberLiteralPolicy::Widen,
-            budget,
-            depth + 1,
-        )?)
-    } else {
-        None
-    };
-    let type_parameters = arrow
-        .type_parameters
-        .as_ref()
-        .map(|tp| lower_type_param_decls(tp, source))
-        .unwrap_or_default();
-
-    // An arrow function always carries an implementation body (expression or
-    // block form).
-    Ok(LoweredSignatureParts {
-        parameters,
-        return_type,
-        predicate,
-        type_parameters,
-        has_implementation_body: true,
-        has_authored_return,
-        jsdoc_return: false,
-        origin: LoweredSignatureOrigin::DeclBody,
-    })
+    let frame = shallow::ArrowFrame::new(arrow, false, budget)?;
+    shallow::run(shallow::Task::Arrow(frame), source, budget, None)
+        .map(shallow::Value::into_signature)
 }
 
 fn unavailable_function_signature(
@@ -4883,100 +4975,6 @@ fn unavailable_function_signature(
         jsdoc_return: false,
         origin: LoweredSignatureOrigin::DeclBody,
     }
-}
-
-/// Extract an object literal EXPRESSION into the ordered pre-fold IR: every
-/// direct member is minted `FreshOwn` and every spread rides an
-/// [`ObjectMember::Spread`] entry holding the operand's inferred type — all in
-/// source order. The producer NEVER folds: taint/overlap semantics are the
-/// shared spread materializer's decision at graph-lowering time.
-fn extract_object_literal(
-    obj: &ObjectExpression<'_>,
-    source: &str,
-    policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<ObjectExpr> {
-    budget.visit(depth)?;
-    let mut members = Vec::new();
-    for prop in &obj.properties {
-        match prop {
-            ObjectPropertyKind::ObjectProperty(p) => {
-                let key = lower_property_key(&p.key, source);
-                if p.method || !matches!(p.kind, PropertyKind::Init) {
-                    let Expression::FunctionExpression(function) = &p.value else {
-                        continue;
-                    };
-                    let signature = extract_function_signature_with_budget(
-                        function,
-                        source,
-                        budget,
-                        depth + 1,
-                    )?;
-                    let spans = MemberSpans {
-                        declaration: Some(p.span.into()),
-                        name: Some(p.key.span().into()),
-                        type_annotation: None,
-                    };
-                    let mut method = MethodSignature::with_key_spans_public(
-                        key,
-                        FunctionExpr::with_spans(
-                            signature.parameters,
-                            signature.return_type.map(Arc::new),
-                            signature.type_parameters,
-                            FunctionSpans {
-                                signature: Some(function.span.into()),
-                                return_type: function
-                                    .return_type
-                                    .as_ref()
-                                    .map(|return_type| return_type.type_annotation.span().into()),
-                            },
-                        )
-                        .with_predicate(signature.predicate),
-                        false,
-                        spans,
-                    )
-                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn);
-                    method.method_kind = match p.kind {
-                        PropertyKind::Get => ObjectMethodKind::Get,
-                        PropertyKind::Set => ObjectMethodKind::Set,
-                        PropertyKind::Init => ObjectMethodKind::Method,
-                    };
-                    method.has_implementation_body = signature.has_implementation_body;
-                    members.push(ObjectMember::Method(method));
-                    continue;
-                }
-                let (ty, readonly) =
-                    object_member_value(&p.value, source, policy, budget, depth + 1)?;
-                let spans = MemberSpans {
-                    declaration: Some(p.span.into()),
-                    name: Some(p.key.span().into()),
-                    // Value-inferred property: there is no source type
-                    // annotation to anchor.
-                    type_annotation: None,
-                };
-                members.push(ObjectMember::Property(
-                    verter_type_expr::ObjectProperty::with_key_spans_public(
-                        key, ty, false, readonly, spans,
-                    )
-                    // A member written directly in the literal is a fresh
-                    // excess-property candidate until a later spread
-                    // overlaps it (the fold's decision).
-                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn),
-                ));
-            }
-            ObjectPropertyKind::SpreadProperty(spread) => {
-                let spread_ty =
-                    infer_expression_type_ctx(&spread.argument, source, policy, budget, depth + 1)?;
-                members.push(ObjectMember::Spread(verter_type_expr::SpreadMember::new(
-                    spread_ty,
-                )));
-            }
-        }
-    }
-    Ok(ObjectExpr {
-        properties: members,
-    })
 }
 
 use crate::analysis::function_program::static_property_key_name;
@@ -5024,7 +5022,6 @@ impl MemberLiteralPolicy {
     }
 }
 
-pub(crate) const MAX_SEMANTIC_INFERENCE_DEPTH: usize = 64;
 pub(crate) const MAX_SEMANTIC_INFERENCE_WORK: usize = 4096;
 
 type InferenceResult<T> = Result<T, InferenceUnavailableReason>;
@@ -5128,10 +5125,10 @@ pub fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
 }
 
 impl InferenceBudget {
-    fn visit(&mut self, depth: usize) -> InferenceResult<()> {
-        if depth >= MAX_SEMANTIC_INFERENCE_DEPTH {
-            return Err(InferenceUnavailableReason::DepthBudgetExceeded);
-        }
+    /// Charge one visited expression, member or parameter. The inference
+    /// runs from explicit stacks, so nesting costs it no native level: its
+    /// work is its only bound.
+    fn visit(&mut self) -> InferenceResult<()> {
         let Some(remaining_work) = self.remaining_work.checked_sub(1) else {
             return Err(InferenceUnavailableReason::WorkBudgetExceeded);
         };
@@ -5218,7 +5215,7 @@ pub fn infer_call_argument_expression_type(
     source: &str,
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Argument, &mut budget, 0)
+    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Argument, &mut budget)
 }
 
 /// Infer the type of a declaration-position expression with a FRESH
@@ -5233,7 +5230,7 @@ pub fn infer_declaration_expression_type(
     policy: TopLevelLiteralPolicy,
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)
+    infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
 }
 
 #[repr(u8)]
@@ -5274,7 +5271,7 @@ pub fn infer_declaration_expression_type_with_nested_nullish(
         nested_nullish,
         ..InferenceBudget::default()
     };
-    let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)?;
+    let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)?;
     Ok(DeclarationExpressionInference {
         ty,
         completeness: if budget.used_unmodeled_fallback {
@@ -5285,136 +5282,25 @@ pub fn infer_declaration_expression_type_with_nested_nullish(
     })
 }
 
+/// A declaration-position expression under its top-level literal `policy`
+/// (see [`shallow`]): a const assertion pins its whole operand, a type
+/// assertion's type is not a fresh literal, each branch of a conditional is
+/// a top level under the same policy, and an array literal's elements
+/// always widen — structural widening is a producer rule, independent of
+/// the caller's top-level policy.
 fn infer_declaration_expression_type_with_budget(
     expr: &Expression<'_>,
     source: &str,
     policy: TopLevelLiteralPolicy,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<TypeExpr> {
-    budget.visit(depth)?;
-    // A const assertion pins its whole operand and carries its own
-    // readonly/tuple semantics — it is never re-decided by either axis.
-    if expr_is_const_asserted(expr, source) {
-        return infer_expression_type_ctx(
-            expr,
-            source,
-            MemberLiteralPolicy::Widen,
-            budget,
-            depth + 1,
-        );
-    }
-    match expr {
-        // A type assertion's type is not a FRESH literal type, and the
-        // checker widens only a fresh one (`getWidenedLiteralType`): `let x =
-        // 0 as 0 | 1 | 2` declares `0 | 1 | 2` under either policy.
-        Expression::TSAsExpression(_) | Expression::TSTypeAssertion(_) => {
-            infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth + 1)
-        }
-        // Structurally transparent: the wrapper is not a top level of its
-        // own, so the caller's policy passes straight through.
-        Expression::ParenthesizedExpression(parenthesized) => {
-            infer_declaration_expression_type_with_budget(
-                &parenthesized.expression,
-                source,
-                policy,
-                budget,
-                depth + 1,
-            )
-        }
-        // A conditional's branches are each a top level under the SAME
-        // policy: `const v = c ? 1 : 2` is `1 | 2`, `let v = c ? 1 : 2` is
-        // `number`.
-        Expression::ConditionalExpression(conditional) => Ok(TypeExpr::union(vec![
-            infer_declaration_expression_type_with_budget(
-                &conditional.consequent,
-                source,
-                policy,
-                budget,
-                depth + 1,
-            )?,
-            infer_declaration_expression_type_with_budget(
-                &conditional.alternate,
-                source,
-                policy,
-                budget,
-                depth + 1,
-            )?,
-        ])),
-        // An array literal's elements ALWAYS widen — structural widening
-        // is a producer rule, independent of the caller's top-level
-        // policy. `const d = [1]` and `return [1]` are both `number[]`;
-        // only an element's OWN const assertion pins it (`[1 as const]` is
-        // `1[]`), and that is decided by the recursion's const-assert gate.
-        Expression::ArrayExpression(array) => {
-            let mut element_types = Vec::new();
-            for element in &array.elements {
-                // `strictNullChecks` off: a bare nullish element is dropped
-                // beside another element; an array of nothing else widens
-                // its element to `any` (see [`NestedNullishLiterals`]).
-                if budget.nested_nullish == NestedNullishLiterals::WidenToAny
-                    && element
-                        .as_expression()
-                        .is_some_and(expr_is_widening_nullish)
-                {
-                    continue;
-                }
-                match element {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
-                        let spread_type = infer_declaration_expression_type_with_budget(
-                            &spread.argument,
-                            source,
-                            TopLevelLiteralPolicy::Widen,
-                            budget,
-                            depth + 1,
-                        )?;
-                        if let Some(elements) = collect_array_element_types_from_type(&spread_type)
-                        {
-                            element_types.extend(elements);
-                        } else {
-                            element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
-                        }
-                    }
-                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
-                    _ => {
-                        if let Some(expression) = element.as_expression() {
-                            append_union_members(
-                                &mut element_types,
-                                infer_declaration_expression_type_with_budget(
-                                    expression,
-                                    source,
-                                    TopLevelLiteralPolicy::Widen,
-                                    budget,
-                                    depth + 1,
-                                )?,
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(TypeExpr::Array {
-                element: Arc::new(if element_types.is_empty() {
-                    TypeExpr::Primitive(PrimitiveName::Any)
-                } else {
-                    TypeExpr::union(element_types)
-                }),
-                readonly: false,
-            })
-        }
-        _ => {
-            let inferred = infer_expression_type_ctx(
-                expr,
-                source,
-                MemberLiteralPolicy::Widen,
-                budget,
-                depth + 1,
-            )?;
-            Ok(match policy {
-                TopLevelLiteralPolicy::Widen => widen_shallow_literal(inferred),
-                TopLevelLiteralPolicy::Preserve => inferred,
-            })
-        }
-    }
+    shallow::run(
+        shallow::Task::Declaration(expr, policy),
+        source,
+        budget,
+        None,
+    )
+    .map(shallow::Value::into_type)
 }
 
 /// Whether an expression is a `… as const` assertion (seen through a
@@ -5461,59 +5347,6 @@ pub fn widen_shallow_literal(ty: TypeExpr) -> TypeExpr {
     }
 }
 
-/// Compute one object-literal member's `(type, readonly)` under `policy`. A
-/// per-property `as const` (`{ tag: "x" as const }`) overrides to
-/// `ConstAssert` for that member; otherwise `policy` decides: `Widen` widens a
-/// fresh top-level literal to its primitive, `Preserve` keeps it, `ConstAssert`
-/// keeps it AND marks it `readonly`. The member value is inferred under the
-/// effective policy so nested objects inherit it.
-fn object_member_value(
-    value: &Expression<'_>,
-    source: &str,
-    policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<(TypeExpr, bool)> {
-    let per_prop_const = expr_is_const_asserted(value, source);
-    // `readonly` comes ONLY from a WHOLE-OBJECT `as const` (the enclosing
-    // `policy`). A per-property `as const` (`{ tag: "x" as const }`) narrows the
-    // VALUE to a literal but does NOT add the `readonly` modifier — TS leaves
-    // `tag` mutable; only `{ … } as const` makes the properties `readonly`.
-    let readonly = policy == MemberLiteralPolicy::ConstAssert;
-    // A bare nullish member value under `strictNullChecks` off widens to
-    // `any` whatever the member policy — an `as const` object keeps it
-    // `readonly` but not `null` (TypeScript 7.0.2: `{ a: null } as const`
-    // is `{ readonly a: any }`).
-    if budget.nested_nullish == NestedNullishLiterals::WidenToAny && expr_is_widening_nullish(value)
-    {
-        budget.visit(depth)?;
-        return Ok((TypeExpr::Primitive(PrimitiveName::Any), readonly));
-    }
-    // The value (and its NESTED members) is inferred under a const context when
-    // the whole object is `as const` OR this property carries its own `as const`,
-    // so a nested object under a per-property `as const`
-    // (`{ tag: { x: 1 } as const }`) still yields readonly + literal members.
-    let value_policy = if per_prop_const {
-        MemberLiteralPolicy::ConstAssert
-    } else {
-        policy
-    };
-    // Widen a fresh TOP-LEVEL literal only under a plain `Widen` context (no
-    // per-property `as const`); `Preserve` (satisfies) and `ConstAssert` keep it.
-    let ty = if value_policy == MemberLiteralPolicy::Widen {
-        infer_declaration_expression_type_with_budget(
-            value,
-            source,
-            TopLevelLiteralPolicy::Widen,
-            budget,
-            depth,
-        )?
-    } else {
-        infer_expression_type_ctx(value, source, value_policy, budget, depth)?
-    };
-    Ok((ty, readonly))
-}
-
 /// Infer the type of a value expression. `policy` governs how fresh
 /// object-literal MEMBER values are treated (see [`MemberLiteralPolicy`]):
 /// a plain object literal widens its members, a `satisfies`-constrained one
@@ -5525,374 +5358,28 @@ fn infer_expression_type_ctx(
     source: &str,
     policy: MemberLiteralPolicy,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<TypeExpr> {
-    infer_expression_type_ctx_with_read_root(expr, source, policy, budget, depth, None)
+    shallow::run(shallow::Task::Value(expr, policy), source, budget, None)
+        .map(shallow::Value::into_type)
 }
 
+/// [`infer_expression_type_ctx`], reporting to `read_root` the whole
+/// identifier read or authored type query the value is, through its
+/// parentheses, `satisfies` and assertions.
 fn infer_expression_type_ctx_with_read_root(
     expr: &Expression<'_>,
     source: &str,
     policy: MemberLiteralPolicy,
     budget: &mut InferenceBudget,
-    depth: usize,
     read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<TypeExpr> {
-    budget.visit(depth)?;
-    match value_inference_carrier(expr) {
-        ValueInferenceCarrier::Parenthesized(inner) => {
-            return infer_expression_type_ctx_with_read_root(
-                inner,
-                source,
-                policy,
-                budget,
-                depth + 1,
-                read_root,
-            )
-        }
-        ValueInferenceCarrier::Satisfies(inner) => {
-            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
-                policy
-            } else {
-                MemberLiteralPolicy::Preserve
-            };
-            return infer_expression_type_ctx_with_read_root(
-                inner,
-                source,
-                inner_policy,
-                budget,
-                depth + 1,
-                read_root,
-            );
-        }
-        ValueInferenceCarrier::Assertion {
-            operand,
-            annotation,
-        } => {
-            if verter_type_expr_oxc::is_const_assertion_type(annotation) {
-                return infer_expression_type_ctx_with_read_root(
-                    operand,
-                    source,
-                    MemberLiteralPolicy::ConstAssert,
-                    budget,
-                    depth + 1,
-                    read_root,
-                );
-            }
-            let mut query = None;
-            let asserted = verter_type_expr_oxc::lower_ts_type_with_whole_query(
-                annotation,
-                source,
-                read_root.as_ref().map(|_| &mut query),
-            );
-            if let (Some(root), Some(query)) = (read_root, query) {
-                *root = IndexedValueReadRoot::SourceTypeQuery(query);
-            }
-            return Ok(asserted);
-        }
-        ValueInferenceCarrier::Value => {}
-    }
-    match expr {
-        // `undefined` is an IDENTIFIER in the grammar (unlike the `null`
-        // literal) but its value position IS the `undefined` type — never a
-        // resolvable file-scope value path.
-        Expression::Identifier(ident) if ident.name == "undefined" => {
-            Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
-        }
-        Expression::Identifier(ident) => {
-            if let Some(read_root) = read_root {
-                *read_root = IndexedValueReadRoot::Identifier(ident.span.into());
-            }
-            Ok(TypeExpr::TypeOf(ValueRef {
-                path: vec![ident.name.as_str().to_string()],
-                type_args: Vec::new(),
-            }))
-        }
-        Expression::StringLiteral(s) => Ok(TypeExpr::string_literal(s.value.as_str())),
-        Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
-        Expression::BigIntLiteral(b) => Ok(TypeExpr::Literal(
-            verter_type_expr::LiteralValue::BigInt(b.value.to_string()),
-        )),
-        // A signed numeric literal (`-1`, `+1`) and a negated bigint literal
-        // (`-1n`) are literals of their own value.
-        Expression::UnaryExpression(unary)
-            if matches!(
-                (unary.operator, &unary.argument),
-                (
-                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
-                    Expression::NumericLiteral(_)
-                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
-            ) =>
-        {
-            Ok(match &unary.argument {
-                Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
-                    TypeExpr::number_literal(-n.value)
-                }
-                Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-                Expression::BigIntLiteral(b) => TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
-                ),
-                _ => unreachable!("the guard admits only numeric and bigint literal operands"),
-            })
-        }
-        Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
-        Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
-        // `void x` evaluates its operand and produces `undefined`.
-        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
-            Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
-        }
-        // `typeof x` over an operand it only reads is the checker's union
-        // of the `typeof` result strings (`typeofType`), a regular literal
-        // union no position widens.
-        Expression::UnaryExpression(unary)
-            if unary.operator == UnaryOperator::Typeof
-                && typeof_operand_only_reads(&unary.argument) =>
-        {
-            Ok(TypeExpr::union(
-                [
-                    "string",
-                    "number",
-                    "bigint",
-                    "boolean",
-                    "symbol",
-                    "undefined",
-                    "object",
-                    "function",
-                ]
-                .into_iter()
-                .map(TypeExpr::string_literal)
-                .collect(),
-            ))
-        }
-        Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
-            // Both arms contribute to this composite; neither is its whole
-            // identifier origin.
-            infer_expression_type_ctx(&cond.consequent, source, policy, budget, depth + 1)?,
-            infer_expression_type_ctx(&cond.alternate, source, policy, budget, depth + 1)?,
-        ])),
-        Expression::ArrayExpression(arr) => {
-            // A literal-preserving position keeps the array literal's
-            // POSITIONAL structure as a tuple. A spread or an elision makes
-            // the positions non-recoverable, so the element-union array is
-            // the sound form there.
-            let positional = !arr.elements.iter().any(|element| {
-                matches!(
-                    element,
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
-                        | oxc_ast::ast::ArrayExpressionElement::Elision(_)
-                )
-            });
-            let widen_nullish = budget.nested_nullish == NestedNullishLiterals::WidenToAny;
-            if let (Some(readonly), true) = (policy.array_literal_is_tuple(), positional) {
-                let mut elements = Vec::with_capacity(arr.elements.len());
-                for element in &arr.elements {
-                    let Some(expr) = element.as_expression() else {
-                        continue;
-                    };
-                    let ty = if widen_nullish && expr_is_widening_nullish(expr) {
-                        TypeExpr::Primitive(PrimitiveName::Any)
-                    } else {
-                        infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?
-                    };
-                    elements.push(TupleElement {
-                        label: None,
-                        ty,
-                        optional: false,
-                        rest: false,
-                    });
-                }
-                return Ok(TypeExpr::Tuple {
-                    elements: Arc::from(elements.into_boxed_slice()),
-                    readonly,
-                });
-            }
-            let mut element_types = Vec::new();
-            // `strictNullChecks` off: a bare nullish element adds nothing to
-            // the element union beside another element, and an array of
-            // nothing else widens to `any[]` exactly as an empty one does.
-            for element in &arr.elements {
-                if widen_nullish
-                    && element
-                        .as_expression()
-                        .is_some_and(expr_is_widening_nullish)
-                {
-                    continue;
-                }
-                match element {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
-                        // A spread element contributes its source's element
-                        // types (array / tuple / union-of-those), else `any`.
-                        // The spread source always infers under the plain
-                        // widen context.
-                        let spread_ty = infer_expression_type_ctx(
-                            &spread.argument,
-                            source,
-                            MemberLiteralPolicy::Widen,
-                            budget,
-                            depth + 1,
-                        )?;
-                        if let Some(spread_elements) =
-                            collect_array_element_types_from_type(&spread_ty)
-                        {
-                            element_types.extend(spread_elements);
-                        } else {
-                            element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
-                        }
-                    }
-                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
-                    _ => {
-                        if let Some(expr) = element.as_expression() {
-                            append_union_members(
-                                &mut element_types,
-                                infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?,
-                            );
-                        }
-                    }
-                }
-            }
-
-            let element = if element_types.is_empty() {
-                TypeExpr::Primitive(PrimitiveName::Any)
-            } else {
-                TypeExpr::union(element_types)
-            };
-            Ok(TypeExpr::Array {
-                element: Arc::new(element),
-                readonly: false,
-            })
-        }
-        Expression::ObjectExpression(obj) => Ok(TypeExpr::Object(Arc::new(
-            extract_object_literal(obj, source, policy, budget, depth + 1)?,
-        ))),
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
-            let mut value = String::new();
-            for quasi in &tpl.quasis {
-                value.push_str(quasi.value.raw.as_str());
-            }
-            Ok(TypeExpr::string_literal(value))
-        }
-        // In a const context a template is the template literal type of its
-        // holes' literal types (`` `x${1}` as const `` is `"x1"`), when every
-        // hole is a literal or primitive type this inference reads; a hole
-        // naming a value keeps the template a `string`.
-        Expression::TemplateLiteral(tpl) if policy == MemberLiteralPolicy::ConstAssert => {
-            let expressions = tpl
-                .expressions
-                .iter()
-                .map(|expression| {
-                    infer_expression_type_ctx(expression, source, policy, budget, depth + 1)
-                })
-                .collect::<InferenceResult<Vec<_>>>()?;
-            let scalar =
-                |ty: &TypeExpr| matches!(ty, TypeExpr::Literal(_) | TypeExpr::Primitive(_));
-            if !expressions.iter().all(|ty| match ty {
-                TypeExpr::Union(members) => members.iter().all(scalar),
-                other => scalar(other),
-            }) {
-                return Ok(TypeExpr::Primitive(PrimitiveName::String));
-            }
-            Ok(TypeExpr::TemplateLiteral {
-                quasis: tpl
-                    .quasis
-                    .iter()
-                    .map(|quasi| quasi.value.raw.to_string())
-                    .collect(),
-                expressions: Arc::from(expressions.into_boxed_slice()),
-            })
-        }
-        Expression::TemplateLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::String)),
-        Expression::ArrowFunctionExpression(arrow) => {
-            let sig = extract_arrow_signature_with_budget(arrow, source, budget, depth + 1)?;
-            let fn_spans = FunctionSpans {
-                signature: Some(arrow.span.into()),
-                return_type: arrow
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
-            };
-            Ok(TypeExpr::Function(Arc::new(
-                FunctionExpr::with_spans(
-                    sig.parameters,
-                    sig.return_type.map(Arc::new),
-                    sig.type_parameters,
-                    fn_spans,
-                )
-                .with_predicate(sig.predicate),
-            )))
-        }
-        Expression::StaticMemberExpression(member) => {
-            // obj.foo → typeof obj.foo (build a dotted path)
-            let mut path = Vec::new();
-            collect_static_member_path_with_budget(member, &mut path, budget, depth + 1)?;
-            if path.is_empty() {
-                budget.used_unmodeled_fallback = true;
-                Ok(TypeExpr::Primitive(PrimitiveName::Any))
-            } else {
-                Ok(TypeExpr::TypeOf(ValueRef {
-                    path,
-                    type_args: Vec::new(),
-                }))
-            }
-        }
-        Expression::CallExpression(call) => {
-            // fn() → ReturnType<typeof fn>
-            let callee_type =
-                infer_expression_type_ctx(&call.callee, source, policy, budget, depth + 1)?;
-            if matches!(callee_type, TypeExpr::Primitive(PrimitiveName::Any)) {
-                Ok(TypeExpr::Primitive(PrimitiveName::Any))
-            } else {
-                Ok(call_return_carrier(callee_type))
-            }
-        }
-        // An equality, relational, `instanceof` or `in` comparison is
-        // `boolean` whatever its operands are: neither operand provides the
-        // comparison's value.
-        Expression::BinaryExpression(binary) if binary_operator_is_comparison(binary.operator) => {
-            Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
-        }
-        // `#field in object` is an `in` test: `boolean`.
-        Expression::PrivateInExpression(_) => Ok(TypeExpr::Primitive(PrimitiveName::Boolean)),
-        // `!operand`, and `a && b` / `a || b`, over `boolean` operands are
-        // `boolean`. Any other operand keeps the unmodeled fallback: the
-        // result then depends on the operand's truthiness facts (`!` over an
-        // always-truthy operand is `false`) or is the operand's own value.
-        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-            let operand = infer_expression_type_ctx(
-                &unary.argument,
-                source,
-                MemberLiteralPolicy::Widen,
-                budget,
-                depth + 1,
-            )?;
-            Ok(boolean_or_unmodeled(&[operand], budget))
-        }
-        Expression::LogicalExpression(logical)
-            if matches!(
-                logical.operator,
-                oxc_ast::ast::LogicalOperator::And | oxc_ast::ast::LogicalOperator::Or
-            ) =>
-        {
-            let left = infer_expression_type_ctx(
-                &logical.left,
-                source,
-                MemberLiteralPolicy::Widen,
-                budget,
-                depth + 1,
-            )?;
-            let right = infer_expression_type_ctx(
-                &logical.right,
-                source,
-                MemberLiteralPolicy::Widen,
-                budget,
-                depth + 1,
-            )?;
-            Ok(boolean_or_unmodeled(&[left, right], budget))
-        }
-        _ => {
-            budget.used_unmodeled_fallback = true;
-            Ok(TypeExpr::Primitive(PrimitiveName::Any))
-        }
-    }
+    shallow::run(
+        shallow::Task::RootValue(expr, policy),
+        source,
+        budget,
+        read_root,
+    )
+    .map(shallow::Value::into_type)
 }
 
 /// Whether a binary operator is a comparison — the operators whose result
@@ -5958,13 +5445,11 @@ fn collect_static_member_path_with_budget(
     member: &oxc_ast::ast::StaticMemberExpression<'_>,
     path: &mut Vec<String>,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<()> {
     let mut properties = Vec::new();
     let mut current = member;
-    let mut nesting = 0usize;
     loop {
-        budget.visit(depth + nesting)?;
+        budget.visit()?;
         properties.push(current.property.name.as_str().to_string());
         match &current.object {
             Expression::Identifier(identifier) => {
@@ -5973,7 +5458,6 @@ fn collect_static_member_path_with_budget(
             }
             Expression::StaticMemberExpression(parent) => {
                 current = parent;
-                nesting += 1;
             }
             _ => {
                 path.clear();
@@ -6024,218 +5508,7 @@ fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
 
 fn widen_literal_type(expr: TypeExpr) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    widen_literal_type_with_budget(expr, &mut budget, 0)
-}
-
-fn widen_literal_type_with_budget(
-    expr: TypeExpr,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<TypeExpr> {
-    budget.visit(depth)?;
-    // `TypeExpr` implements `Drop`, so the compound arms below cannot bind
-    // their children by-move out of an owned `expr`. Match on a borrow and
-    // clone the (refcounted) children; the catch-all forwards `expr` whole
-    // (a full-value move, which `Drop` permits).
-    match &expr {
-        TypeExpr::Literal(verter_type_expr::LiteralValue::String(_)) => {
-            Ok(TypeExpr::Primitive(PrimitiveName::String))
-        }
-        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(_)) => {
-            Ok(TypeExpr::Primitive(PrimitiveName::Number))
-        }
-        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(_)) => {
-            Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
-        }
-        TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(_)) => {
-            Ok(TypeExpr::Primitive(PrimitiveName::BigInt))
-        }
-        TypeExpr::Union(members) => {
-            let mut widened = Vec::with_capacity(members.len());
-            for member in members.iter().cloned() {
-                widened.push(widen_literal_type_with_budget(member, budget, depth + 1)?);
-            }
-            Ok(TypeExpr::union(dedupe_type_exprs(widened)))
-        }
-        TypeExpr::Intersection(members) => {
-            let mut widened = Vec::with_capacity(members.len());
-            for member in members.iter().cloned() {
-                widened.push(widen_literal_type_with_budget(member, budget, depth + 1)?);
-            }
-            Ok(TypeExpr::intersection(widened))
-        }
-        TypeExpr::Array { element, readonly } => Ok(TypeExpr::Array {
-            element: Arc::new(widen_literal_type_with_budget(
-                element.as_ref().clone(),
-                budget,
-                depth + 1,
-            )?),
-            readonly: *readonly,
-        }),
-        TypeExpr::Tuple { elements, readonly } => {
-            let mut widened = Vec::with_capacity(elements.len());
-            for mut element in elements.iter().cloned() {
-                element.ty = widen_literal_type_with_budget(element.ty, budget, depth + 1)?;
-                widened.push(element);
-            }
-            Ok(TypeExpr::Tuple {
-                elements: Arc::from(widened),
-                readonly: *readonly,
-            })
-        }
-        TypeExpr::Object(obj) => {
-            let mut properties = Vec::with_capacity(obj.properties.len());
-            for property in obj.properties.iter().cloned() {
-                properties.push(widen_object_member_with_budget(
-                    property,
-                    budget,
-                    depth + 1,
-                )?);
-            }
-            Ok(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
-        }
-        TypeExpr::Function(function) => Ok(TypeExpr::Function(Arc::new(
-            FunctionExpr::with_spans(
-                function.parameters.clone(),
-                function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        widen_literal_type_with_budget(
-                            return_type.as_ref().clone(),
-                            budget,
-                            depth + 1,
-                        )
-                        .map(Arc::new)
-                    })
-                    .transpose()?,
-                function.type_parameters.clone(),
-                function.spans,
-            )
-            .with_predicate(function.predicate.clone())
-            .with_abstract(function.is_abstract),
-        ))),
-        // A bare constructor type (`new (...) => R`) carries the same
-        // `FunctionExpr` payload as a function type, so its literal members
-        // widen identically. Reconstruct as a `ConstructorType` so the
-        // constructor-ness survives — never flatten it to a plain `Function`.
-        // This runs on analyzer-side lowered IR (e.g. `value as new () => T`),
-        // BEFORE the dispatch lower interns the kind-preserving
-        // `SemanticNodeData::Signature` carrier.
-        TypeExpr::ConstructorType(function) => Ok(TypeExpr::ConstructorType(Arc::new(
-            FunctionExpr::with_spans(
-                function.parameters.clone(),
-                function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        widen_literal_type_with_budget(
-                            return_type.as_ref().clone(),
-                            budget,
-                            depth + 1,
-                        )
-                        .map(Arc::new)
-                    })
-                    .transpose()?,
-                function.type_parameters.clone(),
-                function.spans,
-            )
-            .with_predicate(function.predicate.clone()),
-        ))),
-        _ => Ok(expr),
-    }
-}
-
-fn widen_object_member_with_budget(
-    member: ObjectMember,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<ObjectMember> {
-    budget.visit(depth)?;
-    match member {
-        ObjectMember::Property(mut property) => {
-            property.ty = widen_literal_type_with_budget(property.ty, budget, depth + 1)?;
-            Ok(ObjectMember::Property(property))
-        }
-        ObjectMember::Spread(mut spread) => {
-            // Widening the pre-fold operand is the fold-equivalent of widening
-            // the spread-produced members: an inline literal operand's members
-            // widen recursively; a reference operand passes through unchanged.
-            spread.ty = widen_literal_type_with_budget(spread.ty, budget, depth + 1)?;
-            Ok(ObjectMember::Spread(spread))
-        }
-        ObjectMember::IndexSignature(mut signature) => {
-            signature.value_type =
-                widen_literal_type_with_budget(signature.value_type, budget, depth + 1)?;
-            Ok(ObjectMember::IndexSignature(signature))
-        }
-        ObjectMember::CallSignature(function) => Ok(ObjectMember::CallSignature(
-            FunctionExpr::with_spans(
-                function.parameters,
-                function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        widen_literal_type_with_budget(
-                            return_type.as_ref().clone(),
-                            budget,
-                            depth + 1,
-                        )
-                        .map(Arc::new)
-                    })
-                    .transpose()?,
-                function.type_parameters,
-                function.spans,
-            )
-            .with_predicate(function.predicate),
-        )),
-        ObjectMember::ConstructSignature(function) => {
-            let is_abstract = function.is_abstract;
-            Ok(ObjectMember::ConstructSignature(
-                FunctionExpr::with_spans(
-                    function.parameters,
-                    function
-                        .return_type
-                        .as_ref()
-                        .map(|return_type| {
-                            widen_literal_type_with_budget(
-                                return_type.as_ref().clone(),
-                                budget,
-                                depth + 1,
-                            )
-                            .map(Arc::new)
-                        })
-                        .transpose()?,
-                    function.type_parameters,
-                    function.spans,
-                )
-                .with_predicate(function.predicate)
-                .with_abstract(is_abstract),
-            ))
-        }
-        ObjectMember::Method(mut method) => {
-            method.function = FunctionExpr::with_spans(
-                method.function.parameters,
-                method
-                    .function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        widen_literal_type_with_budget(
-                            return_type.as_ref().clone(),
-                            budget,
-                            depth + 1,
-                        )
-                        .map(Arc::new)
-                    })
-                    .transpose()?,
-                method.function.type_parameters,
-                method.function.spans,
-            )
-            .with_predicate(method.function.predicate);
-            Ok(ObjectMember::Method(method))
-        }
-    }
+    shallow::widen_literal_type(expr, &mut budget)
 }
 
 fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
@@ -6433,84 +5706,21 @@ fn lower_function_params(
     source: &str,
 ) -> Vec<FunctionParam> {
     let mut budget = InferenceBudget::default();
-    lower_function_params_with_budget(params, this_param, source, &mut budget, 0).unwrap_or_else(
+    lower_function_params_with_budget(params, this_param, source, &mut budget).unwrap_or_else(
         |_| lower_function_params_without_initializer_inference(params, this_param, source),
     )
 }
 
+/// A parameter list lowered (see [`shallow::ParamsFrame`]).
 fn lower_function_params_with_budget(
     params: &FormalParameters<'_>,
     this_param: Option<&TSThisParameter<'_>>,
     source: &str,
     budget: &mut InferenceBudget,
-    depth: usize,
 ) -> InferenceResult<Vec<FunctionParam>> {
-    budget.visit(depth)?;
-    let mut lowered_params = Vec::with_capacity(
-        params.items.len() + usize::from(params.rest.is_some()) + usize::from(this_param.is_some()),
-    );
-    if let Some(this) = this_param {
-        lowered_params.push(lower_this_param(this, source));
-    }
-    for param in &params.items {
-        budget.visit(depth + 1)?;
-        let name = match &param.pattern {
-            BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
-            _ => None,
-        };
-        // The OXC structural fact: did this parameter carry an explicit TS
-        // type annotation? Captured here (the AST node is in hand), it is the
-        // sole authority for JSDoc `@param` precedence downstream — an
-        // explicit `: any` lowers to `Primitive(Any)` exactly like a missing
-        // annotation, so the lowered `ty` cannot distinguish the two.
-        let has_ts_annotation = param.type_annotation.is_some();
-        let ty = if let Some(annotation) = &param.type_annotation {
-            lower_ts_type(&annotation.type_annotation, source)
-        } else if let Some(initializer) = &param.initializer {
-            infer_declaration_expression_type_with_budget(
-                initializer,
-                source,
-                TopLevelLiteralPolicy::Widen,
-                budget,
-                depth + 2,
-            )?
-        } else {
-            TypeExpr::Primitive(PrimitiveName::Any)
-        };
-        let mut lowered = FunctionParam::with_span(
-            name,
-            ty,
-            param.optional || param.initializer.is_some(),
-            false,
-            Some(param.span.into()),
-            has_ts_annotation,
-        );
-        lowered.is_parameter_property =
-            param.accessibility.is_some() || param.readonly || param.r#override;
-        lowered_params.push(lowered);
-    }
-    if let Some(rest) = &params.rest {
-        budget.visit(depth + 1)?;
-        let name = match &rest.rest.argument {
-            BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
-            _ => None,
-        };
-        let has_ts_annotation = rest.type_annotation.is_some();
-        let ty = rest
-            .type_annotation
-            .as_ref()
-            .map(|ta| lower_ts_type(&ta.type_annotation, source))
-            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        lowered_params.push(FunctionParam::with_span(
-            name,
-            ty,
-            false,
-            true,
-            Some(rest.span.into()),
-            has_ts_annotation,
-        ));
-    }
-    Ok(lowered_params)
+    let frame = shallow::ParamsFrame::new(params, this_param, source, budget)?;
+    shallow::run(shallow::Task::Params(frame), source, budget, None)
+        .map(shallow::Value::into_params)
 }
 
 fn lower_function_params_without_initializer_inference(
@@ -6726,6 +5936,7 @@ fn publication_diagnostic_kind(
         Source::BudgetExceeded => Target::BudgetExceeded,
         Source::ProjectionWorkLimit => Target::ProjectionWorkLimit,
         Source::ConnectedQueryDepthLimit => Target::ConnectedQueryDepthLimit,
+        Source::ConnectedMemoryLimit => Target::ConnectedMemoryLimit,
         Source::MappedDepthExceeded => Target::MappedDepthExceeded,
         Source::UnresolvedReference => Target::UnresolvedReference,
         Source::IndeterminateConditional => Target::IndeterminateConditional,
@@ -7219,6 +6430,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             stmt,
             source,
             ret.program.source_type.is_typescript_definition(),
+            &Arc::default(),
         );
         out.type_decls.extend(parts.type_decls);
         out.value_decls.extend(parts.value_decls);
@@ -7263,7 +6475,7 @@ fn lower_value_expression_with_read_root(
     read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx_with_read_root(expr, source, policy, &mut budget, 0, read_root)
+    infer_expression_type_ctx_with_read_root(expr, source, policy, &mut budget, read_root)
 }
 
 /// Lower an already-parsed value expression into indexed typed IR.
@@ -7295,7 +6507,10 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
 ) -> IndexedValueExpression {
     match indexed_value_step(expr, source, policy, read_root) {
         IndexedValueStep::Lowered(lowered) => lowered,
-        IndexedValueStep::Call(call) => lower_nested_indexed_calls(call, source),
+        IndexedValueStep::Call(call) => lower_nested_indexed_calls(IndexedNode::Call(call), source),
+        IndexedValueStep::Member(object, name) => {
+            lower_nested_indexed_calls(IndexedNode::Member(object, name), source)
+        }
     }
 }
 
@@ -7308,22 +6523,48 @@ enum IndexedCallNode<'a> {
     Tagged(&'a oxc_ast::ast::TaggedTemplateExpression<'a>),
 }
 
-/// One value expression's indexed lowering: done, or a direct call-like
-/// record to build over its children.
+/// One value expression's indexed lowering: done, a direct call-like
+/// record to build over its children, or a member read off an evaluated
+/// value to build over its object.
 enum IndexedValueStep<'a> {
     Lowered(IndexedValueExpression),
     Call(IndexedCallNode<'a>),
+    Member(&'a Expression<'a>, &'a str),
+}
+
+/// A record [`lower_nested_indexed_calls`] builds over its lowered
+/// children.
+#[derive(Clone, Copy)]
+enum IndexedNode<'a> {
+    Call(IndexedCallNode<'a>),
+    Member(&'a Expression<'a>, &'a str),
+}
+
+/// The receiver a call-like record lowers: its callee's object, unless the
+/// callee is a member read off an evaluated value, whose object the
+/// callee's record already holds.
+fn indexed_record_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    if member_of_evaluated_value(callee).is_some() {
+        return None;
+    }
+    indexed_call_receiver(callee)
 }
 
 /// Lower a direct call-like expression, and every direct call-like
 /// expression nested in its callee, receiver and arguments, from an
 /// explicit stack: a call nested in an argument of a call (`f(f(f(1)))`) or
-/// in a receiver (`a.m().m()`) costs no native level. The nested records
-/// report no read roots, exactly as their recursive lowering did.
-fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> IndexedValueExpression {
+/// in a receiver (`a.m().m()`) costs no native level, nor does a member
+/// read off a call's result (`f().a.b`). The nested records report no read
+/// roots, exactly as their recursive lowering did.
+fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedValueExpression {
     enum Task<'a> {
         Value(&'a Expression<'a>, MemberLiteralPolicy),
         Build(IndexedCallNode<'a>),
+        BuildMember(&'a str),
+    }
+    fn push_member<'a>(object: &'a Expression<'a>, name: &'a str, tasks: &mut Vec<Task<'a>>) {
+        tasks.push(Task::BuildMember(name));
+        tasks.push(Task::Value(object, MemberLiteralPolicy::Widen));
     }
     fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::Build(node));
@@ -7353,7 +6594,7 @@ fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> Index
         if let Some(callee) = callee {
             tasks.push(Task::Value(callee, MemberLiteralPolicy::Widen));
             if !matches!(node, IndexedCallNode::New(_)) {
-                if let Some(receiver) = indexed_call_receiver(callee) {
+                if let Some(receiver) = indexed_record_receiver(callee) {
                     tasks.push(Task::Value(receiver, MemberLiteralPolicy::Widen));
                 }
             }
@@ -7361,16 +6602,27 @@ fn lower_nested_indexed_calls(first: IndexedCallNode<'_>, source: &str) -> Index
     }
     let mut tasks = Vec::new();
     let mut values: Vec<IndexedValueExpression> = Vec::new();
-    push_node(first, &mut tasks);
+    match first {
+        IndexedNode::Call(node) => push_node(node, &mut tasks),
+        IndexedNode::Member(object, name) => push_member(object, name, &mut tasks),
+    }
     while let Some(task) = tasks.pop() {
         match task {
             Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
                 IndexedValueStep::Lowered(lowered) => values.push(lowered),
                 IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+                IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
             },
             Task::Build(node) => {
                 let call = build_indexed_call(node, &mut values, source);
                 values.push(IndexedValueExpression::Call(call));
+            }
+            Task::BuildMember(name) => {
+                let object = values.pop().expect("the member's object");
+                values.push(IndexedValueExpression::Member {
+                    object: Box::new(object),
+                    name: Arc::from(name),
+                });
             }
         }
     }
@@ -7404,8 +6656,8 @@ fn build_indexed_call(
     let lowered_arguments = values.split_off(values.len() - argument_count);
     let callee = values.pop().expect("the callee's record");
     let receiver = match node {
-        IndexedCallNode::Call(call) => indexed_call_receiver(&call.callee),
-        IndexedCallNode::Tagged(tagged) => indexed_call_receiver(&tagged.tag),
+        IndexedCallNode::Call(call) => indexed_record_receiver(&call.callee),
+        IndexedCallNode::Tagged(tagged) => indexed_record_receiver(&tagged.tag),
         IndexedCallNode::New(_) => None,
     }
     .map(|_| Box::new(values.pop().expect("the receiver's record")));
@@ -7560,6 +6812,10 @@ fn indexed_value_step<'a>(
                 .with_predicate(signature.predicate),
             )))
         }
+        unwrapped if member_of_evaluated_value(unwrapped).is_some() => {
+            let (object, name) = member_of_evaluated_value(unwrapped).expect("the member read");
+            return IndexedValueStep::Member(object, name);
+        }
         unwrapped if value_type_derives_from_a_call(unwrapped, source) => {
             IndexedValueExpression::UnsupportedCall {
                 point: unwrapped.span().start,
@@ -7615,26 +6871,100 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
 /// so the eager arguments fix the call's type arguments first. The
 /// classification is purely structural over the authored parameter list — the
 /// lowered parameter type cannot express it, because an explicit `: any`
-/// lowers exactly like a missing annotation. Only a parenthesised wrapper is
-/// transparent.
+/// lowers exactly like a missing annotation. A function expression or an
+/// object literal method without an explicit `this` parameter is context
+/// sensitive whatever its parameters (its `this` is contextually typed),
+/// and a generic function never is.
+///
+/// The checker's `isContextSensitive` reaches through the expressions that
+/// hand their context on: an object literal is context sensitive when a
+/// property's value or a method is, an array literal when an element is,
+/// a conditional when a branch is, and `a || b` / `a ?? b` when an
+/// operand is. A parenthesised wrapper is transparent. Read from an
+/// explicit stack.
 pub fn indexed_context_sensitive(expr: Option<&Expression<'_>>) -> bool {
-    let mut expr = expr;
-    while let Some(Expression::ParenthesizedExpression(parenthesized)) = expr {
-        expr = Some(&parenthesized.expression);
+    let mut pending: Vec<&Expression<'_>> = expr.into_iter().collect();
+    while let Some(expr) = pending.pop() {
+        let params = match expr {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                pending.push(&parenthesized.expression);
+                continue;
+            }
+            // A generic function is not context sensitive
+            // (`hasContextSensitiveParameters`).
+            Expression::ArrowFunctionExpression(arrow) if arrow.type_parameters.is_some() => {
+                continue;
+            }
+            Expression::FunctionExpression(function) if function.type_parameters.is_some() => {
+                continue;
+            }
+            // An arrow function whose expression body is context sensitive
+            // is (`hasContextSensitiveReturnExpression`).
+            Expression::ArrowFunctionExpression(arrow) => {
+                if arrow.return_type.is_none() {
+                    if let Some(body) = arrow.get_expression() {
+                        pending.push(body);
+                    }
+                }
+                &arrow.params
+            }
+            // A function expression or method with no explicit `this`
+            // parameter has an implicit one its context types.
+            Expression::FunctionExpression(function) if function.this_param.is_none() => {
+                return true;
+            }
+            Expression::FunctionExpression(function) => &function.params,
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    if let ObjectPropertyKind::ObjectProperty(property) = property {
+                        // An accessor is no context-sensitive member.
+                        if matches!(property.kind, PropertyKind::Init) {
+                            pending.push(&property.value);
+                        }
+                    }
+                }
+                continue;
+            }
+            Expression::ArrayExpression(array) => {
+                pending.extend(
+                    array
+                        .elements
+                        .iter()
+                        .filter_map(|element| element.as_expression()),
+                );
+                continue;
+            }
+            Expression::ConditionalExpression(conditional) => {
+                pending.push(&conditional.consequent);
+                pending.push(&conditional.alternate);
+                continue;
+            }
+            Expression::LogicalExpression(logical)
+                if matches!(
+                    logical.operator,
+                    oxc_syntax::operator::LogicalOperator::Or
+                        | oxc_syntax::operator::LogicalOperator::Coalesce
+                ) =>
+            {
+                pending.push(&logical.left);
+                pending.push(&logical.right);
+                continue;
+            }
+            _ => continue,
+        };
+        if params
+            .items
+            .iter()
+            .any(|param| param.type_annotation.is_none())
+            || params
+                .rest
+                .as_ref()
+                .is_some_and(|rest| rest.type_annotation.is_none())
+        {
+            return true;
+        }
     }
-    let params = match expr {
-        Some(Expression::ArrowFunctionExpression(arrow)) => &arrow.params,
-        Some(Expression::FunctionExpression(function)) => &function.params,
-        _ => return false,
-    };
-    params
-        .items
-        .iter()
-        .any(|param| param.type_annotation.is_none())
-        || params
-            .rest
-            .as_ref()
-            .is_some_and(|rest| rest.type_annotation.is_none())
+    false
 }
 
 fn indexed_callee_and_receiver(
@@ -7642,7 +6972,7 @@ fn indexed_callee_and_receiver(
     source: &str,
     observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
-    let receiver = indexed_call_receiver(callee).map(|receiver| {
+    let receiver = indexed_record_receiver(callee).map(|receiver| {
         let mut read_root = IndexedValueReadRoot::NonBinding;
         let lowered = lower_indexed_value_expression_with_policy_and_read_root(
             receiver,
@@ -7662,7 +6992,7 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    match lower_nested_indexed_calls(IndexedCallNode::Call(call), source) {
+    match lower_nested_indexed_calls(IndexedNode::Call(IndexedCallNode::Call(call)), source) {
         IndexedValueExpression::Call(call) => call,
         _ => unreachable!("a call lowers to its call record"),
     }
@@ -7858,7 +7188,10 @@ fn lower_indexed_call_argument(
                 point: expression.span().start,
             }
         }
-        IndexedValueStep::Call(node) => lower_nested_indexed_calls(node, source),
+        IndexedValueStep::Call(node) => lower_nested_indexed_calls(IndexedNode::Call(node), source),
+        IndexedValueStep::Member(object, name) => {
+            lower_nested_indexed_calls(IndexedNode::Member(object, name), source)
+        }
     };
     if let Some(observe) = observe.as_mut() {
         observe(IndexedCallReadSite::Argument(ordinal), read_root);
@@ -7974,10 +7307,35 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>, source: &str) -> bool {
             Expression::CallExpression(_)
             | Expression::NewExpression(_)
             | Expression::TaggedTemplateExpression(_) => return true,
+            // A function value is its own frame, which the probe never
+            // enters: it answers at once, not after a containment scan of
+            // the body it skips (a callback nest's every level scanned the
+            // whole nest below it).
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+                return false
+            }
             _ => break,
         };
     }
     let mut probe = CallProbe::default();
-    verter_parser::oxc_parse::with_span_stack(source, expr.span(), || probe.visit_expression(expr));
-    probe.0
+    #[cfg(test)]
+    CALL_PROBE_SCANNED.with(|scanned| scanned.set(scanned.get() + expr.span().size() as usize));
+    // A walk refused its stack is taken as a call, the conservative answer;
+    // the operation around it is refused with the refusal.
+    verter_parser::oxc_parse::leased_span_walk(source, expr.span(), || probe.visit_expression(expr))
+        .map_or(true, |()| probe.0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The source bytes [`value_type_derives_from_a_call`]'s containment
+    /// scans read on this thread; test-only.
+    static CALL_PROBE_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The source bytes the call probe's containment scans read on this
+/// thread so far (test-only).
+#[cfg(test)]
+pub(crate) fn call_probe_scanned_bytes_for_tests() -> usize {
+    CALL_PROBE_SCANNED.with(std::cell::Cell::get)
 }

@@ -780,6 +780,7 @@ pub(super) struct TryEval<'r> {
     pre_finally: Option<FlowLayerState>,
     finally_break_base: usize,
     finally_return_base: usize,
+    finally_throw_base: usize,
     clause: Option<TryClause>,
     phase: TryPhase,
 }
@@ -808,7 +809,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return_base: self.return_edges.len(),
             saved_collect: self.collect_throw_points,
         };
-        self.collect_throw_points = collect_throws;
+        // The catch variable binds before the clause collects: binding it
+        // writes nothing the clause's exception flow can observe.
+        self.collect_throw_points = false;
         if let Some((param, declared)) = catch_param.filter(|(param, _)| {
             self.products
                 .contains_subject(&FlowProductSubject::Local(*param))
@@ -856,6 +859,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 false,
             );
         }
+        self.collect_throw_points = collect_throws;
         clause
     }
 
@@ -959,6 +963,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 pre_finally: None,
                 finally_break_base: 0,
                 finally_return_base: 0,
+                finally_throw_base: 0,
                 clause: Some(clause),
                 phase: TryPhase::Block,
             })),
@@ -998,14 +1003,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.throw_points[eval.throw_base..].to_vec()
                 };
                 if let Some(catch) = eval.catch {
-                    let mut catch_start = {
+                    let catch_start = {
                         let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
                             std::iter::once(&eval.entry)
                                 .chain(eval.block_throws.iter())
                                 .collect();
                         self.join_states(&incoming, &eval.entry.write_observation)
                     };
-                    self.flag_clause_type_changes(&mut catch_start, &writes.type_changes);
                     eval.try_writes = Some(writes);
                     let clause = self.begin_try_clause(
                         &catch_start,
@@ -1056,10 +1060,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => eval.entry.clone(),
         };
-        self.flag_clause_type_changes(&mut pre_finally, &try_writes.type_changes);
-        if let Some(catch_writes) = &eval.catch_writes {
-            self.flag_clause_type_changes(&mut pre_finally, &catch_writes.type_changes);
-        }
         if !eval.exit_states.is_empty() {
             self.flag_conditionally_defined_bindings(&mut pre_finally, &eval.exit_states);
         }
@@ -1102,10 +1102,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         normal_inputs.push(eval.entry.clone());
         for state in &mut normal_inputs {
             self.restore_clause_entry_narrowings(&eval.entry, &mut state.products);
-            self.flag_clause_type_changes(state, &try_writes.type_changes);
-            if let Some(written) = &eval.catch_writes {
-                self.flag_clause_type_changes(state, &written.type_changes);
-            }
         }
         let clause_throws = self.throw_points[eval.throw_base..].to_vec();
         let pending_exits: Vec<FlowLayerState> = self.break_exits[eval.break_base..]
@@ -1127,9 +1123,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         eval.finally_break_base = self.break_exits.len();
         eval.finally_return_base = self.return_edges.len();
+        eval.finally_throw_base = self.throw_points.len();
         eval.try_writes = Some(try_writes);
         eval.pre_finally = Some(pre_finally);
-        let clause = self.begin_try_clause(&finally_start, None, false);
+        // The finally clause's own writes are points an OUTER try's catch
+        // is entered from (the checker binds the finally block under the
+        // enclosing exception target).
+        let collect = self.collect_throw_points;
+        let clause = self.begin_try_clause(&finally_start, None, collect);
         eval.clause = Some(clause);
         eval.phase = TryPhase::Finally;
         BranchStep::Enter(Entered::Try(eval), finally)
@@ -1230,6 +1231,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.products.set_assignment(subject, cleared);
             }
         }
+        // A throw of the try / catch clauses continues to an OUTER try
+        // through the finally: it reaches the outer catch as the state the
+        // finally ends in (the checker's reduce label over the exception
+        // antecedents), or not at all when the finally cannot complete.
+        let finally_throws = self.throw_points.split_off(eval.finally_throw_base);
+        let clause_threw = self.throw_points.len() > eval.throw_base;
+        self.throw_points.truncate(eval.throw_base);
+        if clause_threw
+            && finally
+                .can_fall_through
+                .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+        {
+            self.throw_points.push(finally_end.clone());
+        }
+        self.throw_points.extend(finally_throws);
         if !finally
             .can_fall_through
             .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
@@ -1284,6 +1300,22 @@ pub(super) struct LoopEval<'r> {
     /// The converged pass's head, once the head analysis is done.
     converged: Option<FlowLayerState>,
     pass: Option<PassEval>,
+    /// The head-analysis passes run so far, each by the state it started
+    /// from. A pass is a function of its start state, so a later pass from
+    /// an equal state — another reference's, or the converged pass — takes
+    /// its outcome instead of running the body again (each nested loop
+    /// would otherwise run its body once per pass of every loop around it).
+    /// Owned by the loop statement's evaluation and released with it.
+    run: Vec<RunPass>,
+}
+
+/// A head-analysis pass of a loop: the state it started from, its outcome,
+/// and the side outputs it produced (set aside while the analysis goes on;
+/// taken back by a converged pass that reuses it).
+struct RunPass {
+    start: FlowLayerState,
+    pass: LoopPass,
+    tail: Option<LoopPassTail>,
 }
 
 /// The per-reference analysis of a loop's head
@@ -1310,6 +1342,12 @@ struct ReferenceHead {
     mark: Option<LoopPassMark>,
 }
 
+/// Whether two layer states are the same continuation
+/// ([`FlowProductStore::same_as`]) under the same write observation.
+fn same_layer_state(a: &FlowLayerState, b: &FlowLayerState) -> bool {
+    a.write_observation.same_as(&b.write_observation) && a.products.same_as(&b.products)
+}
+
 /// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]) between
 /// its regions.
 struct PassEval {
@@ -1322,12 +1360,17 @@ struct PassEval {
     tested: Option<FlowLayerState>,
     contributors: Vec<FlowContribution>,
     phase: PassPhase,
+    /// The dead path a body no path enters is evaluated on
+    /// ([`PassPhase::DeadBody`]), restored when the body is.
+    dead: Option<Box<DeadPath>>,
 }
 
 #[derive(Clone, Copy)]
 enum PassPhase {
     TestBefore,
     Body,
+    /// A body behind a literal `false` test, which no path enters.
+    DeadBody,
     Update,
     TestAfter,
 }
@@ -1361,6 +1404,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 head: None,
                 converged: None,
                 pass: None,
+                run: Vec::new(),
             })),
             &lowered.init,
         )
@@ -1415,13 +1459,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if eval.converged.is_some() {
             return self.finish_loop(eval, pass);
         }
-        // A reference's head pass: its head joins the entry with the
-        // pass's back edge.
-        let entry = eval.entry.as_ref().expect("the loop's entry state");
+        // A reference's head pass: its side outputs are set aside, and the
+        // pass is kept by the state it started from.
         let analysis = eval.head.as_mut().expect("the head analysis");
         let reference = analysis.references.pop().expect("the reference analysed");
-        self.rewind_loop_pass(reference.mark.as_ref().expect("the pass's mark"));
-        let products = match pass.back {
+        let tail = self.set_aside_loop_pass(reference.mark.as_ref().expect("the pass's mark"));
+        let back = pass.back.clone();
+        eval.run.push(RunPass {
+            start: reference.start.clone(),
+            pass,
+            tail: Some(tail),
+        });
+        self.take_reference_head(&mut eval, reference, back);
+        self.advance_loop_head(eval)
+    }
+
+    /// Take a reference's head from the back edge of the pass run for it:
+    /// its head joins the entry with that edge.
+    fn take_reference_head(
+        &mut self,
+        eval: &mut LoopEval<'_>,
+        reference: ReferenceHead,
+        back: Option<FlowLayerState>,
+    ) {
+        let entry = eval.entry.as_ref().expect("the loop's entry state");
+        let analysis = eval.head.as_mut().expect("the head analysis");
+        let products = match back {
             Some(back) => {
                 self.join_continuations(
                     &[entry.clone(), back],
@@ -1438,16 +1501,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(parent) => parent
                 .start
                 .products
-                .restore_reaching_from(carried, &products, None, true),
+                .restore_head_value_from(carried, &products),
             None => {
                 analysis
                     .head
                     .products
-                    .restore_reaching_from(carried, &products, None, true);
+                    .restore_head_value_from(carried, &products);
                 analysis.next_subject += 1;
             }
         }
-        self.advance_loop_head(eval)
     }
 
     /// The loop-head products of a carried reference known without a pass
@@ -1514,7 +1576,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 .expect("the reference analysed")
                                 .start
                                 .products
-                                .restore_reaching_from(&carried, &products, None, true);
+                                .restore_head_value_from(&carried, &products);
                         }
                         None => {
                             analysis.in_analysis.push(other);
@@ -1528,8 +1590,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     continue;
                 }
-                // Its dependency closure is analysed: its own pass runs.
+                // Its dependency closure is analysed: its own pass runs,
+                // unless a pass of this loop already ran from the same state.
                 analysis.in_analysis.pop();
+                let reused = eval
+                    .run
+                    .iter()
+                    .find(|run| same_layer_state(&run.start, &reference.start))
+                    .map(|run| run.pass.back.clone());
+                if let Some(back) = reused {
+                    let reference = analysis.references.pop().expect("the reference analysed");
+                    self.take_reference_head(&mut eval, reference, back);
+                    continue;
+                }
                 let mark = self.loop_pass_mark();
                 let start = reference.start.clone();
                 reference.mark = Some(mark);
@@ -1550,7 +1623,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         analysis
                             .head
                             .products
-                            .restore_reaching_from(&carried, &products, None, true);
+                            .restore_head_value_from(&carried, &products);
                         analysis.next_subject += 1;
                     }
                     None => {
@@ -1565,8 +1638,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 continue;
             }
-            // The head is known: the converged pass runs from it.
+            // The head is known: the converged pass runs from it — or, when
+            // a head-analysis pass started from this very state, is that
+            // pass, its side outputs put back.
             let head = eval.head.take().expect("the head analysis").head;
+            let reused = eval
+                .run
+                .iter()
+                .position(|run| run.tail.is_some() && same_layer_state(&run.start, &head));
+            if let Some(index) = reused {
+                let RunPass { pass, tail, .. } = eval.run.swap_remove(index);
+                let mut pass = pass;
+                pass.break_base = self.break_exits.len();
+                self.replay_loop_pass(tail.expect("the pass's side outputs"));
+                eval.run.clear();
+                eval.converged = Some(head);
+                return self.finish_loop(eval, pass);
+            }
+            eval.run.clear();
             eval.converged = Some(head.clone());
             let lowered = eval.lowered;
             let element = eval.element;
@@ -1621,6 +1710,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             tested: None,
             contributors: Vec::new(),
             phase: PassPhase::TestBefore,
+            dead: None,
             head,
         };
         self.restore_layer_state(pass.head.clone());
@@ -1682,19 +1772,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 pass.tested = Some(self.layer_state());
                 // A literal `false` test never enters the body: no path
                 // reaches it, and it contributes as unreachable code does.
+                // The body evaluates next, a frame of the run, on a dead
+                // path the pass restores when it is done.
                 if *constant == Some(false) {
-                    self.restore_narrowings(pass.narrow_mark);
-                    return PassStep::Done(self.eval_unreachable_region(&lowered.body).map(
-                        |contributors| LoopPass {
-                            contributors,
-                            back: None,
-                            test_edge: pass.tested,
-                            break_base: pass.break_base,
-                        },
-                    ));
+                    self.restore_narrowings(pass.narrow_mark.clone());
+                    pass.dead = Some(Box::new(self.open_dead_path(true)));
+                    pass.phase = PassPhase::DeadBody;
+                    return PassStep::Enter(pass, &lowered.body);
                 }
                 self.apply_guard_scoped(guard, true);
                 self.enter_loop_body(lowered, element, pass)
+            }
+            PassPhase::DeadBody => {
+                self.close_dead_path(*pass.dead.take().expect("the dead body's path"));
+                PassStep::Done(result.map(|contributors| LoopPass {
+                    contributors,
+                    back: None,
+                    test_edge: pass.tested,
+                    break_base: pass.break_base,
+                }))
             }
             PassPhase::Body => {
                 let contributors = match result {

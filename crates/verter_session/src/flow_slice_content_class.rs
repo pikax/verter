@@ -197,8 +197,11 @@ impl<'s> Lowerer<'s> {
                     });
                 }
                 ClassElement::PropertyDefinition(property) => {
-                    // A `#private` brand is not a type-level member.
-                    if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
+                    // A static `#private` member never lands on the
+                    // constructor type, as a declared class's does not.
+                    if property.r#static
+                        && matches!(property.key, PropertyKey::PrivateIdentifier(_))
+                    {
                         continue;
                     }
                     let Some(key) = self.class_member_key(&property.key, property.computed) else {
@@ -226,7 +229,7 @@ impl<'s> Lowerer<'s> {
                         is_static: property.r#static,
                         optional: property.optional,
                         readonly: property.readonly,
-                        visibility: class_member_visibility(property.accessibility),
+                        visibility: class_member_visibility(&property.key, property.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
                             declaration: Some(property.span.into()),
@@ -243,7 +246,9 @@ impl<'s> Lowerer<'s> {
                 // storage slot: to the type system, a property of its
                 // annotation, else its initializer's widened type.
                 ClassElement::AccessorProperty(property) => {
-                    if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
+                    if property.r#static
+                        && matches!(property.key, PropertyKey::PrivateIdentifier(_))
+                    {
                         continue;
                     }
                     let Some(key) = self.class_member_key(&property.key, property.computed) else {
@@ -269,7 +274,7 @@ impl<'s> Lowerer<'s> {
                         is_static: property.r#static,
                         optional: false,
                         readonly: false,
-                        visibility: class_member_visibility(property.accessibility),
+                        visibility: class_member_visibility(&property.key, property.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
                             declaration: Some(property.span.into()),
@@ -283,7 +288,7 @@ impl<'s> Lowerer<'s> {
                     }));
                 }
                 ClassElement::MethodDefinition(method) => {
-                    if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    if method.r#static && matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
                         continue;
                     }
                     // The constructor's accessibility is not part of the
@@ -292,7 +297,7 @@ impl<'s> Lowerer<'s> {
                     // constructor lowers alike.
                     if method.kind == MethodDefinitionKind::Constructor {
                         constructor_visibility
-                            .get_or_insert(class_member_visibility(method.accessibility));
+                            .get_or_insert(accessibility_visibility(method.accessibility));
                         let parameters = self.lower_class_constructor(
                             &method.value.params,
                             &own_binders,
@@ -485,7 +490,7 @@ impl<'s> Lowerer<'s> {
                     is_static: group.is_static,
                     optional: first.optional,
                     readonly: setter.is_none(),
-                    visibility: class_member_visibility(first.accessibility),
+                    visibility: class_member_visibility(&first.key, first.accessibility),
                     method_kind: None,
                     spans: verter_type_expr::MemberSpans {
                         declaration: Some(first.span.into()),
@@ -534,7 +539,7 @@ impl<'s> Lowerer<'s> {
                         is_static: group.is_static,
                         optional: method.optional,
                         readonly: false,
-                        visibility: class_member_visibility(method.accessibility),
+                        visibility: class_member_visibility(&method.key, method.accessibility),
                         method_kind: Some(verter_type_expr::ObjectMethodKind::Method),
                         spans: verter_type_expr::MemberSpans {
                             declaration: Some(method.span.into()),
@@ -549,10 +554,12 @@ impl<'s> Lowerer<'s> {
         }
     }
 
-    /// A class member's key: a static name, else the computed key's
-    /// value as a flow value of this frame (a numeric-literal key's name
-    /// is its NUMBER's, which only the value knows). `None` for a key form
-    /// that names no member (a `#private` brand).
+    /// A class member's key: a static name (an ECMAScript private name
+    /// keeps its `#`: a private member of this class alone, see
+    /// [`class_member_visibility`]), else the computed key's value as a
+    /// flow value of this frame (a numeric-literal key's name is its
+    /// NUMBER's, which only the value knows). `None` for a key form that
+    /// names no member.
     fn class_member_key(
         &mut self,
         key: &PropertyKey<'_>,
@@ -565,7 +572,9 @@ impl<'s> Lowerer<'s> {
             PropertyKey::StringLiteral(literal) => {
                 Some(SliceObjectKey::Static(Arc::from(literal.value.as_str())))
             }
-            PropertyKey::PrivateIdentifier(_) => None,
+            PropertyKey::PrivateIdentifier(name) => Some(SliceObjectKey::Static(Arc::from(
+                format!("#{}", name.name).as_str(),
+            ))),
             _ => {
                 let expression = key.as_expression()?;
                 Some(SliceObjectKey::Computed {
@@ -643,7 +652,7 @@ impl<'s> Lowerer<'s> {
                         is_static: false,
                         optional: parameter.optional,
                         readonly: parameter.readonly,
-                        visibility: class_member_visibility(parameter.accessibility),
+                        visibility: accessibility_visibility(parameter.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
                             declaration: Some(parameter.span.into()),
@@ -848,6 +857,8 @@ impl<'a> LeafCallScanner<'a> {
     /// [`Visit::visit_class`] without the `extends` value — the class
     /// lowering evaluates that one as a value of its own.
     fn visit_class_after_heritage(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        #[cfg(test)]
+        super::lowering_probe::scanned_class();
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
         self.nested_frame_nesting += 1;
@@ -871,8 +882,22 @@ impl<'a> LeafCallScanner<'a> {
     }
 }
 
-/// A class member's declared accessibility.
+/// A class member's accessibility: an ECMAScript private name is private
+/// whatever modifier it carries, so it relates only to its own declaration
+/// (the class's private brand) and is no key of the instance type.
 fn class_member_visibility(
+    key: &PropertyKey<'_>,
+    accessibility: Option<oxc_ast::ast::TSAccessibility>,
+) -> verter_type_expr::MemberVisibility {
+    if matches!(key, PropertyKey::PrivateIdentifier(_)) {
+        verter_type_expr::MemberVisibility::Private
+    } else {
+        accessibility_visibility(accessibility)
+    }
+}
+
+/// A declared accessibility modifier's visibility.
+fn accessibility_visibility(
     accessibility: Option<oxc_ast::ast::TSAccessibility>,
 ) -> verter_type_expr::MemberVisibility {
     match accessibility {

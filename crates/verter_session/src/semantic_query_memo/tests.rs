@@ -690,11 +690,14 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
     }));
     assert!(panicked.is_err(), "build must have unwound via panic");
 
-    // The thread-local recursion stack must be empty (RAII guard) so
+    // The unwound producer closed and its task retired (RAII guards), so
     // the same thread can query the same key without being flagged as
     // same-path recursion.
-    let is_empty = IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().is_empty());
-    assert!(is_empty, "recursion stack must be empty after panic");
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "the unwound producer's task must retire"
+    );
 
     // A subsequent call for the same key must not deadlock. It must
     // be free to start a fresh cold build (the in-flight entry was
@@ -10281,6 +10284,36 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
     assert!(
         !carrier_facts_reference_canonical(&facts, "/other.d.ts"),
         "an unrelated canonical must not match the contributor fact"
+    );
+}
+
+/// The fact-rail drain reaches an entry through a consumed result's
+/// receipt however deep the edited canonical sits: a change to the file a
+/// 1,024-level receipt chain bottoms out in reaches the entry holding its
+/// top, and a file no level names does not.
+#[test]
+fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
+    use crate::resolver_core::FactVersionRef;
+    let whole = |canonical: String| FactVersionRef::FileWholeHash {
+        canonical_id: canonical,
+        hash: [7u8; 16],
+    };
+    let mut receipt = verter_workspace::ResultReceipt::new(vec![whole("/deep/0.ts".into())]);
+    for level in 1..1_024 {
+        receipt = verter_workspace::ResultReceipt::new(vec![
+            FactVersionRef::Receipt(receipt),
+            whole(format!("/deep/{level}.ts")),
+        ]);
+    }
+    let facts = [FactVersionRef::Receipt(receipt)];
+    assert!(
+        carrier_facts_reference_canonical(&facts, "/deep/0.ts"),
+        "the deepest level's canonical must reach the entry"
+    );
+    assert!(carrier_facts_reference_canonical(&facts, "/deep/1023.ts"));
+    assert!(
+        !carrier_facts_reference_canonical(&facts, "/deep/unrelated.ts"),
+        "a canonical no level names must not reach the entry"
     );
 }
 

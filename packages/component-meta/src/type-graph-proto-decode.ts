@@ -180,6 +180,7 @@ const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
 const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
 const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
 const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
+const EXPANSION_REASON_CONNECTED_MEMORY_LIMIT = 15;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
@@ -227,6 +228,9 @@ const SURFACE_PARTIAL_REASON_BY_WIRE: Readonly<
   [SurfacePartialReason.FLOW_RETURN_UNINFERRED]: "flowReturnUninferred",
   [SurfacePartialReason.FLOW_RETURN_UNVERIFIED]: "flowReturnUnverified",
   [SurfacePartialReason.FLOW_RETURN_NO_SURFACE]: "flowReturnNoSurface",
+  [SurfacePartialReason.UNDECIDED_CONDITIONAL]: "undecidedConditional",
+  [SurfacePartialReason.CONNECTED_MEMORY_LIMIT]: "connectedMemoryLimit",
+  [SurfacePartialReason.OPERATION_BUDGET]: "operationBudget",
 };
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;
@@ -1053,6 +1057,7 @@ function decodeResolutionDiagnosticKind(
     "cyclicInstantiation",
     "instantiationError",
     "emptyUnionArm",
+    "connectedMemoryLimit",
   ] as const;
   const kind = kinds[value - 1];
   if (!kind) {
@@ -2299,7 +2304,8 @@ function decodeExpansionStopReason(
   | "cyclicReference"
   | "cyclicInstantiation"
   | "instantiationError"
-  | "emptyUnionArm" {
+  | "emptyUnionArm"
+  | "connectedMemoryLimit" {
   switch (value) {
     case EXPANSION_REASON_BUDGET_EXCEEDED:
       return "budgetExceeded";
@@ -2329,6 +2335,8 @@ function decodeExpansionStopReason(
       return "projectionWorkLimit";
     case EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT:
       return "connectedQueryDepthLimit";
+    case EXPANSION_REASON_CONNECTED_MEMORY_LIMIT:
+      return "connectedMemoryLimit";
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }

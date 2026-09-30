@@ -91,11 +91,55 @@ struct LazyResolutionCacheKey {
     population: ResolutionPopulation,
 }
 
+/// Bound on the overlay lane's slot count; oldest slot evicted first.
+pub(crate) const OVERLAY_LANE_SLOT_CAP: usize = 4096;
+
+/// Whose answers a resolution candidate belongs to.
+///
+/// A request overlay that changes a resolution fact answers in its own
+/// lane, so an overlay answer never occupies — or evicts from — a slot the
+/// workspace reads. Every overlay shares that one lane: its candidates are
+/// told apart by their witnesses (an overlay-changed fact is versioned in
+/// the overlay's own version space), never by an overlay identity in the
+/// key, so a request whose overlay leaves a query's facts alone reuses the
+/// answer another request's overlay produced. What an overlay identity
+/// DOES decide is residency: a lane candidate lives while an overlay
+/// authority that produced or reused it lives (see
+/// [`crate::overlay_residency`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ResolutionLane {
+    Workspace,
+    /// An overlay-lane candidate, with its admission sequence number.
+    RequestOverlay(u64),
+}
+
+/// The overlay lane: overlay answers held by the overlay authorities that
+/// produced or reused them, bounded per slot and in slots.
+type OverlayLane =
+    crate::overlay_residency::AuthorityHeld<LazyResolutionCacheKey, LazyResolutionCacheEntry>;
+
 #[derive(Debug, Clone)]
 struct LazyResolutionCacheEntry {
     result: Option<ResolveResult>,
     query: ResolutionQueryKey,
     signature: crate::ReadSetSignature,
+}
+
+impl LazyResolutionCacheEntry {
+    /// The bytes one retained overlay-lane candidate holds under `key`.
+    fn retained_bytes(&self, key: &LazyResolutionCacheKey) -> usize {
+        let result = self.result.as_ref().map_or(0, |result| {
+            result.source_id.len() + result.provider_id.len() + result.provider_specifier.len()
+        });
+        let facts =
+            self.signature.facts.len() * (std::mem::size_of::<crate::FactVersionRef>() + 64);
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<LazyResolutionCacheKey>()
+            + key.importer_id.len()
+            + key.specifier.len()
+            + result
+            + facts
+    }
 }
 
 /// Admission state shared by one bounded resolution operation. Keeping the
@@ -106,6 +150,17 @@ pub(crate) struct ResolutionOperation<'a> {
     expected_published: Option<&'a Arc<crate::published_state::PublishedRoot>>,
     input_ledger: &'a mut crate::resolver::InputResolutionLedger,
     final_validate: &'a dyn Fn() -> bool,
+    /// The request overlay this operation resolves through, if any. A
+    /// required part of the operation rather than a reader hook: the Engine
+    /// composes the overlay reader itself, so no wrapper around a reader
+    /// can drop the overlay and have its answers versioned as the
+    /// workspace values they replace.
+    overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
+    /// The caller's cancellation, checked while this operation waits on a
+    /// concurrent identical query's flight: a cancelled caller detaches
+    /// from the flight (the producer runs on for its other subscribers)
+    /// and returns a typed `Cancelled` refusal.
+    cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> ResolutionOperation<'a> {
@@ -118,10 +173,12 @@ impl<'a> ResolutionOperation<'a> {
             expected_published: Some(expected_published),
             input_ledger,
             final_validate,
+            overlay: None,
+            cancelled: None,
         }
     }
 
-    fn unpinned(
+    pub(crate) fn unpinned(
         input_ledger: &'a mut crate::resolver::InputResolutionLedger,
         final_validate: &'a dyn Fn() -> bool,
     ) -> Self {
@@ -129,8 +186,42 @@ impl<'a> ResolutionOperation<'a> {
             expected_published: None,
             input_ledger,
             final_validate,
+            overlay: None,
+            cancelled: None,
         }
     }
+
+    /// Resolve through `overlay`'s effective view. An empty overlay is the
+    /// workspace view itself.
+    pub(crate) fn over(
+        mut self,
+        overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
+    ) -> Self {
+        self.overlay = overlay.filter(|overlay| !overlay.is_empty());
+        self
+    }
+
+    /// Let the caller's cancellation detach this operation from a flight it
+    /// waits on.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn cancelled_by(mut self, cancelled: &'a dyn Fn() -> bool) -> Self {
+        self.cancelled = Some(cancelled);
+        self
+    }
+}
+
+/// The identity a resolution flight coalesces on: the complete query slot
+/// and the execution domain (the workspace view, or a request overlay that
+/// changes a fact). Overlay flights coalesce across overlays because every
+/// subscriber validates the delivered candidate against its own world.
+type ResolutionFlightKey = (LazyResolutionCacheKey, bool);
+
+/// What a completed flight delivers: the candidate its producer admitted,
+/// with the lane it was retained in.
+#[derive(Debug)]
+struct FlightDelivery {
+    lane: ResolutionLane,
+    entry: LazyResolutionCacheEntry,
 }
 
 /// One bounded multi-candidate resolution slot.
@@ -200,6 +291,11 @@ impl SessionResolutionDomain {
 
 struct CapturedResolutionFence {
     base_epoch: ResolutionEpoch,
+    /// The content generation the capture read under its stable epoch: a
+    /// content transition recorded past it, on a canonical the attempt
+    /// observed, changed an input the attempt read even when no resolution
+    /// fact has advanced yet (the refresh is lazy).
+    content_generation: u64,
     session_epoch: Option<ResolutionEpoch>,
     session_domain: Option<Arc<SessionResolutionDomain>>,
     world: Arc<CapturedResolutionWorld>,
@@ -400,6 +496,27 @@ pub(crate) struct Engine {
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
     lazy_resolution_cache: RwLock<FxHashMap<LazyResolutionCacheKey, LazyResolutionCandidates>>,
+    /// The overlay lane (see [`ResolutionLane`]): overlay answers, each held
+    /// by the overlay authorities that produced or reused it and released
+    /// with the last of them, charged to the installed retention account,
+    /// and bounded at [`CANDIDATE_CAP`] per slot and
+    /// [`OVERLAY_LANE_SLOT_CAP`] slots. Its lock is a leaf: nothing else is
+    /// acquired while it is held.
+    overlay_lane: Arc<OverlayLane>,
+    /// Versions of overlay values with no exact encoding, held and released
+    /// the same way as the overlay lane
+    /// ([`crate::resolution_currency::OVERLAY_VALUE_VERSIONS_CAP`] values).
+    /// Every world this Engine captures carries it. Its lock is a leaf.
+    overlay_values: Arc<crate::resolution_currency::OverlayValueVersions>,
+    /// The host's aggregate retention account, once installed; the overlay
+    /// lane and value table charge their entries to it.
+    retention: Arc<crate::overlay_residency::RetentionHook>,
+    /// Cold resolutions in flight, one per query slot and execution domain
+    /// (see [`crate::resolution_flights`]). Request-scoped: a flight lives
+    /// from its claim to its producer's settlement, so the registry holds
+    /// at most one entry per concurrently resolving query. Its lock is a
+    /// leaf; no wait happens under any Engine lock.
+    flights: crate::resolution_flights::ResolutionFlights<ResolutionFlightKey, FlightDelivery>,
     /// Per-canonical pending-evidence ledger: canonicals whose content
     /// transitioned through [`Self::bump_content_generation_for`] and whose
     /// resolution-visible evidence has not been re-observed yet. The bump
@@ -590,12 +707,25 @@ impl Engine {
         ));
         let mut resolution_sessions = FxHashMap::default();
         resolution_sessions.insert(default_resolution_session, default_session_domain);
+        let retention = Arc::new(crate::overlay_residency::RetentionHook::default());
         let engine = Self {
             input_resolution_budgets,
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
             lazy_resolution_cache: RwLock::new(FxHashMap::default()),
+            overlay_lane: Arc::new(OverlayLane::new(
+                Arc::clone(&retention),
+                CANDIDATE_CAP,
+                OVERLAY_LANE_SLOT_CAP,
+            )),
+            overlay_values: Arc::new(crate::resolution_currency::OverlayValueVersions::new(
+                Arc::clone(&retention),
+                1,
+                crate::resolution_currency::OVERLAY_VALUE_VERSIONS_CAP,
+            )),
+            retention,
+            flights: crate::resolution_flights::ResolutionFlights::default(),
             pending_resolution_refresh: RwLock::new(rustc_hash::FxHashSet::default()),
             evidence_verified_generation: RwLock::new(FxHashMap::default()),
             content_generation: AtomicU64::new(1),
@@ -1011,6 +1141,8 @@ impl Engine {
         );
         self.resolution_epoch
             .store(stable.wrapping_add(1), Ordering::Release);
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::WorldWriteHeld);
 
         struct RestoreEpoch<'a> {
             epoch: &'a AtomicU64,
@@ -2164,6 +2296,9 @@ impl Engine {
                 continue;
             }
             let base = self.resolution_world.load_full();
+            // Content transitions are recorded inside a world write, so a
+            // read between two equal stable epochs is the capture's own.
+            let content_generation = self.current_content_generation();
             let (session_domain, session_epoch, session) = match population {
                 ResolutionPopulation::Base => (None, None, None),
                 ResolutionPopulation::Session(fingerprint) => {
@@ -2187,12 +2322,15 @@ impl Engine {
             if base_before == base_after && base_after.is_stable() {
                 return Some(CapturedResolutionFence {
                     base_epoch: base_after,
+                    content_generation,
                     session_epoch,
                     session_domain,
                     world: Arc::new(CapturedResolutionWorld {
                         base,
                         session,
                         population,
+                        overlay: None,
+                        overlay_values: Some(Arc::clone(&self.overlay_values)),
                     }),
                 });
             }
@@ -2236,39 +2374,75 @@ impl Engine {
     /// live", so the workspace-symbol frontier never completes and rename
     /// silently returns no edits.
     ///
-    /// Bounded: the optimistic yields keep the uncontended path lock-free,
-    /// then one timed rendezvous on the publication gate distinguishes a slow
-    /// publisher from a stuck one. Every session writer holds the base gate
-    /// for its whole publication too, so acquiring that gate pins both epochs
-    /// without needing a second lock.
+    /// The optimistic yields keep the uncontended path lock-free; a writer
+    /// still inside its window after them is WAITED on, by taking the
+    /// publication gate it holds, never turned into a refusal: however long a
+    /// descheduled publisher takes, the world it leaves is the one to
+    /// capture. Every writer holds the base gate for its whole publication
+    /// (session writers included), so under that gate both epochs are stable
+    /// and the capture cannot fail. No caller holds the gate here: captures
+    /// begin attempts, and an attempt takes the gate only for its admission.
     fn capture_stable_resolution_world(
         &self,
         population: ResolutionPopulation,
-    ) -> Option<CapturedResolutionFence> {
+    ) -> CapturedResolutionFence {
         const CAPTURE_YIELDS: usize = 1024;
-        const CAPTURE_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-        self.capture_stable_resolution_world_with_policy(
-            population,
-            CAPTURE_YIELDS,
-            CAPTURE_GATE_WAIT,
-        )
-    }
-
-    fn capture_stable_resolution_world_with_policy(
-        &self,
-        population: ResolutionPopulation,
-        optimistic_yields: usize,
-        gate_wait: std::time::Duration,
-    ) -> Option<CapturedResolutionFence> {
-        for _ in 0..optimistic_yields {
+        for _ in 0..CAPTURE_YIELDS {
             if let Some(captured) = self.capture_resolution_world(population) {
-                return Some(captured);
+                return captured;
             }
             std::thread::yield_now();
         }
-
-        let _publication = self.resolution_world_write.try_lock_for(gate_wait)?;
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::PublicationGateWait);
+        let _publication = self.resolution_world_write.lock();
         self.capture_resolution_world(population)
+            .expect("no world writer is inside its window while the publication gate is held")
+    }
+
+    /// The fence an attempt admits under, decided while the caller holds the
+    /// publication gate (every writer is out of its window): the captured
+    /// fence while its world is still current, else the latest coherent
+    /// world when every fact the attempt observed still holds there — an
+    /// advance that touched nothing this attempt read is compatible, and
+    /// admitting into it reruns nothing. `None` when an observed fact
+    /// changed, or the request overlay's lane did: a genuine conflict.
+    fn admission_fence_under_gate(
+        &self,
+        captured: &CapturedResolutionFence,
+        population: ResolutionPopulation,
+        request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        transaction: &ResolutionTransaction,
+    ) -> Option<CapturedResolutionFence> {
+        if self.resolution_world_still_current(captured) {
+            return Some(CapturedResolutionFence {
+                base_epoch: captured.base_epoch,
+                content_generation: captured.content_generation,
+                session_epoch: captured.session_epoch,
+                session_domain: captured.session_domain.clone(),
+                world: Arc::clone(&captured.world),
+            });
+        }
+        let mut latest = self.capture_resolution_world(population)?;
+        if let Some(overlay) = request_overlay {
+            latest.world = overlay.effective_world(&latest.world);
+        }
+        if latest.world.composes_request_overlay() != captured.world.composes_request_overlay() {
+            return None;
+        }
+        // An input the attempt read whose content transitioned since the
+        // capture is a genuine change, even before its lazy refresh advances
+        // a fact.
+        if latest.content_generation != captured.content_generation
+            && transaction.observed_canonicals().any(|canonical| {
+                self.last_content_transition_generation(canonical) > captured.content_generation
+            })
+        {
+            return None;
+        }
+        transaction
+            .observations_hold_in(&latest.world)
+            .then_some(latest)
     }
 
     fn resolution_world_still_current(&self, captured: &CapturedResolutionFence) -> bool {
@@ -2439,6 +2613,70 @@ impl Engine {
             .map_or(0, |slot| slot.len())
     }
 
+    /// [`Self::lazy_resolution_slot_len_for_test`] for the overlay lane.
+    #[cfg(test)]
+    pub(crate) fn overlay_resolution_slot_len_for_test(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        context: verter_semantic::resolver_core::ResolutionContext,
+        population: ResolutionPopulation,
+    ) -> usize {
+        self.overlay_lane
+            .items(&LazyResolutionCacheKey {
+                importer_id: importer_id.to_owned(),
+                specifier: specifier.to_owned(),
+                phase: context.phase,
+                kind: context.kind,
+                population,
+            })
+            .len()
+    }
+
+    /// Subscribers waiting on the flight of one query slot and domain.
+    #[cfg(test)]
+    pub(crate) fn flight_subscribers_for_test(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        context: verter_semantic::resolver_core::ResolutionContext,
+        population: ResolutionPopulation,
+        overlay_domain: bool,
+    ) -> usize {
+        self.flights.subscribers(&(
+            LazyResolutionCacheKey {
+                importer_id: importer_id.to_owned(),
+                specifier: specifier.to_owned(),
+                phase: context.phase,
+                kind: context.kind,
+                population,
+            },
+            overlay_domain,
+        ))
+    }
+
+    /// Candidates the overlay lane holds, across every slot.
+    #[cfg(test)]
+    pub(crate) fn overlay_lane_item_count_for_test(&self) -> usize {
+        self.overlay_lane.item_count()
+    }
+
+    /// Entries in the overlay lane's and value table's eviction queues.
+    #[cfg(test)]
+    pub(crate) fn overlay_residency_queue_len_for_test(&self) -> usize {
+        self.overlay_lane.queue_len() + self.overlay_values.queue_len()
+    }
+
+    /// Install the host's aggregate retention account: from here on the
+    /// overlay lane and the overlay value table charge each entry they
+    /// retain to it, and retain nothing it refuses.
+    pub(crate) fn install_resolution_retention(
+        &self,
+        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+    ) {
+        self.retention.install(account);
+    }
+
     /// Load the current published state (lock-free).
     ///
     /// Always returns `Some` after `Engine::new()`. Check
@@ -2453,8 +2691,13 @@ impl Engine {
         let edges = self.edges.read();
         let package_index = self.package_index.read();
         let published = self.load_published();
+        let resolution_slots = self.lazy_resolution_cache.read().len();
 
         WorkspaceResourceSnapshot {
+            resolution_slots,
+            overlay_resolution_slots: self.overlay_lane.len(),
+            overlay_value_versions: self.overlay_values.len(),
+            resolution_flights: self.flights.len(),
             overlay_entries: overlay.len(),
             overlay_bytes: overlay.approx_bytes(),
             snapshot_entries: snapshot.len(),
@@ -3020,6 +3263,7 @@ impl Engine {
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+        request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         signature: &crate::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
@@ -3096,8 +3340,12 @@ impl Engine {
         for canonical in &targets {
             let canonical = canonical.as_ref();
             // An overlay-shadowed canonical's reader observation is
-            // overlay-effective; it must not overwrite base evidence.
-            if self.overlay.read().has_overlay(canonical) {
+            // overlay-effective; it must not overwrite base evidence —
+            // whether the editor overlay or the reader's request overlay
+            // shadows it.
+            if self.overlay.read().has_overlay(canonical)
+                || request_overlay.is_some_and(|overlay| overlay.covers(canonical))
+            {
                 continue;
             }
             let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
@@ -3357,8 +3605,19 @@ impl Engine {
             expected_published,
             input_ledger,
             final_validate,
+            overlay: request_overlay,
+            cancelled,
         } = operation;
         crate::probe_scope!(RESOLVE_IN_PUBLISHED);
+        let overlay_reader;
+        let reader: &dyn crate::traits::WorkspaceRead = match request_overlay {
+            Some(overlay) => {
+                overlay_reader =
+                    crate::resolution_currency::OverlaySnapshotReader::new(reader, overlay);
+                &overlay_reader
+            }
+            None => reader,
+        };
         let population = reader.resolution_population();
         let cache_key = LazyResolutionCacheKey {
             importer_id: importer_id.to_string(),
@@ -3367,21 +3626,30 @@ impl Engine {
             kind: ctx.kind,
             population,
         };
-        let request_local_snapshot = reader.resolution_snapshot_is_request_local();
+        // This demand's lease on its query's flight, once it leads one: held
+        // across retries and settled (completed or abandoned) on return.
+        let mut flight_lease = None;
         loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
-            let captured = {
+            #[cfg(test)]
+            resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
+            let mut captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
-            let Some(captured) = captured else {
-                #[cfg(test)]
-                resolution_test_hooks::record_return_only();
-                return ResolutionOutcome::refused(
-                    None,
-                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-                );
-            };
+            // A request overlay answers from its own effective world: every
+            // fact it changes is versioned in the overlay's version space, so
+            // the witness this attempt records never passes for the
+            // workspace value the overlay replaced.
+            if let Some(overlay) = request_overlay {
+                captured.world = overlay.effective_world(&captured.world);
+            }
+            // An overlay that changes no resolution fact of this world
+            // resolves exactly as the workspace does — every value the
+            // reader returns is the workspace's — so it answers in the
+            // workspace lane, publishing and reusing workspace decisions.
+            // Only an overlay that changes a fact answers in its own lane.
+            let overlay_lane = captured.world.composes_request_overlay();
             if expected_published.is_some_and(|expected| {
                 !captured
                     .world
@@ -3410,17 +3678,30 @@ impl Engine {
             transaction.lock().observe(exact_fact.clone());
             let observed_exact_version = captured.world.fact_version(&exact_fact);
 
-            let candidates: LazyResolutionCandidates = {
+            // The workspace slot always; the overlay lane's slot too under an
+            // overlay that changes a fact. A workspace candidate is reused
+            // under an overlay only when its witness validates against the
+            // overlay's effective world — every fact it observed, negative
+            // probes included, still holds with the overlay in place.
+            let candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> = {
                 crate::probe_scope!(RESOLVE_CANDIDATE_READ);
-                if request_local_snapshot {
-                    LazyResolutionCandidates::new()
-                } else {
+                let mut candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> =
                     self.lazy_resolution_cache
                         .read()
                         .get(&cache_key)
-                        .cloned()
-                        .unwrap_or_default()
+                        .into_iter()
+                        .flatten()
+                        .map(|entry| (ResolutionLane::Workspace, entry.clone()))
+                        .collect();
+                if overlay_lane {
+                    candidates.extend(
+                        self.overlay_lane
+                            .items(&cache_key)
+                            .into_iter()
+                            .map(|(seq, entry)| (ResolutionLane::RequestOverlay(seq), entry)),
+                    );
                 }
+                candidates
             };
             // Every retained candidate is screened against the captured
             // world's exact fact, not just the most recent one: a slot that
@@ -3430,7 +3711,7 @@ impl Engine {
             let mut rejected_exact_targets = Vec::new();
             {
                 crate::probe_scope!(RESOLVE_SCREEN_EXACT);
-                for candidate in candidates.iter() {
+                for (_, candidate) in candidates.iter() {
                     let candidate_exact_version =
                         candidate.signature.resolution_fact_version(&exact_fact);
                     if candidate_exact_version.is_some()
@@ -3477,6 +3758,7 @@ impl Engine {
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ProjectSelection);
 
             let mut reused = false;
+            let mut restated_witness = false;
             let mut publish_candidate = false;
 
             // Reader-driven evidence refresh for the retained candidates' own
@@ -3485,9 +3767,13 @@ impl Engine {
             let mut refreshed = false;
             {
                 crate::probe_scope!(RESOLVE_REFRESH_EVID);
-                for entry in candidates.iter() {
-                    refreshed |=
-                        self.refresh_resolution_evidence(reader, evidence, &entry.signature);
+                for (_, entry) in candidates.iter() {
+                    refreshed |= self.refresh_resolution_evidence(
+                        reader,
+                        evidence,
+                        request_overlay,
+                        &entry.signature,
+                    );
                 }
             }
             if refreshed {
@@ -3512,53 +3798,112 @@ impl Engine {
             // exact change invalidates the candidate through the same rail
             // as any other resolution input, and the recomputed result —
             // exact or resolver-derived — republishes through the same slot.
-            let reusable = {
-                crate::probe_scope!(RESOLVE_REUSE_FIND);
-                candidates.iter().find(|entry| {
-                    let candidate_context = {
-                        crate::probe_scope!(RESOLVE_REUSE_CTX);
-                        Self::complete_provider_context(
-                            captured.world.base.as_ref(),
-                            selected_context.clone(),
-                            entry.result.as_ref(),
-                            population,
-                            &transaction,
-                        )
-                    };
-                    let Some(candidate_context) = candidate_context else {
-                        return false;
-                    };
-                    let query_matches = {
-                        crate::probe_scope!(RESOLVE_REUSE_QUERY);
-                        let query = ResolutionQueryKey::importer(
-                            importer_id,
-                            specifier,
-                            ctx,
-                            candidate_context,
-                            population,
-                        );
-                        entry.query == query
-                    };
-                    if !query_matches {
-                        return false;
-                    }
-                    crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
-                    entry.signature.validates(captured.world.as_ref())
-                })
+            let reusable_for_this_view = |entry: &LazyResolutionCacheEntry| {
+                let candidate_context = {
+                    crate::probe_scope!(RESOLVE_REUSE_CTX);
+                    Self::complete_provider_context(
+                        captured.world.base.as_ref(),
+                        selected_context.clone(),
+                        entry.result.as_ref(),
+                        population,
+                        &transaction,
+                    )
+                };
+                let Some(candidate_context) = candidate_context else {
+                    return false;
+                };
+                let query_matches = {
+                    crate::probe_scope!(RESOLVE_REUSE_QUERY);
+                    let query = ResolutionQueryKey::importer(
+                        importer_id,
+                        specifier,
+                        ctx,
+                        candidate_context,
+                        population,
+                    );
+                    entry.query == query
+                };
+                if !query_matches {
+                    return false;
+                }
+                crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
+                // A witness the declared evidence source cannot
+                // re-observe is not a witness this attempt may stand
+                // on. See `witness_evidence_is_unenumerable`.
+                entry.signature.validates(captured.world.as_ref())
+                    && !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
             };
-            // A witness the declared evidence source cannot re-observe is
-            // not a witness this attempt may stand on. See
-            // `witness_evidence_is_unenumerable`.
-            let reusable = reusable.filter(|entry| {
-                !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
-            });
-            let result = if let Some(entry) = reusable {
+            let mut reusable: Option<(ResolutionLane, LazyResolutionCacheEntry)> = {
+                crate::probe_scope!(RESOLVE_REUSE_FIND);
+                candidates
+                    .iter()
+                    .find(|(_, entry)| reusable_for_this_view(entry))
+                    .cloned()
+            };
+            // A cold query that can admit joins the flight of an identical
+            // concurrent demand instead of running the producer again —
+            // unless it leads the flight already (a retry of its own). A
+            // delivered candidate is adopted only when it validates for THIS
+            // view; otherwise this demand resolves for itself.
+            if reusable.is_none()
+                && exact.is_none()
+                && flight_lease.is_none()
+                && reader.resolution_event_bridge_complete()
+            {
+                match self.flights.claim(&(cache_key.clone(), overlay_lane)) {
+                    crate::resolution_flights::FlightClaim::Lead(lease) => {
+                        flight_lease = Some(lease);
+                    }
+                    crate::resolution_flights::FlightClaim::Direct => {}
+                    crate::resolution_flights::FlightClaim::Join(subscription) => {
+                        match subscription.wait(cancelled) {
+                            crate::resolution_flights::FlightOutcome::Delivered(delivery) => {
+                                if reusable_for_this_view(&delivery.entry) {
+                                    reusable = Some((delivery.lane, delivery.entry.clone()));
+                                }
+                            }
+                            crate::resolution_flights::FlightOutcome::Abandoned => continue,
+                            crate::resolution_flights::FlightOutcome::Detached => {
+                                return ResolutionOutcome::refused(
+                                    None,
+                                    verter_audit::NonAdmissionReason::Cancelled,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let result = if let Some((lane, entry)) = reusable.as_ref() {
                 // The DAG's reuse seam. The reused candidate's signature
                 // is NOT folded in: the outcome roots on this query's own
                 // decision node, whose version reverse propagation keeps
                 // honest, so a warm answer no longer restates every leaf
                 // the candidate transitively touched.
-                transaction.lock().set_query(entry.query.clone());
+                //
+                // Unless no such node speaks for this view: an overlay-lane
+                // candidate has none, and a workspace decision the overlay
+                // reaches reads as moved. Such a reuse restates the
+                // candidate's own witness — just validated against this
+                // world — instead.
+                //
+                // An overlay-lane candidate reused by this request is held by
+                // this request's overlay authority from here on, so it lives
+                // while any overlay still using it lives.
+                if let (ResolutionLane::RequestOverlay(seq), Some(overlay)) =
+                    (*lane, request_overlay)
+                {
+                    self.overlay_lane
+                        .adopt(&cache_key, seq, overlay.authority());
+                }
+                let mut transaction = transaction.lock();
+                transaction.set_query(entry.query.clone());
+                let node = ResolutionFactKey::decision(entry.query.clone());
+                if matches!(lane, ResolutionLane::RequestOverlay(_))
+                    || captured.world.request_overlay_reaches(&node)
+                {
+                    transaction.adopt_witness(&entry.signature);
+                    restated_witness = true;
+                }
                 reused = true;
                 entry.result.clone()
             } else {
@@ -3666,53 +4011,58 @@ impl Engine {
                     ));
                 }
             }
+            // Admission is decided once, under the publication gate below: a
+            // world that moved since this attempt's capture is checked for
+            // compatibility there, and a writer still inside its window is
+            // waited on by taking the gate, never charged as a superseded
+            // world.
             #[cfg(test)]
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        rejected_exact_targets,
-                        true,
-                        false,
-                        false,
-                    );
-                }
-                continue;
-            }
 
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::RequestCompletion);
 
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
+            let session_domain = captured.session_domain.clone();
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::PublicationGateWait,
+            );
             let (_publication, _session_publication) = {
                 crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
                     self.resolution_world_write.lock(),
-                    captured
-                        .session_domain
-                        .as_ref()
-                        .map(|domain| domain.write.lock()),
+                    session_domain.as_ref().map(|domain| domain.write.lock()),
                 )
             };
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        rejected_exact_targets,
-                        true,
-                        false,
-                        false,
-                    );
+            let admission_fence = self.admission_fence_under_gate(
+                &captured,
+                population,
+                request_overlay,
+                &transaction.lock(),
+            );
+            match admission_fence {
+                Some(latest) => {
+                    transaction.lock().rebase_onto(Arc::clone(&latest.world));
+                    captured = latest;
                 }
-                continue;
+                None => {
+                    let tracked = TransactionReader::new(reader, &transaction);
+                    if input_ledger.charge_outer_restart(&tracked).is_err() {
+                        return ResolutionOutcome::new(
+                            None,
+                            transaction.into_inner().finish(),
+                            rejected_exact_targets,
+                            true,
+                            false,
+                            false,
+                        );
+                    }
+                    continue;
+                }
             }
             if !final_validate() {
                 input_ledger.release_applied_outputs();
@@ -3756,7 +4106,7 @@ impl Engine {
                 );
             }
             if publish_candidate
-                && !request_local_snapshot
+                && !overlay_lane
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
                 && {
                     crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
@@ -3798,19 +4148,53 @@ impl Engine {
                     .import_resolution_cache_miss_count
                     .fetch_add(1, Ordering::Relaxed);
             }
-            if publish_candidate && !request_local_snapshot {
+            // What this demand's flight delivers to its subscribers: the
+            // candidate it admitted — retained or not, it is a complete
+            // answer each subscriber may validate for its own view.
+            let mut delivery = None;
+            if publish_candidate && overlay_lane {
+                // An overlay answer enters the overlay lane with its own
+                // witness and no decision node: the decision graph is the
+                // workspace's, and a node for an overlay answer would be a
+                // workspace fact the workspace cannot see. It is held by this
+                // request's overlay authority and charged to the retention
+                // account; a refused charge serves the answer uncached.
+                if let (Some(signature), Some(query), Some(overlay)) =
+                    (cacheable_signature, query.clone(), request_overlay)
+                {
+                    crate::probe_scope!(RESOLVE_ADMIT);
+                    let entry = LazyResolutionCacheEntry {
+                        result: result.clone(),
+                        query,
+                        signature,
+                    };
+                    let bytes = entry.retained_bytes(&cache_key);
+                    let seq = self.overlay_lane.insert(
+                        cache_key.clone(),
+                        entry.clone(),
+                        bytes,
+                        overlay.authority(),
+                    );
+                    published = seq.is_some();
+                    delivery = Some(FlightDelivery {
+                        lane: ResolutionLane::RequestOverlay(seq.unwrap_or(0)),
+                        entry,
+                    });
+                }
+            } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
                     crate::probe_scope!(RESOLVE_ADMIT);
+                    let entry = LazyResolutionCacheEntry {
+                        result: result.clone(),
+                        query: query.clone(),
+                        signature,
+                    };
                     let evicted = admit_resolution_candidate(
                         self.lazy_resolution_cache
                             .write()
                             .entry(cache_key.clone())
                             .or_default(),
-                        LazyResolutionCacheEntry {
-                            result: result.clone(),
-                            query: query.clone(),
-                            signature,
-                        },
+                        entry.clone(),
                     );
                     // The candidate, its decision node and the removal of
                     // every aged-out sibling's decision all land under the
@@ -3822,6 +4206,18 @@ impl Engine {
                     }
                     self.publish_resolution_decision(&captured, query, direct_edges);
                     published = true;
+                    delivery = Some(FlightDelivery {
+                        lane: ResolutionLane::Workspace,
+                        entry,
+                    });
+                }
+            }
+            // Settle the flight this demand leads: deliver its candidate,
+            // or — with none admitted — abandon it so every subscriber
+            // retries for itself.
+            if let Some(lease) = flight_lease.take() {
+                if let Some(delivery) = delivery {
+                    lease.complete(delivery);
                 }
             }
             // **The DAG's consumer-facing product.** A cacheable outcome
@@ -3842,12 +4238,12 @@ impl Engine {
             //   request view can root on it and warm-hit through that
             //   same view.
             //
-            // A request-local snapshot publishes no node, so it keeps its
+            // An overlay-lane answer publishes no node, so it keeps its
             // precise observation set: rooting on a node that does not
-            // exist would be a witness nothing can ever invalidate.
-            if !request_local_snapshot
-                && matches!(&admission, SignatureAdmission::Cacheable(_))
-                && (published || reused)
+            // exist would be a witness nothing can ever invalidate. So does
+            // a reuse that restated its candidate's witness.
+            if matches!(&admission, SignatureAdmission::Cacheable(_))
+                && ((published && !overlay_lane) || (reused && !restated_witness))
             {
                 if let Some(query) = query.clone() {
                     let node = ResolutionFactKey::decision(query);
@@ -3865,7 +4261,11 @@ impl Engine {
                         ])));
                 }
             }
-            if !request_local_snapshot && matches!(&admission, SignatureAdmission::Cacheable(_)) {
+            // The workspace's own edge store records only what the
+            // workspace resolved: a request overlay's answer, even one
+            // resolution-equivalent to the workspace's, may be for an
+            // importer's overlay-only specifier.
+            if request_overlay.is_none() && matches!(&admission, SignatureAdmission::Cacheable(_)) {
                 input_ledger.commit_loaded_inputs(reader);
                 if let Some(ref result) = result {
                     self.edges
@@ -3955,14 +4355,7 @@ impl Engine {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         loop {
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                #[cfg(test)]
-                resolution_test_hooks::record_return_only();
-                return ResolutionOutcome::refused(
-                    None,
-                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-                );
-            };
+            let mut captured = self.capture_stable_resolution_world(population);
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
 
@@ -4055,29 +4448,18 @@ impl Engine {
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
-            if !self.resolution_world_still_current(&captured) {
-                let tracked = TransactionReader::new(reader, &transaction);
-                if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
-                        None,
-                        transaction.into_inner().finish(),
-                        Vec::new(),
-                        true,
-                        false,
-                        false,
-                    );
-                }
-                continue;
-            }
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::RequestCompletion);
 
             let _publication = self.resolution_world_write.lock();
-            let _session_publication = captured
-                .session_domain
-                .as_ref()
-                .map(|domain| domain.write.lock());
-            if !self.resolution_world_still_current(&captured) {
+            let session_domain = captured.session_domain.clone();
+            let _session_publication = session_domain.as_ref().map(|domain| domain.write.lock());
+            let admission_fence =
+                self.admission_fence_under_gate(&captured, population, None, &transaction.lock());
+            if let Some(latest) = admission_fence {
+                transaction.lock().rebase_onto(Arc::clone(&latest.world));
+                captured = latest;
+            } else {
                 let tracked = TransactionReader::new(reader, &transaction);
                 if input_ledger.charge_outer_restart(&tracked).is_err() {
                     return ResolutionOutcome::new(
@@ -4495,15 +4877,7 @@ impl Engine {
 
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledgers
-                    .iter_mut()
-                    .any(|ledger| ledger.charge_outer_restart(reader).is_err())
-                {
-                    return false;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
 
             let mut resolved = Vec::with_capacity(records.len());
             let mut relative_results: FxHashMap<ParsedRelativeBatchKey, Option<String>> =
@@ -4584,12 +4958,7 @@ impl Engine {
         crate::probe_scope!(RECORD_PARSED_EDGES);
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledger.charge_outer_restart(reader).is_err() {
-                    return false;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
                 reader,
                 canonical_id,
@@ -4673,12 +5042,7 @@ impl Engine {
     ) -> Option<crate::types::ExactResolutionResult> {
         loop {
             let population = reader.resolution_population();
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
-                if input_ledger.charge_outer_restart(reader).is_err() {
-                    return None;
-                }
-                continue;
-            };
+            let captured = self.capture_stable_resolution_world(population);
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
                 reader,
                 canonical_id,

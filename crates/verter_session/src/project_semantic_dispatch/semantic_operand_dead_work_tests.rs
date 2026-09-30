@@ -721,9 +721,11 @@ fn row_remap_dropped_value() -> MatrixRow {
             (Counter::ConditionalDecided, 3),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 2),
-            // The remap's per-key `K extends "a"` decidability checks —
-            // key-domain classification, not dead-value work.
-            (Counter::RelationChecks, 6),
+            // The remap's per-key `"a" extends "a"` decidability checks —
+            // key-domain classification, not dead-value work. The generic
+            // `K extends "a"` the remap is written as defers without a
+            // relation, as the checker defers it.
+            (Counter::RelationChecks, 3),
         ],
     }
 }

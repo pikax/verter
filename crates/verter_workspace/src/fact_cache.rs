@@ -13,6 +13,7 @@ use verter_semantic::facts::registry::FactLane;
 #[cfg(test)]
 use verter_semantic::resolver_core::ResolutionPopulation;
 
+pub use verter_semantic::facts::receipt::{drop_subsumed_receipts, ReceiptWalk, ResultReceipt};
 pub use verter_semantic::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
@@ -377,6 +378,24 @@ pub trait FactVersionValidator {
     }
 }
 
+/// Validate one fact through `leaf`, a consumed result's receipt read
+/// through to every fact it reaches. The one shape every validator uses
+/// for a receipt, so a validator's own per-fact rule — a strict self-root,
+/// a view-scoped aggregate — applies inside the receipt exactly as outside
+/// it. `walk` is shared by every fact of one signature, so a dependency
+/// graph its receipts share is validated once.
+#[inline]
+pub fn validates_through_receipts(
+    fact: &FactVersionRef,
+    walk: &mut ReceiptWalk,
+    mut leaf: impl FnMut(&FactVersionRef) -> bool,
+) -> bool {
+    match fact {
+        FactVersionRef::Receipt(receipt) => walk.leaves(receipt, leaf),
+        other => leaf(other),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReadSetSignature {
     pub facts: Arc<[FactVersionRef]>,
@@ -413,11 +432,22 @@ impl ReadSetSignature {
         !self.overflowed && validator.validates_fact_signature(&self.facts)
     }
 
+    /// Every canonical this signature depends on, in first-observation
+    /// order — a consumed result's receipt contributing every canonical
+    /// its evidence reaches (its summary, not a walk).
     #[must_use]
     pub fn canonical_ids(&self) -> Vec<Arc<str>> {
         let mut seen = rustc_hash::FxHashSet::<Arc<str>>::default();
         let mut out = Vec::new();
         for fact in self.facts.iter() {
+            if let FactVersionRef::Receipt(receipt) = fact {
+                for canonical_id in receipt.canonicals().iter() {
+                    if seen.insert(Arc::clone(canonical_id)) {
+                        out.push(Arc::clone(canonical_id));
+                    }
+                }
+                continue;
+            }
             let Some(canonical_id) = fact.canonical_id() else {
                 continue;
             };
@@ -457,6 +487,14 @@ impl ReadSetSignature {
     pub fn aggregated_domains(&self) -> Vec<CompactionDomain> {
         let mut out: Vec<CompactionDomain> = Vec::new();
         for fact in self.facts.iter() {
+            if let FactVersionRef::Receipt(receipt) = fact {
+                for domain in receipt.aggregated_domains() {
+                    if !out.contains(domain) {
+                        out.push(*domain);
+                    }
+                }
+                continue;
+            }
             if let FactAttribution::DomainAggregate(domain) = fact.attribution() {
                 if !out.contains(&domain) {
                     out.push(domain);
@@ -473,12 +511,30 @@ impl ReadSetSignature {
     /// consumer that only projects one domain's canonicals.
     #[must_use]
     pub fn aggregates_domain(&self, domain: CompactionDomain) -> bool {
-        self.facts.iter().any(|fact| {
-            matches!(
-                fact.attribution(),
+        self.facts.iter().any(|fact| match fact {
+            FactVersionRef::Receipt(receipt) => receipt.aggregated_domains().contains(&domain),
+            other => matches!(
+                other.attribution(),
                 FactAttribution::DomainAggregate(aggregated) if aggregated == domain
-            )
+            ),
         })
+    }
+
+    /// Visit every fact this signature depends on, a consumed result's
+    /// receipt read through to the facts it reaches (each receipt once).
+    /// Stops at the first fact `visit` answers `false` for.
+    pub fn all_leaves(&self, mut visit: impl FnMut(&FactVersionRef) -> bool) -> bool {
+        let mut walk = ReceiptWalk::default();
+        for fact in self.facts.iter() {
+            let visited = match fact {
+                FactVersionRef::Receipt(receipt) => walk.leaves(receipt, &mut visit),
+                leaf => visit(leaf),
+            };
+            if !visited {
+                return false;
+            }
+        }
+        true
     }
 
     /// The canonicals this signature observed as a PATH — a typed probe, a
@@ -491,21 +547,22 @@ impl ReadSetSignature {
     pub fn resolution_path_canonical_ids(&self) -> Vec<Arc<str>> {
         let mut seen = rustc_hash::FxHashSet::<Arc<str>>::default();
         let mut out = Vec::new();
-        for fact in self.facts.iter() {
+        self.all_leaves(|fact| {
             let FactVersionRef::ResolveImports(fact) = fact else {
-                continue;
+                return true;
             };
             let Some(fact) = fact.resolution_fact() else {
-                continue;
+                return true;
             };
             let Some(canonical_id) = fact.key.reobservable_path_canonical_id() else {
-                continue;
+                return true;
             };
             let canonical_id: Arc<str> = Arc::from(canonical_id);
             if seen.insert(Arc::clone(&canonical_id)) {
                 out.push(canonical_id);
             }
-        }
+            true
+        });
         out
     }
 
@@ -521,25 +578,28 @@ impl ReadSetSignature {
     pub fn resolution_evidence_is_unenumerable(&self) -> bool {
         let mut carries_resolution_evidence = false;
         let mut carries_reobservable_path = false;
-        for fact in self.facts.iter() {
+        let mut carries_resolution_aggregate = false;
+        self.all_leaves(|fact| {
             if matches!(
                 fact.attribution(),
                 FactAttribution::DomainAggregate(CompactionDomain::Resolution)
             ) {
-                return true;
+                carries_resolution_aggregate = true;
+                return false;
             }
             let FactVersionRef::ResolveImports(fact) = fact else {
-                continue;
+                return true;
             };
             let Some(fact) = fact.resolution_fact() else {
-                continue;
+                return true;
             };
             carries_resolution_evidence = true;
             if fact.key.reobservable_path_canonical_id().is_some() {
                 carries_reobservable_path = true;
             }
-        }
-        carries_resolution_evidence && !carries_reobservable_path
+            true
+        });
+        carries_resolution_aggregate || (carries_resolution_evidence && !carries_reobservable_path)
     }
 
     #[must_use]
@@ -557,13 +617,19 @@ impl ReadSetSignature {
         &self,
         key: &ResolutionFactKey,
     ) -> Option<crate::resolution_currency::ResolutionFactVersion> {
-        self.facts.iter().find_map(|fact| {
-            let FactVersionRef::ResolveImports(fact) = fact else {
-                return None;
-            };
-            let fact = fact.resolution_fact()?;
-            (&fact.key == key).then_some(fact.version)
-        })
+        let mut found = None;
+        self.all_leaves(|fact| {
+            if let FactVersionRef::ResolveImports(fact) = fact {
+                if let Some(fact) = fact.resolution_fact() {
+                    if &fact.key == key {
+                        found = Some(fact.version);
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        found
     }
 }
 

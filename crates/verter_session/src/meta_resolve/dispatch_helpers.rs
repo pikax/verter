@@ -141,7 +141,8 @@ fn realize_callable_member_at(
     }
     let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
         StructuralFactDemandOutcome::Complete(node) => node,
-        StructuralFactDemandOutcome::Partial(reasons) => {
+        StructuralFactDemandOutcome::Recovered { reasons, .. }
+        | StructuralFactDemandOutcome::Partial(reasons) => {
             return SurfaceResolution::incomplete(
                 NonEmptyReasons::new(reasons)
                     .unwrap_or_else(|| NonEmptyReasons::of(PartialReason::SemanticQueryFault)),

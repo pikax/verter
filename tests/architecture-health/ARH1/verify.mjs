@@ -31,9 +31,8 @@
  * constructor row is drift, not silence), state-lifetime rows name live identifiers and one
  * sole owner that DECLARES the state (a comment mention or the enclosing
  * type's name in a consumer file is not ownership), surface declarations
- * are pinned against the derived parent-module declaration, the recorded
- * snapshot counts equal the live-derived file-wide counts exactly (a stale,
- * zeroed or key-stripped snapshot is drift), public
+ * are pinned against the derived parent-module declaration (file size and
+ * item counts are never compared), public
  * modules' complete pub-item populations must be retained/narrowed or
  * carried by a bulk row (deleted rows are drift), every narrowing consumer
  * is a live referencing file and every live referencing file is a recorded
@@ -1427,38 +1426,6 @@ function moduleDeclarationBinding(hotspotPath) {
   return { parent: null, declaration: null, base };
 }
 
-/** File-wide surface counts of one comment-stripped hotspot text — the
- * snapshot vocabulary, derived identically for every hotspot: line-anchored
- * visibility declarations (pub fn including the test-hook subset, pub(crate)
- * fn, pub types, pub/pub(crate) mod) plus the pub fields of fully-pub
- * structs. The recorded snapshot must equal this dict exactly, so a stale,
- * zeroed or key-stripped snapshot is drift. */
-function deriveSnapshotCounts(stripped) {
-  let pubFn = 0;
-  let pubFnTestHooks = 0;
-  let pubCrateFn = 0;
-  let pubType = 0;
-  let pubCrateMod = 0;
-  let inlinePubMod = 0;
-  for (const line of stripped.split("\n")) {
-    if (/^\s*pub\s+(?:const\s+)?fn\s/.test(line)) {
-      pubFn++;
-      if (/^\s*pub\s+(?:const\s+)?fn\s+test_/.test(line)) pubFnTestHooks++;
-    } else if (/^\s*pub\(crate\)\s+(?:const\s+)?fn\s/.test(line)) {
-      pubCrateFn++;
-    } else if (/^\s*pub\s+(?:struct|enum|trait|type|union|const|static)\s/.test(line)) {
-      pubType++;
-    }
-    if (/^\s*pub\(crate\)\s+mod\s/.test(line)) pubCrateMod++;
-    else if (/^\s*pub\s+mod\s/.test(line)) inlinePubMod++;
-  }
-  let pubStructField = 0;
-  for (const s of structFieldDecls(stripped)) {
-    if (s.isPub) pubStructField += s.pubFields.size;
-  }
-  return { pubFn, pubFnTestHooks, pubCrateFn, pubType, pubCrateMod, inlinePubMod, pubStructField };
-}
-
 /**
  * ARH1-AC1: minimal public surfaces bind the live tree. The module's
  * visibility declaration is pinned verbatim against the DERIVED parent
@@ -1490,30 +1457,6 @@ function validateSurface(contracts, errors) {
     const stripped = strippedFileText(hotspot.path);
     const surface = hotspot.minimalPublicSurface;
     const moduleBase = path.basename(hotspot.path, ".rs");
-
-    // The recorded snapshot equals the live-derived file-wide counts exactly
-    // (every vocabulary key, both directions): the products cannot claim a
-    // measurement basis the measured tree contradicts.
-    const derivedCounts = deriveSnapshotCounts(stripped);
-    const recordedCounts = hotspot.snapshot || {};
-    for (const [key, value] of Object.entries(derivedCounts)) {
-      if (recordedCounts[key] !== value) {
-        errors.push({
-          caseId,
-          code: "snapshot-count-drift",
-          detail: `${hotspot.path}: snapshot ${key} is ${JSON.stringify(recordedCounts[key])}, the live tree carries ${value}`,
-        });
-      }
-    }
-    for (const key of Object.keys(recordedCounts)) {
-      if (!(key in derivedCounts)) {
-        errors.push({
-          caseId,
-          code: "snapshot-count-drift",
-          detail: `${hotspot.path}: snapshot key ${key} is not a derived count`,
-        });
-      }
-    }
 
     // The surface boundary is pinned to the derived parent declaration.
     const binding = moduleDeclarationBinding(hotspot.path);

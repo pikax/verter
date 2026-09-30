@@ -2641,9 +2641,12 @@ pub(crate) fn collect_expr_references_in<'a>(
         local_frames: Vec::new(),
         fn_depth: 0,
     };
-    verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+    // A walk refused its stack refuses the expression; the compile around it
+    // is refused with the refusal.
+    verter_parser::oxc_parse::leased_program_walk(&parsed.program, || {
         collector.visit_program(&parsed.program)
-    });
+    })
+    .map_err(|_| ())?;
     // The whole expression body (the `({text});` wrapper's lone expression statement) —
     // the SAME parsed program both downstream facts read (no second reparse).
     let body_expr = parsed.program.body.first().and_then(|stmt| match stmt {
@@ -2706,12 +2709,13 @@ pub(crate) fn collect_expr_references_in<'a>(
     );
     // The wrap-trigger + dynamic-callee lowering facts — from the SAME parse.
     let (has_sync_member_or_assignment, render_dynamic_callee) =
-        verter_parser::oxc_parse::with_program_stack(&parsed.program, || {
+        verter_parser::oxc_parse::leased_program_walk(&parsed.program, || {
             (
                 body_expr.is_some_and(sync_member_or_assignment),
                 body_expr.and_then(collect_render_dynamic_callee_facts),
             )
-        });
+        })
+        .map_err(|_| ())?;
     let facts = ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,

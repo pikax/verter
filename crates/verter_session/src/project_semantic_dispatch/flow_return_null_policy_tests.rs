@@ -11380,8 +11380,10 @@ const LOOP_HEADS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// references under analysis its value can read: the head of a reference
 /// no other one feeds takes one pass, and a chain `x = y; y = z; z = "s"`
 /// takes one pass per link — `x` reaches `z`'s `"s"` two iterations away
-/// (`string | number | true | null`). Twelve independent counters take
-/// twelve head passes and the final pass, never a pass per subset of them.
+/// (`string | number | true | null`). A pass is a function of the state it
+/// starts from, so references whose passes start from one state share one
+/// pass: twelve independent counters take one head pass and the final
+/// pass, never a pass per subset of them.
 #[test]
 fn loop_heads_follow_each_references_dependencies() {
     assert_measured_matrix("loop-heads.ts", LOOP_HEADS_SOURCE, LOOP_HEADS_TABLE);
@@ -11389,8 +11391,8 @@ fn loop_heads_follow_each_references_dependencies() {
     let path = format!("{STRICT_ROOT}/loop-heads.ts");
     upsert(&host, &path, LOOP_HEADS_SOURCE);
     for (symbol, passes) in [
-        ("independentCounters", 13),
-        ("independentWrites", 13),
+        ("independentCounters", 2),
+        ("independentWrites", 2),
         ("chain", 4),
     ] {
         let before = super::flow_return::loop_passes_for_tests();
@@ -11398,7 +11400,7 @@ fn loop_heads_follow_each_references_dependencies() {
         assert_eq!(
             super::flow_return::loop_passes_for_tests() - before,
             passes,
-            "`{symbol}` evaluates one pass per loop head and one final pass"
+            "`{symbol}` evaluates one pass per distinct loop-head start and one final pass"
         );
     }
 }
@@ -11512,18 +11514,21 @@ fn and_chain(operands: usize) -> String {
     )
 }
 
-/// An `&&` chain applies each operand's guard to the next operands as the
-/// checker's flow walk reads it, once per earlier operand: the guards it
-/// applies grow with the square of its length, never faster (each
-/// operand's short-circuit edge reads the earlier operands' negations as
-/// one growing prefix), and its nested left operands evaluate without a
-/// native level each.
+/// An `&&` chain of references reads each operand under the chain of the
+/// earlier operands' conditions, as the checker's flow graph gives it with
+/// no join between them: each operand's guard is applied once, on top of
+/// the ones before it, and the chain's short-circuit edges are joined once
+/// past it, so the guards it applies grow linearly with its length (the
+/// same count for every five operands more), and its nested left operands
+/// evaluate without a native level each. Applying every earlier operand's
+/// guard again for each operand grew the count with the square of the
+/// chain.
 ///
 /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
 /// over 32 operands: `number | "" | false | null | undefined` with
 /// `strictNullChecks`, `number` without it.
 #[test]
-fn an_and_chain_applies_a_quadratic_count_of_guards() {
+fn an_and_chain_applies_a_linear_count_of_guards() {
     let source = and_chain(32);
     assert_measured_matrix(
         "and-chain.ts",
@@ -11544,12 +11549,11 @@ fn an_and_chain_applies_a_quadratic_count_of_guards() {
         let _ = observe(&host, &path, "lc");
         super::flow_return::guard_applications_for_tests() - before
     };
-    let second_difference =
-        |operands: usize| guards(operands + 10) + guards(operands) - 2 * guards(operands + 5);
+    let per_five = |operands: usize| guards(operands + 5) - guards(operands);
     assert_eq!(
-        second_difference(20),
-        second_difference(40),
-        "each operand adds the same number of guard applications more than the one before it"
+        per_five(20),
+        per_five(40),
+        "every five operands add the same number of guard applications"
     );
 }
 
@@ -11597,14 +11601,12 @@ fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
         .expect("the chain evaluates")
 }
 
-/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread: the
-/// slice lowering walks its nested left operands from an explicit spine
-/// and classifies each operand's guard once, so neither its stack nor its
-/// work grows with a native level or a re-classification per operand. The
-/// evaluation's connected work outgrows the demand's budget on this
-/// chain, and the lane answers with that typed refusal; the operands past
-/// that point are not evaluated, so the guards it applies are those of a
-/// 1,000-operand chain.
+/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread and
+/// answers the checker's type: the slice lowering walks its nested left
+/// operands from an explicit spine and classifies each operand's guard
+/// once, and the evaluation applies each operand's guard once, so neither
+/// its stack nor its work grows with a native level or a re-application
+/// per operand — the guards it applies grow linearly with the chain.
 ///
 /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
 /// about one second): `"" | 0 | 1 | false | null | undefined` with
@@ -11612,11 +11614,13 @@ fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
 #[test]
 fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
     let (answer, guards) = and_chain_on_a_small_stack(2000);
-    assert_eq!(answer, "<no value: Failure(Budget(WorkBudgetExceeded))>");
-    let (_, shorter_guards) = and_chain_on_a_small_stack(1000);
+    assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
+    let (_, half) = and_chain_on_a_small_stack(1000);
+    let (_, quarter) = and_chain_on_a_small_stack(500);
     assert_eq!(
-        guards, shorter_guards,
-        "the evaluation stops where the budget trips"
+        guards - half,
+        2 * (half - quarter),
+        "every operand applies the same number of guards: {quarter}, {half}, {guards}"
     );
 }
 
@@ -11638,16 +11642,6 @@ fn a_return_in_2000_parentheses_lowers_on_the_worker_stack() {
     );
     upsert(&host, &path, &source);
     assert_eq!(observe(&host, &path, "pf"), "number");
-}
-
-/// The checker's answer for the 2,000-operand chain above.
-#[test]
-#[ignore = "the evaluation's connected work outgrows the demand's work budget past about 420 operands"]
-fn a_2000_operand_and_chain_answers_the_checkers_type() {
-    assert_eq!(
-        and_chain_on_a_small_stack(2000).0,
-        "\"\" | 0 | 1 | false | null | undefined"
-    );
 }
 
 const CAPTURE_EXTENT_SOURCE: &str = r#"

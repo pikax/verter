@@ -51,9 +51,19 @@ export interface PublicApiScriptSetupAttrsProjectionSubject {
   sourceRange: { start: number; end: number };
 }
 
-export type PublicApiProjectionSubject =
+/** The whole source: a failure not attributable to one syntax slot. */
+export interface PublicApiSourceProjectionSubject {
+  kind: "source";
+}
+
+/** The syntax slot a failure is attributed to. */
+export type PublicApiSyntaxProjectionSubject =
   | PublicApiMacroProjectionSubject
   | PublicApiScriptSetupAttrsProjectionSubject;
+
+export type PublicApiProjectionSubject =
+  | PublicApiSyntaxProjectionSubject
+  | PublicApiSourceProjectionSubject;
 
 export type PublicApiUnavailableOutcome =
   | {
@@ -100,13 +110,13 @@ interface PublicApiProjectionErrorBase {
 export type PublicApiProjectionError =
   | (PublicApiProjectionErrorBase & {
       detailCode: "unsupported-declaration-shape";
-      subject: PublicApiProjectionSubject;
+      subject: PublicApiSyntaxProjectionSubject;
       declarationShapeReason: PublicApiDeclarationShapeReason;
       memberOrdinal: null;
     } & NoPublicApiUnavailableOutcome)
   | (PublicApiProjectionErrorBase & {
       detailCode: "invalid-authored-member-ordinal";
-      subject: PublicApiProjectionSubject;
+      subject: PublicApiSyntaxProjectionSubject;
       declarationShapeReason: null;
       memberOrdinal: number;
     } & NoPublicApiUnavailableOutcome)
@@ -129,7 +139,14 @@ export type PublicApiProjectionError =
         | "missing-scope-declaration"
         | "invalid-macro-anchor"
         | "missing-authored-argument-geometry";
-      subject: PublicApiProjectionSubject;
+      subject: PublicApiSyntaxProjectionSubject;
+      declarationShapeReason: null;
+      memberOrdinal: null;
+    } & NoPublicApiUnavailableOutcome)
+  | (PublicApiProjectionErrorBase & {
+      /** A parse of the source refused its stack: typed incompleteness. */
+      detailCode: "stack-unavailable";
+      subject: PublicApiSourceProjectionSubject;
       declarationShapeReason: null;
       memberOrdinal: null;
     } & NoPublicApiUnavailableOutcome);

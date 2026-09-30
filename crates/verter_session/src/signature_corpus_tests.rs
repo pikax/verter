@@ -494,7 +494,8 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // A `Partial` demand carries NO node: truncated or faulted, which is a
     // semantic non-answer, not a type. Nothing to compare, so the row's
     // structural bases stay false and only a non-answer pin is satisfied.
-    let Some(node) = demand.into_complete_node() else {
+    // A `Recovered` demand holds the checker's recovery: that is its answer.
+    let Some(node) = demand.into_usable_node() else {
         return LiveProbeOutcome {
             matched_checker: false,
             matched_checker_in_order: false,
@@ -575,7 +576,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // and message, whose recovery reads as the recorded recovery print.
     let live_diagnostic = match dispatch.graph().node_data(node).as_deref() {
         Some(crate::semantic_query::SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::CheckerRecovery(diagnostic),
+            crate::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
         )) => Some(*diagnostic),
         _ => None,
     };
@@ -664,6 +665,12 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
     }
     {
         let rendered = live.rendered.as_deref().unwrap_or("<no value>");
+        // A degraded answer is never the checker's answer: it matches a
+        // recorded basis only as the checker's own recovery after a
+        // recorded diagnostic, which the diagnostic arm reads.
+        let matched_checker = live.matched_checker && !live.degraded;
+        let matched_checker_in_order = live.matched_checker_in_order && !live.degraded;
+        let matched_declared_return = live.matched_declared_return && !live.degraded;
         let note = match row.verdict {
             // A diagnostic row's basis is the recorded diagnostic and the
             // recovery the checker continues with.
@@ -684,7 +691,7 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                 })
             }
             Verdict::MatchesChecker => {
-                if !(live.matched_checker || live.matched_declared_return) {
+                if !(matched_checker || matched_declared_return) {
                     let bases = if row.checker_display_only {
                         format!(
                             "the display-only checker text `{}` nor the declared return `{}`",
@@ -706,7 +713,7 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                 }
             }
             Verdict::StableOrderDifference { .. } => {
-                if !live.matched_checker {
+                if !matched_checker {
                     Some(format!(
                         "labelled StableOrderDifference but the live answer to the probe `{}` no \
                          longer equals the recorded observation `{}` even as a SET of members — \
@@ -714,7 +721,7 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                          order one: re-measure and move the row and its ledger entry",
                         row.probe, row.checker, rendered, live.degraded
                     ))
-                } else if live.matched_checker_in_order {
+                } else if matched_checker_in_order {
                     Some(format!(
                         "labelled StableOrderDifference but the live answer to the probe `{}` now \
                          equals the recorded observation `{}` IN ORDER — the order difference is \
@@ -739,7 +746,7 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                             .map(|recorded| spell_recorded_diagnostic(&recorded))
                             .unwrap_or_default(),
                     ))
-                } else if live.matched_checker {
+                } else if matched_checker {
                     Some(format!(
                         "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
                          EQUALS the recorded observation `{}` — the recorded divergence is \
@@ -749,7 +756,7 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                          same change",
                         row.verdict, row.probe, row.checker
                     ))
-                } else if live.matched_declared_return {
+                } else if matched_declared_return {
                     Some(format!(
                         "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
                          EQUALS the claim recorded in the declaration bytes (`{}`) — the \
@@ -878,6 +885,50 @@ fn a_boundary_failure_never_satisfies_a_diagnostic_row() {
         verdict_failure(&row, &refused),
         None,
         "a typed gap where the checker refused is an honest live non-answer"
+    );
+}
+
+/// A degraded live answer is never a match: over the reduced control probe
+/// with its typed degradation set, a `MatchesChecker` row fails and an owed
+/// row does not flip as if its divergence were gone.
+#[test]
+fn a_degraded_answer_never_counts_as_a_match() {
+    use crate::signature_corpus_rows_tests::Family;
+    let row = |verdict| Row {
+        id: "SV_CONTROL_degraded_probe",
+        family: Family::UnionValuedThen,
+        source: "export function witness() { return 1; }",
+        probe: "string",
+        checker: "string",
+        checker_is_any: false,
+        checker_is_never: false,
+        checker_display_only: false,
+        diagnostic: None,
+        decl_emit: "export declare function witness(): string;\n",
+        verdict,
+    };
+    let matches = row(Verdict::MatchesChecker);
+    let clean = live_probe_outcome(&matches);
+    assert!(
+        clean.matched_checker && !clean.degraded,
+        "the control probe must reduce, match and stay clean"
+    );
+    assert_eq!(verdict_failure(&matches, &clean), None);
+    let degraded = LiveProbeOutcome {
+        degraded: true,
+        ..clean
+    };
+    assert!(
+        verdict_failure(&matches, &degraded).is_some(),
+        "a degraded answer must not satisfy a MatchesChecker row"
+    );
+    let owed = row(Verdict::KnownOwed {
+        note: "control: a degraded answer is not the implementation",
+    });
+    assert_eq!(
+        verdict_failure(&owed, &degraded),
+        None,
+        "a degraded answer must not flip an owed row as implemented"
     );
 }
 

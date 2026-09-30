@@ -316,6 +316,8 @@ export interface RetentionReading {
   readonly relateKeys: number;
   /** Resident union member views, released with their union's document. */
   readonly unionViews: number;
+  /** Stable-key classes the semantic store's key table holds. */
+  readonly stableKeyClasses: number;
   /** Close-time semantic releases queued behind in-flight computations, not yet applied. */
   readonly deferredReleases: number;
   /** Resolved-import fact entries (one key per document content hash). */
@@ -328,6 +330,12 @@ export interface RetentionReading {
   readonly signatureRecords: number;
   /** The record cap the kernel replaces its epoch at. */
   readonly signatureRecordCap: number;
+  /** Overlay-lane resolution slots held for live overlay authorities (sessions, request overlays). */
+  readonly overlayResolutionSlots: number;
+  /** Overlay value versions held for live overlay authorities. */
+  readonly overlayValueVersions: number;
+  /** Fallthrough nodes the resolver runtime caches, released with their component. */
+  readonly fallthroughNodes: number;
   /** Queued releases applied so far (monotonic by design, so not a retention counter). */
   readonly releasesApplied: number;
   /** The longest a queued release waited for a zero-reader instant, in microseconds. */
@@ -412,6 +420,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "relationProofs",
   "relateKeys",
   "unionViews",
+  "stableKeyClasses",
   "shapeCacheEntries",
   "flowGraphs",
   "flowHashEntries",
@@ -427,6 +436,9 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "registeredSources",
   "signatureRecords",
   "signatureRecordCap",
+  "overlayResolutionSlots",
+  "overlayValueVersions",
+  "fallthroughNodes",
   "releasesApplied",
   "releaseWaitMaxMicros",
   "releaseElapsedMaxMicros",
@@ -1093,6 +1105,7 @@ export const CHURN_RETENTION_COUNTERS = [
   "relationProofs",
   "relateKeys",
   "unionViews",
+  "stableKeyClasses",
   "shapeCacheEntries",
   "flowGraphs",
   "flowHashEntries",
@@ -1103,6 +1116,9 @@ export const CHURN_RETENTION_COUNTERS = [
   "resolvedImportFacts",
   "componentMetaStates",
   "registeredSources",
+  "overlayResolutionSlots",
+  "overlayValueVersions",
+  "fallthroughNodes",
 ] as const satisfies readonly (keyof RetentionReading)[];
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
@@ -1299,12 +1315,13 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `roots=${reading.liveRoots} leases=${reading.snapshotLeases} ` +
     `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
     `nodes=${reading.semanticNodes}/${reading.semanticNodeSlots} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
-    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} unionViews=${reading.unionViews} shapes=${reading.shapeCacheEntries} ` +
+    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} unionViews=${reading.unionViews} keyClasses=${reading.stableKeyClasses} shapes=${reading.shapeCacheEntries} ` +
     `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
     `pressureRefusals=${reading.refusalsPressure} ` +
     `importFacts=${reading.resolvedImportFacts} metaStates=${reading.componentMetaStates} ` +
     `registeredSources=${reading.registeredSources} signatureRecords=${reading.signatureRecords} ` +
+    `overlayResolutionSlots=${reading.overlayResolutionSlots} overlayValueVersions=${reading.overlayValueVersions} fallthroughNodes=${reading.fallthroughNodes} ` +
     `deferred=${reading.deferredReleases} releases=${reading.releasesApplied} ` +
     `releaseWaitMax=${formatMicros(reading.releaseWaitMaxMicros)} releaseMax=${formatMicros(reading.releaseElapsedMaxMicros)} ` +
     (reading.lastRelease

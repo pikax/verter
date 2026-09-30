@@ -382,6 +382,13 @@ pub struct SkeletonBinding {
     /// [`evolving_array_element_write_root`]) — so each records a write of
     /// the values it adds into the binding.
     pub evolving_array: bool,
+    /// Whether the binding is a function declaration WITHOUT a body — an
+    /// overload signature. A runtime variable with one is an overloaded
+    /// function, called through its signatures, never its implementation
+    /// (the checker's `getSignaturesOfSymbol`). Recorded here, in the one
+    /// discovery pass, so a reader never walks the program to find the
+    /// declaration's siblings.
+    pub overload_signature: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -985,8 +992,8 @@ impl FunctionBodySkeleton {
 /// plus the body statement list of exactly one function / arrow, borrowed
 /// from the retained parse snapshot for the duration of the build only.
 pub struct FunctionBodySource<'a, 'ast> {
-    /// The formal parameters.
-    pub params: &'a oxc_ast::ast::FormalParameters<'ast>,
+    /// The formal parameters (`None` for a class field initializer).
+    pub params: Option<&'a oxc_ast::ast::FormalParameters<'ast>>,
     /// The function's authored kind (`async` / `generator` flags).
     pub kind: FunctionBodyKind,
     /// The body statements.
@@ -1034,7 +1041,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
     pub fn from_function(function: &'a Function<'ast>) -> Option<Self> {
         let body = function.body.as_ref()?;
         Some(Self {
-            params: &function.params,
+            params: Some(&function.params),
             kind: function_body_kind(function.r#async, function.generator),
             statements: &body.statements,
             expression_body: None,
@@ -1059,7 +1066,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
     #[must_use]
     pub fn from_arrow(arrow: &'a ArrowFunctionExpression<'ast>) -> Self {
         Self {
-            params: &arrow.params,
+            params: Some(&arrow.params),
             kind: function_body_kind(arrow.r#async, false),
             statements: arrow
                 .get_function_body()
@@ -1067,6 +1074,22 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             expression_body: arrow.get_expression(),
             body_span: arrow.body.span().into(),
             anchor: arrow.span.start,
+            self_binding: None,
+        }
+    }
+
+    /// The source positions of a class field's initializer served as its own
+    /// position: no parameters, the one expression its value.
+    #[must_use]
+    pub fn from_initializer(expression: &'a oxc_ast::ast::Expression<'ast>) -> Self {
+        let span = expression.span();
+        Self {
+            params: None,
+            kind: FunctionBodyKind::Plain,
+            statements: &[],
+            expression_body: Some(expression),
+            body_span: span.into(),
+            anchor: span.start,
             self_binding: None,
         }
     }
@@ -1389,7 +1412,9 @@ fn build_body_skeleton_contained(
             false,
         );
     }
-    builder.collect_params(source.params);
+    if let Some(params) = source.params {
+        builder.collect_params(params);
+    }
     if let Some(expression) = source.expression_body {
         let argument = builder.open_root_site(expression);
         builder.push_implicit_return(argument, expression.span().into());
@@ -1437,6 +1462,11 @@ struct SkeletonBuilder<'entry> {
     yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    /// The exact captures of this frame's parameter-list callables, by span.
+    parameter_callable_captures: FxHashMap<
+        verter_span::Span,
+        &'entry crate::analysis::function_program::FunctionParameterCallableCaptures,
+    >,
     /// The spans of this frame's references to an enclosing frame's
     /// EVOLVING-array binding
     /// ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
@@ -1487,6 +1517,15 @@ impl<'entry> SkeletonBuilder<'entry> {
                         .nested_captures
                         .iter()
                         .map(|child| (child.span, child))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            parameter_callable_captures: entry
+                .map(|entry| {
+                    entry
+                        .parameter_callable_captures
+                        .iter()
+                        .map(|callable| (callable.span, callable))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1840,15 +1879,35 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// indistinguishable from no callback at all, and a callable the index
     /// does not serve is silently invisible rather than a typed gap.
     fn push_nested_callable(&mut self, span: verter_span::Span) {
-        let Some(captures) = self.nested_captures.get(&span).copied() else {
-            self.push_unserved_callable(span);
-            return;
+        let (bindings, reads, correlation) = match self.nested_captures.get(&span).copied() {
+            Some(captures) => (
+                captures.bindings.clone(),
+                Arc::clone(&captures.reads),
+                if captures.exhaustive {
+                    SkeletonClosureCorrelation::Exact
+                } else {
+                    SkeletonClosureCorrelation::Partial
+                },
+            ),
+            // A parameter-list callable no entry serves, whose every
+            // reference the frame resolved: its capture set is exact.
+            None => match self.parameter_callable_captures.get(&span).copied() {
+                Some(captures) => (
+                    captures.bindings.clone(),
+                    Arc::clone(&captures.reads),
+                    SkeletonClosureCorrelation::Exact,
+                ),
+                None => {
+                    self.push_unserved_callable(span);
+                    return;
+                }
+            },
         };
         let site = self.footprint_site(span);
         let closure_span = self.frame_span(span);
         let mut own: Vec<FlowBindingRef> = Vec::new();
         let mut own_seen = FxHashSet::default();
-        for identity in captures.bindings.0.iter() {
+        for identity in bindings.0.iter() {
             let binding = FlowBindingRef::Captured(identity.clone());
             if own_seen.insert(binding.clone()) {
                 own.push(binding.clone());
@@ -1867,7 +1926,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         // this callable — is the one consuming the cell's value.
         let mut own_reads: Vec<FlowBindingRef> = Vec::new();
         let mut own_read_seen = FxHashSet::default();
-        for read in captures.reads.iter() {
+        for read in reads.iter() {
             let binding = FlowBindingRef::Captured(read.binding.clone());
             if own_read_seen.insert(binding.clone()) {
                 own_reads.push(binding);
@@ -1875,15 +1934,11 @@ impl<'entry> SkeletonBuilder<'entry> {
         }
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
-            correlation: if captures.exhaustive {
-                SkeletonClosureCorrelation::Exact
-            } else {
-                SkeletonClosureCorrelation::Partial
-            },
+            correlation,
             captures: Arc::from(own.into_boxed_slice()),
             read_captures: Arc::from(own_reads.into_boxed_slice()),
         });
-        for read in captures.reads.iter() {
+        for read in reads.iter() {
             let name = self.intern(&read.binding.name);
             let path: Arc<[_]> = read
                 .path
@@ -1976,6 +2031,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             destructured,
             pattern_sites: Arc::from([]),
             evolving_array: false,
+            overload_signature: false,
         });
     }
 
@@ -2485,6 +2541,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                         None,
                         false,
                     );
+                    if function.body.is_none() {
+                        if let Some(binding) = self.bindings.last_mut() {
+                            binding.overload_signature = true;
+                        }
+                    }
                 }
             }
             Statement::ClassDeclaration(class) => {

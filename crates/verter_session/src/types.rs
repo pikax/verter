@@ -2736,6 +2736,15 @@ pub(crate) const HOST_MISSING_MACRO_SEMANTIC_BUNDLE: &str =
 pub(crate) const HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT: &str =
     verter_compiler::diagnostics::X_UNAVAILABLE_MACRO_SEMANTIC_RESULT;
 
+/// A parse or walk-stack lease the compile needed was refused its stack.
+///
+/// One of the [`CompileFailure::blocked_on_unavailable_input`] codes: the
+/// blocker is the stack the host could reserve at that moment, not the
+/// bytes, and nothing the compile produced publishes — its programs were
+/// empty in place of the source's. The same bytes compile once the stack
+/// can be reserved.
+pub(crate) const HOST_STACK_UNAVAILABLE: &str = "HOST_STACK_UNAVAILABLE";
+
 impl CompileFailure {
     /// Whether this compile was blocked on an input OUTSIDE the compiled
     /// bytes, rather than reaching a verdict from those bytes alone.
@@ -2775,8 +2784,19 @@ impl CompileFailure {
                         | HOST_MISSING_MACRO_TYPE_DEP
                         | HOST_MISSING_MACRO_SEMANTIC_BUNDLE
                         | HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT
+                        | HOST_STACK_UNAVAILABLE
                 )
         })
+    }
+}
+
+impl From<crate::semantic_query::ExecutionAbort> for HostError {
+    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+        match abort {
+            crate::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+            crate::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
+            crate::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
+        }
     }
 }
 
@@ -2822,6 +2842,9 @@ pub enum HostError {
     /// The request was superseded by a newer version of the file.
     #[error("request superseded by newer generation")]
     Superseded,
+    /// The request was cancelled before it could publish.
+    #[error("request cancelled")]
+    Cancelled,
     /// The scheduler was shut down.
     #[error("scheduler shut down")]
     Shutdown,
@@ -2984,6 +3007,11 @@ pub(crate) struct ParseSnapshot {
     pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PendingPreprocessorRequest>,
+    /// The source's script parse, or the walk-stack lease of its walks, was
+    /// refused: nothing in this snapshot was read from the script, and the
+    /// source stage reports the refusal in its place
+    /// ([`verter_scheduler::executor::StageErrorKind::StackUnavailable`]).
+    pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
 #[derive(Debug, Clone)]
@@ -3180,6 +3208,8 @@ pub enum PublicApiProjectionError {
     /// Vue TSC generation rejected an incomplete, mismatched, or unsafe macro
     /// projection.
     TscGeneration(verter_compiler::tsc::TscGenerationError),
+    /// The projection's semantic inputs were aborted: nothing is published.
+    Aborted(crate::semantic_query::ExecutionAbort),
 }
 
 impl PublicApiProjectionError {
@@ -3189,6 +3219,11 @@ impl PublicApiProjectionError {
     pub const fn is_retryable(&self) -> bool {
         match self {
             Self::TscGeneration(error) => error.is_retryable(),
+            // A superseded view is transient; a cancelled request or a shut
+            // down host is the caller's decision, not a retry.
+            Self::Aborted(abort) => {
+                matches!(abort, crate::semantic_query::ExecutionAbort::Superseded)
+            }
         }
     }
 
@@ -3197,6 +3232,7 @@ impl PublicApiProjectionError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::TscGeneration(_) => "tsc-generation",
+            Self::Aborted(_) => "aborted",
         }
     }
 
@@ -3205,6 +3241,9 @@ impl PublicApiProjectionError {
     pub const fn detail_code(&self) -> &'static str {
         match self {
             Self::TscGeneration(error) => error.code(),
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Cancelled) => "cancelled",
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Superseded) => "superseded",
+            Self::Aborted(crate::semantic_query::ExecutionAbort::Shutdown) => "shutdown",
         }
     }
 
@@ -3213,6 +3252,7 @@ impl PublicApiProjectionError {
     pub const fn subject(&self) -> crate::PublicApiProjectionSubject {
         let subject = match self {
             Self::TscGeneration(error) => error.subject(),
+            Self::Aborted(_) => verter_compiler::tsc::TscFailureSubject::Source,
         };
         match subject {
             verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
@@ -3220,6 +3260,9 @@ impl PublicApiProjectionError {
             }
             verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
                 crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
+            }
+            verter_compiler::tsc::TscFailureSubject::Source => {
+                crate::PublicApiProjectionSubject::Source
             }
         }
     }
@@ -3229,6 +3272,7 @@ impl PublicApiProjectionError {
     pub const fn macro_syntax_index(&self) -> Option<u32> {
         match self {
             Self::TscGeneration(error) => error.macro_syntax_index(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3239,6 +3283,7 @@ impl PublicApiProjectionError {
     ) -> Option<verter_compiler::tsc::TscDeclarationShapeReason> {
         match self {
             Self::TscGeneration(error) => error.declaration_shape_reason(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3247,6 +3292,7 @@ impl PublicApiProjectionError {
     pub const fn member_ordinal(&self) -> Option<u32> {
         match self {
             Self::TscGeneration(error) => error.member_ordinal(),
+            Self::Aborted(_) => None,
         }
     }
 
@@ -3257,6 +3303,7 @@ impl PublicApiProjectionError {
     ) -> Option<&verter_compiler::tsc::TscUnavailableOutcome> {
         match self {
             Self::TscGeneration(error) => error.unavailable_outcome(),
+            Self::Aborted(_) => None,
         }
     }
 }
@@ -3271,6 +3318,7 @@ impl std::fmt::Display for PublicApiProjectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TscGeneration(error) => error.fmt(formatter),
+            Self::Aborted(abort) => write!(formatter, "public API projection aborted: {abort:?}"),
         }
     }
 }
@@ -4957,6 +5005,9 @@ pub struct HostRetentionSnapshot {
     /// Resident union member views (one per distinct union built, released
     /// with the union's document).
     pub union_views: usize,
+    /// Stable-key classes (distinct subtrees) the semantic store's key
+    /// table holds, forgotten with their released nodes.
+    pub stable_key_classes: usize,
     /// Live shape-cache entries.
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.
@@ -5011,6 +5062,16 @@ pub struct HostRetentionSnapshot {
     pub signature_records: usize,
     /// The record cap the kernel replaces its epoch at.
     pub signature_record_cap: usize,
+    /// Resolution slots the workspace's overlay lane holds: overlay answers
+    /// held by the overlay authorities (sessions, request overlays) that
+    /// produced or reused them, released with the last of them.
+    pub overlay_resolution_slots: usize,
+    /// Overlay value versions the workspace holds, held and released the
+    /// same way.
+    pub overlay_value_versions: usize,
+    /// Fallthrough nodes the resolver runtime caches: keyed by component,
+    /// bounded, and released when their component closes or is deleted.
+    pub fallthrough_nodes: usize,
     /// What the activity gate has applied so far: counts, the longest a
     /// queued release waited, and the last release's own cost.
     pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,
@@ -5359,6 +5420,7 @@ mod tests {
             HOST_MISSING_EXTERNAL_SOURCE,
             HOST_MISSING_MACRO_TYPE_DEP,
             HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+            HOST_STACK_UNAVAILABLE,
         ] {
             assert!(
                 failure_with(blocked, HostSeverity::Error).blocked_on_unavailable_input(),

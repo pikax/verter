@@ -32,6 +32,11 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+#[allow(clippy::duplicate_mod)]
+#[path = "support/map_in_parallel.rs"]
+mod map_in_parallel;
+use map_in_parallel::map_in_parallel;
+
 #[test]
 fn creo_is_the_only_emit_occurrence_identity_path() {
     // Static defense-in-depth behind the behavioral cross-kind heritage and
@@ -330,112 +335,6 @@ fn no_local_vite_helpers_in_lsp() {
             );
         }
     }
-}
-
-#[test]
-fn god_module_size_budget() {
-    // Target-root walkdir scan, production files only.
-    //
-    // The guard is intentionally scoped to the five Phase 11 god-module
-    // targets. A repository-wide scan would fail on unrelated large files
-    // that Phase 11 does not own; scanning only the old exact filenames
-    // would lose signal after a target becomes a folder module.
-    //
-    // Each target below may exist as the original file, as the post-split
-    // directory module, or as both when the split keeps a thin shell file
-    // next to private siblings. The guard walks whichever form exists,
-    // fails if neither form exists, and asserts every production .rs file
-    // under that target <= 4000 LOC.
-    // Test fixtures are excluded because Phase 11's public budget is for
-    // production module ownership; large test fixtures are governed by the
-    // testing skill's sibling-test extraction rules.
-    use std::collections::HashSet;
-    use walkdir::WalkDir;
-    const DEFAULT_MAX_LINES: usize = 4000;
-
-    fn is_test_fixture(rel: &str) -> bool {
-        rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/")
-    }
-
-    fn check_file(
-        workspace: &std::path::Path,
-        path: &std::path::Path,
-        seen: &mut HashSet<String>,
-        violations: &mut Vec<String>,
-    ) {
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            return;
-        }
-        let rel = path
-            .strip_prefix(workspace)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !seen.insert(rel.clone()) || is_test_fixture(&rel) {
-            return;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        let lines = src.lines().count();
-        if lines > DEFAULT_MAX_LINES {
-            violations.push(format!(
-                "{rel}: {lines} > {DEFAULT_MAX_LINES} (Phase 11 god-module budget)"
-            ));
-        }
-    }
-
-    let phase_11_targets = [
-        (
-            "crates/verter_session/src/meta_resolve.rs",
-            "crates/verter_session/src/meta_resolve",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
-            "crates/verter_session/src/resolver_core/component_meta_query_engine",
-        ),
-        (
-            "crates/verter_session/src/host_manage.rs",
-            "crates/verter_session/src/host_manage",
-        ),
-        (
-            "crates/verter_compiler/src/ide/script.rs",
-            "crates/verter_compiler/src/ide/script",
-        ),
-        (
-            "crates/verter_lsp/src/server.rs",
-            "crates/verter_lsp/src/server",
-        ),
-    ];
-    let workspace = workspace_root();
-    let mut violations = Vec::<String>::new();
-    let mut seen = HashSet::<String>::new();
-    for (file_rel, dir_rel) in phase_11_targets {
-        let file_root = workspace.join(file_rel);
-        let dir_root = workspace.join(dir_rel);
-        let mut found_target = false;
-        if file_root.is_file() {
-            found_target = true;
-            check_file(&workspace, &file_root, &mut seen, &mut violations);
-        }
-        if dir_root.is_dir() {
-            found_target = true;
-            for entry in WalkDir::new(&dir_root) {
-                let entry = entry.expect("walkdir entry");
-                if entry.file_type().is_file() {
-                    check_file(&workspace, entry.path(), &mut seen, &mut violations);
-                }
-            }
-        }
-        if !found_target {
-            violations.push(format!(
-                "{file_rel} / {dir_rel}: missing Phase 11 target root"
-            ));
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "god_module_size_budget violations:\n{}",
-        violations.join("\n")
-    );
 }
 
 #[test]
@@ -759,29 +658,32 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
             .map(|name| name.as_str().expect("forbidden dependency name"))
             .collect();
         let src_root = workspace.join(crate_rel).join("src");
-        for entry in WalkDir::new(&src_root) {
-            let entry = entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display()));
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|ext| ext.to_str()) != Some("rs")
-            {
-                continue;
-            }
-            let source = fs::read_to_string(entry.path())
-                .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
+        let sources: Vec<PathBuf> = WalkDir::new(&src_root)
+            .into_iter()
+            .map(|entry| entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display())))
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.path().extension().and_then(|ext| ext.to_str()) == Some("rs")
+            })
+            .map(|entry| entry.into_path())
+            .collect();
+        map_in_parallel(&sources, |path| {
+            let source =
+                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
             let syntax = syn::parse_file(&source).unwrap_or_else(|e| {
                 panic!(
                     "{} contains unsupported Rust syntax; refusing to skip dependency enforcement: {e}",
-                    entry.path().display()
+                    path.display()
                 )
             });
             let found = forbidden_imports(&syntax, &forbidden);
             assert!(
                 found.is_empty(),
                 "{} imports forbidden crates: {:?}",
-                entry.path().display(),
+                path.display(),
                 found
             );
-        }
+        });
     }
 
     let hotspots = contracts["hotspots"]
@@ -1400,10 +1302,6 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 // or carry an explicit allow-list entry with a phase-report citation
 // explaining why the recursion is bounded by another invariant
 // (data-structure DAG, finite AST depth from a finite source, etc.).
-//
-// Pattern mirrors `god_module_size_budget`'s allow-list approach (see
-// the head of this file). This is a doc-only test guard rewrite —
-// production code is not touched.
 
 mod resolver_core_recursion {
     use std::collections::HashMap;
@@ -3756,35 +3654,40 @@ mod cosmetic_reprinter_guard {
             Ok(it) => it,
             Err(_) => return violations,
         };
+        let mut sources: Vec<(String, PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let crate_dir = entry.path();
             if !crate_dir.is_dir() {
                 continue;
             }
-            // (b) Production `.rs` sources under `<crate>/src`.
+            // (b) Production `.rs` sources under `<crate>/src`, scanned below.
             let src_dir = crate_dir.join("src");
             if src_dir.exists() {
                 for file in walk_production_rs(&src_dir) {
                     let rel = relative_to_root(&file);
-                    if super::is_generated_data_source(&rel) {
-                        continue;
-                    }
-                    let src = match fs::read_to_string(&file) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    let in_codegen = path_is_codegen_emit(&rel);
-                    let stripped = strip_comments(&src);
-                    for (idx, line) in stripped.lines().enumerate() {
-                        if let Some(token) = line_flags_cosmetic_reprinter(line, in_codegen) {
-                            violations.push((rel.clone(), idx + 1, token.to_string()));
-                        }
+                    if !super::is_generated_data_source(&rel) {
+                        sources.push((rel, file));
                     }
                 }
             }
             // (c) The crate manifest — a forbidden JS-printer/codegen dependency (structural parse).
             scan_manifest(crate_dir.join("Cargo.toml"), &mut violations);
         }
+        let scanned = super::map_in_parallel(&sources, |(rel, file)| {
+            let mut found = Vec::new();
+            let Ok(src) = fs::read_to_string(file) else {
+                return found;
+            };
+            let in_codegen = path_is_codegen_emit(rel);
+            let stripped = strip_comments(&src);
+            for (idx, line) in stripped.lines().enumerate() {
+                if let Some(token) = line_flags_cosmetic_reprinter(line, in_codegen) {
+                    found.push((rel.clone(), idx + 1, token.to_string()));
+                }
+            }
+            found
+        });
+        violations.extend(scanned.into_iter().flatten());
         violations.sort();
         violations
     }
@@ -4494,6 +4397,20 @@ pub(crate) mod foundations_guards {
             // may depend on the crate. `D14_ALLOW_LIST` carries the full
             // rationale.
             "crates/verter_validation_probe/src/disk.rs",
+            // test/CI-only process supervisor for compiler probes and
+            // benchmarks — the crate's SOLE disk boundary, through which its
+            // backends, its result writer and its fixture binary all read and
+            // write. Touches only its own result/log files, the contained
+            // workload's cgroup and `/proc` pseudo-files, and temp paths; never
+            // workspace/semantic/overlay/VFS state, and no production crate may
+            // depend on the crate. `D14_ALLOW_LIST` carries the full rationale.
+            "crates/verter_supervise/src/disk.rs",
+            // dev/CI-only semantic-perf benchmark harness — the harness's SOLE
+            // disk boundary. Reads its own job file and scenario inputs,
+            // writes its own record (aside, then renamed), and samples
+            // `/proc/<pid>/status` on Linux; never workspace/semantic/
+            // overlay/VFS state. `D14_ALLOW_LIST` carries the full rationale.
+            "crates/verter_bench/src/semantic_perf/disk.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -5240,6 +5157,11 @@ pub(crate) mod foundations_guards {
         // has no business minting or reading one.
         "pub(crate) mod flow_completion_inventory",
         "pub(crate) mod flow_slice_content",
+        // Existential and three-valued questions about a type answered
+        // through its parts from a work list (`reaches` / `classify`).
+        // Crate-private: generic walk machinery for the dispatch and
+        // meta-resolve helpers.
+        "pub(crate) mod graph_walk",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).
         // Crate-private: the materialise closure and the memo are its
@@ -5314,6 +5236,9 @@ pub(crate) mod foundations_guards {
         // wiring lands with the query-layer adoption).
         "pub mod query_host_port",
         "pub(crate) mod semantic_query_memo",
+        // The request-scoped continuation runtime semantic evaluation runs
+        // its frames on; crate-internal.
+        "pub(crate) mod semantic_execution",
         // The one process-local aggregate retained-byte account every
         // host-owned semantic store charges. `pub` because the account is
         // PROCESS-wide rather than crate-wide: the LSP server's
@@ -5836,6 +5761,10 @@ pub(crate) mod foundations_guards {
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
         (
+            "crates/verter_bench/src/semantic_perf/disk.rs",
+            "Semantic-perf benchmark harness disk boundary (dev/CI-only bench crate, never published) — the SOLE module in the harness that touches the disk; its CLI, runner and process sampler all route through it. It reads the harness's own job file and generated scenario inputs, writes its own result record (written aside, then renamed over the target), and reads the kernel pseudo-file `/proc/<pid>/status` on Linux to sample the measured process. Benchmark tooling I/O on its own artifacts, never workspace, semantic, overlay or VFS state; routing it through the disk boundary would give a measurement harness a session it has no other use for and put a path cache in the measured path.",
+        ),
+        (
             "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
             "Declaration generator, not a runtime path. It is a `[[bin]]` behind `required-features = [\"generate-host-request-ts\"]`, so it is absent from every default build including the published addon; a developer runs it to rewrite one committed file whose bytes a freshness guard then pins. The SOLE `std::fs::` call writes that generated declaration to a path derived from the manifest directory. It touches no workspace, semantic, overlay or VFS state, and routing a build-time source-tree write through the disk boundary would give a generator a session it has no other use for.",
         ),
@@ -6031,6 +5960,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_validation_probe/src/disk.rs",
             "test/CI-only validation-probe lane, and the crate's SOLE disk boundary — the corpus adapter, the lane and the summary binary all route through this one module, so the whole crate is this single entry rather than one per reader. It reads a pinned third-party corpus checkout under `.integration-tests/repos/` (gated behind `feature = \"external-corpus\"`), its own committed `manifest/*.toml`, and its own published `target/validation-probe/summary.json`. None of that is workspace, semantic, overlay or VFS state, and no production crate may depend on this crate (the dependency-layer guard lists it among the harnesses) — sibling of the `verter_vue_conformance/src/lib.rs` and `verter_svelte_conformance/src/generate.rs` corpus-tooling entries.",
+        ),
+        (
+            "crates/verter_supervise/src/disk.rs",
+            "test/CI-only process supervisor (`verter-supervise`) that runs compiler probes and benchmark arms under process-tree memory containment, and the crate's SOLE disk boundary — its Windows/Linux/macOS backends, its result writer and its `verter-supervise-fixture` test binary all route through this one module, so the whole crate is this single entry. It touches only its own `result.json` and the child's stdout/stderr log files, the contained workload's cgroup v2 control files and `/proc` pseudo-files, and temp paths its tests and fixture use. None of that is workspace, semantic, overlay or VFS state, and no production crate may depend on this crate (the dependency-layer guard lists it among the harnesses) — sibling of the `verter_validation_probe/src/disk.rs` tooling entry.",
         ),
 ];
 

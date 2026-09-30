@@ -37,7 +37,9 @@ pub use recursive_traversal::{referenced_names, ReferencedNames, ReferencedTypeN
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
 mod display;
-pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayError};
+pub use display::{
+    push_template_quasi, render_type_expr_display, RenderedTypeExpr, TypeExprDisplayError,
+};
 
 /// Hand-rolled JSON (de)serialisation for [`TypeExpr`]: the
 /// [`serde::Serialize`]/[`serde::Deserialize`] impls,
@@ -353,8 +355,12 @@ pub enum TypeExpr {
         expressions: Arc<[TypeExpr]>,
     },
 
-    /// `infer T` — only valid inside conditional types.
-    Infer { name: String },
+    /// `infer T` (`infer T extends C` with a `constraint`) — only valid
+    /// inside conditional types.
+    Infer {
+        name: String,
+        constraint: Option<Arc<TypeExpr>>,
+    },
 
     /// `readonly T` or rest `...T` at tuple level (handled by TupleElement).
     /// This variant catches standalone `readonly` or rest when not in tuple context.

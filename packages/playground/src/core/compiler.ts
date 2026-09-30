@@ -118,7 +118,9 @@ function preservePublicApiProjectionFailure(
   const subject =
     projection.subject.kind === "macro"
       ? `macro(${projection.subject.syntaxIndex})`
-      : `scriptSetupAttrs(${projection.subject.sourceRange.start}..${projection.subject.sourceRange.end})`;
+      : projection.subject.kind === "scriptSetupAttrs"
+        ? `scriptSetupAttrs(${projection.subject.sourceRange.start}..${projection.subject.sourceRange.end})`
+        : "source";
   const diagnostic: HostDiagnostic = {
     severity: "error",
     code: `${projection.code}/${projection.detailCode}`,

@@ -919,10 +919,86 @@ pub(crate) struct RequestStoreView<'a> {
     /// (`promote_route_completion`) are NOT validation-promotion
     /// and stay live so the cold compute can still observe additive loads.
     base_is_current: bool,
+    /// The receipts this view has validated (see [`ValidatedReceipts`]).
+    validated_receipts: ValidatedReceipts,
     #[cfg(test)]
     validation_step_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     #[cfg(test)]
     validation_step: AtomicUsize,
+    /// Test-only: how many facts that are not receipts this view validated.
+    #[cfg(test)]
+    leaf_validations: AtomicUsize,
+}
+
+/// One receipt a request view validated: the receipt, the strict
+/// self-roots among the canonicals it reaches that it was validated under,
+/// and the completion state it was validated at.
+#[derive(PartialEq, Eq, Hash)]
+struct ValidatedReceipt {
+    receipt: verter_workspace::ResultReceipt,
+    strict: Box<[Arc<str>]>,
+    state: CompletionOverlayState,
+}
+
+/// The receipts one request view validated, so the request validates each
+/// distinct receipt once, not once per signature that reaches it.
+///
+/// Sound because a validation's answer is a function of the base (proven
+/// current at construction and never replaced), the completion overlay's
+/// exact state (part of the key: a completion that changes what a fact
+/// validates against moves the overlay's revision), and the strict
+/// self-roots a caller applies (part of the key, restricted to the
+/// canonicals the receipt reaches). Only positive answers are kept, each
+/// recorded after the state was confirmed unchanged across the whole
+/// validation, and each holds its receipt alive, so an address is never
+/// mistaken for another receipt. Bounded by the distinct receipts the
+/// request's signatures reach; request-scoped, dropped with the view.
+#[derive(Default)]
+struct ValidatedReceipts(parking_lot::Mutex<rustc_hash::FxHashSet<ValidatedReceipt>>);
+
+impl ValidatedReceipts {
+    fn key(
+        receipt: &verter_workspace::ResultReceipt,
+        self_root_canonicals: &[&str],
+        state: CompletionOverlayState,
+    ) -> ValidatedReceipt {
+        let canonicals = receipt.canonicals();
+        let mut strict: Vec<Arc<str>> = self_root_canonicals
+            .iter()
+            .filter_map(|root| canonicals.get(root).map(Arc::clone))
+            .collect();
+        strict.sort_unstable();
+        strict.dedup();
+        let strict = strict.into_boxed_slice();
+        ValidatedReceipt {
+            receipt: receipt.clone(),
+            strict,
+            state,
+        }
+    }
+
+    fn contains(
+        &self,
+        receipt: &verter_workspace::ResultReceipt,
+        self_root_canonicals: &[&str],
+        state: CompletionOverlayState,
+    ) -> bool {
+        self.0
+            .lock()
+            .contains(&Self::key(receipt, self_root_canonicals, state))
+    }
+
+    fn insert_all(
+        &self,
+        receipts: Vec<verter_workspace::ResultReceipt>,
+        self_root_canonicals: &[&str],
+        state: CompletionOverlayState,
+    ) {
+        let mut validated = self.0.lock();
+        for receipt in receipts {
+            validated.insert(Self::key(&receipt, self_root_canonicals, state));
+        }
+    }
 }
 
 impl<'a> RequestStoreView<'a> {
@@ -935,10 +1011,13 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current: true,
+            validated_receipts: ValidatedReceipts::default(),
             #[cfg(test)]
             validation_step_hook: None,
             #[cfg(test)]
             validation_step: AtomicUsize::new(0),
+            #[cfg(test)]
+            leaf_validations: AtomicUsize::new(0),
         }
     }
 
@@ -960,10 +1039,13 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current,
+            validated_receipts: ValidatedReceipts::default(),
             #[cfg(test)]
             validation_step_hook: None,
             #[cfg(test)]
             validation_step: AtomicUsize::new(0),
+            #[cfg(test)]
+            leaf_validations: AtomicUsize::new(0),
         }
     }
 
@@ -1021,7 +1103,69 @@ impl<'a> RequestStoreView<'a> {
         ViewPopulation::refined_by_completion(parent, state)
     }
 
-    fn validates_at_completion_state(
+    /// Validate `fact` at `state`, reading a receipt through to the facts
+    /// it reaches, the ones listed in `self_root_canonicals` as strict
+    /// self-roots. A receipt this view already validated under the same
+    /// strict roots and state is not walked again; every receipt this walk
+    /// read through is pushed onto `walked`, for the caller to remember
+    /// once the state is confirmed unchanged.
+    fn validates_with_receipts_at_completion_state(
+        &self,
+        fact: &FactVersionRef,
+        walk: &mut verter_workspace::ReceiptWalk,
+        self_root_canonicals: &[&str],
+        state: CompletionOverlayState,
+        walked: &mut Vec<verter_workspace::ResultReceipt>,
+    ) -> bool {
+        let FactVersionRef::Receipt(receipt) = fact else {
+            return self.validates_leaf_or_self_root(fact, self_root_canonicals, state);
+        };
+        walk.leaves_unless(
+            receipt,
+            |met| {
+                if self
+                    .validated_receipts
+                    .contains(met, self_root_canonicals, state)
+                {
+                    return true;
+                }
+                walked.push(met.clone());
+                false
+            },
+            |leaf| self.validates_leaf_or_self_root(leaf, self_root_canonicals, state),
+        )
+    }
+
+    /// One fact that is not a receipt: a strict self-root when its file is
+    /// listed in `self_root_canonicals`, otherwise validated at `state`.
+    fn validates_leaf_or_self_root(
+        &self,
+        fact: &FactVersionRef,
+        self_root_canonicals: &[&str],
+        state: CompletionOverlayState,
+    ) -> bool {
+        #[cfg(test)]
+        self.leaf_validations.fetch_add(1, Ordering::Relaxed);
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if self_root_canonicals.contains(&canonical_id.as_str()) =>
+            {
+                self.validates_self_root_at_completion_state(canonical_id, hash)
+            }
+            other => self.validates_leaf_at_completion_state(other, state),
+        }
+    }
+
+    /// Test-only: how many facts that are not receipts this view validated.
+    #[cfg(test)]
+    pub(crate) fn leaf_validations_for_tests(&self) -> usize {
+        self.leaf_validations.load(Ordering::Relaxed)
+    }
+
+    /// One fact that is not a receipt, validated at `state`. A receipt
+    /// never reaches here: [`Self::validates_with_receipts_at_completion_state`] reads it
+    /// through to the facts it reaches.
+    fn validates_leaf_at_completion_state(
         &self,
         fact: &FactVersionRef,
         state: CompletionOverlayState,
@@ -1098,6 +1242,8 @@ impl<'a> RequestStoreView<'a> {
             FactVersionRef::StrictSelfRootWorld(world) => self
                 .strict_self_root_world_at_completion_state(state)
                 .is_some_and(|current| current == *world),
+            // Read through by the caller; fails closed if one ever arrives.
+            FactVersionRef::Receipt(_) => false,
         }
     }
 
@@ -1184,7 +1330,19 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if state == CompletionOverlayState::InFlight {
             return false;
         }
-        self.validates_at_completion_state(fact, state) && self.overlay.completion_state() == state
+        let mut walk = verter_workspace::ReceiptWalk::default();
+        let mut walked = Vec::new();
+        let valid = self.validates_with_receipts_at_completion_state(
+            fact,
+            &mut walk,
+            &[],
+            state,
+            &mut walked,
+        ) && self.overlay.completion_state() == state;
+        if valid {
+            self.validated_receipts.insert_all(walked, &[], state);
+        }
+        valid
     }
 
     fn validate_fact_signature(
@@ -1199,25 +1357,31 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return Err(0);
         }
 
-        let carries_resolution_aggregate = sig.iter().any(|fact| {
-            matches!(
-                fact.attribution(),
-                verter_workspace::FactAttribution::DomainAggregate(
-                    verter_workspace::CompactionDomain::Resolution
-                )
-            )
-        });
+        // The aggregated domains of one entry, a consumed result's receipt
+        // answering for every aggregate its evidence reaches.
+        let aggregates = |fact: &FactVersionRef| -> Vec<verter_workspace::CompactionDomain> {
+            match fact {
+                FactVersionRef::Receipt(receipt) => receipt.aggregated_domains().to_vec(),
+                other => match other.attribution() {
+                    verter_workspace::FactAttribution::DomainAggregate(domain) => vec![domain],
+                    _ => Vec::new(),
+                },
+            }
+        };
+        let carries_resolution_aggregate = sig
+            .iter()
+            .any(|fact| aggregates(fact).contains(&verter_workspace::CompactionDomain::Resolution));
         if carries_resolution_aggregate {
             if let Some(index) = sig.iter().position(|fact| {
-                matches!(
-                    fact.attribution(),
-                    verter_workspace::FactAttribution::DomainAggregate(
+                aggregates(fact).iter().any(|domain| {
+                    matches!(
+                        domain,
                         verter_workspace::CompactionDomain::Content
                             | verter_workspace::CompactionDomain::SourceEnv
                             | verter_workspace::CompactionDomain::SemanticImports
                             | verter_workspace::CompactionDomain::RouteSurface
                     )
-                )
+                })
             }) {
                 return Err(index);
             }
@@ -1228,16 +1392,17 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return Err(0);
         }
 
+        let mut walk = verter_workspace::ReceiptWalk::default();
+        let mut walked = Vec::new();
         for (index, fact) in sig.iter().enumerate() {
             self.note_validation_step();
-            let valid = match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                {
-                    self.validates_self_root_at_completion_state(canonical_id, hash)
-                }
-                other => self.validates_at_completion_state(other, state),
-            };
+            let valid = self.validates_with_receipts_at_completion_state(
+                fact,
+                &mut walk,
+                self_root_canonicals,
+                state,
+                &mut walked,
+            );
             if !valid {
                 return Err(index);
             }
@@ -1246,6 +1411,8 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if self.overlay.completion_state() != state {
             return Err(0);
         }
+        self.validated_receipts
+            .insert_all(walked, self_root_canonicals, state);
         Ok(())
     }
 

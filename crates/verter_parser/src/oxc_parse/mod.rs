@@ -13,14 +13,16 @@
 //! tree nests; the parse needs at most [`PARSE_STACK_BYTES_PER_LEVEL`] per
 //! level of that bound. When the calling thread has that much stack left
 //! the parse runs in place, which is every source of ordinary depth;
-//! otherwise it runs on a stack segment reserved for it ([`stack`]), which
+//! otherwise it runs on a stack region reserved for it ([`stack`]), which
 //! commits only the stack the parse touches. Where a stack can grow no
-//! depth is too deep: the segment is sized from the source. On wasm32 the
-//! engine's own call stack, which nothing grows, bounds the recursion, and
-//! a source nesting past [`WASM_ENGINE_NESTING`] is not parsed; nor,
-//! anywhere, is a source whose segment cannot be reserved. Such a parse
-//! returns an empty program and [`stack_unavailable_diagnostic`]'s
-//! diagnostic: operational incompleteness, not a syntax error.
+//! depth is too deep: the region is sized from the source. A host whose
+//! engine keeps a call stack of its own, which nothing grows (a
+//! WebAssembly engine), parses under that engine's measured
+//! [`EngineStackProfile`], and a source nesting past it is not parsed;
+//! nor, anywhere, is a source whose region cannot be reserved. Such a
+//! parse returns an empty program, marked fatal, whose one diagnostic is
+//! [`stack_unavailable_diagnostic`]'s: typed operational incompleteness,
+//! not a syntax error.
 //!
 //! oxc's own walks over what it parsed (`clone_in`, the semantic builder,
 //! the `Visit` and `VisitMut` walkers) recurse once per level of the same
@@ -29,7 +31,10 @@
 //! of a whole program, [`with_node_stack`] for a walk of one node of it,
 //! [`with_ast_stack`] for a walk of a node given its source text, and
 //! [`with_nesting_stack`] where the caller already holds the [`Nesting`]
-//! of what it walks.
+//! of what it walks. An operation pays for their stack once, at its
+//! boundary: [`with_program_walk_stack_lease`] reserves the region its
+//! walks can need before any begins, the one step that can fail, and
+//! every walk inside it runs on that region without reserving again.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Program};
@@ -42,7 +47,9 @@ mod nesting;
 mod stack;
 
 pub use nesting::Nesting;
-pub use stack::StackUnavailable;
+#[cfg(any(test, feature = "stack-fault-injection"))]
+pub use stack::faults;
+pub use stack::{refusals_within, StackUnavailable};
 
 /// The most native stack oxc 0.151's parser, or a walk of oxc's over what
 /// it parsed, spends per level of [`nesting`]'s bound, with twice the
@@ -82,40 +89,82 @@ pub fn parse_stack_bytes(source_text: &str, source_type: SourceType) -> usize {
     stack_bytes(syntax_nesting(source_text, source_type).depth as usize)
 }
 
-/// How deeply syntax may nest for oxc to parse and walk it on wasm32,
-/// where the engine's own call stack, which no segment grows, bounds the
-/// recursion: [`WASM_ENGINE_STACK_BYTES`] less
-/// [`WASM_ENGINE_RESERVED_BYTES`], at [`WASM_ENGINE_BYTES_PER_LEVEL`] a
-/// level. Everywhere else the parse's stack grows to what its source
-/// needs, and no nesting is refused.
-pub const WASM_ENGINE_NESTING: usize =
-    (WASM_ENGINE_STACK_BYTES - WASM_ENGINE_RESERVED_BYTES) / WASM_ENGINE_BYTES_PER_LEVEL;
+/// A host whose engine runs the module's calls on a call stack of its own,
+/// which no stack region grows and nothing in the module can read: a
+/// WebAssembly engine. Its profile is a measured runtime safety profile of
+/// oxc's recursion on that engine, for the oxc version, build and engine it
+/// was measured on, not a limit of the language: a source nesting past
+/// [`Self::nesting`] is not parsed there, as typed operational
+/// incompleteness, and every host whose stack can grow parses any depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineStackProfile {
+    /// The profile's name.
+    pub name: &'static str,
+    /// The engine and its configuration the profile was measured on.
+    pub engine: &'static str,
+    /// The `oxc_parser` version the profile was measured against.
+    pub oxc_version: &'static str,
+    /// The build the profile was measured on.
+    pub build: &'static str,
+    /// The call stack the engine gives the module.
+    pub stack_bytes: usize,
+    /// The call stack kept for the frames around a parse: the host's own
+    /// and the module's callers of the parse.
+    pub reserved_bytes: usize,
+    /// The most call stack oxc's parser, or a walk of oxc's over what it
+    /// parsed, spends per level of [`nesting`]'s bound, with twice the
+    /// margin.
+    pub bytes_per_level: usize,
+}
 
-/// The engine stack a WebAssembly host gives the module: V8's default
-/// (`--stack-size`, 984 KiB), the stack of Node.js and of Chromium's
-/// threads.
-pub const WASM_ENGINE_STACK_BYTES: usize = 984 * 1024;
+impl EngineStackProfile {
+    /// How deeply the scan's bound may nest for oxc to parse and walk the
+    /// source within the engine's stack.
+    pub const fn nesting(&self) -> usize {
+        (self.stack_bytes - self.reserved_bytes) / self.bytes_per_level
+    }
 
-/// The engine stack kept for the frames around a parse: the host's own and
-/// the module's callers of the parse, a quarter of the stack (the module's
-/// callers, from `VerterHost.upsert` down to the parse, take under 16 KiB
-/// under Node.js).
-pub const WASM_ENGINE_RESERVED_BYTES: usize = 256 * 1024;
+    /// Whether syntax whose scan bound is `depth` fits the engine's stack.
+    pub const fn admits(&self, depth: usize) -> bool {
+        depth <= self.nesting()
+    }
+}
 
-/// The most engine stack oxc 0.151's parser, or a walk of oxc's over what
-/// it parsed, spends per level of [`nesting`]'s bound on wasm32, with
-/// twice the margin. Measured on the optimized module under Node.js 26, as
-/// the engine stack a level adds: an object literal's level takes 1,188
-/// bytes, the costliest (a parenthesis 1,034, a type argument 1,034, an
-/// array 1,159, a template hole 639 a level, a `!` 104), and no level of
-/// `clone_in`, `Visit` or the semantic builder takes more
-/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`).
-pub const WASM_ENGINE_BYTES_PER_LEVEL: usize = 2 * 1188;
+/// V8 at its default call stack (`--stack-size`, 984 KiB), the stack of
+/// Node.js and of Chromium's threads, for the optimized wasm32 module:
+/// measured under Node.js 26.5.0 (V8 14.6), a level of an object literal
+/// takes 1,188 bytes of engine stack, the costliest form (a parenthesis
+/// 1,034, a type argument 1,034, an array 1,159, a template hole 639 a
+/// level, a `!` 104), and no level of `clone_in`, `Visit` or the semantic
+/// builder takes more; the module's callers of the parse, from
+/// `VerterHost.upsert` down, take under 16 KiB of the 256 KiB kept
+/// (`docs/evidence/signature-kernel/oxc-deep-parse.md`). Other engines
+/// (SpiderMonkey, JavaScriptCore, wasmtime) have not been measured and
+/// carry no profile of their own.
+pub const V8_DEFAULT_STACK_PROFILE: EngineStackProfile = EngineStackProfile {
+    name: "v8-default-stack",
+    engine: "V8 14.6 (Node.js 26.5.0), default --stack-size (984 KiB)",
+    oxc_version: "0.151.0",
+    build: "wasm32-unknown-unknown, release profile (opt-level 3, lto, one codegen unit)",
+    stack_bytes: 984 * 1024,
+    reserved_bytes: 256 * 1024,
+    bytes_per_level: 2 * 1188,
+};
 
-/// Whether syntax nesting `depth` levels deep fits the engine stack on this
-/// target.
-fn within_engine_stack(depth: usize) -> bool {
-    !cfg!(target_arch = "wasm32") || depth <= WASM_ENGINE_NESTING
+/// The engine-stack profile this build parses under: on wasm32 the V8
+/// profile, the runtime contract of the WebAssembly host (Node.js and
+/// Chromium); `None` everywhere a stack region grows to what a source
+/// needs, where no nesting is refused.
+pub const HOST_ENGINE_STACK_PROFILE: Option<EngineStackProfile> = if cfg!(target_arch = "wasm32") {
+    Some(V8_DEFAULT_STACK_PROFILE)
+} else {
+    None
+};
+
+/// Whether syntax whose scan bound is `depth` fits the engine stack under
+/// `profile`.
+fn within_engine_stack(profile: Option<EngineStackProfile>, depth: usize) -> bool {
+    profile.is_none_or(|profile| profile.admits(depth))
 }
 
 /// Every level of nesting takes at least one byte of source, so a source
@@ -123,38 +172,64 @@ fn within_engine_stack(depth: usize) -> bool {
 /// without the scan: the many short sources (a template's expressions, a
 /// synthesized wrapper) parse and walk in place at once.
 fn fits_by_length(length: usize) -> bool {
-    within_engine_stack(length)
+    fits_by_length_under(HOST_ENGINE_STACK_PROFILE, length)
+}
+
+fn fits_by_length_under(profile: Option<EngineStackProfile>, length: usize) -> bool {
+    within_engine_stack(profile, length)
         && stack::remaining().is_some_and(|remaining| remaining >= stack_bytes(length))
 }
 
+/// Whether a walk of a source `length` bytes long runs without a scan: in
+/// place, its every byte a level fitting the thread's stack, or on the
+/// region of a walk-stack lease that covers as much.
+fn covered_by_length(length: usize) -> bool {
+    fits_by_length(length) || stack::lease_covers(stack_bytes(length))
+}
+
 /// Run `parse`, a parse of `source_text`, with at least
-/// [`parse_stack_bytes`] of stack: in place when the thread has it, on a
-/// new stack segment otherwise. A source nesting deeper than a stack this
-/// host can provide is not parsed.
+/// [`parse_stack_bytes`] of stack: in place when the thread has it, on the
+/// walk-stack lease's region when the thread holds one covering it, on a
+/// region reserved for it otherwise. A source nesting deeper than a stack
+/// this host can provide is not parsed.
 fn parse_with_stack<R>(
     source_text: &str,
     source_type: SourceType,
     parse: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if fits_by_length(source_text.len()) {
+    parse_with_stack_under(HOST_ENGINE_STACK_PROFILE, source_text, source_type, parse)
+}
+
+/// [`parse_with_stack`] under an engine-stack profile.
+fn parse_with_stack_under<R>(
+    profile: Option<EngineStackProfile>,
+    source_text: &str,
+    source_type: SourceType,
+    parse: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    if fits_by_length_under(profile, source_text.len()) {
         return Ok(parse());
     }
     let depth = syntax_nesting(source_text, source_type).depth as usize;
-    if !within_engine_stack(depth) {
-        return Err(StackUnavailable {
-            needed: depth.saturating_mul(WASM_ENGINE_BYTES_PER_LEVEL),
-        });
+    if let Some(profile) = profile.filter(|profile| !profile.admits(depth)) {
+        return Err(stack::record_refusal(StackUnavailable {
+            needed: depth.saturating_mul(profile.bytes_per_level),
+        }));
     }
-    stack::with_stack(stack_bytes(depth), parse)
+    stack::with_stack(stack_bytes(depth), stack::Reservation::Parse, parse)
+        .map_err(stack::record_refusal)
 }
 
 /// Run `walk`, a walk of oxc's over parsed syntax, with at least `needed`
-/// bytes of stack. The parse of the syntax had as much or more (or it
-/// returned [`StackUnavailable`] and parsed nothing), so a walk that cannot
-/// have it meets an address space exhausted since, which ends the process
-/// as any failed allocation does.
+/// bytes of stack: in place, or on the region of the walk-stack lease the
+/// operation around it holds ([`with_walk_stack_lease`]), which cannot
+/// fail. A walk no lease covers reserves a region of its own; the parse of
+/// the syntax had as much or more, so that reservation fails only on an
+/// address space exhausted since, which ends the process as any failed
+/// allocation does.
+#[track_caller]
 fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
-    match stack::with_stack(needed, walk) {
+    match stack::with_stack(needed, stack::Reservation::Walk, walk) {
         Ok(result) => result,
         Err(unavailable) => std::alloc::handle_alloc_error(
             std::alloc::Layout::from_size_align(unavailable.needed.max(1), 16)
@@ -163,11 +238,137 @@ fn walk_with_stack<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
     }
 }
 
+/// Run `walk` holding a walk-stack lease of `needed` bytes, the walk's own
+/// stack, so the walk reserves nothing past it. A refused lease is
+/// [`StackUnavailable`] and `walk` does not run: the refusal is recorded
+/// for the operation around the walk that records its refusals
+/// ([`refusals_within`]), which reports it as typed incompleteness. Test
+/// builds record by its call site a leased walk that could reserve while no
+/// operation records ([`faults::take_unleased_walks`]): its refusal would
+/// reach no operation.
+#[track_caller]
+fn leased_walk<R>(needed: usize, walk: impl FnOnce() -> R) -> Result<R, StackUnavailable> {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if !stack::recording() && !stack::lease_covers(needed) {
+        stack::faults::unleased_walk(std::panic::Location::caller());
+    }
+    stack::with_walk_stack_lease(needed, || walk_with_stack(needed, walk))
+}
+
+/// [`with_ast_stack`] under a walk-stack lease of its own ([`leased_walk`]):
+/// the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_ast_walk<R>(
+    source_text: &str,
+    source_type: SourceType,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    let needed = if covered_by_length(source_text.len()) {
+        stack_bytes(source_text.len())
+    } else {
+        parse_stack_bytes(source_text, source_type)
+    };
+    leased_walk(needed, walk)
+}
+
+/// [`with_program_stack`] under a walk-stack lease of its own
+/// ([`leased_walk`]): the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_program_walk<R>(
+    program: &Program<'_>,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    leased_ast_walk(program.source_text, program.source_type, walk)
+}
+
+/// [`with_span_stack`] under a walk-stack lease of its own
+/// ([`leased_walk`]): the walk is its operation's boundary.
+#[track_caller]
+pub fn leased_span_walk<R>(
+    source_text: &str,
+    span: Span,
+    walk: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    let text = source_text
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or(source_text);
+    let needed = if covered_by_length(text.len()) {
+        stack_bytes(text.len())
+    } else {
+        stack_bytes(
+            syntax_nesting(text, SourceType::ts())
+                .depth
+                .max(syntax_nesting(text, SourceType::tsx()).depth) as usize,
+        )
+    };
+    leased_walk(needed, walk)
+}
+
+/// Run `operation` holding a walk-stack lease for syntax nesting as
+/// `nesting` measured: a region reserved, before `operation` begins, for
+/// the stack every walk of oxc's inside it can need, which each such walk
+/// runs on without reserving again. The lease is the operation's one
+/// fallible step: when its region cannot be reserved, `operation` does not
+/// run and the result is [`StackUnavailable`], typed operational
+/// incompleteness. A thread already holding a lease that covers `nesting`,
+/// or whose own stack does, reserves nothing.
+pub fn with_walk_stack_lease<R>(
+    nesting: Nesting,
+    operation: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    stack::with_walk_stack_lease(stack_bytes(nesting.depth as usize), operation)
+}
+
+/// [`with_walk_stack_lease`] for an operation over `program`'s syntax: its
+/// walks of the whole program, or of any node in it.
+pub fn with_program_walk_stack_lease<R>(
+    program: &Program<'_>,
+    operation: impl FnOnce() -> R,
+) -> Result<R, StackUnavailable> {
+    // A program short enough that every byte could be a level fits the
+    // thread's stack by its length, and leases it without the scan.
+    let length = program.source_text.len();
+    let needed = if fits_by_length(length) {
+        stack_bytes(length)
+    } else {
+        parse_stack_bytes(program.source_text, program.source_type)
+    };
+    stack::with_walk_stack_lease(needed, operation)
+}
+
 /// The diagnostic a parse returns for a source nesting deeper than a stack
 /// this host can provide, in place of the program it did not parse.
 pub fn stack_unavailable_diagnostic(unavailable: StackUnavailable) -> OxcDiagnostic {
     OxcDiagnostic::error(unavailable.to_string())
         .with_error_code(STACK_UNAVAILABLE_SCOPE, STACK_UNAVAILABLE_CODE)
+        .with_note(unavailable.needed.to_string())
+}
+
+/// The refusal a parse returned in place of its program: the
+/// [`StackUnavailable`] its [`stack_unavailable_diagnostic`] carries, when
+/// the parse is fatal and carries one.
+pub fn parse_refusal(parsed: &ParserReturn<'_>) -> Option<StackUnavailable> {
+    if !parsed.fatal_error {
+        return None;
+    }
+    diagnostics_refusal(parsed.diagnostics.errors())
+}
+
+/// The [`StackUnavailable`] a [`stack_unavailable_diagnostic`] among
+/// `diagnostics` carries.
+pub fn diagnostics_refusal<'d>(
+    diagnostics: impl IntoIterator<Item = &'d OxcDiagnostic>,
+) -> Option<StackUnavailable> {
+    diagnostics
+        .into_iter()
+        .find(|diagnostic| is_stack_unavailable(diagnostic))
+        .map(|diagnostic| StackUnavailable {
+            needed: diagnostic
+                .note
+                .as_deref()
+                .and_then(|needed| needed.parse().ok())
+                .unwrap_or(usize::MAX),
+        })
 }
 
 /// Whether `diagnostic` is [`stack_unavailable_diagnostic`]'s: the parse
@@ -184,18 +385,20 @@ const STACK_UNAVAILABLE_CODE: &str = "stack-unavailable";
 /// Run `walk`, a walk of oxc's over syntax parsed from `source_text`, with
 /// at least [`parse_stack_bytes`] of stack: in place when the thread has
 /// it, on a new stack segment otherwise.
+#[track_caller]
 pub fn with_ast_stack<R>(
     source_text: &str,
     source_type: SourceType,
     walk: impl FnOnce() -> R,
 ) -> R {
-    if fits_by_length(source_text.len()) {
-        return walk();
+    if covered_by_length(source_text.len()) {
+        return walk_with_stack(stack_bytes(source_text.len()), walk);
     }
-    walk_with_stack(parse_stack_bytes(source_text, source_type), walk)
+    scanned_walk(parse_stack_bytes(source_text, source_type), walk)
 }
 
 /// [`with_ast_stack`] for a walk of `program`, or of any node in it.
+#[track_caller]
 pub fn with_program_stack<R>(program: &Program<'_>, walk: impl FnOnce() -> R) -> R {
     with_ast_stack(program.source_text, program.source_type, walk)
 }
@@ -203,6 +406,7 @@ pub fn with_program_stack<R>(program: &Program<'_>, walk: impl FnOnce() -> R) ->
 /// [`with_ast_stack`] for a walk of the node at `span` in `program`,
 /// sized from the node's own text: a short node walks in place at once, and
 /// a long one costs a scan of its text, no more than the walk itself.
+#[track_caller]
 pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce() -> R) -> R {
     let text = program
         .source_text
@@ -216,9 +420,10 @@ pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce()
 /// `<` can open a JSX element and whether a declaration file's unions
 /// count; the syntax nests no deeper than the larger of a TypeScript and a
 /// TSX scan of it, whichever it is.
+#[track_caller]
 pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
-    if fits_by_length(source_text.len()) {
-        return walk();
+    if covered_by_length(source_text.len()) {
+        return walk_with_stack(stack_bytes(source_text.len()), walk);
     }
     let nesting = Nesting {
         depth: syntax_nesting(source_text, SourceType::ts())
@@ -231,6 +436,7 @@ pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
 /// [`with_source_stack`] for a walk of the node at `span` in `source_text`,
 /// the text its spans index (the whole text when the span lies outside
 /// it).
+#[track_caller]
 pub fn with_span_stack<R>(source_text: &str, span: Span, walk: impl FnOnce() -> R) -> R {
     let text = source_text
         .get(span.start as usize..span.end as usize)
@@ -288,6 +494,7 @@ impl<'p> ProgramWalkStack<'p> {
     /// program can need: every walk inside it runs in place, where each
     /// would otherwise take a stack segment sized for the program of its
     /// own.
+    #[track_caller]
     pub fn within<T, R>(
         owner: &mut T,
         stack: impl Fn(&T) -> &ProgramWalkStack<'_>,
@@ -321,12 +528,13 @@ impl<'p> ProgramWalkStack<'p> {
 
     /// Run `walk`, a walk of oxc's over the node at `span`, with the stack
     /// it can need.
+    #[track_caller]
     pub fn with_node_stack<R>(&self, span: Span, walk: impl FnOnce() -> R) -> R {
         if self.inside.get() {
             return walk();
         }
-        if fits_by_length(span.size() as usize) {
-            return walk();
+        if covered_by_length(span.size() as usize) {
+            return walk_with_stack(stack_bytes(span.size() as usize), walk);
         }
         with_nesting_stack(self.program_nesting(), walk)
     }
@@ -337,6 +545,7 @@ impl<'p> ProgramWalkStack<'p> {
 /// bodies of the functions nested in the node): the stack is sized from the
 /// node's text with each of those bodies taken out, so a function's walk
 /// costs its own syntax only, not every function nested inside it.
+#[track_caller]
 pub fn with_own_syntax_stack<R>(
     source_text: &str,
     span: Span,
@@ -399,8 +608,23 @@ pub(crate) mod scan_probe {
 
 /// Run `walk`, a walk of oxc's over syntax that nests as `nesting`
 /// measured (a node's, or its program's), with the stack that can need.
+#[track_caller]
 pub fn with_nesting_stack<R>(nesting: Nesting, walk: impl FnOnce() -> R) -> R {
-    walk_with_stack(stack_bytes(nesting.depth as usize), walk)
+    scanned_walk(stack_bytes(nesting.depth as usize), walk)
+}
+
+/// [`walk_with_stack`] for a walk too long to fit the thread's stack by its
+/// length, sized from its scan: one that can reserve a region when no
+/// lease covers it, which test builds record by its call site
+/// ([`faults::take_unleased_walks`]) whether or not this thread's stack
+/// has the bytes.
+#[track_caller]
+fn scanned_walk<R>(needed: usize, walk: impl FnOnce() -> R) -> R {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if !stack::lease_covers(needed) {
+        stack::faults::unleased_walk(std::panic::Location::caller());
+    }
+    walk_with_stack(needed, walk)
 }
 
 /// `oxc_parser::Parser`, parsing on a stack its source cannot exhaust.
@@ -506,6 +730,8 @@ fn unparsed<'a>(
     empty
         .diagnostics
         .push(stack_unavailable_diagnostic(unavailable));
+    // The program is not the source's: nothing may be read from it.
+    empty.fatal_error = true;
     empty
 }
 

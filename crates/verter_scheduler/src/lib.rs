@@ -130,6 +130,7 @@ pub mod scheduler;
 pub mod source_loader;
 pub mod source_root;
 pub mod stage;
+pub mod tasks;
 
 #[cfg(test)]
 #[path = "source_root_tests.rs"]

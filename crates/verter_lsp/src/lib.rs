@@ -149,6 +149,9 @@ fn public_api_projection_subject_json(
                 "sourceRange": { "start": source_range.start, "end": source_range.end },
             })
         }
+        verter_session::PublicApiProjectionSubject::Source => {
+            serde_json::json!({ "kind": "source" })
+        }
     }
 }
 

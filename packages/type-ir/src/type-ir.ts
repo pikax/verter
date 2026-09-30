@@ -342,6 +342,7 @@ export function intrinsicApplication(
  */
 const INTRINSIC_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   awaited: "Awaited",
+  noInfer: "NoInfer",
 };
 
 /**

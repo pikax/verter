@@ -2659,7 +2659,6 @@ pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
     host.project_type_store()
         .flow_slice()
         .set_budget_for_test(FlowSliceBudget {
-            max_return_sites: 256,
             max_selected_nodes: 1,
             ..FlowSliceBudget::default()
         });
@@ -3075,21 +3074,34 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     });
 }
 
-/// A deeply nested array literal that trips the shallow leaf-lowering
-/// budget (`> MAX_SEMANTIC_INFERENCE_DEPTH` nesting levels).
-fn budget_tripping_array() -> String {
-    let levels = 70;
-    let mut out = String::new();
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push('[');
-    }
-    out.push('0');
-    // bounded-loop: fixed 70-level fixture constructor.
-    for _ in 0..levels {
-        out.push(']');
-    }
-    out
+/// A leaf whose lowering trips the shallow leaf-lowering work budget
+/// (`> MAX_SEMANTIC_INFERENCE_WORK` visits): a `satisfies` over a
+/// conditional holding a 5,000-element array literal, which the leaf
+/// lowering infers whole ([`budget_tripping_content_trips_when_lowered`]).
+fn budget_tripping_content() -> String {
+    format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    )
+}
+
+/// The budget-tripping content trips when it IS lowered: returned, the
+/// function's evaluation answers the leaf lowering's typed budget failure.
+/// The two tests below read it unlowered, which only this makes a proof.
+#[test]
+fn budget_tripping_content_trips_when_lowered() {
+    let source = format!(
+        "export function pf() {{ return {}; }}\n",
+        budget_tripping_content()
+    );
+    assert_eq!(
+        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+            crate::semantic_query::FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            )
+        ))
+    );
 }
 
 /// The demand slice is the ONLY lowered content: an UNREAD binding's
@@ -3106,7 +3118,7 @@ fn flow_return_unread_binding_content_never_lowers() {
         input_id: "/ws/unread-content.ts".to_string(),
         source: Arc::from(format!(
             "export function sliced() {{\n  const unused = {};\n  return 2;\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/unread-content.ts")
@@ -3137,7 +3149,7 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
         input_id: "/ws/member-sibling-content.ts".to_string(),
         source: Arc::from(format!(
             "export function memberSliced() {{\n  return {{ a: {}, b: 1 }};\n}}\n",
-            budget_tripping_array()
+            budget_tripping_content()
         )),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/member-sibling-content.ts")
@@ -3935,14 +3947,75 @@ fn staged_flow_proof(
     .expect("a clean re-staged value mints a proof")
 }
 
-/// A completed member marked reusable answers a later demand on its
-/// transaction with its proven value, and REPLAYS what its evaluation read
-/// into the scopes live at the demanding site — the fact into the live
-/// tracer, the canonical self-root onto the live build frame, and the
-/// canonical-evidence epoch — so a build that consumes the reused value
-/// is rooted exactly as if it had re-evaluated it.
+/// A flow result completed on the transaction answers a later demand on it
+/// with its proven value, and REPLAYS what its evaluation read into the
+/// scopes live at the demanding site — the fact into the live tracer, the
+/// canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value is
+/// rooted exactly as if it had re-evaluated it.
 #[test]
 fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::Shared);
+}
+
+/// A completed result whose persistent admission was refused for a typed,
+/// deterministic reason still answers the rest of its transaction — its
+/// completion does not depend on its retention — and the refusal travels
+/// with it: the live tracer that consumes it is refused too, and its reads
+/// are replayed as for any other completed result.
+#[test]
+fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() {
+    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::RequestOnly(
+        crate::resolver_core::reuse::NonCacheableRefusal::new(
+            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        ),
+    ));
+}
+
+/// An incomplete result, or one refused for a transient or unattributed
+/// reason, never enters the transaction's result table: a later demand
+/// evaluates it again rather than freezing a degraded answer.
+#[test]
+fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
+    use crate::resolver_core::reuse::{NoReuseCause, ReuseClass};
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let value = flow_result_value(dispatch, key.clone());
+        for reuse in [
+            ReuseClass::NoReuse(NoReuseCause::Incomplete),
+            ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            )),
+            ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
+                verter_workspace::NonCacheablePropagation::Transitive,
+            )),
+        ] {
+            let mut txn = dispatch.dispatch_txn.borrow_mut();
+            txn.flow.results.complete(
+                key.clone(),
+                super::dispatch_txn::TransactionFlowResult {
+                    value: value.clone(),
+                    reuse,
+                    replay: super::dispatch_txn::FlowMemberReuse {
+                        reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                            facts: Arc::from(Vec::new()),
+                            non_cacheable: false,
+                        },
+                        observed_self_roots: Vec::new(),
+                        canonical_evidence_deposited: false,
+                    },
+                },
+            );
+            assert!(
+                !txn.flow.results.contains(&key),
+                "{reuse:?} must not answer a later demand on the transaction"
+            );
+        }
+    });
+}
+
+fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
     let host = make_scc_host();
     with_dispatch(&host, |dispatch| {
         let key = scc_key(dispatch, "scCleanA");
@@ -3956,26 +4029,21 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
         };
         let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
             (Arc::from("/ws/replayed.ts"), [6; 16]);
-        dispatch
-            .dispatch_txn
-            .borrow_mut()
-            .flow
-            .completed_members
-            .push(super::dispatch_txn::CompletedFlowReturnMember {
-                key: key.clone(),
-                result: staged_flow_proof(&key, value.clone()),
-                inline_flight: None,
-                self_roots: Vec::new(),
-                materialized: crate::semantic_query::demand::MaterializedSet::default(),
-                reuse: Some(super::dispatch_txn::FlowMemberReuse {
+        dispatch.dispatch_txn.borrow_mut().flow.results.complete(
+            key.clone(),
+            super::dispatch_txn::TransactionFlowResult {
+                value: value.clone(),
+                reuse,
+                replay: super::dispatch_txn::FlowMemberReuse {
                     reads: crate::resolver_core::resolver_context::RecordedFactReads {
                         facts: Arc::from(vec![fact.clone()]),
                         non_cacheable: false,
                     },
                     observed_self_roots: vec![root.clone()],
                     canonical_evidence_deposited: true,
-                }),
-            });
+                },
+            },
+        );
         let epoch = dispatch.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
         let (step, read_set) = host
@@ -3991,8 +4059,16 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
             ),
             other => panic!("a reusable member answers Complete, got {other:?}"),
         }
-        let crate::resolver_core::FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
-            panic!("the live tracer seals a cacheable signature");
+        let signature = match (read_set.finalise(), reuse.is_shared()) {
+            (crate::resolver_core::FactReadSetFinalise::Ok(signature), true) => signature,
+            (crate::resolver_core::FactReadSetFinalise::NonCacheable(signature), false) => {
+                signature
+            }
+            (other, shared) => panic!(
+                "a {} result seals the live tracer {}, got {other:?}",
+                if shared { "shared" } else { "request-only" },
+                if shared { "cacheable" } else { "non-cacheable" }
+            ),
         };
         assert!(
             signature.contains(&fact),
@@ -4562,16 +4638,21 @@ fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
 }
 
 /// A binding WRITTEN in the try and read in the catch: the throw can
-/// precede the write, so the read must degrade rather than publish the
-/// entry value clean. tsgo: `{ v: "before" | "inside" }`.
+/// precede the write, so the catch reads the entry value and the written
+/// one — the catch is entered from the try's entry and from every mutation
+/// in it. tsc 7.0.2: `{ v: "before" | "inside" }`.
 #[test]
-fn flow_return_try_written_binding_degrades_at_catch_read() {
-    let (_, degradation) = flow_expr_for_script(
+fn flow_return_try_written_binding_joins_at_catch_read() {
+    let (expr, degradation) = flow_expr_for_script(
         "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }",
     );
+    assert_eq!(degradation, None);
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("before"),
+            string_literal("inside"),
+        ])]
     );
 }
 
@@ -5162,10 +5243,15 @@ fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
 
 #[test]
 fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    // A catch merges the try's entry with the state after each write and at
+    // each throw point of its block: `0`, `x = 1`, `x = 'b'`, `x = true`
+    // and the three throws are its seven predecessors. A finally merges the
+    // normal completion and the entry with each write and throw of the try
+    // and each pending return: seven again.
     for (source, predecessors) in [
         ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 4),
-        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 4),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 7),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 7),
     ] {
         let (result, joins) = flow_source_probe_observed(source, true);
         assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
@@ -9454,6 +9540,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
                     false,
                     None,
                     None,
+                    Default::default(),
                 )),
                 Vec::new(),
                 vec![member],
@@ -9503,6 +9590,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
                     false,
                     None,
                     None,
+                    Default::default(),
                 )),
                 Vec::new(),
                 Vec::new(),
@@ -10320,25 +10408,25 @@ fn flow_return_finally_identity_membership_scales_with_written_subjects() {
 
 #[test]
 fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
-    // The existing catch policy retains its conditional-definition refusal.
-    // An unused binder must neither block the string write nor replace that
-    // established boundary with a product-selection failure.
+    // An unused binder must neither block the catch's write nor replace it
+    // with a product-selection failure. The write of `'s'` to `let x = 0`
+    // holds the declared `number` (the checker's assignment rule; tsc 7.0.2
+    // answers `number`), so the read is clean.
     for clause in ["catch(e)", "catch"] {
         let source =
             format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
         let result = flow_source_probe(&source);
         let FlowSourceProbe::Value {
             expr,
-            degradation:
-                Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
-            candidates: 0,
+            degradation: None,
+            candidates: 1,
         } = result
         else {
             panic!("{source}: {result:?}");
         };
         assert_eq!(
             expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
     }
     assert_eq!(
@@ -10688,15 +10776,22 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
         assert_eq!(member_types(&expr, "v"), expected, "{case}");
     }
     // The CHANGING write read inside the finally: the entering fact does
-    // not describe the written try end, so it cannot stand at the join,
-    // and the read of the clause-flagged value fails closed rather than
-    // publishing the pre-try `string` clean.
-    let (_, degradation) = flow_expr_cold_warm(
+    // not describe the written try end, so it cannot stand at the join;
+    // the finally reads the pre-try `string` and the written `number`
+    // (tsc 7.0.2: `{ v: string | number; } | { v: boolean; }`).
+    let (expr, degradation) = flow_expr_cold_warm(
         "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { return { v: p } } } return { v: true } }",
     );
+    assert_eq!(degradation, None, "changing write read inside the finally");
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+        member_types(&expr, "v"),
+        vec![
+            boolean,
+            verter_type_expr::TypeExpr::union(vec![
+                number,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ]),
+        ],
         "changing write read inside the finally"
     );
 }
@@ -11634,4 +11729,185 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     };
     assert_eq!(acquisitions(1), vec![1], "one caller");
     assert_eq!(acquisitions(4), vec![1; 4], "four callers");
+}
+
+/// The functions of `source` whose `FlowReturn` read closes WITHOUT its
+/// proof — the finalizer's verdict partial, so the read is `ReturnOnly`
+/// with [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`]
+/// — each with its partial reasons. A correct flow answer closes with its
+/// proof: the completeness design keeps every correct answer clean and
+/// admits no unproven one as exact, so a publication boundary that
+/// honours the verdict can only keep a correct answer clean when its
+/// proof closes.
+fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
+    const FILE: &str = "/ws/proof.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(FILE.to_string()),
+        input_id: FILE.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let mut unproven = Vec::new();
+    for name in names {
+        with_dispatch(&host, |dispatch| {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(FILE),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(*name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(FILE),
+                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: crate::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+            if read.result_is_partial {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            }
+        });
+    }
+    unproven
+}
+
+/// An annotated declaration's initializer RUNS: the checker checks it and
+/// its flow sees every write and call inside it, whatever the declared
+/// type makes of its value. Its writes reach later reads, each call in it
+/// is evaluated and so evidenced, and the proof closes. TypeScript 7.0.2,
+/// all four settings: `wContextual` is `1`, `initWrite` `number`,
+/// `initWriteLet` `readonly [number, number]`.
+const ANNOTATED_INITIALIZERS: &str = r#"
+declare function f<T>(x: T): T;
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+export function initWrite() { let y: string | number = "s"; const x: 1 = (y = 2, 1); return y; }
+export function initWriteLet() { let y: string | number = "s"; let x: number = (y = 2, 3); return [x, y] as const; }
+"#;
+
+#[test]
+fn an_annotated_declarations_initializer_runs_and_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(
+        ANNOTATED_INITIALIZERS,
+        &["wContextual", "initWrite", "initWriteLet"],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ANNOTATED_INITIALIZERS).returns(&[
+            ("wContextual", "1"),
+            ("initWrite", "number"),
+            ("initWriteLet", "readonly [number, number]"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An `asserts` call applied as a sequence operand, a sequence arm or an
+/// initializer operand is evaluated where it narrows: the narrow records
+/// the call's evidence, decided exactly as a predicate call's narrow is,
+/// and the proof closes. TypeScript 7.0.2, all four settings: `p12` is
+/// `string`, `inSequence` `string | number`, `guardedInSequence` `never`,
+/// `initAssert` `string`, `stmtTruthy` and `seqTruthy` `string`.
+const ASSERTION_CALLS: &str = r#"
+declare function assertString(x: unknown): asserts x is string;
+declare function ok(v: unknown): asserts v;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+export function guardedInSequence(x: string | number | boolean) { const y = (typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)), x); return y; }
+export function initAssert(v: string | number) { const x: 1 = ((0, assertString(v)), 1); return v; }
+export function stmtTruthy(v: string | undefined) { ok(v); return v; }
+export function seqTruthy(v: string | undefined) { return ((0, ok(v)), v); }
+"#;
+
+#[test]
+fn an_assertion_call_evidences_its_own_narrow() {
+    let mut failures = flow_reads_without_proof(
+        ASSERTION_CALLS,
+        &[
+            "p12",
+            "inSequence",
+            "guardedInSequence",
+            "initAssert",
+            "stmtTruthy",
+            "seqTruthy",
+        ],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ASSERTION_CALLS).returns(&[
+            ("p12", "string"),
+            ("inSequence", "string | number"),
+            ("guardedInSequence", "never"),
+            ("initAssert", "string"),
+            ("stmtTruthy", "string"),
+            ("seqTruthy", "string"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A construction passed as a call argument is a call of its constructor:
+/// the frame evaluates it as it does any call argument, so the
+/// construction's own call is evidenced and the proof closes. TypeScript
+/// 7.0.2, all four settings: `cArg` is `Error0`.
+const CONSTRUCTED_ARGUMENTS: &str = r#"
+class Error0 {}
+declare function id<T>(x: T): T;
+export function cArg() { return id(new Error0()); }
+"#;
+
+#[test]
+fn a_constructed_call_argument_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(CONSTRUCTED_ARGUMENTS, &["cArg"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(CONSTRUCTED_ARGUMENTS)
+            .returns(&[("cArg", "Error0")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A callable in a parameter list is served by no index entry, but the
+/// frame resolves every name it reaches, so its capture set is exact and
+/// no closure-capture gap stands. TypeScript 7.0.2, all four settings:
+/// `dpArrow` is `() => number`.
+const PARAMETER_CALLABLES: &str = r#"
+export function dpArrow(cb = () => 7) { return cb; }
+"#;
+
+#[test]
+fn a_parameter_default_callable_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(PARAMETER_CALLABLES, &["dpArrow"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(PARAMETER_CALLABLES)
+            .returns(&[("dpArrow", "() => number")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class static block runs at the class's evaluation, and the checker
+/// flows through it inline: `x = 1` in `class C { static { x = 1; } }`
+/// reaches every later read of `x` in the frame. TypeScript 7.0.2, all four
+/// settings: `classStaticBlockAssigns` is `(x: string | number) =>
+/// boolean` (the assignment declines the predicate).
+///
+/// What the lane gives: `boolean`, the checker's answer, with the verdict
+/// partial (`DegradedValue`): the class declaration's unmodeled write
+/// lowers to the statement gap `FlowGap::GuardNarrowing`, which the value
+/// then carries. Proving it takes the static block's statements lowered
+/// in the frame, which the skeleton does not walk (a static block keeps
+/// its own scope and no index entry serves it).
+const STATIC_BLOCK_WRITES: &str = r#"
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+"#;
+
+#[test]
+#[ignore = "a class static block's write is flowed in its frame"]
+fn a_class_static_block_write_is_flowed_in_its_frame() {
+    let unproven = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
+    assert!(unproven.is_empty(), "{}", unproven.join("\n"));
 }

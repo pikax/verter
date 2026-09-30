@@ -46,6 +46,25 @@ enum PrintedDeclaration {
     AliasTransparent,
 }
 
+/// One step of the printing walk over a declaration.
+enum DeclarationPrinting {
+    /// The declaration prints so (`None` when its kind or body cannot be
+    /// recovered).
+    Printed(Option<PrintedDeclaration>),
+    /// The declaration's body references this declaration with these
+    /// declared arguments.
+    Reference(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>),
+}
+
+/// How an alias whose body references a declaration prints.
+enum ReferencePrinting {
+    /// Printed so.
+    Printed(PrintedDeclaration),
+    /// As the referenced alias's own declaration prints: named by the
+    /// outer alias unless the target prints as what it resolves to.
+    AsTarget,
+}
+
 /// A builtin mapped utility, by whether its mapping is homomorphic (its
 /// keys are `keyof` its source).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,10 +306,13 @@ struct DeferredEvaluationFrame {
     completeness: ResultCompleteness,
     cache_suppress: bool,
     stage: DeferredEvaluationStage,
+    /// The dispatcher's operation-budget epoch when the frame began: a
+    /// recovery made under it leaves the frame a resource partial.
+    budget_epoch: u64,
 }
 
 impl DeferredEvaluationFrame {
-    fn new(node: SemanticNodeId, context: ProjectionReductionContext) -> Self {
+    fn new(node: SemanticNodeId, context: ProjectionReductionContext, budget_epoch: u64) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
@@ -302,6 +324,7 @@ impl DeferredEvaluationFrame {
             completeness: ResultCompleteness::Complete,
             cache_suppress: false,
             stage: DeferredEvaluationStage::EvaluateCurrent,
+            budget_epoch,
         }
     }
 
@@ -397,6 +420,19 @@ pub(crate) enum StructuralFactDemandOutcome {
     /// carrier-stop (no fuse/ceiling/fault fired). The ONLY arm that
     /// yields a node.
     Complete(SemanticNodeId),
+    /// Resolved, except that an operation on the way exhausted its own
+    /// allowance and the node holds the checker's recovery for it — the
+    /// only reason is [`PartialReasonSet::OPERATION_BUDGET`]. A resource
+    /// partial: a fail-closed consumer treats it exactly as
+    /// [`Partial`](Self::Partial); one that reads the checker's recovery
+    /// as the checker does reads the node through
+    /// [`into_usable_node`](StructuralFactDemandOutcome::into_usable_node).
+    Recovered {
+        /// The resolved node, holding the recovery.
+        node: SemanticNodeId,
+        /// The partial reasons: exactly the operation budget.
+        reasons: PartialReasonSet,
+    },
     /// Truncated / faulted. Carries the reasons ONLY — no node.
     Partial(PartialReasonSet),
 }
@@ -413,6 +449,8 @@ struct SettledDemand<'g> {
     n: SemanticNodeId,
     exit_reasons: Option<PartialReasonSet>,
     named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)>,
+    /// The dispatcher's operation-budget epoch when the demand began.
+    budget_epoch: u64,
 }
 
 /// A demand's first half: finished outright (a trip on entry), or settled.
@@ -453,6 +491,16 @@ struct CompositeReduction {
     next: usize,
     views: Vec<SemanticNodeId>,
     named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)>,
+    /// The named arms of an intersection that stand for unions of object
+    /// types: the arm stays the view, and the checker's cross product over
+    /// the unions is still weighed
+    /// ([`ProjectSemanticDispatch::named_intersection_too_complex`]).
+    named_object_unions: Vec<SemanticNodeId>,
+    /// Whether the result keeps the names the checker prints as a union's
+    /// origin (`U0 | 2`): only at the altitude a type is printed at. A
+    /// demand that resolves declarations reads the type set itself (`0 |
+    /// 1 | 2`), which is what every member a consumer reads must be.
+    keep_origin: bool,
     waiting: Option<ArmWait>,
     /// The typed completeness of the demands the reduction read: a name
     /// whose demand did not complete leaves the composite as written, and
@@ -542,6 +590,18 @@ impl StructuralFactDemandOutcome {
     pub(crate) fn into_complete_node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Complete(node) => Some(node),
+            Self::Recovered { .. } | Self::Partial(_) => None,
+        }
+    }
+
+    /// The node the checker would continue with: the resolved node when
+    /// `Complete`, and when `Recovered` the node holding the checker's
+    /// recovery, which reads and relates as the checker's does. `None` when
+    /// `Partial`. The result it feeds stays partial whenever it is
+    /// `Recovered`: the demand already folded its reasons.
+    pub(crate) fn into_usable_node(self) -> Option<SemanticNodeId> {
+        match self {
+            Self::Complete(node) | Self::Recovered { node, .. } => Some(node),
             Self::Partial(_) => None,
         }
     }
@@ -958,6 +1018,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.fold_local_partial_completeness(reasons);
             return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(reasons));
         }
+        let budget_epoch = self.operation_budget_epoch.get();
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
         // merging the evaluation's typed completeness into the demand outcome.
@@ -1254,6 +1315,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             n,
             exit_reasons,
             named_alias_application,
+            budget_epoch,
         })
     }
 
@@ -1275,6 +1337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             mut n,
             exit_reasons,
             named_alias_application,
+            budget_epoch,
         } = settled;
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
@@ -1308,6 +1371,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if named_by_alias {
                 n = named;
             }
+        }
+        // A recovery made anywhere under the demand — a relation, a nested
+        // build, a canonical construction — is this demand's too, even
+        // where no read carried its reason here.
+        if self.operation_budget_epoch.get() != budget_epoch {
+            completeness = completeness.merge(ResultCompleteness::partial(
+                PartialReasonSet::OPERATION_BUDGET,
+            ));
         }
         // The declaration-keeping mode prints an application's arguments as
         // the checker prints them.
@@ -1344,7 +1415,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // + `peel_node_for_uninstantiated_carrier_fact_demand`) route
                 // through this one exit, so both fail closed identically.
                 self.fold_local_partial_completeness(reasons);
-                StructuralFactDemandOutcome::Partial(reasons)
+                // Stopped only by an operation's own allowance: the node
+                // holds the checker's recovery, usable but incomplete.
+                if reasons == PartialReasonSet::OPERATION_BUDGET {
+                    StructuralFactDemandOutcome::Recovered { node: n, reasons }
+                } else {
+                    StructuralFactDemandOutcome::Partial(reasons)
+                }
             }
         }
     }
@@ -1358,7 +1435,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - an alias whose declared body is a type the alias itself
     ///   constructs — an object, function, mapped, array or tuple type, a
     ///   union or an intersection — is printed by the alias (`Tup<number>`,
-    ///   `Fn<number>`);
+    ///   `Fn<number>`), except a tuple with a variadic element, which is
+    ///   normalized on instantiation and printed as the tuple (`type
+    ///   Push<T extends unknown[], U> = [...T, U]` prints `Push<[1, 2], 3>`
+    ///   as `[1, 2, 3]`);
     /// - an alias whose body references another declaration prints as
     ///   [`Self::printed_alias_reference`] decides;
     /// - every other alias is not named by the alias: a conditional
@@ -1366,33 +1446,91 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   (`type Lit<T> = T`) or a primitive.
     ///
     /// `None` when the declaration's kind or body cannot be recovered.
+    ///
+    /// An alias chain is walked in a loop, one alias per step, so a chain
+    /// of any length is read in constant native stack.
     fn printed_declaration(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<PrintedDeclaration> {
-        self.printed_declaration_within(identity, &mut rustc_hash::FxHashSet::default())
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = identity.clone();
+        // Whether the printing is the one of an alias further down the
+        // chain, reached through generic alias applications.
+        let mut through_alias = false;
+        let terminal = loop {
+            let (target, args) = match self.printed_declaration_body(&current, &mut visited) {
+                DeclarationPrinting::Printed(printed) => break printed,
+                DeclarationPrinting::Reference(target, args) => (target, args),
+            };
+            match self.printed_alias_reference(&target, &args) {
+                ReferencePrinting::Printed(printed) => break Some(printed),
+                ReferencePrinting::AsTarget => {
+                    through_alias = true;
+                    current = target;
+                }
+            }
+        };
+        if !through_alias {
+            return terminal;
+        }
+        // An application of a generic alias is named by the outer alias
+        // unless the target prints as what it resolves to — at every step
+        // alike, so every step above the terminal prints as the one below.
+        Some(match terminal {
+            Some(PrintedDeclaration::AliasTransparent) | None => {
+                PrintedDeclaration::AliasTransparent
+            }
+            Some(_) => PrintedDeclaration::AliasNamed,
+        })
     }
 
-    fn printed_declaration_within(
+    /// One step of [`Self::printed_declaration`]: how `identity` prints,
+    /// or the declaration its body references, whose printing decides.
+    fn printed_declaration_body(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
         visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
-    ) -> Option<PrintedDeclaration> {
+    ) -> DeclarationPrinting {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         if !visited.insert(identity.clone()) {
             // An alias cycle names nothing.
-            return Some(PrintedDeclaration::AliasTransparent);
+            return DeclarationPrinting::Printed(Some(PrintedDeclaration::AliasTransparent));
         }
-        match self.prepared_decl_kind(identity)? {
-            TypeDeclKind::Interface | TypeDeclKind::Class => {
-                return Some(PrintedDeclaration::Named)
+        match self.prepared_decl_kind(identity) {
+            None => return DeclarationPrinting::Printed(None),
+            Some(TypeDeclKind::Interface | TypeDeclKind::Class) => {
+                return DeclarationPrinting::Printed(Some(PrintedDeclaration::Named))
             }
-            TypeDeclKind::Alias => {}
+            Some(TypeDeclKind::Alias) => {}
         }
-        let Some(body) = self.declared_alias_body(identity)? else {
-            return Some(PrintedDeclaration::AliasTransparent);
+        let body = match self.declared_alias_body(identity) {
+            None => return DeclarationPrinting::Printed(None),
+            Some(None) => {
+                return DeclarationPrinting::Printed(Some(PrintedDeclaration::AliasTransparent))
+            }
+            Some(Some(body)) => body,
         };
-        Some(match self.graph().node_data(body).as_deref() {
+        let graph = self.graph();
+        DeclarationPrinting::Printed(Some(match graph.node_data(body).as_deref() {
+            // A tuple with a variadic element (`...T` over anything but an
+            // array type) is normalized when it is instantiated, and the
+            // normalized tuple carries no alias (the checker defers only a
+            // tuple type node without one).
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if elements.iter().any(|element| {
+                    element.rest
+                        && !matches!(
+                            graph.node_data(element.value).as_deref(),
+                            Some(SemanticNodeData::Array {
+                                readonly: false,
+                                ..
+                            })
+                        )
+                }) =>
+            {
+                PrintedDeclaration::AliasTransparent
+            }
             Some(
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Signature { .. }
@@ -1403,13 +1541,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) => PrintedDeclaration::AliasNamed,
             Some(SemanticNodeData::Intersection(_)) => PrintedDeclaration::AliasNamedIntersection,
             Some(SemanticNodeData::DeclRef { identity: target }) => {
-                self.printed_alias_reference(target, &[], visited)
+                return DeclarationPrinting::Reference(target.clone(), Arc::from([]));
             }
             Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
-                self.printed_alias_reference(target, args, visited)
+                return DeclarationPrinting::Reference(target.clone(), Arc::clone(args));
             }
             _ => PrintedDeclaration::AliasTransparent,
-        })
+        }))
     }
 
     /// How the checker prints an alias whose declared body references
@@ -1440,15 +1578,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   prints `G<boolean>`, `type OuterCond<T> = Cond<T>` prints the
     ///   selected branch);
     /// - any other builtin (a conditional utility) is what it resolves to.
+    ///
+    /// [`ReferencePrinting::AsTarget`] for a generic alias application,
+    /// which the target's own printing decides.
     fn printed_alias_reference(
         &self,
         target: &crate::semantic_query::DeclIdentity,
         args: &[SemanticNodeId],
-        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
-    ) -> PrintedDeclaration {
+    ) -> ReferencePrinting {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         if is_builtin(target) {
-            return match BuiltinMappedUtility::of(&target.decl_name) {
+            return ReferencePrinting::Printed(match BuiltinMappedUtility::of(&target.decl_name) {
                 Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
                     PrintedDeclaration::AliasThrough
                 }
@@ -1457,27 +1597,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     PrintedDeclaration::AliasNamed
                 }
                 None => PrintedDeclaration::AliasTransparent,
-            };
+            });
         }
         let (Some(kind), Some(generic)) = (
             self.prepared_decl_kind(target),
             self.prepared_decl_is_generic(target),
         ) else {
-            return PrintedDeclaration::AliasTransparent;
+            return ReferencePrinting::Printed(PrintedDeclaration::AliasTransparent);
         };
-        match kind {
+        ReferencePrinting::Printed(match kind {
             _ if !generic => PrintedDeclaration::AliasThrough,
             TypeDeclKind::Interface | TypeDeclKind::Class => PrintedDeclaration::AliasNamed,
             TypeDeclKind::Alias if self.alias_declares_homomorphic_mapping(target) => {
                 PrintedDeclaration::AliasThrough
             }
-            TypeDeclKind::Alias => match self.printed_declaration_within(target, visited) {
-                Some(PrintedDeclaration::AliasTransparent) | None => {
-                    PrintedDeclaration::AliasTransparent
-                }
-                Some(_) => PrintedDeclaration::AliasNamed,
-            },
-        }
+            TypeDeclKind::Alias => return ReferencePrinting::AsTarget,
+        })
     }
 
     /// Whether the alias `identity` declares a homomorphic mapped type — a
@@ -1486,17 +1621,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// union, or an application of another alias that does. The checker
     /// gives such a declaration the mapped type's own name, so an alias of
     /// it is printed by that name.
+    ///
+    /// Every alias the walk passes answers as the one it starts from — the
+    /// walk from each continues the same way — so each answer is kept for
+    /// the request, and a chain is walked once however many of its aliases
+    /// are asked about.
     fn alias_declares_homomorphic_mapping(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        if let Some(&known) = self.homomorphic_aliases.borrow().get(identity) {
+            return known;
+        }
+        let mut walked = Vec::new();
+        let answer = self.walk_homomorphic_mapping(identity, &mut walked);
+        let mut known = self.homomorphic_aliases.borrow_mut();
+        for alias in walked {
+            known.insert(alias, answer);
+        }
+        answer
+    }
+
+    /// [`Self::alias_declares_homomorphic_mapping`]'s walk from `identity`,
+    /// recording in `walked` every alias it passes.
+    fn walk_homomorphic_mapping(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        walked: &mut Vec<crate::semantic_query::DeclIdentity>,
     ) -> bool {
         use verter_semantic::analysis::type_eval::TypeDeclKind;
         let mut visited = rustc_hash::FxHashSet::default();
         let mut current = identity.clone();
         loop {
+            if let Some(&known) = self.homomorphic_aliases.borrow().get(&current) {
+                return known;
+            }
             if !visited.insert(current.clone()) {
                 return false;
             }
+            walked.push(current.clone());
             let Some(Some(body)) = self.declared_alias_body(&current) else {
                 return false;
             };
@@ -1554,7 +1717,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             BuiltinMappedUtility::Homomorphic => {
                 let source = self
                     .normalize_node_for_structural_fact_demand(*args.first()?, context)
-                    .into_complete_node()?;
+                    .into_usable_node()?;
                 (!matches!(
                     self.graph().node_data(source).as_deref(),
                     Some(
@@ -1572,7 +1735,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// An alias's declared body shape with `Alias` wrappers peeled: `None`
     /// when the body cannot be recovered, `Some(None)` for an alias cycle.
-    fn declared_alias_body(
+    pub(super) fn declared_alias_body(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<Option<SemanticNodeId>> {
@@ -1787,9 +1950,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     fn finish_deferred_evaluation_frame(
         &self,
-        frame: DeferredEvaluationFrame,
+        mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
     ) -> EvaluateDeferredOutcome {
+        // A recovery made under the evaluation — an inline relation, a
+        // canonical construction — makes it a resource partial, never a
+        // published memo entry, even where no read carried its reason here.
+        if self.operation_budget_epoch.get() != frame.budget_epoch {
+            frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                PartialReasonSet::OPERATION_BUDGET,
+            ));
+        }
         if let Some(reasons) = self.connected_demand_trip() {
             return EvaluateDeferredOutcome {
                 node: frame.entry_node,
@@ -1830,7 +2001,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
-        let mut frames = vec![DeferredEvaluationFrame::new(node, reduction_context)];
+        let mut frames = vec![DeferredEvaluationFrame::new(
+            node,
+            reduction_context,
+            self.operation_budget_epoch.get(),
+        )];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {
@@ -2090,7 +2265,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match action {
                 DeferredEvaluationAction::Continue => {}
                 DeferredEvaluationAction::Push { node, context } => {
-                    frames.push(DeferredEvaluationFrame::new(node, context));
+                    frames.push(DeferredEvaluationFrame::new(
+                        node,
+                        context,
+                        self.operation_budget_epoch.get(),
+                    ));
                 }
                 DeferredEvaluationAction::Finish(result) => {
                     let frame = frames.pop().expect("finishing an active evaluator frame");
@@ -2143,7 +2322,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let reduction = self.begin_composite(node)?;
+        let reduction = self.begin_composite(node, false)?;
         match self.drive_structural_fact_demands(DemandFrame::Composite(reduction)) {
             DrivenRoot::Composite(reduced) => reduced,
             DrivenRoot::Demand(_) => unreachable!("a composite root finishes as a composite"),
@@ -2191,7 +2370,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if composite.is_none() {
                         // A chain that did not settle is not reduced.
                         let started = if settled.exit_reasons.is_none() {
-                            let started = self.begin_composite(settled.n);
+                            let started =
+                                self.begin_composite(settled.n, !settled.resolve_declaration_refs);
                             if started.is_none()
                                 && self.carrier_normalizing.borrow().contains(&settled.n)
                             {
@@ -2336,10 +2516,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// arms stays as written — the re-entry reads the same
     /// `carrier_normalizing` record the carrier normalizer keeps, never a
     /// depth limit). A started reduction is on that record until it is done.
-    fn begin_composite(&self, node: SemanticNodeId) -> Option<CompositeReduction> {
+    fn begin_composite(
+        &self,
+        node: SemanticNodeId,
+        keep_origin: bool,
+    ) -> Option<CompositeReduction> {
         use crate::semantic_query::composite::CompositeOriginCategory as Category;
+        let mut re_decidable = true;
         let (arms, is_union) = match self.graph().node_data(node)?.as_ref() {
-            SemanticNodeData::Union(members) => (members.members_arc(), true),
+            SemanticNodeData::Union(members) => {
+                re_decidable = matches!(
+                    members.origin_category(),
+                    Category::Canonical(_) | Category::CanonicalUnproven | Category::AuthoredShell
+                );
+                (members.members_arc(), true)
+            }
             SemanticNodeData::Intersection(members)
                 if matches!(
                     members.origin_category(),
@@ -2350,7 +2541,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => return None,
         };
-        if !arms.iter().any(|arm| self.is_composite_name(*arm)) {
+        // A union without a name still reduces as the checker's union does
+        // (`"a" | string` is `string`) when its arm list is one the
+        // canonical authority may re-decide; an intersection without one has
+        // nothing to resolve.
+        if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
         if self.carrier_normalizing.borrow().contains(&node) {
@@ -2365,6 +2560,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             next: 0,
             views: Vec::with_capacity(capacity),
             named_unions: Vec::new(),
+            named_object_unions: Vec::new(),
+            keep_origin,
             waiting: None,
             completeness: ResultCompleteness::Complete,
         })
@@ -2397,6 +2594,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(ArmWait::Resolved(arm)) => {
                     let resolved = match outcome {
                         StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                        // A name an operation's allowance stopped is the
+                        // checker's recovery, read as the checker reads it;
+                        // the reduction is partial with it.
+                        StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                            reduction.completeness = reduction
+                                .completeness
+                                .merge(ResultCompleteness::partial(reasons));
+                            node
+                        }
                         StructuralFactDemandOutcome::Partial(reasons) => {
                             reduction.completeness = reduction
                                 .completeness
@@ -2457,6 +2663,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .all(|member| self.is_composite_scalar(*member))
                 {
                     reduction.views.push(arm);
+                    reduction.named_object_unions.push(arm);
                 } else {
                     reduction
                         .views
@@ -2487,7 +2694,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let arms: &[SemanticNodeId] = &reduction.arms;
         let views = &reduction.views;
         let named_unions = &reduction.named_unions;
-        if views.as_slice() == arms {
+        if !reduction.is_union {
+            if let Some(recovery) = self.named_intersection_too_complex(reduction) {
+                return Some(recovery);
+            }
+        }
+        if !reduction.is_union && views.as_slice() == arms {
             return None;
         }
         let is_opaque = |view: SemanticNodeId| {
@@ -2510,7 +2722,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if views.iter().any(|view| is_opaque(*view)) {
             return None;
         }
+        // A template literal arm is the type its construction builds
+        // (`${string}${string}` is `string`), as the checker holds it
+        // before the union reduces.
+        let views: Vec<SemanticNodeId> = views
+            .iter()
+            .map(|view| match graph.node_data(*view).as_deref() {
+                Some(SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                }) => {
+                    let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+                        pattern: Arc::clone(quasis),
+                        args: Arc::clone(expressions),
+                        context: self.template_literal_reduce_context(),
+                    });
+                    match read.value {
+                        QueryResult::Value(built) if !read.result_is_partial => built,
+                        _ => *view,
+                    }
+                }
+                _ => *view,
+            })
+            .collect();
+        let views = views.as_slice();
         let reduced = self.intern_normalized_union_or_intersection(views, true);
+        // Arms read as written whose every member the union's reduction
+        // keeps: the union stays as written, in its written order.
+        if views == arms {
+            let kept = match graph.node_data(reduced).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm))
+                }
+                _ => false,
+            };
+            if kept {
+                return None;
+            }
+        }
         let type_set: Vec<SemanticNodeId> = match graph.node_data(reduced).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => {
@@ -2518,6 +2767,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => vec![reduced],
         };
+        if !reduction.keep_origin {
+            return (reduced != node).then_some(reduced);
+        }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
         let in_named = |member: &SemanticNodeId| {
@@ -2550,6 +2802,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (result != node).then_some(result)
     }
 
+    /// The checker's TS2590 recovery for an intersection over named
+    /// object unions it refuses to distribute
+    /// ([`Self::intersection_too_complex`]): the intersection stays factored
+    /// while it is read, but its cross product is weighed as the checker
+    /// weighs it. `None` when the checker distributes it.
+    fn named_intersection_too_complex(
+        &self,
+        reduction: &CompositeReduction,
+    ) -> Option<SemanticNodeId> {
+        if reduction.named_object_unions.is_empty() {
+            return None;
+        }
+        self.intersection_too_complex(reduction.node)
+    }
+
     /// Advance `walk` — the members of the resolved union a named arm
     /// stands for, with every member that is itself a named union read as
     /// that union's members, flattened as the checker's union holds them —
@@ -2570,6 +2837,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .expect("an outcome is delivered only to a waiting walk");
             let resolved = match outcome {
                 StructuralFactDemandOutcome::Complete(resolved) => resolved,
+                StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                    walk.partial = Some(walk.partial.map_or(reasons, |held| held.union(reasons)));
+                    node
+                }
                 StructuralFactDemandOutcome::Partial(reasons) => {
                     walk.partial = Some(reasons);
                     return MembersStep::Done(None);
@@ -2684,7 +2955,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// read-boundary fold covers `CacheRead`-carried partials only; this is
     /// the matching funnel for evaluator-local ones.
     pub(super) fn fold_local_partial_completeness(&self, reasons: PartialReasonSet) {
+        if reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
+            self.operation_budget_epoch
+                .set(self.operation_budget_epoch.get().wrapping_add(1));
+        }
         crate::request_context::fold_result_completeness(ResultCompleteness::partial(reasons));
         self.fold_into_top_build_local_taint_with(true, true, reasons);
+    }
+
+    /// The checker's recovery after `refusal`, an operation that exhausted
+    /// its own allowance: its error type, with `origin` the operation's
+    /// authored form, if one already exists. The recovery is a resource
+    /// partial, folded here with it, so no caller can keep the recovery
+    /// while dropping its incompleteness.
+    pub(super) fn recover_at_operation_budget(
+        &self,
+        refusal: crate::semantic_query::checker_policy::OperationRefusal,
+        origin: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.fold_local_partial_completeness(PartialReasonSet::OPERATION_BUDGET);
+        crate::semantic_query::checker_policy::resource_recovery(self.graph(), refusal, origin)
     }
 }

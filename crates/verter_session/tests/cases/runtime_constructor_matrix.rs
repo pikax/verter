@@ -1674,7 +1674,13 @@ defineProps({ label: Nope })
         project.upsert_base(case.id, case.source).unwrap();
 
         match project.host().get_component_meta_output(case.id) {
-            Err(error) => {
+            Err(verter_session::meta_resolve::ComponentMetaFailure::Aborted(abort)) => {
+                panic!(
+                    "{}: an uncancelled request never aborts: {abort:?}",
+                    case.id
+                )
+            }
+            Err(verter_session::meta_resolve::ComponentMetaFailure::Output(error)) => {
                 assert_eq!(
                     error.lane,
                     ComponentMetaOutputLane::Prop,
@@ -1756,13 +1762,16 @@ defineProps({ label: Widget })
         )
         .unwrap();
 
-    let error = project
+    let failure = project
         .host()
         .get_component_meta_output("/rcm/VueDefaultCtor.vue")
         .expect_err(
             "a component default has no raisable value body, so this constructor \
              position must fail closed rather than publish something invented",
         );
+    let verter_session::meta_resolve::ComponentMetaFailure::Output(error) = failure else {
+        panic!("an uncancelled request never aborts: {failure:?}");
+    };
 
     let verter_type_expr::facts::SourcePosition::Present(
         verter_type_expr::facts::SemanticTypeSource::Authored(

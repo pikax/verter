@@ -324,11 +324,19 @@ fn lower_node(
             let mut declaration_frame = BinderScope::default();
             let mut declarations = FxHashMap::default();
             for site in &infer_sites {
+                // A constrained `infer` needs the full lowering of its
+                // constraint.
+                if site.constraint.is_some() {
+                    return Err(StructuralLowerError::UnsupportedWithoutResolution {
+                        shape: "ConstrainedInfer",
+                    });
+                }
                 let binder = infer_binders.binder_at(&site.path);
                 let declaration = graph.intern_node_with_scope(
                     SemanticNodeData::Infer {
                         name: Arc::clone(&site.name),
                         binder: binder.clone(),
+                        constraint: None,
                     },
                     scope.clone(),
                 );
@@ -409,7 +417,7 @@ fn lower_node(
         TypeExpr::RecursiveRef { .. } => Err(StructuralLowerError::UnsupportedWithoutResolution {
             shape: "RecursiveRef",
         }),
-        TypeExpr::Infer { name } => {
+        TypeExpr::Infer { name, .. } => {
             if let Some(declaration) = ctx.lookup_infer_declaration(name) {
                 let declaration_data = graph.node_data(declaration);
                 if let Some(SemanticNodeData::Infer { .. }) = declaration_data.as_deref() {
@@ -423,6 +431,7 @@ fn lower_node(
                         .infer_binders
                         .expect("structural lowering injects an infer identity authority")
                         .binder_for_expr(expr),
+                    constraint: None,
                 },
                 scope.clone(),
             ))
@@ -743,7 +752,7 @@ fn lower_node(
                         scope.clone(),
                     );
                     let base_infer = match graph.node_data(inner_id).as_deref() {
-                        Some(SemanticNodeData::Infer { name, binder }) => {
+                        Some(SemanticNodeData::Infer { name, binder, .. }) => {
                             Some((Arc::clone(name), binder.clone()))
                         }
                         _ => None,

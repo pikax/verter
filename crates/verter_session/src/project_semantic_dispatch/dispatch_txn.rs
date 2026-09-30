@@ -341,9 +341,94 @@ pub(crate) struct RelationChainPosition {
     /// frame or one below it in the chain.
     pub(crate) expanding: u8,
     /// The recursion identities of this counted frame's source and target
-    /// with the node each was read from (see
+    /// with the instantiation each was read from — its type arguments, none
+    /// for the alias named without any (see
     /// `ProjectSemanticDispatch::relation_recursion_identity`).
-    pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
+    pub(crate) identities:
+        [Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)>; 2],
+    /// The chain's depth when this frame opened — the depth its parent
+    /// had reached.
+    pub(crate) opened_at: u16,
+    /// What this frame's computation used of the checker's recursion
+    /// bounds so far (see [`RelationRecursionUse`]).
+    pub(crate) recursion: RelationRecursionUse,
+}
+
+/// What one relation's computation used of the checker's two recursion
+/// bounds — the chain depth it reached and the recursion identities it
+/// stacked — measured from the frame that computes it. Its footprint is
+/// published with the relation, so a warm read replays the answer only
+/// where the cold computation takes the same course
+/// (`ProjectSemanticDispatch::relation_replays_cold`). Transient: it lives
+/// on the frame and on the pending member, and is released at publish.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RelationRecursionUse {
+    /// The deepest chain depth a counted frame of the computation reached,
+    /// or a replayed memo entry would have reached.
+    pub(crate) reached: u16,
+    /// Per side (source, target): for each recursion identity, the most
+    /// distinct instantiations of it the computation stacked on one path
+    /// from this frame, a replayed entry's own counts added to the chain's
+    /// below it; and the bound a replayed cyclic member carries for every
+    /// identity.
+    pub(crate) repeats: [RepeatsUse; 2],
+    /// The counted frames the computation opened, itself included.
+    pub(crate) frames: u32,
+    /// The deepest a replayed memo entry reaches below its read.
+    pub(crate) replayed_height: u16,
+    /// The computation met a marker the checker reports as unreliable
+    /// (see `RelationRecursionFootprint::unreliable`).
+    pub(crate) unreliable: bool,
+    /// The computation answered from where its chain began: a relation of
+    /// it overflowed the checker's depth, or was deeply nested. Its answer
+    /// is no cold answer, and is never reused.
+    pub(crate) context_dependent: bool,
+}
+
+/// One side of [`RelationRecursionUse::repeats`].
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RepeatsUse {
+    /// `(identity fingerprint, instantiations)` pairs.
+    pub(crate) identities: smallvec::SmallVec<[(u64, u16); 2]>,
+    /// A count every identity's instantiations are within.
+    pub(crate) any: u16,
+}
+
+impl RepeatsUse {
+    /// Raise the count of the identity `fingerprint` to `count`.
+    pub(crate) fn raise(&mut self, fingerprint: u64, count: u16) {
+        match self
+            .identities
+            .iter_mut()
+            .find(|(seen, _)| *seen == fingerprint)
+        {
+            Some((_, seen)) => *seen = (*seen).max(count),
+            None => self.identities.push((fingerprint, count)),
+        }
+    }
+
+    /// The published identity list, in fingerprint order.
+    pub(crate) fn published_identities(&self) -> Box<[(u64, u16)]> {
+        let mut identities = self.identities.to_vec();
+        identities.sort_unstable();
+        identities.into_boxed_slice()
+    }
+}
+
+/// A closed relation frame's [`RelationRecursionUse`], measured from the
+/// frame itself: the footprint its own publication carries, and what a
+/// cyclic component's members are bounded by.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ClosedRelationRecursion {
+    /// The frame's own footprint.
+    pub(crate) footprint: crate::semantic_query::RelationRecursionFootprint,
+    /// The counted frames the frame's computation opened.
+    pub(crate) frames: u32,
+    /// The deepest a replayed memo entry reached below its read.
+    pub(crate) replayed_height: u16,
+    /// The computation answered from where its chain began (see
+    /// `RelationRecursionUse::context_dependent`).
+    pub(crate) context_dependent: bool,
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -658,6 +743,8 @@ pub(crate) struct RelationPendingState {
     pub(crate) opened_session: Option<SessionId>,
     /// Store-owned admission for this inline non-binding member.
     pub(crate) inline_flight: Option<InlineMemberFlight>,
+    /// What the member's computation used of the recursion bounds.
+    pub(crate) recursion: ClosedRelationRecursion,
 }
 
 /// The decided outcome of a popped flow-return member. Decided at pop:
@@ -2205,6 +2292,10 @@ struct InferenceInfo {
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
+    /// The arity a bare type-parameter rest (`...args: A`) takes from the
+    /// call's arguments (the checker's `impliedArity`), set before any
+    /// inference runs; a tuple inference splitting `[...A, ...B]` reads it.
+    implied_arity: Option<usize>,
 }
 
 /// The mutable inference session — cold-compute STATE of `execute`
@@ -2261,6 +2352,7 @@ impl InferenceSession {
                 const_policy: info.const_policy,
                 has_constraint: info.has_constraint,
                 candidates: Vec::new(),
+                implied_arity: None,
             })
             .collect();
         Self {
@@ -2569,6 +2661,27 @@ impl InferenceSession {
         self.infos.iter().any(|info| info.param_node == param_node)
     }
 
+    /// Record the arity the call's arguments imply for the bare rest type
+    /// parameter `param_node`.
+    pub(crate) fn set_implied_arity(&mut self, param_node: SemanticNodeId, arity: usize) {
+        if let Some(info) = self
+            .infos
+            .iter_mut()
+            .find(|info| info.param_node == param_node)
+        {
+            info.implied_arity = Some(arity);
+        }
+    }
+
+    /// The arity the call's arguments imply for `param_node`, when it is
+    /// the call's bare rest type parameter.
+    pub(crate) fn implied_arity(&self, param_node: SemanticNodeId) -> Option<usize> {
+        self.infos
+            .iter()
+            .find(|info| info.param_node == param_node)
+            .and_then(|info| info.implied_arity)
+    }
+
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
         (self.context_key().pass_kind == InferencePassKind::CallApplicability)
             .then(|| {
@@ -2599,8 +2712,9 @@ impl InferenceSession {
         let mut bindings = Vec::with_capacity(self.infos.len());
         let infos = std::mem::take(&mut self.infos);
         for info in &infos {
-            let (candidates, variance) = select_inference_candidates(&info.candidates);
-            let bound = combine(&candidates, variance);
+            let winning = super::inference::winning_candidates(&info.candidates);
+            let (candidates, variance) = winning.inferred_from();
+            let bound = combine(candidates, variance);
             bindings.push(InferBinding {
                 param: info.param_node,
                 name: Arc::clone(&info.param_name),
@@ -2631,14 +2745,10 @@ impl InferenceSession {
         Some(
             self.infos
                 .iter()
-                .map(|info| {
-                    let (candidates, variance) = select_inference_candidates(&info.candidates);
-                    FixationInput {
-                        param: info.param_node,
-                        name: Arc::clone(&info.param_name),
-                        candidates,
-                        variance,
-                    }
+                .map(|info| FixationInput {
+                    param: info.param_node,
+                    name: Arc::clone(&info.param_name),
+                    candidates: super::inference::winning_candidates(&info.candidates),
                 })
                 .collect(),
         )
@@ -2703,41 +2813,9 @@ pub(crate) struct FixationInput {
     pub(crate) param: SemanticNodeId,
     /// The binder's display name.
     pub(crate) name: Arc<str>,
-    /// The winning candidate rung (empty when the parameter is uninferred).
-    pub(crate) candidates: Vec<SemanticNodeId>,
-    /// That rung's combination variance.
-    pub(crate) variance: VariancePhase,
-}
-
-/// Select the winning priority rung and combination variance for a candidate
-/// list. This is shared by top-level fixation and reverse-projection recovery.
-pub(crate) fn select_inference_candidates(
-    candidates: &[InferenceCandidate],
-) -> (Vec<SemanticNodeId>, VariancePhase) {
-    let Some(priority) = candidates
-        .iter()
-        .map(|candidate| candidate.priority)
-        .max_by_key(|priority| crate::semantic_query::inference_candidate_precedence(*priority))
-    else {
-        return (Vec::new(), VariancePhase::Covariant);
-    };
-    let chosen: Vec<&InferenceCandidate> = candidates
-        .iter()
-        .filter(|candidate| candidate.priority == priority)
-        .collect();
-    let contravariant: Vec<SemanticNodeId> = chosen
-        .iter()
-        .filter(|candidate| candidate.variance == VariancePhase::Contravariant)
-        .map(|candidate| candidate.node)
-        .collect();
-    if contravariant.is_empty() {
-        (
-            chosen.iter().map(|candidate| candidate.node).collect(),
-            VariancePhase::Covariant,
-        )
-    } else {
-        (contravariant, VariancePhase::Contravariant)
-    }
+    /// The strongest-priority candidates (empty when the parameter is
+    /// uninferred).
+    pub(crate) candidates: super::inference::WinningCandidates,
 }
 
 /// The decided provisional verdict of a popped member.
@@ -2821,6 +2899,15 @@ pub(crate) struct CompletedSccMember {
 pub(crate) struct RelationDomainRuntime {
     /// The active inference-session stack.
     pub(crate) sessions: Vec<InferenceSession>,
+    /// The structured comparisons each open relation chain has entered,
+    /// keyed by the stack index of its first frame: the checker's
+    /// `relationCount` for its `checkTypeRelatedTo` call. An entry starts
+    /// when a chain starts at that index, and one whose chain has closed is
+    /// dropped when the next chain starts.
+    pub(crate) chain_comparisons: Vec<(
+        usize,
+        crate::semantic_query::checker_policy::RelationComplexity,
+    )>,
     /// Per-session deferred-admission ledger.
     pub(crate) session_admission: SessionAdmissionLedger,
     /// SCC-closed members queued for the root's batched publish drain.
@@ -2849,6 +2936,22 @@ pub(crate) struct RelationDomainRuntime {
     /// this counter, so the fuse's unit is the accepted deposit itself —
     /// never one unit per top-level argument.
     pub(crate) accepted_inference_deposits: u64,
+    /// Whether the relation last closed or replayed reported an unreliable
+    /// variance marker — read by the variance measurement that asked for
+    /// it, right after asking. Transient: overwritten at every close.
+    pub(crate) last_relation_unreliable: bool,
+    /// The relations this transaction decided and queued for publication
+    /// (completed SCC members and inline SCC roots), by key: a relation
+    /// met again before the batch publishes reads its answer here, as the
+    /// checker's relation cache serves a pair it already related, instead
+    /// of relating it again — without it, a pair reached along every one
+    /// of `2ⁿ` paths was related `2ⁿ` times. Only cold answers enter (no
+    /// overflow or deeply-nested answer, no session-local delta, no binding
+    /// key), each read through its recursion footprint like a memo entry.
+    /// Request-scoped: it lives on the transaction, and is cleared with the
+    /// member batch it mirrors — at its publish or its abort — so one entry
+    /// per queued member at most.
+    pub(crate) settled: FxHashMap<RelateMemoKey, RelationPayload>,
     next_session_id: u64,
 }
 
@@ -2895,25 +2998,16 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
-    /// Set when a later demand for the same key on this transaction may
-    /// reuse the proven value instead of re-evaluating the body (§12:
-    /// shared body-obligation consumers reuse completed return work): the
-    /// member closed as its OWN SCC root, so its value came only from work
-    /// inside its frame, and every read that work made was recorded and
-    /// clean. `None` for a member closed inside a larger component, whose
-    /// value also rests on frames outside its own, and for any member
-    /// whose evaluation was not recorded or read something a replay cannot
-    /// reproduce.
-    pub(crate) reuse: Option<FlowMemberReuse>,
 }
 
-/// What reusing a completed flow member replays at the demanding site: the
+/// What reusing a completed flow result replays at the demanding site: the
 /// reads its evaluation made on every channel an enclosing build observes,
-/// so a scope that was not live when the member ran still sees them — the
-/// transaction-local counterpart of a warm hit bubbling its stored
-/// signature. Only a CLEAN evaluation is recorded as reusable (no
-/// non-cacheable read, no partial or cache-suppressing taint, a complete
-/// cold-compute scope), so these three rails are all a replay needs.
+/// so a scope that was not live when the result was computed still sees
+/// them — the transaction-local counterpart of a warm hit bubbling its
+/// stored signature. Only a COMPLETE evaluation is kept (no partial taint,
+/// a complete cold-compute scope); its refusal, if any, is carried by the
+/// result's [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) and
+/// replayed beside these rails.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowMemberReuse {
     /// The fact reads, fanned out again into the live tracers.
@@ -2924,6 +3018,66 @@ pub(crate) struct FlowMemberReuse {
     /// Whether the evaluation deposited canonical evidence, which a
     /// substitution's cache decision watches for.
     pub(crate) canonical_evidence_deposited: bool,
+}
+
+/// A flow result completed on this transaction: its value, how far it may
+/// travel, and what reusing it replays.
+#[derive(Debug, Clone)]
+pub(crate) struct TransactionFlowResult {
+    pub(crate) value: crate::semantic_query::FlowReturnResult,
+    /// [`ReuseClass::Shared`](crate::resolver_core::reuse::ReuseClass::Shared)
+    /// for a result eligible for cross-request reuse,
+    /// [`ReuseClass::RequestOnly`](crate::resolver_core::reuse::ReuseClass::RequestOnly)
+    /// for one whose persistent admission is refused. An incomplete result
+    /// never enters the table.
+    pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
+    pub(crate) replay: FlowMemberReuse,
+}
+
+/// The flow results completed on this transaction, keyed by their demand.
+///
+/// COMPLETION, not retention: a demand whose evaluation completed as its
+/// own component's root is answered here for the rest of the transaction,
+/// in constant time, whether its persistent admission later lands, is
+/// refused, or is aborted with its root's batch — so a complete child
+/// executes once per transaction however its publication fares. The
+/// ordered publication queue
+/// ([`FlowReturnDomainRuntime::completed_members`]) is separate and
+/// drained by the machinery root; this table is not. Nothing is evicted:
+/// it lives exactly as long as the dispatch transaction, and holds only
+/// results that transaction computed.
+#[derive(Debug, Default)]
+pub(crate) struct FlowResultTable {
+    results: FxHashMap<FlowReturnKey, TransactionFlowResult>,
+}
+
+impl FlowResultTable {
+    /// The completed result of `key`, if any.
+    pub(crate) fn get(&self, key: &FlowReturnKey) -> Option<&TransactionFlowResult> {
+        self.results.get(key)
+    }
+
+    /// Whether `key` completed on this transaction.
+    pub(crate) fn contains(&self, key: &FlowReturnKey) -> bool {
+        self.results.contains_key(key)
+    }
+
+    /// Record `key`'s completed result. Only a request-reusable class
+    /// enters; a later completion of the same demand replaces nothing (the
+    /// first completion answers every later demand, so a second one never
+    /// runs).
+    pub(crate) fn complete(&mut self, key: FlowReturnKey, result: TransactionFlowResult) {
+        if !result.reuse.is_request_reusable() {
+            return;
+        }
+        self.results.entry(key).or_insert(result);
+    }
+
+    /// Number of completed results held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.results.len()
+    }
 }
 
 /// A call member whose mixed component closed cleanly, queued for the
@@ -2967,6 +3121,8 @@ pub(crate) struct FlowReturnDomainRuntime {
     /// returns a schedule already settled, and the instantiated returns
     /// each uninstantiated frame's call resolution demanded.
     pub(crate) schedule: super::flow_return::schedule::FlowScheduleSession,
+    /// The flow results completed on this transaction, by demand.
+    pub(crate) results: FlowResultTable,
 }
 
 /// The call-resolution domain runtime.
@@ -3139,8 +3295,19 @@ impl CheckerDispatchTransaction {
             .find(|s| s.state == InferenceSessionState::Collecting)
     }
 
-    pub(crate) fn binding_is_disabled(&self) -> bool {
-        !self.relation.binding_disabled_session_barriers.is_empty()
+    /// Whether a collecting session visible here infers `param_node`.
+    pub(crate) fn collecting_session_infers(&self, param_node: SemanticNodeId) -> bool {
+        let start = self
+            .relation
+            .binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0);
+        self.relation.sessions.get(start..).is_some_and(|sessions| {
+            sessions.iter().any(|session| {
+                session.state == InferenceSessionState::Collecting && session.infers(param_node)
+            })
+        })
     }
 
     pub(crate) fn begin_binding_disabled(&mut self) {
