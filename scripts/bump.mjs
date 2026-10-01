@@ -11,21 +11,25 @@
  *
  * Version source, in order of preference:
  *   1. an explicit positional version,
- *   2. `git-cliff --bumped-version` when git-cliff is installed,
+ *   2. `git-cliff --bumped-version` (the pinned root devDependency),
  *   3. a local conventional-commit derivation (feat -> minor, fix/perf ->
  *      patch, BREAKING CHANGE / `!` -> major). A pre-release stays in its
  *      channel and increments its counter (0.0.1-beta.1 -> 0.0.1-beta.2);
  *      a breaking change graduates it (0.0.1-beta.1 -> 1.0.0).
  *
  * The script writes the version across the release surface via
- * scripts/set-version.mjs, requires scripts/check-versions.mjs to pass, and
- * creates exactly ONE commit: `release: v<version>` (the message
- * release-tag.yml recognises on main). It never creates a tag and never
- * pushes — review the commit, push to main, and CI tags the release.
+ * scripts/set-version.mjs, requires scripts/check-versions.mjs to pass,
+ * regenerates CHANGELOG.md with git-cliff for the new version, and creates
+ * exactly ONE commit: `release: v<version>` (the message release-tag.yml
+ * recognises on main). The changelog rides in that commit because main only
+ * accepts changes through a pull request with green CI, so the release
+ * workflow cannot add it after the tag. It never creates a tag and never
+ * pushes — review the commit, open its release pull request, and CI tags the
+ * release once it merges.
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isValidSemver, parseSemver, semverGt } from "./lib/semver.mjs";
 
@@ -110,14 +114,30 @@ function conventionalBumpLevel(tag) {
   return level || 1;
 }
 
+/**
+ * Run the git-cliff pinned in the root devDependencies through its Node
+ * launcher, so every host generates the same changelog without a separate
+ * install and without a platform-specific shim name.
+ */
+function gitCliff(cliffArgs, options = {}) {
+  const pkgDir = join(ROOT, "node_modules", "git-cliff");
+  const pkgPath = join(pkgDir, "package.json");
+  if (!existsSync(pkgPath)) {
+    throw new Error("git-cliff is not installed — run `pnpm install` first");
+  }
+  const { bin } = JSON.parse(readFileSync(pkgPath, "utf8"));
+  const cli = join(pkgDir, typeof bin === "string" ? bin : bin["git-cliff"]);
+  return execFileSync(process.execPath, [cli, ...cliffArgs], {
+    cwd: ROOT,
+    encoding: "utf8",
+    ...options,
+  });
+}
+
 /** git-cliff --bumped-version, or null when git-cliff is missing/fails. */
 function cliffBumpedVersion() {
   try {
-    const out = execFileSync("git-cliff", ["--bumped-version"], {
-      cwd: ROOT,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })
+    const out = gitCliff(["--bumped-version"], { stdio: ["pipe", "pipe", "pipe"] })
       .trim()
       .replace(/^v/, "");
     return isValidSemver(out) ? out : null;
@@ -197,7 +217,9 @@ console.log(`bump: ${current} -> ${next} (${source})`);
 
 if (dryRun) {
   console.log("bump: dry run — no files changed, no commit created");
-  console.log(`bump: a real run would commit the version change as "release: v${next}"`);
+  console.log(
+    `bump: a real run would commit the version change and CHANGELOG.md as "release: v${next}"`,
+  );
   process.exit(0);
 }
 
@@ -221,8 +243,15 @@ function run(scriptArgs, what) {
 }
 
 run([join(ROOT, "scripts/set-version.mjs"), next], "set-version");
-// The publish-set comparison against npm/crates.io must pass before committing.
+// The publish-set comparison against npm must pass before committing.
 run([join(ROOT, "scripts/check-versions.mjs")], "check-versions");
+// The tag does not exist yet, so `--tag` labels the commits since the last
+// v* tag as this release.
+try {
+  gitCliff(["--tag", `v${next}`, "--output", "CHANGELOG.md"], { stdio: "inherit" });
+} catch {
+  fail("git-cliff failed — the version change is left in the working tree for inspection");
+}
 
 // The tree was clean before set-version ran, so every modification is ours.
 git(["add", "-u"]);
@@ -231,5 +260,6 @@ git(["commit", "-m", `release: v${next}`]);
 console.log("");
 console.log(`bump: committed "release: v${next}" (${git(["rev-parse", "--short", "HEAD"])})`);
 console.log("bump: no tag created, nothing pushed.");
-console.log("next step: review the commit, then push to main —");
-console.log("  release-tag.yml will tag v" + next + " and release.yml will publish it.");
+console.log("next step: review the commit (version + CHANGELOG.md), push it on a branch and open");
+console.log(`  its pull request; once it squash-merges as "release: v${next}", release-tag.yml`);
+console.log(`  tags v${next} and release.yml publishes it.`);

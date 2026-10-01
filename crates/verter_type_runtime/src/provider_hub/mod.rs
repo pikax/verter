@@ -759,8 +759,8 @@ where
         lane: Lane,
     ) -> Result<AppliedReceipt, TypeProviderError> {
         let deadline = crate::deadline::current();
-        let requires_admission = self.state.shared.generated_unit_resolver.get().is_some()
-            && mutation.closed_path().is_none();
+        let requires_admission =
+            admission::managed_settlement_required(&self.state.shared, &mutation);
         let (ack, ack_rx) = oneshot::channel();
         self.state
             .commands
@@ -1489,9 +1489,7 @@ async fn run_actor<P>(
                 deadline,
                 ack,
             } => {
-                if shared.generated_unit_resolver.get().is_some()
-                    && mutation.closed_path().is_none()
-                {
+                if admission::managed_settlement_required(&shared, &mutation) {
                     let reason = if ack.is_closed() {
                         Some(AdmissionRefusal::Cancelled)
                     } else if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {

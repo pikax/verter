@@ -512,12 +512,19 @@ pub(super) fn refresh_replay_request<P: ?Sized>(
     check_witness_for_serving(shared, serving, &request.witness)
 }
 
+pub(super) fn managed_settlement_required<P: ?Sized>(
+    shared: &Shared<P>,
+    mutation: &super::DesiredMutation,
+) -> bool {
+    shared.generated_unit_resolver.get().is_some() && mutation.closed_path().is_none()
+}
+
 pub(super) fn generated_mutation_requests<P: ?Sized>(
     shared: &Shared<P>,
     serving: Option<&Serving<P>>,
     mutation: &super::DesiredMutation,
 ) -> Result<Vec<AdmittedRequest>, AdmissionRefusal> {
-    if shared.generated_unit_resolver.get().is_none() || mutation.closed_path().is_some() {
+    if !managed_settlement_required(shared, mutation) {
         return Ok(Vec::new());
     }
     let mut requests = Vec::new();

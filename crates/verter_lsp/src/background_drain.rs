@@ -336,20 +336,10 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
         let Some(ws) = ws.as_ref() else {
             return;
         };
-        let Some(published) = ws.load_published() else {
+        let Some(snapshot) = published_resolver_snapshot(ws) else {
             return;
         };
-        (
-            super::PublishedResolverSnapshot {
-                resolver: published.snapshot.resolver.clone(),
-                resolution_view: Some(super::PublishedResolutionView {
-                    workspace: Arc::clone(ws),
-                    published: Arc::clone(&published),
-                }),
-                ownership_ready: published.ownership_ready,
-            },
-            Arc::clone(ws),
-        )
+        (snapshot, Arc::clone(ws))
     };
     // The carrier-publish context — ALWAYS present here (a published `vfs_handle` was
     // captured above), carrying the single ownership-resolution vfs for BOTH engines.
@@ -403,6 +393,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             &canonical_id,
             Some(&carrier_publish),
             carrier_coordinator,
+            is_tsgo,
         )
         .await;
 
@@ -894,6 +885,22 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     synced_any
 }
 
+/// The resolver snapshot of `ws`'s current publication, or `None` while it
+/// has published nothing.
+fn published_resolver_snapshot(
+    ws: &Arc<verter_workspace::FilesystemWorkspace>,
+) -> Option<super::PublishedResolverSnapshot> {
+    let published = ws.load_published()?;
+    Some(super::PublishedResolverSnapshot {
+        resolver: published.snapshot.resolver.clone(),
+        resolution_view: Some(super::PublishedResolutionView {
+            workspace: Arc::clone(ws),
+            published: Arc::clone(&published),
+        }),
+        ownership_ready: published.ownership_ready,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_snapshot_provider_file(
     sync: Option<&ProjectSync>,
@@ -903,6 +910,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     canonical_id: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    rewrite_import_specifiers: bool,
 ) -> SyncOutcome {
     if carrier_language_for(canonical_id).is_some() {
         sync_pending_carrier_provider_file(
@@ -932,6 +940,47 @@ pub(super) async fn sync_pending_snapshot_provider_file(
                 .is_none()
         {
             return SyncOutcome::Terminal;
+        }
+        // An OPEN self-file document (a plain script or a rune module) is
+        // delivered through the same shared shadow sync the coordinator tick and
+        // the editor ingress use. It records the provider surface and the
+        // position mapper that match the delivered bytes, and it rewrites import
+        // specifiers only for a provider that resolves the explicit source graph
+        // itself. Delivering an open plain script here with specifiers rewritten
+        // for tsserver would shift every provider position in it against the
+        // editor's text, so its hovers and navigation would land on the wrong
+        // tokens.
+        if let (Some(file_language), Some(uri)) = (
+            crate::server::self_file_language_for(canonical_id),
+            documents.canonical_id_to_uri(canonical_id),
+        ) {
+            // A re-synced buffer must look new to the diagnostics cache and to any
+            // receipt the open document still owes, exactly as the non-carrier
+            // pass below does, so the drain's owed-diagnostics re-arm fires.
+            documents.host().bump_diagnostics_generation(canonical_id);
+            // The supersession check re-derives the projection after the provider
+            // await, so it must read the publication current THEN: one landing
+            // during the delivery has to be able to supersede it.
+            let published = || match carrier_publish {
+                Some(publish) => published_resolver_snapshot(&publish.vfs),
+                None => Some(snapshot.clone()),
+            };
+            let delivered = crate::server::sync_self_file_shadow_state(
+                documents,
+                sync,
+                provider_sync_states,
+                &published,
+                &uri,
+                canonical_id,
+                &file_language,
+                rewrite_import_specifiers,
+            )
+            .await;
+            return if delivered {
+                SyncOutcome::FullyReconciled
+            } else {
+                SyncOutcome::Nothing
+            };
         }
         // Non-carrier files have a single Shadow kind: synced fully or not at all.
         if sync_pending_non_carrier_provider_file(
