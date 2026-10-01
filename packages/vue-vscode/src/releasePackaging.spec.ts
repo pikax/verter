@@ -218,7 +218,7 @@ const chainTo = (graph: Map<string, string[]>, from: string, target: string): st
 };
 
 /**
- * A tag push publishes to crates.io, npm and the VS Code Marketplace. Every
+ * A tag push publishes to npm and the VS Code Marketplace. Every
  * publish job must therefore transitively depend on a job that actually runs
  * the test suite — otherwise a red tree publishes silently.
  */
@@ -229,7 +229,7 @@ describe("release gating", () => {
 
   const releaseIde = read(".github/workflows/release-ide.yml");
   const ci = read(".github/workflows/ci.yml");
-  const publishJobs = ["publish-crates", "publish-npm", "publish-vscode", "github-release"];
+  const publishJobs = ["publish-npm", "publish-vscode", "github-release"];
 
   it("keeps PR release validation read-only and reserves the full rehearsal for dispatch", () => {
     expect(releaseCheck).toMatch(/permissions:\n  contents: read/);
@@ -309,6 +309,17 @@ describe("release gating", () => {
       "verter-vscode test\n",
     ])
       expect(workflow, `${command} belongs to ci.yml`).not.toContain(command);
+  });
+
+  // main accepts a commit only through a pull request whose `CI Required`
+  // check passed, so a release job that pushes to it is rejected after the
+  // packages have already published. What must land on main (CHANGELOG.md)
+  // rides in the release pull request instead.
+  it.each([
+    ["release.yml", release],
+    ["release-ide.yml", releaseIde],
+  ])("%s never pushes a commit to main", (_file, workflow) => {
+    expect(workflow).not.toMatch(/git push\b[^\n]*\bmain\b/u);
   });
 
   it("runs the rehearsal as the release pull request's CI, required through CI Required", () => {

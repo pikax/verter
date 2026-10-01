@@ -20,8 +20,8 @@ name: Release IDE
 #   - The editor packages carry an INDEPENDENT version. `packages/vue-vscode`
 #     is `private: true`, so `MARKETPLACE_ONLY` keeps it out of the npm publish
 #     set and `pnpm bump` never touches it, and the Zed/Lapce manifests are not
-#     npm packages at all. Shipping an editor fix must not re-publish crates.io
-#     and npm at a version they already hold.
+#     npm packages at all. Shipping an editor fix must not re-publish npm at a
+#     version it already holds.
 #   - Marketplace versions are plain MAJOR.MINOR.PATCH — vsce rejects the
 #     `-beta.N` line the monorepo releases on — so the two version lines cannot
 #     be the same line even in principle.

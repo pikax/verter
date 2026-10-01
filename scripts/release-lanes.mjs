@@ -11,8 +11,8 @@
  *   release: v<version>          v<version>       release.yml
  *   release(ide): v<version>     ide/v<version>   release-ide.yml
  *
- * The unscoped lane is the monorepo itself — crates.io, npm, and the VSIX built
- * from that same version. A scoped lane ships one thing on a version line that
+ * The unscoped lane is the monorepo itself — npm, and the VSIX built from that
+ * same version. A scoped lane ships one thing on a version line that
  * moves independently of it. `release-tag.yml` reads this table to turn a
  * version commit on main into the right tag, so adding a lane is an entry here
  * plus the workflow that listens on its tag — never workflow surgery.
@@ -70,7 +70,7 @@ export const RELEASE_LANES = {
     source: "Cargo.toml [workspace.package]",
     bump: "pnpm bump",
     workflow: "release.yml",
-    publishes: "crates.io, npm, and the VS Code extension built from that same version",
+    publishes: "npm, and the VS Code extension built from that same version",
     tag: (version) => `v${version}`,
     version: readWorkspaceVersion,
     verify: [["scripts/set-version.mjs", "--check", "{version}"], ["scripts/check-versions.mjs"]],

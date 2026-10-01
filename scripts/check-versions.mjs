@@ -3,7 +3,7 @@
 /**
  * check-versions.mjs
  *
- * Compares local package versions against published versions on npm/crates.io.
+ * Compares local package versions against published versions on npm.
  * Detects pre-release channels (alpha, beta, rc) and computes topological
  * publish order from workspace dependencies.
  *
@@ -15,7 +15,7 @@
 import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
+import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -39,20 +39,6 @@ function getNpmVersion(name) {
     return out || null;
   } catch {
     return null; // 404 = never published
-  }
-}
-
-/** Fetch the published crates.io version for a crate. */
-function getCrateVersion(name) {
-  try {
-    const out = execSync(`cargo search ${name} --limit 1`, {
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    const match = out.match(new RegExp(`^${name}\\s*=\\s*"([^"]+)"`));
-    return match ? match[1] : null;
-  } catch {
-    return null;
   }
 }
 
@@ -129,25 +115,6 @@ const order = publishSet.order
   .map((name) => dirByName.get(name));
 
 // ---------------------------------------------------------------------------
-// Rust crates
-// ---------------------------------------------------------------------------
-
-const cargoToml = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
-const cargoVersionMatch = cargoToml.match(/version\s*=\s*"([^"]+)"/);
-const cargoVersion = cargoVersionMatch ? cargoVersionMatch[1] : null;
-
-const rustCrates = [];
-for (const crate of PUBLISHED_CRATES) {
-  const published = getCrateVersion(crate);
-  rustCrates.push({
-    crate,
-    localVersion: cargoVersion,
-    publishedVersion: published,
-    needsPublish: cargoVersion ? semverGt(cargoVersion, published) : false,
-  });
-}
-
-// ---------------------------------------------------------------------------
 // VS Code extension validation
 // ---------------------------------------------------------------------------
 
@@ -195,7 +162,6 @@ const result = {
   order,
   isPrerelease,
   channel,
-  rust: rustCrates,
   vscodeWarnings,
 };
 
@@ -212,14 +178,6 @@ if (jsonMode) {
   }
   console.log(`\n  Publish order: ${order.join(" -> ")}`);
   console.log(`  Pre-release: ${isPrerelease} (channel: ${channel || "stable"})`);
-
-  console.log("\n=== Rust crates ===");
-  for (const r of rustCrates) {
-    const rStatus = r.needsPublish ? "PUBLISH" : "skip";
-    console.log(
-      `  [${rStatus}] ${r.crate}: ${r.publishedVersion || "(none)"} -> ${r.localVersion}`,
-    );
-  }
 
   if (vscodeWarnings.length > 0) {
     console.log("\n=== VS Code Extension Warnings ===");
