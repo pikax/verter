@@ -153,7 +153,8 @@ queries, and re-resolves them before replay into each fresh incarnation. Nested
 hubs receive the same fact source and bind to their own incarnation; the
 tsserver router keeps its existing per-project hub admission. Warm managed
 requests reuse only the hub's current capability. Cold state carries no applied
-receipt, and cancelled or expired queued mutations perform no writes. An
+receipt, and queued writes honor cancellation and expiry before recording or
+forwarding. Closes retain their cleanup semantics. An
 excluded unit's desired editor bytes remain held but cannot replay or appear
 applied; a later admissible incarnation can restore them. Discovery loads
 continue to preserve open editor overlays. `TypeProviderError.admission_refusal`
