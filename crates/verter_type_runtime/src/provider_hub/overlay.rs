@@ -451,12 +451,17 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     fn take_content(&self, path: &str) -> Option<ContentRecord> {
         let removed = {
             let mut state = self.state.lock();
-            let epoch = state.active_epoch;
-            // A never-attached overlay has no physical document to withdraw.
-            if epoch.is_some() {
-                state.withdrawals.insert(path.to_string(), epoch);
+            let removed = state.content.remove(path);
+            // Desired content alone owns no physical document. In particular,
+            // a shadow-vetoed carrier must not close the real editor document.
+            if let Some(injected) = removed.as_ref().and_then(|rec| rec.injected.as_ref()) {
+                if Some(injected.epoch) == state.active_epoch {
+                    state
+                        .withdrawals
+                        .insert(path.to_string(), Some(injected.epoch));
+                }
             }
-            state.content.remove(path)
+            removed
         };
         // Prune dead carrier-gate registry entries on the close path too (not only on a fresh
         // gate mint) — a completed operation leaves a dead `Weak`, and close churn should not

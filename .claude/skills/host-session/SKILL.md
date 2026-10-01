@@ -190,8 +190,11 @@ matching bytes without rewriting its captured snapshot; concurrent edits remain
 protected. A lazy managed fallback staying `Held` cannot mask an applied shared
 receipt.
 Overlay close removes desired content immediately but retains an epoch-bound
-withdrawal until transport close succeeds. Synchronization drains withdrawals
-outside the editor-demand injection filter. Deadlines and cancellation retain
+withdrawal from a committed injection receipt until transport close succeeds.
+A never-injected or shadow-vetoed carrier owns no transport document and creates
+no withdrawal; closing it preserves any real editor document at the same path.
+Synchronization drains withdrawals outside the editor-demand injection filter.
+Deadlines and cancellation retain
 ownership, successful reopen supersedes the pending close under the carrier gate,
 and retired-incarnation closes never target the replacement transport.
 A recovery drain also wakes the existing post-scan completion check. A scan that
