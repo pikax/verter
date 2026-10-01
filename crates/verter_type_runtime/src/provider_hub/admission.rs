@@ -687,6 +687,34 @@ where
         if serving.epoch != admission.witness.0.epoch {
             return Err(AdmissionRefusal::StaleProvider);
         }
+        // From here the write belongs to the engine, not to the issuer: it runs
+        // detached to its acknowledgement and settles even if the issuer stops
+        // waiting (see [`super::detach_application`]).
+        let hub = Self {
+            state: Arc::clone(&self.state),
+        };
+        let admission = admission.clone();
+        let path = path.to_string();
+        let content = content.to_string();
+        super::detach_application(async move {
+            hub.settle_admitted_file(serving, &admission, &path, &content, kind, priority)
+                .await
+        })
+        .await
+        .unwrap_or(Err(AdmissionRefusal::ProviderWriteFailed))
+    }
+
+    /// The physical half of [`Self::forward_admitted_file`]: one write to the
+    /// serving engine and its settlement against the live basis.
+    async fn settle_admitted_file(
+        &self,
+        serving: Serving<P>,
+        admission: &AdmittedRequest,
+        path: &str,
+        content: &str,
+        kind: OverlayFileKind,
+        priority: OverlayPriority,
+    ) -> Result<(), AdmissionRefusal> {
         let mut application =
             super::DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
         let forwarded = match kind {
