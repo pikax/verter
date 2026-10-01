@@ -77,8 +77,8 @@ mod quarantine;
 
 pub use admission::{
     AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
-    OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis, ProjectBindingInput,
-    ProjectWitness,
+    GeneratedUnitInput, GeneratedUnitResolver, OverlayFileKind, OverlayMutation, OverlayPriority,
+    ProjectBasis, ProjectBindingInput, ProjectWitness,
 };
 use desired::{DesiredMutation, DesiredState, Disposition, Lane};
 use epoch::EpochMint;
@@ -332,6 +332,7 @@ struct Shared<P: ?Sized> {
     lifecycle: StdMutex<Lifecycle>,
     query_watch: Arc<StdMutex<QueryWatch>>,
     admission: StdMutex<admission::AdmissionState>,
+    generated_unit_resolver: std::sync::OnceLock<Arc<GeneratedUnitResolver>>,
     overlay: overlay::LazyOverlayCore<overlay::HubAdmittedTransport<P>>,
     /// Bytes a serving incarnation actually accepted. Empty while none serves.
     /// Desired state can be ahead of this map: a held or failed write is not
@@ -513,6 +514,7 @@ where
             }),
             query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
             admission: StdMutex::new(admission::AdmissionState::default()),
+            generated_unit_resolver: std::sync::OnceLock::new(),
             overlay: overlay::LazyOverlayCore::new(),
             applied_files: StdRwLock::new(HashMap::new()),
         });
@@ -857,7 +859,25 @@ where
         F: FnOnce(Arc<P>) -> Fut,
         Fut: Future<Output = Result<T, TypeProviderError>>,
     {
+        if self.state.shared.serving_epoch().is_none() {
+            admission::generated_request(
+                &self.state.shared,
+                None,
+                &fp.path,
+                None,
+                fp.scope.as_deref(),
+            )
+            .map_err(TypeProviderError::admission)?;
+        }
         let serving = self.serving_for_query().await?;
+        let admission = admission::generated_request(
+            &self.state.shared,
+            Some(&serving),
+            &fp.path,
+            None,
+            fp.scope.as_deref(),
+        )
+        .map_err(TypeProviderError::admission)?;
         let quarantined = self
             .state
             .shared
@@ -881,7 +901,13 @@ where
         // Settle FIRST, and only a settlement the serving epoch accepted counts
         // as a success: an answer the epoch discarded proves nothing about the
         // request and must not erase its crash strikes.
-        let settled = self.settle(serving.epoch, result);
+        let settled = self.settle(serving.epoch, result).and_then(|value| {
+            if let Some(admission) = &admission {
+                admission::check_current(&self.state.shared, admission)
+                    .map_err(TypeProviderError::admission)?;
+            }
+            Ok(value)
+        });
         guard.complete(settled.is_ok());
         settled
     }
@@ -1455,6 +1481,33 @@ async fn run_actor<P>(
                 deadline,
                 ack,
             } => {
+                if shared.generated_unit_resolver.get().is_some()
+                    && mutation.closed_path().is_none()
+                {
+                    let reason = if ack.is_closed() {
+                        Some(AdmissionRefusal::Cancelled)
+                    } else if deadline.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                        Some(AdmissionRefusal::DeadlineElapsed)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        let _ = ack.send(Err(TypeProviderError::admission(reason)));
+                        continue;
+                    }
+                }
+                let serving = shared.serving();
+                let requests = match admission::generated_mutation_requests(
+                    &shared,
+                    serving.as_ref(),
+                    &mutation,
+                ) {
+                    Ok(requests) => requests,
+                    Err(reason) => {
+                        let _ = ack.send(Err(TypeProviderError::admission(reason)));
+                        continue;
+                    }
+                };
                 let touched = mutation.touched_paths();
                 // A close is committed only after the serving engine accepts it.
                 // Recording it first would drop the prior surface when the close
@@ -1480,7 +1533,7 @@ async fn run_actor<P>(
                         watch.clear_path(path);
                     }
                 }
-                let result = match (shared.serving(), disposition) {
+                let result = match (serving, disposition) {
                     (None, _) => {
                         if closing {
                             desired.apply(&mutation, lane);
@@ -1520,6 +1573,19 @@ async fn run_actor<P>(
                         .await
                         {
                             Ok(Ok(())) => {
+                                if let Err(reason) = requests.iter().try_for_each(|request| {
+                                    admission::check_current(&shared, request)
+                                }) {
+                                    if !requests.iter().all(admission::membership_inputs_current) {
+                                        if demand_driven {
+                                            retire(&shared, serving.epoch).await;
+                                        } else {
+                                            serving.crash_signal.notify_one();
+                                        }
+                                    }
+                                    let _ = ack.send(Err(TypeProviderError::admission(reason)));
+                                    continue;
+                                }
                                 if closing {
                                     desired.apply(&mutation, lane);
                                     let mut watch = shared
@@ -1609,10 +1675,25 @@ async fn run_actor<P>(
                 // Replay the CURRENT desired state (every command processed
                 // before this one), then install. No caller observes the engine
                 // before its replay completes.
-                let replay = tokio::time::timeout(replay_timeout, desired.replay_into(&*provider));
+                let serving = Serving {
+                    provider: Arc::clone(&provider),
+                    epoch: shared.epochs.mint(),
+                    crash_signal: Arc::clone(&crash_signal),
+                };
+                if let Some(resolve) = shared.generated_unit_resolver.get() {
+                    // Nested lifecycle owners receive the same workspace facts;
+                    // each admits against its own actual provider incarnation.
+                    if let Err(reason) = provider.set_generated_unit_resolver(Arc::clone(resolve)) {
+                        let _ = provider.shutdown().await;
+                        let _ = ack.send(Err(TypeProviderError::admission(reason)));
+                        continue;
+                    }
+                }
+                let replay =
+                    tokio::time::timeout(replay_timeout, desired.replay_into(&shared, &serving));
                 let outcome =
                     match await_receptive(replay, None, &mut command_rx, &mut queued).await {
-                        Ok(Ok(Ok(()))) => Ok(()),
+                        Ok(Ok(Ok(paths))) => Ok(paths),
                         Ok(Ok(Err(error))) => Err(error),
                         Ok(Err(_)) => Err(TypeProviderError::new(format!(
                             "{log_name} replay exceeded its {replay_timeout:?} bound"
@@ -1636,10 +1717,10 @@ async fn run_actor<P>(
                         }
                     };
                 match outcome {
-                    Ok(()) => {
+                    Ok(paths) => {
                         let dropped = desired.discard_admitted();
-                        publish_serving_files(&shared, provider.as_ref(), &desired);
-                        let epoch = shared.epochs.mint();
+                        publish_serving_files(&shared, provider.as_ref(), &desired, &paths);
+                        let epoch = serving.epoch;
                         shared.overlay.observe_serving_epoch(epoch);
                         // Record the installed engine's tier BEFORE releasing
                         // it into the serving cell: from that instant
@@ -1759,10 +1840,12 @@ fn publish_serving_files<P: TypeProvider + ?Sized>(
     shared: &Shared<P>,
     provider: &P,
     desired: &DesiredState,
+    refused: &std::collections::HashSet<String>,
 ) {
     *applied_map(shared) = desired
         .serving_file_contents()
         .into_iter()
+        .filter(|(path, _)| !refused.contains(path))
         .filter_map(|(path, content)| match provider.applied_content(&path) {
             crate::traits::AppliedContent::Applied(bytes) if bytes == content => {
                 Some((path, bytes))

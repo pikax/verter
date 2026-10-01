@@ -855,6 +855,111 @@ async fn engage_transport_failure_preserves_source_project_and_generation() {
 const COMPANION_EXCLUDING_TSCONFIG: &str =
     r#"{ "include": ["src"], "exclude": ["src/**/*.vue.tsx"] }"#;
 
+#[tokio::test]
+async fn managed_generated_write_requires_membership_before_activation() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _) = overlay_over(
+        &[(source, "<template/>")],
+        fixture_snapshot(COMPANION_EXCLUDING_TSCONFIG),
+    );
+    let engine = Arc::new(RecordingAttach::new());
+    let managed = Arc::new(crate::type_provider::lazy_managed::new_lazy_managed({
+        let engine = Arc::clone(&engine);
+        move || {
+            let engine = Arc::clone(&engine);
+            async move { Ok(engine as Arc<dyn TypeProvider>) }
+        }
+    }));
+    let composite = super::TsgoCompositeProvider::new(
+        Arc::clone(&managed),
+        Arc::clone(&overlay.inner.host),
+        None,
+    );
+    let result = composite
+        .open_file(companion, "export const value = 1")
+        .await;
+    let refusal = result.expect_err("an excluded generated unit must be refused");
+    assert_eq!(
+        refusal.admission_refusal,
+        Some(verter_type_runtime::provider_hub::AdmissionRefusal::GeneratedUnitExcluded)
+    );
+    assert!(
+        !managed.is_serving(),
+        "a refused write cannot activate fallback"
+    );
+    assert!(
+        engine.ops().is_empty(),
+        "refusal must perform zero provider work"
+    );
+    managed.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_cold_replay_rechecks_membership_and_preserves_open_overlay() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, workspace) = overlay_over(
+        &[(source, "<template/>")],
+        fixture_snapshot(r#"{"include":["src"]}"#),
+    );
+    let engine = Arc::new(RecordingAttach::new());
+    let managed = Arc::new(crate::type_provider::lazy_managed::new_lazy_managed({
+        let engine = Arc::clone(&engine);
+        move || {
+            let engine = Arc::clone(&engine);
+            async move { Ok(engine as Arc<dyn TypeProvider>) }
+        }
+    }));
+    let composite = super::TsgoCompositeProvider::new(
+        Arc::clone(&managed),
+        Arc::clone(&overlay.inner.host),
+        None,
+    );
+    let wrong_project = composite
+        .register_carrier_metadata(source, companion, "wrong", "d:/other/tsconfig.json")
+        .await
+        .expect_err("cold registration requires the exact configured owner");
+    assert_eq!(
+        wrong_project.admission_refusal,
+        Some(verter_type_runtime::provider_hub::AdmissionRefusal::WrongProject)
+    );
+    composite
+        .open_file(companion, "export const unsaved = 2")
+        .await
+        .unwrap();
+    composite
+        .load_file_background(companion, "export const disk = 1")
+        .await
+        .unwrap();
+    assert!(!managed.is_serving());
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        COMPANION_EXCLUDING_TSCONFIG,
+    ))));
+    managed.establish().await.unwrap();
+    assert_eq!(
+        engine.count("write:"),
+        0,
+        "cold proof cannot authorize changed membership"
+    );
+    managed.shutdown().await.unwrap();
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        r#"{"include":["src"]}"#,
+    ))));
+    managed.establish().await.unwrap();
+    assert_eq!(
+        engine.count("write:"),
+        1,
+        "fresh admission replays one live overlay"
+    );
+    assert!(matches!(
+        managed.applied_content(companion),
+        verter_type_runtime::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const unsaved = 2"
+    ));
+    managed.shutdown().await.unwrap();
+}
+
 /// A carrier whose project owns the source but CONFIGURATION-EXCLUDES its
 /// generated units is refused with the typed reason BEFORE the transport is
 /// established — so nothing can have been written — and the refusal is

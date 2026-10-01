@@ -415,10 +415,24 @@ fn codes(diags: &[TypeDiagnostic]) -> Vec<String> {
     diags.iter().filter_map(|d| d.code.clone()).collect()
 }
 
+fn managed_marker(
+    owned: Arc<MarkerOwned>,
+) -> Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider> {
+    Arc::new(verter_lsp::type_provider::lazy_managed::new_lazy_managed(
+        move || {
+            let owned = Arc::clone(&owned);
+            async move { Ok(owned as Arc<dyn TypeProvider>) }
+        },
+    ))
+}
 fn composite(host: Arc<VerterHost>) -> TsgoCompositeProvider {
     // The always-present admission layer with NO SHARED overlay (bare host-aware
     // OWNED). The gate is what is under test — SHARED is not required to prove it.
-    TsgoCompositeProvider::new(Arc::new(MarkerOwned::project_bound(false)), host, None)
+    TsgoCompositeProvider::new(
+        managed_marker(Arc::new(MarkerOwned::project_bound(false))),
+        host,
+        None,
+    )
 }
 
 /// A composite over a MARKER OWNED double whose `Arc` is ALSO returned, so a feature
@@ -426,8 +440,7 @@ fn composite(host: Arc<VerterHost>) -> TsgoCompositeProvider {
 /// counter at ZERO — the gate served the external default WITHOUT delegating to OWNED).
 fn composite_with_owned(host: Arc<VerterHost>) -> (TsgoCompositeProvider, Arc<MarkerOwned>) {
     let owned = Arc::new(MarkerOwned::project_bound(false));
-    let composite =
-        TsgoCompositeProvider::new(Arc::clone(&owned) as Arc<dyn TypeProvider>, host, None);
+    let composite = TsgoCompositeProvider::new(managed_marker(Arc::clone(&owned)), host, None);
     (composite, owned)
 }
 
@@ -541,7 +554,7 @@ async fn gate_bound_carrier_uses_established_managed_diagnostics_route() {
 async fn partial_project_capability_none_falls_back_when_check_js_is_enabled() {
     let owned = Arc::new(MarkerOwned::default());
     let c = TsgoCompositeProvider::new(
-        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        managed_marker(Arc::clone(&owned)),
         host_with_check_js_snapshot(),
         None,
     );
@@ -569,7 +582,7 @@ async fn partial_project_capability_none_falls_back_when_check_js_is_enabled() {
 async fn unavailable_project_capability_never_reenables_check_js_through_raw_fallback() {
     let owned = Arc::new(MarkerOwned::default());
     let c = TsgoCompositeProvider::new(
-        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        managed_marker(Arc::clone(&owned)),
         host_with_snapshot(),
         None,
     );
@@ -593,7 +606,7 @@ async fn unavailable_project_capability_never_reenables_check_js_through_raw_fal
 async fn project_bound_clean_javascript_diagnostics_are_authoritative() {
     let owned = Arc::new(MarkerOwned::project_bound(true));
     let c = TsgoCompositeProvider::new(
-        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        managed_marker(Arc::clone(&owned)),
         host_with_snapshot(),
         None,
     );

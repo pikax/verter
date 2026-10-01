@@ -413,10 +413,17 @@ impl DesiredState {
     /// order on each file's recorded lane and access mode, then carrier
     /// registrations (CONTENTLESS). Any failure fails the replay: an engine
     /// that did not accept the complete desired state is never installed.
-    pub(super) async fn replay_into<P>(&self, provider: &P) -> Result<(), TypeProviderError>
+    pub(super) async fn replay_into<P>(
+        &self,
+        shared: &super::Shared<P>,
+        serving: &super::Serving<P>,
+    ) -> Result<HashSet<String>, TypeProviderError>
     where
         P: TypeProvider + ?Sized,
     {
+        let provider = serving.provider.as_ref();
+        let mut admissions = Vec::new();
+        let mut refused_paths = HashSet::new();
         if !self.workspace_folders.is_empty() {
             provider
                 .update_workspace_folders(self.workspace_folders.clone(), Vec::new())
@@ -434,6 +441,21 @@ impl DesiredState {
             if !self.replay_admitted(path) {
                 continue;
             }
+            let admission = match super::admission::generated_request(
+                shared,
+                Some(serving),
+                path,
+                None,
+                None,
+            ) {
+                Ok(admission) => admission,
+                // Held bytes are still desired, but excluded/unavailable units
+                // never reach this incarnation or become applied receipts.
+                Err(_) => {
+                    refused_paths.insert(path.clone());
+                    continue;
+                }
+            };
             let replayed = match (file.mode, file.lane) {
                 (FileMode::Open, Lane::Foreground) => provider.open_file(path, &file.content),
                 (FileMode::Open, Lane::Normal) => provider.open_file_normal(path, &file.content),
@@ -449,6 +471,11 @@ impl DesiredState {
             replayed.await.map_err(|error| {
                 TypeProviderError::new(format!("replay of {path} failed: {error}"))
             })?;
+            if let Some(admission) = admission {
+                super::admission::check_witness_for_serving(shared, serving, &admission.witness)
+                    .map_err(TypeProviderError::admission)?;
+                admissions.push(admission);
+            }
         }
 
         // Carriers replay in two passes, mirroring the live publication →
@@ -466,6 +493,23 @@ impl DesiredState {
             if !self.replay_admitted(companion_path) {
                 continue;
             }
+            let mutation = DesiredMutation::RegisterCarrierMetadata {
+                source_path: carrier.source_path.clone(),
+                companion_path: companion_path.clone(),
+                content: String::new(),
+                project_file_name: carrier.project_file_name.clone(),
+            };
+            let requests = match super::admission::generated_mutation_requests(
+                shared,
+                Some(serving),
+                &mutation,
+            ) {
+                Ok(requests) => requests,
+                Err(_) => {
+                    refused_paths.insert(companion_path.clone());
+                    continue;
+                }
+            };
             let registration = if carrier.active && carrier.script_kind.is_none() {
                 provider.register_carrier_member(
                     &carrier.source_path,
@@ -486,6 +530,11 @@ impl DesiredState {
                     "carrier replay of {companion_path} failed: {error}"
                 ))
             })?;
+            for request in requests {
+                super::admission::check_witness_for_serving(shared, serving, &request.witness)
+                    .map_err(TypeProviderError::admission)?;
+                admissions.push(request);
+            }
             if let Some(script_kind) = carrier.script_kind {
                 activations.push(CarrierActivation {
                     source_path: carrier.source_path.clone(),
@@ -496,6 +545,10 @@ impl DesiredState {
             }
         }
         if !activations.is_empty() {
+            for request in &admissions {
+                super::admission::check_witness_for_serving(shared, serving, &request.witness)
+                    .map_err(TypeProviderError::admission)?;
+            }
             provider
                 .activate_carrier_members(&activations)
                 .await
@@ -503,7 +556,11 @@ impl DesiredState {
                     TypeProviderError::new(format!("carrier activation replay failed: {error}"))
                 })?;
         }
-        Ok(())
+        for request in &admissions {
+            super::admission::check_witness_for_serving(shared, serving, &request.witness)
+                .map_err(TypeProviderError::admission)?;
+        }
+        Ok(refused_paths)
     }
 
     /// Files a completed replay left on the engine: admitted overlays were

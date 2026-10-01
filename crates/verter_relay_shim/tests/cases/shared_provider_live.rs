@@ -1479,11 +1479,29 @@ struct CompositeHarness {
     src: PathBuf,
 }
 
+async fn managed_baseline() -> Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>
+{
+    let managed = Arc::new(new_lazy_managed(|| async {
+        Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
+    }));
+    // Preserve the eager baseline's actual byte receipts. Tests of a cold
+    // fallback supply their own unestablished hub instead.
+    managed
+        .establish()
+        .await
+        .expect("owned baseline establishes");
+    managed
+}
+
 /// Drive the full chain to a production composite whose SHARED overlay binds
 /// lazily per query: spawn the shim, run the editor LSP handshake, publish the real
 /// fixture snapshot onto the host workspace, then build the composite (OWNED double
 /// + a SHARED overlay over that host — NO fabricated binding, NO `new_for_test`).
-async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -> CompositeHarness {
+async fn setup_composite(
+    tsgo: &Path,
+    tag: &str,
+    owned: Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>,
+) -> CompositeHarness {
     let dir = tempdir(tag);
     let (tsconfig, src) = write_fixture(&dir);
     let tsconfig_norm = norm(&tsconfig);
@@ -1570,7 +1588,7 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble::default())).await;
+    let h = setup_composite(&tsgo, "composite", managed_baseline().await).await;
 
     // REAL IDE codegen (NOT handcrafted): the imported-prop type flows through the
     // macro into the carrier via the shared resolver.
@@ -1673,7 +1691,7 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
                 Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
-    })) as Arc<dyn TypeProvider>;
+    }));
     let h = setup_composite(&tsgo, "shared_only", fallback).await;
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
@@ -1779,7 +1797,7 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
                 Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
-    })) as Arc<dyn TypeProvider>;
+    }));
     let composite = Arc::new(TsgoCompositeProvider::new(fallback, host, Some(overlay)));
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
@@ -1929,7 +1947,7 @@ fn monorepo_fixture_snapshot(ws_root: &str) -> WorkspaceSnapshot {
 async fn setup_composite_monorepo(
     tsgo: &Path,
     tag: &str,
-    owned: Arc<dyn TypeProvider>,
+    owned: Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>,
 ) -> CompositeHarness {
     let dir = tempdir(tag);
     let (_app_tsconfig, src) = write_monorepo_fixture(&dir);
@@ -2146,12 +2164,7 @@ async fn composite_shared_template_answers_are_typed_single_project() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(
-        &tsgo,
-        "tpl_single",
-        Arc::new(OwnedBaselineDouble::default()),
-    )
-    .await;
+    let h = setup_composite(&tsgo, "tpl_single", managed_baseline().await).await;
     assert_template_member_served_typed(&h, "single-project").await;
     teardown_composite(h).await;
 }
@@ -2165,8 +2178,7 @@ async fn composite_shared_template_answers_are_typed_monorepo_nested_leaf() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h =
-        setup_composite_monorepo(&tsgo, "tpl_mono", Arc::new(OwnedBaselineDouble::default())).await;
+    let h = setup_composite_monorepo(&tsgo, "tpl_mono", managed_baseline().await).await;
     assert_template_member_served_typed(&h, "monorepo").await;
     teardown_composite(h).await;
 }

@@ -4677,6 +4677,168 @@ async fn admitted_overlay_fixture() -> (ResilientHarness, MockProvider, super::A
     (harness, engine, admitted)
 }
 
+#[tokio::test(start_paused = true)]
+async fn managed_recovery_rebinds_proof_and_interrupts_a_held_generated_write() {
+    use super::{AdmissionRefusal, GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
+    use std::future::Future;
+    use std::task::Poll;
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = "d:/ws/src/Foo.vue.tsx";
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.into()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.into(), Arc::<str>::from("<template/>"));
+    let publish = |config: &str| {
+        workspace.inject_file(project.into(), Arc::<str>::from(config));
+        Arc::new(PublishedRoot::new_vfs_only(Arc::new(
+            build_workspace_snapshot_simple(
+                vec![configured_project(
+                    &workspace,
+                    project,
+                    root,
+                    &CanonicalPath::new(root),
+                    ProjectId(0),
+                )],
+                SnapshotGeneration(1),
+            ),
+        )))
+    };
+    let publication = Arc::new(parking_lot::RwLock::new(publish(r#"{"include":["src"]}"#)));
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let original_epoch = harness.provider.serving_epoch();
+    harness
+        .provider
+        .set_generated_unit_resolver(Arc::new({
+            let publication = Arc::clone(&publication);
+            let resolutions = Arc::clone(&resolutions);
+            move |path| {
+                if path != unit {
+                    return None;
+                }
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                let published = Arc::clone(&publication.read());
+                let units = vec![CanonicalPath::new(unit)];
+                let proof = verter_workspace::decide_generated_unit_admission(
+                    &published.snapshot,
+                    &CanonicalPath::new(project),
+                    &units,
+                );
+                let reader = {
+                    let publication = Arc::clone(&publication);
+                    Arc::new(move || Some(ProjectBasis::new(Arc::clone(&publication.read()), 1, 1)))
+                };
+                Some(Ok(GeneratedUnitInput {
+                    binding: ProjectBindingInput::new(
+                        source.into(),
+                        project.into(),
+                        Vec::new(),
+                        ProjectBasis::new(published, 1, 1),
+                        reader,
+                    ),
+                    units,
+                    proof,
+                }))
+            }
+        }))
+        .unwrap();
+    harness
+        .provider
+        .open_file(unit, "unsaved initial")
+        .await
+        .unwrap();
+    harness
+        .provider
+        .load_file_background(unit, "disk")
+        .await
+        .unwrap();
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        1,
+        "warm admission must not resolve twice"
+    );
+    let wrong_project = harness
+        .provider
+        .register_carrier_metadata(source, unit, "wrong", "d:/other/tsconfig.json")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        wrong_project.admission_refusal,
+        Some(AdmissionRefusal::WrongProject)
+    );
+    *engine.inner.update_gate.lock() = Some(Arc::new(Semaphore::new(0)));
+    let hub = Arc::clone(&harness.provider);
+    let held = tokio::spawn(async move { hub.update_file(unit, "unsaved current").await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        engine.inner.update_started.notified(),
+    )
+    .await
+    .unwrap();
+    let mut cancelled = Box::pin(harness.provider.update_file(unit, "cancelled bytes"));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(cancelled.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    drop(cancelled);
+    harness.crash_current_generation();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(30), held)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err(),
+        "crash control must interrupt the suspended mutation"
+    );
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_ne!(harness.provider.serving_epoch(), original_epoch);
+    assert!(
+        matches!(harness.provider.applied_content(unit), crate::traits::AppliedContent::Applied(bytes) if bytes.as_ref() == "unsaved current")
+    );
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        2,
+        "replacement needs one fresh admission"
+    );
+    let writes_before = replacement.calls().len();
+    *publication.write() = publish(r#"{"include":["src"],"exclude":["src/**/*.vue.tsx"]}"#);
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(3).await;
+    assert_eq!(
+        replacement.calls().len(),
+        writes_before,
+        "excluded replay must write nothing"
+    );
+    assert!(matches!(
+        harness.provider.applied_content(unit),
+        crate::traits::AppliedContent::NotApplied
+    ));
+    let denied = harness.provider.get_hover(unit, 0).await.unwrap_err();
+    assert_eq!(
+        denied.admission_refusal,
+        Some(AdmissionRefusal::GeneratedUnitExcluded)
+    );
+    harness
+        .provider
+        .get_hover("d:/ws/healthy.ts", 0)
+        .await
+        .unwrap();
+    harness.provider.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_queued_overlay_never_reaches_the_engine_or_replay() {
     use super::{OverlayFileKind, OverlayMutation, OverlayPriority};

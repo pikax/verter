@@ -15,6 +15,35 @@ impl<P> ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
+    /// Install the workspace fact source once. It never authorizes a write;
+    /// the hub revalidates its proof at execution, replay, and settlement.
+    pub fn set_generated_unit_resolver(
+        &self,
+        resolver: Arc<GeneratedUnitResolver>,
+    ) -> Result<(), AdmissionRefusal> {
+        if let Some(existing) = self.state.shared.generated_unit_resolver.get() {
+            return if Arc::ptr_eq(existing, &resolver) {
+                Ok(())
+            } else {
+                Err(AdmissionRefusal::StaleBasis)
+            };
+        }
+        if let Some(serving) = self.state.shared.serving() {
+            serving
+                .provider
+                .set_generated_unit_resolver(Arc::clone(&resolver))?;
+        }
+        if self
+            .state
+            .shared
+            .generated_unit_resolver
+            .set(Arc::clone(&resolver))
+            .is_err()
+        {
+            return Err(AdmissionRefusal::StaleBasis);
+        }
+        Ok(())
+    }
     fn mutation_disposition<'a>(
         &'a self,
         mutation: DesiredMutation,
@@ -36,6 +65,12 @@ impl<P> TypeProvider for ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
+    fn set_generated_unit_resolver(
+        &self,
+        resolver: Arc<GeneratedUnitResolver>,
+    ) -> Result<(), AdmissionRefusal> {
+        Self::set_generated_unit_resolver(self, resolver)
+    }
     fn load_file_with_disposition<'a>(
         &'a self,
         path: &'a str,

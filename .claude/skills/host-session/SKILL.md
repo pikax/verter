@@ -144,6 +144,20 @@ that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
 `exclude` removes the unit's own form still refuses it. Warm same-basis requests reuse the hub admission, while an excluded,
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
+The managed composite also requires a typed `Arc<ProviderHub<P>>`; a raw
+`TypeProvider` cannot fill that slot. It installs one `GeneratedUnitResolver`
+which supplies resolver-produced binding inputs and complete workspace proofs,
+never serving authority. The hub checks these facts before recording cold
+generated state, binds them to its actual provider/epoch before live writes and
+queries, and re-resolves them before replay into each fresh incarnation. Nested
+hubs receive the same fact source and bind to their own incarnation; the
+tsserver router keeps its existing per-project hub admission. Warm managed
+requests reuse only the hub's current capability. Cold state carries no applied
+receipt, and cancelled or expired queued mutations perform no writes. An
+excluded unit's desired editor bytes remain held but cannot replay or appear
+applied; a later admissible incarnation can restore them. Discovery loads
+continue to preserve open editor overlays. `TypeProviderError.admission_refusal`
+is a typed internal refusal and is omitted from serialization.
 The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
 authority: the composite holds a `ProviderHub<TsgoSharedProvider>` that establishes
 the attach through the re-arm door. The hub owns shared overlay content, per-carrier

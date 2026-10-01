@@ -1391,11 +1391,49 @@ impl TsgoCompositeProvider {
     /// Build the layer over a managed provider slot, the binding authority, and an
     /// optional exact-editor route.
     #[must_use]
-    pub fn new(
-        managed: Arc<dyn TypeProvider>,
+    pub fn new<P: TypeProvider + ?Sized + Send + Sync + 'static>(
+        managed: Arc<ProviderHub<P>>,
         host: Arc<VerterHost>,
         shared: Option<SharedTsgoOverlay>,
     ) -> Self {
+        let resolver_host = Arc::clone(&host);
+        let installed = managed.set_generated_unit_resolver(Arc::new(move |path| {
+            let source = carrier_source_of(path)?;
+            Some((|| {
+                use verter_type_runtime::provider_hub::{AdmissionRefusal, GeneratedUnitInput};
+                let (resolution, _, published) = project_binding::resolve_carrier_with_publication(
+                    &resolver_host,
+                    &source,
+                    Arc::from(""),
+                    project_binding::OwnershipReadinessMode::PresentSnapshotAuthoritative,
+                )
+                .ok_or(AdmissionRefusal::MissingGeneratedProof)?;
+                let CarrierOwnershipResolution::Bound(binding) = resolution else {
+                    return Err(AdmissionRefusal::WrongProject);
+                };
+                let units = vec![CanonicalPath::new(path)];
+                let proof = verter_workspace::decide_generated_unit_admission_with_basis(
+                    published.published.snapshot.as_ref(),
+                    &CanonicalPath::new(binding.tsconfig_uri()),
+                    &units,
+                    crate::external_ts::carrier_membership_basis,
+                );
+                Ok(GeneratedUnitInput {
+                    binding: project_binding::hub_binding_input(
+                        &resolver_host,
+                        &source,
+                        &binding,
+                        published,
+                    ),
+                    units,
+                    proof,
+                })
+            })())
+        }));
+        assert!(
+            installed.is_ok(),
+            "a managed hub must have exactly one workspace fact source"
+        );
         Self {
             managed,
             host,
