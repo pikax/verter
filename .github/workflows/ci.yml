@@ -1340,8 +1340,25 @@ jobs:
         with:
           name: wasm-build
           path: packages/wasm
+      # The browser binaries are keyed on the resolved Playwright version, which
+      # pins the exact browser builds it downloads. The apt system libraries
+      # cannot live in a cache, so a hit still runs `install-deps`.
+      - name: Resolve Playwright version
+        id: playwright-version
+        working-directory: packages/playground
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium-firefox-webkit
       - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @verter/playground exec playwright install-deps chromium firefox webkit
       - name: Run the browser-host-domain gate
         run: node scripts/browser-host-gate.mjs --skip-build
 
