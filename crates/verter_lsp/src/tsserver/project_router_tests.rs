@@ -1234,3 +1234,126 @@ async fn recovery_rearm_racing_a_content_edit_is_reissued() {
         "a re-armed carrier must be routed to its owning engine again"
     );
 }
+
+/// Move the published basis with an unrelated document's content, the drift a
+/// concurrent edit or open causes while an engine applies a carrier write.
+fn drift_basis(
+    router: &ProjectTsserverProvider,
+    workspace: &verter_workspace::FilesystemWorkspace,
+    member: &CarrierActivation,
+) {
+    workspace.inject_file(
+        format!("{}.unrelated.ts", member.source_path),
+        Arc::from("export {};"),
+    );
+    // Engine discovery is substituted in this fixture: carry the pre-resolved
+    // engines over to the drifted basis, as a real install's re-resolution would.
+    let drifted = ResolvedPublication::current(&router.host).unwrap();
+    for mut spec in router.engine_specs.iter_mut() {
+        spec.basis = drifted.clone();
+    }
+}
+
+/// An editor activation whose settlement lands on a basis an unrelated edit
+/// moved while the engine applied it is re-issued under a fresh admission.
+///
+/// The hub refuses that settlement (a content-only drift) and leaves the
+/// re-application to its issuer. An issuer that surfaces the refusal instead
+/// leaves the carrier degraded: its open document never reaches the engine and
+/// every provider-backed feature on it fails until the next edit.
+#[tokio::test]
+async fn carrier_activation_racing_a_content_edit_is_reissued() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    let member = members[0].clone();
+    let (arrived, release) = providers[0].block_next_carrier_activation();
+    let router = Arc::new(router);
+    let activation = tokio::spawn({
+        let router = Arc::clone(&router);
+        let member = member.clone();
+        async move {
+            router
+                .activate_carrier_member(
+                    &member.source_path,
+                    &member.companion_path,
+                    &member.project_file_name,
+                    member.script_kind,
+                )
+                .await
+        }
+    });
+    arrived.notified().await;
+    drift_basis(&router, &workspace, &member);
+    release.notify_one();
+
+    activation
+        .await
+        .unwrap()
+        .expect("a basis-drift refusal must be answered by a fresh admission");
+    let activations = providers[0]
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                MockCall::ActivateCarrierMember { companion_path, .. }
+                    if *companion_path == member.companion_path
+            )
+        })
+        .count();
+    assert_eq!(
+        activations, 2,
+        "the refused activation must be re-issued once under a fresh admission"
+    );
+}
+
+/// The bulk activation an editor's burst of opens issues is re-issued the
+/// same way: one drifted settlement must not degrade every carrier in it.
+#[tokio::test]
+async fn carrier_batch_racing_a_content_edit_is_reissued() {
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    let group: Vec<_> = members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/a/tsconfig.json"))
+        .cloned()
+        .collect();
+    let (arrived, release) = providers[0].block_next_carrier_batch();
+    let router = Arc::new(router);
+    let batch = tokio::spawn({
+        let router = Arc::clone(&router);
+        let group = group.clone();
+        async move { router.activate_carrier_members(&group).await }
+    });
+    arrived.notified().await;
+    drift_basis(&router, &workspace, &group[0]);
+    release.notify_one();
+
+    batch
+        .await
+        .unwrap()
+        .expect("a basis-drift refusal must be answered by a fresh admission");
+    let batches: Vec<_> = providers[0]
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::ActivateCarrierMembers { members } => Some(members),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        batches,
+        vec![group.clone(), group],
+        "the refused batch must be re-issued whole under a fresh admission"
+    );
+}
