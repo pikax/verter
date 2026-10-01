@@ -336,20 +336,10 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
         let Some(ws) = ws.as_ref() else {
             return;
         };
-        let Some(published) = ws.load_published() else {
+        let Some(snapshot) = published_resolver_snapshot(ws) else {
             return;
         };
-        (
-            super::PublishedResolverSnapshot {
-                resolver: published.snapshot.resolver.clone(),
-                resolution_view: Some(super::PublishedResolutionView {
-                    workspace: Arc::clone(ws),
-                    published: Arc::clone(&published),
-                }),
-                ownership_ready: published.ownership_ready,
-            },
-            Arc::clone(ws),
-        )
+        (snapshot, Arc::clone(ws))
     };
     // The carrier-publish context — ALWAYS present here (a published `vfs_handle` was
     // captured above), carrying the single ownership-resolution vfs for BOTH engines.
@@ -895,6 +885,22 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     synced_any
 }
 
+/// The resolver snapshot of `ws`'s current publication, or `None` while it
+/// has published nothing.
+fn published_resolver_snapshot(
+    ws: &Arc<verter_workspace::FilesystemWorkspace>,
+) -> Option<super::PublishedResolverSnapshot> {
+    let published = ws.load_published()?;
+    Some(super::PublishedResolverSnapshot {
+        resolver: published.snapshot.resolver.clone(),
+        resolution_view: Some(super::PublishedResolutionView {
+            workspace: Arc::clone(ws),
+            published: Arc::clone(&published),
+        }),
+        ownership_ready: published.ownership_ready,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_snapshot_provider_file(
     sync: Option<&ProjectSync>,
@@ -948,7 +954,17 @@ pub(super) async fn sync_pending_snapshot_provider_file(
             crate::server::self_file_language_for(canonical_id),
             documents.canonical_id_to_uri(canonical_id),
         ) {
-            let published = || Some(snapshot.clone());
+            // A re-synced buffer must look new to the diagnostics cache and to any
+            // receipt the open document still owes, exactly as the non-carrier
+            // pass below does, so the drain's owed-diagnostics re-arm fires.
+            documents.host().bump_diagnostics_generation(canonical_id);
+            // The supersession check re-derives the projection after the provider
+            // await, so it must read the publication current THEN: one landing
+            // during the delivery has to be able to supersede it.
+            let published = || match carrier_publish {
+                Some(publish) => published_resolver_snapshot(&publish.vfs),
+                None => Some(snapshot.clone()),
+            };
             let delivered = crate::server::sync_self_file_shadow_state(
                 documents,
                 sync,

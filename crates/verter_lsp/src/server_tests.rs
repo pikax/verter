@@ -16349,6 +16349,7 @@ export const direct = Comp;
         resolution_view: None,
         ownership_ready: true,
     };
+    let generation_before = host.get_diagnostics_generation(&consumer_id).unwrap_or(0);
     let outcome = super::background_drain::sync_pending_snapshot_provider_file(
         Some(&sync),
         &documents,
@@ -16387,6 +16388,10 @@ export const direct = Comp;
             super::background_drain::SyncOutcome::FullyReconciled
         ),
         "a delivered script is reconciled"
+    );
+    assert!(
+        host.get_diagnostics_generation(&consumer_id).unwrap_or(0) > generation_before,
+        "the re-synced buffer must outdate any diagnostics receipt the document still owes"
     );
 }
 
