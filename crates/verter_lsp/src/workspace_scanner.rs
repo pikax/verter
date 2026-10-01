@@ -1184,16 +1184,15 @@ pub(crate) async fn sync_file_to_provider(
                         sync.load_tsx_background(&tsx_path, &ide.code).await
                     };
                     if result.is_ok() {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                        synced_kinds.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface), through
                         // the shared fenced choke point: `open_pin` was captured
                         // above BEFORE the compile, so this scan pass can never pair
                         // stale bytes with a since-edited open document's source —
                         // it either records the coherent pair or refuses.
-                        if let Some(delivered) = sync.carrier_provider_surface(&tsx_path, &ide.code)
-                        {
+                        if let Some(delivered) = sync.receipt_for_commit(&tsx_path, &ide.code) {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced_kinds.push(ProviderPathKind::Ide);
                             crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                 provider_surfaces,
                                 documents,

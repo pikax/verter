@@ -145,8 +145,11 @@ that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
 The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
-authority: its overlay owns a `ProviderHub<TsgoSharedProvider>` that establishes
-the attach through the re-arm door, and every per-carrier sweep write carries a
+authority: the composite holds a `ProviderHub<TsgoSharedProvider>` that establishes
+the attach through the re-arm door. The hub owns shared overlay content, per-carrier
+application gates and applied epochs in `provider_hub/overlay.rs`; the composite
+collects inputs and calls `ProviderHub::synchronize`. Receipts list only successful
+member writes with exact bytes and epoch. Every per-carrier sweep write carries a
 hub-issued `AdmittedRequest` forwarded by
 `ProviderHub::forward_admitted_file` — off the actor queue, because the sweep's
 writes are concurrent barrier-coalesced (the single-writer actor would serialize
@@ -157,6 +160,54 @@ hub-issued admission binds the serving epoch and basis, so a replacement
 re-admits fresh. No admission cache survives beside the hub (the per-composite
 `CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
 are `ProviderHub::bound_project` + the hub request cache).
+Background discovery uses `load_file_with_disposition`. Open and update use the
+same disposition. `Shadowed` preserves editor content and does not record a
+shared overlay or a `ProjectSync` mapper. `Held` records hub desired state for
+replay and does not enter the delivery ledger, and a coordinator does not mark
+that IDE kind synced. `AppliedContent::Uncertified` is not a receipt. After
+replay, `ProviderHub::applied_content` is the bytes the serving incarnation
+accepted, including a rejected close, which keeps the prior surface. A close
+is committed only after the engine accepts it. tsserver companion content
+opens stay suppressed; that membership path is not a second content authority.
+Document receipts require completed transport delivery. TSGO transfers its document
+ordering gate to the stdin writer until the complete frame is written and flushed;
+dropping the submitter cannot reorder the next mutation. Queued replacements revoke
+the prior receipt, and failed or closed transports cannot certify cached bytes.
+TSGO publication deduplicates against delivered bytes, never the load-only conversion
+cache. tsserver uses acknowledged `updateOpen` writes for file receipts; completed
+carrier registration refreshes certify carrier bytes. ProviderHub validates wrapped
+provider receipts both after forwarding and during install replay, and rechecks the
+live receipt on reads so transport failure cannot leave a cached hub certificate.
+Direct admitted writes use the same engine-receipt check as queued mutations;
+successful physical overlay withdrawal removes that receipt.
+Cache-only loads remain `Held` until the wrapped provider certifies matching bytes.
+When a background drain encounters a held IDE write, it calls
+`TypeProvider::synchronize_pending_file`: the shared composite resolves the current
+configured owner and drives the existing hub engagement/synchronization path.
+This runs outside the foreground publication budget and breaks the dependency
+between first query and first delivered surface. ProjectSync then certifies the
+matching bytes without rewriting its captured snapshot; concurrent edits remain
+protected. A lazy managed fallback staying `Held` cannot mask an applied shared
+receipt.
+Overlay close removes desired content immediately but retains an epoch-bound
+withdrawal from a committed injection receipt until transport close succeeds.
+A never-injected or shadow-vetoed carrier owns no transport document and creates
+no withdrawal; closing it preserves any real editor document at the same path.
+Synchronization drains withdrawals outside the editor-demand injection filter.
+Deadlines and cancellation retain
+ownership, successful reopen supersedes the pending close under the carrier gate,
+and retired-incarnation closes never target the replacement transport.
+A recovery drain also wakes the existing post-scan completion check. A scan that
+finished during an engine replacement can announce completion once its queued
+work settles, without reinitializing the workspace or polling readiness. The
+waiter retains only a weak server reference and rejects superseded generations.
+Independent hub groups activate concurrently. A held engine on one project
+does not block another project's group. An A/B/A activation across two project
+hubs keeps aliases in one ordered bulk call per delivery and sends nothing
+after withdrawal. That router seam counts hub bulk calls; live tsserver/tsgo
+process rebuild counters belong to the real-provider lane.
+Dropping a direct overlay write or withdrawal signals that incarnation's
+recovery monitor because its physical outcome is unknown.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
@@ -921,7 +972,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsgo/ipc.rs` | TSGO LSP client, `LspTransport`, hang detection |
 | `crates/verter_type_runtime/src/provider_hub/` | `ProviderHub`: the ONE provider lifecycle owner (establish, recover, replay, serving `ProviderEpoch`, receipts, `bind_project`/`admit_request` admission and the lazy-attach re-arm door) |
 | `crates/verter_lsp/src/tsgo/resilient.rs` | Owned tsgo establishment strategy (`establish_owned`) |
-| `crates/verter_lsp/src/tsgo/project_sync.rs` | `ProjectSync` (batched provider file ops) |
+| `crates/verter_lsp/src/type_provider/project_sync.rs` | `ProjectSync` (batched provider file ops) |
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | tsserver establishment strategy (`hub`) |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |

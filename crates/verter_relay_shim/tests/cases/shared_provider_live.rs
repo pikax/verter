@@ -1079,24 +1079,45 @@ async fn shared_provider_reconnect_mints_fresh_engine_no_split_brain() {
 /// shared result is discriminating; in the topology test it is wrapped by
 /// [`LazyManagedTypeProvider`] and must never be constructed at all.
 #[derive(Default)]
-struct OwnedBaselineDouble;
+struct OwnedBaselineDouble {
+    applied: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<str>>>,
+}
 
 impl TypeProvider for OwnedBaselineDouble {
+    fn applied_content(&self, path: &str) -> verter_lsp::type_provider::traits::AppliedContent {
+        use verter_lsp::type_provider::traits::AppliedContent;
+        match self.applied.lock().expect("applied").get(path) {
+            Some(bytes) => AppliedContent::Applied(std::sync::Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
+    }
     fn provider_id(&self) -> &'static str {
         "tsgo"
     }
-    fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = std::sync::Arc::<str>::from(content);
+        Box::pin(async move {
+            self.applied
+                .lock()
+                .expect("applied")
+                .insert(path, std::sync::Arc::clone(&content));
+            Ok(())
+        })
     }
     /// This double does not distinguish a background load from an editor open.
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         self.open_file(path, content)
     }
-    fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
     }
-    fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        Box::pin(async move {
+            self.applied.lock().expect("applied").remove(&path);
+            Ok(())
+        })
     }
     fn get_completions(
         &self,
@@ -1549,7 +1570,7 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble)).await;
+    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble::default())).await;
 
     // REAL IDE codegen (NOT handcrafted): the imported-prop type flows through the
     // macro into the carrier via the shared resolver.
@@ -1649,7 +1670,7 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
             let activation_count = Arc::clone(&activation_count);
             async move {
                 activation_count.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+                Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
     })) as Arc<dyn TypeProvider>;
@@ -1755,7 +1776,7 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
             let activation_count = Arc::clone(&activation_count);
             async move {
                 activation_count.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+                Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
     })) as Arc<dyn TypeProvider>;
@@ -2125,7 +2146,12 @@ async fn composite_shared_template_answers_are_typed_single_project() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(&tsgo, "tpl_single", Arc::new(OwnedBaselineDouble)).await;
+    let h = setup_composite(
+        &tsgo,
+        "tpl_single",
+        Arc::new(OwnedBaselineDouble::default()),
+    )
+    .await;
     assert_template_member_served_typed(&h, "single-project").await;
     teardown_composite(h).await;
 }
@@ -2139,7 +2165,8 @@ async fn composite_shared_template_answers_are_typed_monorepo_nested_leaf() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite_monorepo(&tsgo, "tpl_mono", Arc::new(OwnedBaselineDouble)).await;
+    let h =
+        setup_composite_monorepo(&tsgo, "tpl_mono", Arc::new(OwnedBaselineDouble::default())).await;
     assert_template_member_served_typed(&h, "monorepo").await;
     teardown_composite(h).await;
 }

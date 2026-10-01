@@ -32,8 +32,8 @@ use verter_type_runtime::discovery::{
     tsserver_serving_tier, ResolvedTsserver, TsserverSource,
 };
 use verter_type_runtime::provider_hub::{
-    AdmissionRefusal, AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation,
-    OverlayPriority, ProjectWitness,
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
+    OverlayFileKind, OverlayMutation, OverlayPriority, ProjectWitness,
 };
 use verter_workspace::{decide_generated_unit_admission_with_basis, CanonicalPath};
 
@@ -113,6 +113,16 @@ struct RequestRoute {
 /// basis drifts under it.
 const BASIS_DRIFT_REISSUES: usize = 2;
 
+/// Backed-off retries for recovery re-arms still refused on a drifted basis
+/// after their immediate [`BASIS_DRIFT_REISSUES`] (see
+/// [`ProjectTsserverProvider::rearm_admitted_state`]): long enough in total to
+/// outlast an edit burst.
+const REARM_DRIFT_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(4),
+];
+
 /// Run one read-only query through its request route, settling it only under
 /// a CURRENT admission.
 ///
@@ -183,6 +193,42 @@ impl RequestRoute {
         let result = future.await;
         self.check()?;
         result
+    }
+}
+
+/// Why one carrier's recovery re-arm did not complete.
+enum RearmFailure {
+    /// No fresh admission could be minted for it.
+    Admission(TypeProviderError),
+    /// The serving hub refused one of its settlements.
+    Refused {
+        stage: &'static str,
+        reason: AdmissionRefusal,
+    },
+}
+
+impl RearmFailure {
+    /// Refused because the basis moved while the engine applied it — the
+    /// refusal a fresh admission answers.
+    fn basis_drifted(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused {
+                reason: AdmissionRefusal::StaleBasis,
+                ..
+            }
+        )
+    }
+}
+
+impl std::fmt::Display for RearmFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "{error}"),
+            Self::Refused { stage, reason } => {
+                write!(f, "recovery re-arm {stage} refused: {reason:?}")
+            }
+        }
     }
 }
 
@@ -264,67 +310,116 @@ impl ProjectTsserverProvider {
     /// through FRESH admission against the epoch that now serves. Each carrier
     /// re-registers its metadata and, when its last explicit activation was
     /// recorded, re-activates with that exact parsing mode — mirroring the
-    /// desired-state replay order for non-admitted carriers. A refusal (the
-    /// configuration changed, the project moved, the publication raced) skips
-    /// that carrier fail-closed: the ordinary carrier-sync path owns its
-    /// re-drive, exactly as before the crash.
+    /// desired-state replay order for non-admitted carriers.
+    ///
+    /// A settlement refused on a drifted BASIS (an unrelated document's edit
+    /// landed while the engine applied it) is re-issued under a fresh
+    /// admission: the hub leaves that re-application to its issuer, and nothing
+    /// else re-drives a carrier the LSP still believes the engine holds — its
+    /// open documents would wait on a provider that never received them. The
+    /// first re-issues are immediate, like every other basis-drift re-issue;
+    /// carriers still drifting after them are retried once the whole set has
+    /// been re-armed, backing off so a burst of edits cannot spend the budget
+    /// while it lasts (and one drifting carrier never delays the others). Any
+    /// other refusal (the configuration changed, the project moved, the engine
+    /// was replaced) skips that carrier fail-closed: the change that caused it
+    /// re-publishes the carrier through the ordinary sync path.
     pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
+        let mut drifting = Vec::new();
         for carrier in &dropped.carriers {
-            let rearm = async {
-                let (hub, admitted) = self
-                    .admit_registered_unit(
-                        &carrier.source_path,
-                        &carrier.companion_path,
-                        &carrier.project_file_name,
-                    )
-                    .await?;
-                hub.apply_overlay(
-                    &admitted,
-                    OverlayMutation::RegisterCarrierMetadata {
-                        source_path: carrier.source_path.clone(),
-                        companion_path: carrier.companion_path.clone(),
-                        content: carrier.content.clone(),
-                        project_file_name: carrier.project_file_name.clone(),
-                    },
-                )
-                .await
-                .map_err(|reason| {
-                    TypeProviderError::new(format!(
-                        "recovery re-arm registration refused: {reason:?}"
-                    ))
-                })?;
-                if let Some(script_kind) = carrier.script_kind {
-                    hub.apply_overlay(
-                        &admitted,
-                        OverlayMutation::ActivateCarrier {
-                            source_path: carrier.source_path.clone(),
-                            companion_path: carrier.companion_path.clone(),
-                            project_file_name: carrier.project_file_name.clone(),
-                            script_kind,
-                        },
-                    )
-                    .await
-                    .map_err(|reason| {
-                        TypeProviderError::new(format!(
-                            "recovery re-arm activation refused: {reason:?}"
-                        ))
-                    })?;
+            let mut reissues = BASIS_DRIFT_REISSUES;
+            loop {
+                match self.rearm_admitted_carrier(carrier).await {
+                    Ok(()) => break,
+                    Err(error) if error.basis_drifted() && reissues > 0 => reissues -= 1,
+                    Err(error) if error.basis_drifted() => {
+                        drifting.push((carrier, error));
+                        break;
+                    }
+                    Err(error) => {
+                        Self::warn_rearm_skipped(carrier, &error);
+                        break;
+                    }
                 }
-                self.register_route(
-                    &carrier.source_path,
-                    &carrier.companion_path,
-                    &carrier.project_file_name,
-                );
-                Ok::<(), TypeProviderError>(())
-            };
-            if let Err(error) = rearm.await {
-                tracing::warn!(
-                    companion = %carrier.companion_path,
-                    "tsserver recovery re-arm skipped (fail-closed; the ordinary \
-                     carrier sync re-drives it): {error}"
-                );
             }
         }
+        for delay in REARM_DRIFT_BACKOFF {
+            if drifting.is_empty() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            let mut still = Vec::new();
+            for (carrier, _) in drifting {
+                match self.rearm_admitted_carrier(carrier).await {
+                    Ok(()) => {}
+                    Err(error) if error.basis_drifted() => still.push((carrier, error)),
+                    Err(error) => Self::warn_rearm_skipped(carrier, &error),
+                }
+            }
+            drifting = still;
+        }
+        for (carrier, error) in &drifting {
+            Self::warn_rearm_skipped(carrier, error);
+        }
+    }
+
+    fn warn_rearm_skipped(carrier: &DroppedAdmittedCarrier, error: &RearmFailure) {
+        tracing::warn!(
+            companion = %carrier.companion_path,
+            "tsserver recovery re-arm skipped (fail-closed; the ordinary \
+             carrier sync re-drives it): {error}"
+        );
+    }
+
+    /// One carrier of [`Self::rearm_admitted_state`], under one fresh admission.
+    async fn rearm_admitted_carrier(
+        &self,
+        carrier: &DroppedAdmittedCarrier,
+    ) -> Result<(), RearmFailure> {
+        let (hub, admitted) = self
+            .admit_registered_unit(
+                &carrier.source_path,
+                &carrier.companion_path,
+                &carrier.project_file_name,
+            )
+            .await
+            .map_err(RearmFailure::Admission)?;
+        hub.apply_overlay(
+            &admitted,
+            OverlayMutation::RegisterCarrierMetadata {
+                source_path: carrier.source_path.clone(),
+                companion_path: carrier.companion_path.clone(),
+                content: carrier.content.clone(),
+                project_file_name: carrier.project_file_name.clone(),
+            },
+        )
+        .await
+        .map_err(|reason| RearmFailure::Refused {
+            stage: "registration",
+            reason,
+        })?;
+        if let Some(script_kind) = carrier.script_kind {
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::ActivateCarrier {
+                    source_path: carrier.source_path.clone(),
+                    companion_path: carrier.companion_path.clone(),
+                    project_file_name: carrier.project_file_name.clone(),
+                    script_kind,
+                },
+            )
+            .await
+            .map_err(|reason| RearmFailure::Refused {
+                stage: "activation",
+                reason,
+            })?;
+        }
+        self.register_route(
+            &carrier.source_path,
+            &carrier.companion_path,
+            &carrier.project_file_name,
+        );
+        Ok(())
     }
 
     fn normalized(path: &str) -> String {
@@ -1002,6 +1097,56 @@ pub fn probe_source_label(source: TsserverSource) -> &'static str {
 }
 
 impl TypeProvider for ProjectTsserverProvider {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
+                return self
+                    .provider_for_path(path)
+                    .await?
+                    .load_file_with_disposition(path, content, priority)
+                    .await;
+            }
+            self.apply_file_write(path, content, OverlayFileKind::Load, priority)
+                .await?;
+            Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        let normalized = Self::normalized(path);
+        let certify = |content: AppliedContent| match content {
+            AppliedContent::Uncertified => AppliedContent::NotApplied,
+            other => other,
+        };
+        if let Some(route) = self.routes.get(&normalized) {
+            for entry in &self.providers {
+                if Self::normalized(&entry.key().project) == route.project {
+                    return certify(entry.value().applied_content(path));
+                }
+            }
+            return AppliedContent::NotApplied;
+        }
+        let mut found = None;
+        for entry in self.providers.iter() {
+            if let AppliedContent::Applied(bytes) = entry.value().applied_content(path) {
+                if found.is_some() {
+                    return AppliedContent::NotApplied;
+                }
+                found = Some(AppliedContent::Applied(bytes));
+            }
+        }
+        found.unwrap_or(AppliedContent::NotApplied)
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsserver"
     }
@@ -1428,23 +1573,30 @@ impl TypeProvider for ProjectTsserverProvider {
             }
             // Preserve each engine's input order and its single-refresh bulk
             // activation contract. Scalar editor opens keep their separate path.
-            for (hub, members) in batches {
-                let routes: Vec<_> = members
-                    .iter()
-                    .map(|(_, member)| {
-                        (
-                            member.source_path.clone(),
-                            member.companion_path.clone(),
-                            member.project_file_name.clone(),
-                        )
-                    })
-                    .collect();
-                hub.apply_overlay_batch(members).await.map_err(|reason| {
-                    TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
-                })?;
-                for (source, companion, project) in routes {
-                    self.register_route(&source, &companion, &project);
-                }
+            let outcomes = futures_util::future::join_all(batches.into_iter().map(
+                |(hub, members)| async move {
+                    let routes: Vec<_> = members
+                        .iter()
+                        .map(|(_, member)| {
+                            (
+                                member.source_path.clone(),
+                                member.companion_path.clone(),
+                                member.project_file_name.clone(),
+                            )
+                        })
+                        .collect();
+                    hub.apply_overlay_batch(members).await.map_err(|reason| {
+                        TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
+                    })?;
+                    for (source, companion, project) in routes {
+                        self.register_route(&source, &companion, &project);
+                    }
+                    Ok::<(), TypeProviderError>(())
+                },
+            ))
+            .await;
+            for outcome in outcomes {
+                outcome?;
             }
             Ok(())
         })

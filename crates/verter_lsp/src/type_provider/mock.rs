@@ -159,6 +159,19 @@ mod inner {
     /// Shared state for the mock provider.
     #[derive(Default)]
     struct MockState {
+        carrier_batch_observer: Option<std::sync::Arc<tokio::sync::Notify>>,
+        carrier_batch_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// One-shot pause for the next `activate_carrier_member`: `(arrived,
+        /// release)`, as [`MockTypeProvider::block_next_carrier_activation`].
+        carrier_activation_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// Bytes this engine accepted. Absent means not applied.
+        applied: std::collections::HashMap<String, Arc<str>>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -595,6 +608,54 @@ mod inner {
             self.state.lock().unwrap().on_query = Some((path.to_string(), callback));
         }
 
+        pub fn observe_carrier_batch(&self) -> std::sync::Arc<tokio::sync::Notify> {
+            let observer = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_batch_observer = Some(observer.clone());
+            observer
+        }
+
+        /// Pause the next `activate_carrier_members` until `release` is signalled.
+        /// `arrived` fires once the engine has entered the batch.
+        pub fn block_next_carrier_batch(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_batch_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Pause the next `activate_carrier_member` until `release` is
+        /// signalled. `arrived` fires once the engine has entered it.
+        pub fn block_next_carrier_activation(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_activation_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        fn accept_applied(&self, path: &str, content: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .applied
+                .insert(path.to_string(), Arc::from(content));
+        }
+
+        fn drop_applied(&self, path: &str) {
+            self.state.lock().unwrap().applied.remove(path);
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()
@@ -965,6 +1026,14 @@ mod inner {
     }
 
     impl TypeProvider for MockTypeProvider {
+        fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+            use verter_type_runtime::traits::AppliedContent;
+            match self.state.lock().unwrap().applied.get(path) {
+                Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
+                None => AppliedContent::NotApplied,
+            }
+        }
+
         fn provider_id(&self) -> &'static str {
             self.state.lock().unwrap().provider_id.unwrap_or("tsgo")
         }
@@ -1016,12 +1085,17 @@ mod inner {
             if let Some(callback) = on_open {
                 callback();
             }
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "open_file")
+                fail_or_ok(fail, "open_file")?;
+                this.accept_applied(&path_owned, &content_owned);
+                Ok(())
             })
         }
 
@@ -1049,7 +1123,14 @@ mod inner {
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
             drop(state);
             self.note_recorded();
-            Box::pin(async move { fail_or_ok(fail, "load_file") })
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            Box::pin(async move {
+                fail_or_ok(fail, "load_file")?;
+                this.accept_applied(&path_owned, &content_owned);
+                Ok(())
+            })
         }
 
         /// Recorded as its OWN call so a caller's priority lane is observable. The
@@ -1064,7 +1145,14 @@ mod inner {
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
             drop(state);
             self.note_recorded();
-            Box::pin(async move { fail_or_ok(fail, "open_file_background") })
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            Box::pin(async move {
+                fail_or_ok(fail, "open_file_background")?;
+                this.accept_applied(&path_owned, &content_owned);
+                Ok(())
+            })
         }
 
         fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -1085,12 +1173,17 @@ mod inner {
                 (fail, block)
             };
             self.note_recorded();
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "update_file")
+                fail_or_ok(fail, "update_file")?;
+                this.accept_applied(&path_owned, &content_owned);
+                Ok(())
             })
         }
 
@@ -1118,6 +1211,8 @@ mod inner {
                 };
                 (fail, block)
             };
+            let this = self.clone();
+            let path_owned = path.to_string();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     // Signal the test that the close has been reached (the closing
@@ -1125,7 +1220,9 @@ mod inner {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "close_file")
+                fail_or_ok(fail, "close_file")?;
+                this.drop_applied(&path_owned);
+                Ok(())
             })
         }
 
@@ -1172,10 +1269,14 @@ mod inner {
                     .filter(|(blocked_path, _)| blocked_path == companion_path)
                     .map(|(_, gate)| gate.clone())
             };
+            let this = self.clone();
+            let companion = companion_path.to_string();
+            let bytes = content.to_string();
             Box::pin(async move {
                 if let Some(gate) = block {
                     gate.notified().await;
                 }
+                this.accept_applied(&companion, &bytes);
                 Ok(())
             })
         }
@@ -1213,31 +1314,49 @@ mod inner {
             project_file_name: &str,
             script_kind: verter_type_runtime::CarrierScriptKind,
         ) -> ProviderFuture<'_, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::ActivateCarrierMember {
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ActivateCarrierMember {
                     source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     project_file_name: project_file_name.to_string(),
                     script_kind,
                 });
-            Box::pin(async { Ok(()) })
+                state.carrier_activation_block.take()
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn activate_carrier_members<'a>(
             &'a self,
             members: &'a [verter_type_runtime::CarrierActivation],
         ) -> ProviderFuture<'a, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::ActivateCarrierMembers {
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ActivateCarrierMembers {
                     members: members.to_vec(),
                 });
-            Box::pin(async { Ok(()) })
+                let observer = state.carrier_batch_observer.clone();
+                let block = state.carrier_batch_block.take();
+                (observer, block)
+            };
+            if let Some(observer) = block.0 {
+                observer.notify_one();
+            }
+            let block = block.1;
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn get_completions(

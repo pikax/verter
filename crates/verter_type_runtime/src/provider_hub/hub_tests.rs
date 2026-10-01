@@ -29,8 +29,8 @@ use verter_identity::identity::ProviderEpoch;
 
 use super::desired::{DesiredMutation, Lane};
 use super::{
-    AppliedReceipt, EngineStart, EstablishFuture, HubPolicy, NotifySeverity, ProviderEstablisher,
-    ProviderHub, ProviderNotifier, QueryFingerprint, TracingNotifier,
+    EngineStart, EstablishFuture, HubPolicy, NotifySeverity, ProviderEstablisher, ProviderHub,
+    ProviderNotifier, QueryFingerprint, TracingNotifier,
 };
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
@@ -642,9 +642,16 @@ struct MockInner {
     /// When set, `update_file` BLOCKS on the gate before recording — an engine
     /// holding a state update beyond its submitter's deadline.
     update_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    update_started: Notify,
     /// When set, every `update_file` FAILS without recording — an engine
     /// rejecting a state update it was forwarded (the divergence shape).
     update_fails: std::sync::atomic::AtomicBool,
+    close_fails: std::sync::atomic::AtomicBool,
+    /// When set, `close_file` BLOCKS on the gate (after signalling
+    /// `close_started`) before failing or recording.
+    close_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    close_started: Notify,
+    cache_only_loads: std::sync::atomic::AtomicBool,
     shutdowns: AtomicUsize,
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
@@ -672,7 +679,12 @@ impl MockProvider {
                 hover_gate: parking_lot::Mutex::new(None),
                 configure_gate: parking_lot::Mutex::new(None),
                 update_gate: parking_lot::Mutex::new(None),
+                update_started: Notify::new(),
                 update_fails: std::sync::atomic::AtomicBool::new(false),
+                close_fails: std::sync::atomic::AtomicBool::new(false),
+                close_gate: parking_lot::Mutex::new(None),
+                close_started: Notify::new(),
+                cache_only_loads: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
@@ -698,6 +710,12 @@ impl MockProvider {
     fn set_failing_updates(&self) {
         self.inner
             .update_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn set_failing_closes(&self) {
+        self.inner
+            .close_fails
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -729,6 +747,35 @@ fn record_call(inner: &Arc<MockInner>, call: MockCall) {
 }
 
 impl TypeProvider for MockProvider {
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        use crate::traits::AppliedContent;
+        for call in self.calls().iter().rev() {
+            match call {
+                MockCall::OpenFile { path: p, content }
+                | MockCall::UpdateFile { path: p, content }
+                    if p == path =>
+                {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::LoadFile { path: p, content }
+                    if p == path && !self.inner.cache_only_loads.load(Ordering::SeqCst) =>
+                {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::RegisterCarrierMember {
+                    companion_path,
+                    content,
+                    ..
+                } if companion_path == path => {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::CloseFile { path: p } if p == path => return AppliedContent::NotApplied,
+                _ => {}
+            }
+        }
+        AppliedContent::NotApplied
+    }
+
     fn provider_id(&self) -> &'static str {
         self.inner.id
     }
@@ -761,6 +808,7 @@ impl TypeProvider for MockProvider {
         let content = content.to_string();
         Box::pin(async move {
             if let Some(gate) = gate {
+                inner.update_started.notify_one();
                 let _permit = gate.acquire().await;
             }
             if fails {
@@ -772,10 +820,20 @@ impl TypeProvider for MockProvider {
     }
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
-        self.record(MockCall::CloseFile {
-            path: path.to_string(),
-        });
-        Box::pin(async { Ok(()) })
+        let inner = Arc::clone(&self.inner);
+        let gate = inner.close_gate.lock().clone();
+        let path = path.to_string();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                inner.close_started.notify_one();
+                let _permit = gate.acquire().await;
+            }
+            if inner.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(TypeProviderError::new("mock close failure"));
+            }
+            record_call(&inner, MockCall::CloseFile { path });
+            Ok(())
+        })
     }
 
     fn register_carrier_member(
@@ -3312,12 +3370,7 @@ async fn receipts_name_the_epoch_that_applied_the_mutation() {
         .submit_mutation(open("const a = 1;"), Lane::Foreground)
         .await
         .unwrap();
-    assert_eq!(
-        first,
-        AppliedReceipt {
-            epoch: Some(ProviderEpoch(1))
-        }
-    );
+    assert_eq!(first.epoch, Some(ProviderEpoch(1)));
 
     harness.crash_notify.notify_one();
     await_down(provider).await;
@@ -3326,8 +3379,7 @@ async fn receipts_name_the_epoch_that_applied_the_mutation() {
         .await
         .unwrap();
     assert_eq!(
-        held,
-        AppliedReceipt { epoch: None },
+        held.epoch, None,
         "no engine applied a mutation issued while none serves"
     );
 
@@ -3337,12 +3389,7 @@ async fn receipts_name_the_epoch_that_applied_the_mutation() {
         .submit_mutation(open("const a = 3;"), Lane::Foreground)
         .await
         .unwrap();
-    assert_eq!(
-        second,
-        AppliedReceipt {
-            epoch: Some(ProviderEpoch(2))
-        }
-    );
+    assert_eq!(second.epoch, Some(ProviderEpoch(2)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3531,6 +3578,69 @@ async fn a_failed_forward_retires_the_epoch_and_replays_before_serving_again() {
          replay: {:?}",
         replacement.calls()
     );
+}
+
+/// A rejected close leaves the prior surface in desired state. Recovery replays
+/// that surface; a later successful close, then a reopen, is the only path that
+/// replaces it.
+#[tokio::test(start_paused = true)]
+async fn failed_close_keeps_the_prior_surface_until_reopen() {
+    use crate::traits::AppliedContent;
+
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+    provider.open_file("/p/A.ts", "const a = 1;").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 1;"
+    ));
+
+    initial.set_failing_closes();
+    let failure = provider
+        .close_file("/p/A.ts")
+        .await
+        .expect_err("the failed close reaches its submitter");
+    assert!(failure.message.contains("mock close failure"));
+    await_down(&provider).await;
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    provider
+        .get_hover("/p/A.ts", 3)
+        .await
+        .expect("the replacement serves the prior surface");
+    assert!(
+        replacement.calls().iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, content }
+                if path == "/p/A.ts" && content == "const a = 1;"
+        )),
+        "recovery replays the unclosed surface: {:?}",
+        replacement.calls()
+    );
+    assert!(
+        !replacement
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { .. })),
+        "a failed close must not be replayed as a retirement"
+    );
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 1;"
+    ));
+
+    provider.close_file("/p/A.ts").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::NotApplied
+    ));
+    provider.open_file("/p/A.ts", "const a = 2;").await.unwrap();
+    assert!(matches!(
+        provider.applied_content("/p/A.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 2;"
+    ));
 }
 
 /// The on-demand shape of the same reconciliation: no eager respawn. The
@@ -4206,6 +4316,29 @@ async fn forward_admitted_file_refusals_write_nothing() {
             == 1,
         "exactly one provider write for the admitted unit"
     );
+    assert!(
+        matches!(hub.applied_content(unit.as_str()), crate::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const v = 1;"),
+        "a direct admitted write must expose the engine's receipt through the hub"
+    );
+    engine.inner.cache_only_loads.store(true, Ordering::SeqCst);
+    assert_eq!(
+        hub.forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "cache-only replacement",
+            OverlayFileKind::Load,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::ShadowedMutation),
+        "a successful cache-only load cannot settle direct application"
+    );
+    assert!(
+        matches!(hub.applied_content(unit.as_str()), crate::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const v = 1;"),
+        "a cache-only replacement preserves the actual engine receipt"
+    );
 }
 
 /// A BASIS-ONLY drift observed after a successful direct write (a
@@ -4465,4 +4598,396 @@ async fn applied_overlay_survives_a_content_only_drift_without_restarting_the_en
         replacement.calls().is_empty(),
         "no replacement engine received work"
     );
+}
+
+async fn admitted_overlay_fixture() -> (ResilientHarness, MockProvider, super::AdmittedRequest) {
+    use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(
+        source.into(),
+        project.into(),
+        Vec::new(),
+        basis.clone(),
+        Arc::clone(&reader),
+    );
+    let witness = harness.provider.bind_project(input.clone()).unwrap();
+    assert!(witness.same_binding(&harness.provider.bind_project(input).unwrap()));
+    assert!(matches!(
+        harness
+            .provider
+            .admit_request(&witness, std::slice::from_ref(&unit), None),
+        Err(AdmissionRefusal::MissingGeneratedProof)
+    ));
+    assert!(matches!(
+        harness.provider.admit_request(&witness, &[], Some(&proof)),
+        Err(AdmissionRefusal::IncompleteGeneratedProof)
+    ));
+    assert!(engine.calls().is_empty());
+    let admitted = harness
+        .provider
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    (harness, engine, admitted)
+}
+
+#[tokio::test]
+async fn cancelled_queued_overlay_never_reaches_the_engine_or_replay() {
+    use super::{OverlayFileKind, OverlayMutation, OverlayPriority};
+    use std::future::Future;
+    use std::task::Poll;
+    let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let leader = tokio::spawn(async move {
+        hub.update_file("d:/ws/held.ts", "held").await.unwrap();
+    });
+    engine.inner.update_started.notified().await;
+    let mut cancelled = Box::pin(harness.provider.apply_overlay(
+        &admitted,
+        OverlayMutation::File {
+            path: "d:/ws/src/Foo.vue.tsx".into(),
+            content: "cancelled".into(),
+            kind: OverlayFileKind::Open,
+            priority: OverlayPriority::Foreground,
+        },
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(cancelled.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    drop(cancelled);
+    gate.add_permits(1);
+    leader.await.unwrap();
+    harness
+        .provider
+        .configure_paths("d:/ws", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call_path(call) == "d:/ws/src/Foo.vue.tsx"),
+        "cancellation before application must perform zero member writes"
+    );
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert!(
+        harness.notifier.dropped().is_empty(),
+        "cancelled work must never enter applied state or replay reconciliation"
+    );
+}
+
+/// Whether a respawn was announced within `bound` (paused clock: the bound
+/// elapses as soon as every task is idle).
+async fn respawned_within(harness: &ResilientHarness, bound: std::time::Duration) -> bool {
+    tokio::time::timeout(bound, harness.notifier.await_started(2))
+        .await
+        .is_ok()
+}
+
+/// An issuer that stops waiting does not make its write's outcome unknown: the
+/// write was already handed to the engine, so it runs to its acknowledgement
+/// and settles exactly as if the issuer had stayed. Restarting the engine
+/// instead would throw away every project it holds because one caller (an
+/// editor request the client cancelled) went away while its write sat behind
+/// a slow acknowledgement.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_issuer_of_an_inflight_direct_overlay_lets_it_settle() {
+    use super::{OverlayFileKind, OverlayPriority};
+    let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let epoch = harness.provider.serving_epoch().unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let write = tokio::spawn(async move {
+        hub.forward_admitted_file(
+            &admitted,
+            "d:/ws/src/Foo.vue.tsx",
+            "unsaved",
+            OverlayFileKind::Update,
+            OverlayPriority::Foreground,
+        )
+        .await
+    });
+    engine.inner.update_started.notified().await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    harness.spawn_gate.add_permits(1);
+    assert!(
+        !respawned_within(&harness, std::time::Duration::from_secs(2)).await,
+        "an abandoned issuer must not restart a healthy engine"
+    );
+    assert_eq!(harness.provider.serving_epoch(), Some(epoch));
+    assert_eq!(engine.inner.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(
+        engine.calls().iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, content }
+                if path == "d:/ws/src/Foo.vue.tsx" && content == "unsaved"
+        )),
+        "the write the engine was given must run to its acknowledgement"
+    );
+}
+
+/// The actor-path counterpart: an admitted overlay whose submitter is dropped
+/// after the engine started applying it settles normally — recorded as applied
+/// (so a later replacement re-arms it) — and the serving engine stays.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_issuer_of_an_inflight_actor_overlay_lets_it_settle() {
+    use super::{OverlayFileKind, OverlayMutation, OverlayPriority};
+    let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let epoch = harness.provider.serving_epoch().unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let write = tokio::spawn(async move {
+        hub.apply_overlay(
+            &admitted,
+            OverlayMutation::File {
+                path: "d:/ws/src/Foo.vue.tsx".into(),
+                content: "unsaved".into(),
+                kind: OverlayFileKind::Update,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+    });
+    engine.inner.update_started.notified().await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    // An ordinary mutation queued behind the abandoned one proves the actor
+    // finished settling it before the assertions below run.
+    harness
+        .provider
+        .configure_paths("d:/ws", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        !respawned_within(&harness, std::time::Duration::from_secs(2)).await,
+        "an abandoned issuer must not restart a healthy engine"
+    );
+    assert_eq!(harness.provider.serving_epoch(), Some(epoch));
+    assert_eq!(engine.inner.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(
+        engine.calls().iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, content }
+                if path == "d:/ws/src/Foo.vue.tsx" && content == "unsaved"
+        )),
+        "the write the engine was given must run to its acknowledgement"
+    );
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_dropped(1).await;
+    assert!(
+        harness.notifier.dropped().iter().any(|dropped| dropped
+            .files
+            .iter()
+            .any(|file| file == "d:/ws/src/Foo.vue.tsx")),
+        "the settled write is applied state a replacement must re-arm"
+    );
+}
+
+/// A withdrawal owns its whole settlement, not just the physical close: an
+/// issuer that stops waiting while the engine closes the path must still
+/// leave no applied receipt behind once the close succeeds.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_issuer_of_an_inflight_withdrawal_still_drops_its_receipt() {
+    let (harness, engine, _admitted) = admitted_overlay_fixture().await;
+    let path = "d:/ws/src/Foo.vue.tsx";
+    let epoch = harness.provider.serving_epoch().unwrap();
+    super::applied_map(&harness.provider.state.shared).insert(path.into(), Arc::from("held"));
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.close_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let withdrawal = tokio::spawn(async move { hub.retract_overlay(epoch, path).await });
+    engine.inner.close_started.notified().await;
+    withdrawal.abort();
+    assert!(withdrawal.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    let released = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while super::applied_map(&harness.provider.state.shared).contains_key(path) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "a withdrawal the engine completed must drop its applied receipt"
+    );
+    assert_eq!(harness.provider.serving_epoch(), Some(epoch));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path: p } if p == path)));
+}
+
+/// The failure half of the same settlement: a close that fails after its
+/// issuer stopped waiting still arms recovery of the incarnation that may now
+/// hold a partial withdrawal.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_issuer_of_a_failing_withdrawal_still_arms_recovery() {
+    let (harness, engine, _admitted) = admitted_overlay_fixture().await;
+    let epoch = harness.provider.serving_epoch().unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.close_gate.lock() = Some(Arc::clone(&gate));
+    engine
+        .inner
+        .close_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let hub = Arc::clone(&harness.provider);
+    let withdrawal =
+        tokio::spawn(async move { hub.retract_overlay(epoch, "d:/ws/src/Foo.vue.tsx").await });
+    engine.inner.close_started.notified().await;
+    withdrawal.abort();
+    assert!(withdrawal.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    harness.spawn_gate.add_permits(1);
+    assert!(
+        respawned_within(&harness, std::time::Duration::from_secs(2)).await,
+        "a failed withdrawal must arm recovery even when nobody awaits it"
+    );
+}
+
+#[tokio::test]
+async fn synchronization_receipts_contain_only_successful_actual_members() {
+    use super::overlay::{GeneratedUnitWritePermit, OverlayPriority};
+    let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let path = "d:/ws/src/Foo.vue.tsx";
+    let hub = &harness.provider;
+    let epoch = hub.serving_epoch().unwrap();
+    hub.overlay_state().record_content_at_priority(
+        path,
+        &Arc::from("unsaved"),
+        OverlayPriority::Interactive,
+    );
+    let receipt = hub
+        .synchronize(
+            epoch,
+            1,
+            |_, _| true,
+            |_| Some(GeneratedUnitWritePermit::admitted(admitted.clone())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.epoch(), epoch);
+    assert_eq!(receipt.members().len(), 1);
+    assert_eq!(receipt.members()[0].path(), path);
+    assert_eq!(receipt.members()[0].content().as_ref(), "unsaved");
+    assert_eq!(receipt.members()[0].epoch(), epoch);
+    let first_calls = engine.calls();
+    assert_eq!(
+        first_calls
+            .iter()
+            .filter(|call| call_path(call) == path)
+            .count(),
+        1
+    );
+    let warm = hub
+        .synchronize(
+            epoch,
+            1,
+            |_, _| true,
+            |_| Some(GeneratedUnitWritePermit::admitted(admitted.clone())),
+        )
+        .await
+        .unwrap();
+    assert!(
+        warm.members().is_empty(),
+        "warm candidate membership is not successful member work"
+    );
+    assert_eq!(
+        engine.calls().len(),
+        first_calls.len(),
+        "warm synchronization performs no extra engine work"
+    );
+}
+
+#[tokio::test]
+async fn cache_only_loads_remain_held_during_forward_and_replay() {
+    use crate::traits::{AppliedContent, FileLoadDisposition};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let engine = MockProvider::new("tsgo");
+    engine.inner.cache_only_loads.store(true, Ordering::SeqCst);
+    let hub = on_demand_hub(ScriptedBackend::new(vec![engine], &attempts));
+    let priority = crate::provider_hub::OverlayPriority::Background;
+    assert_eq!(
+        hub.load_file_with_disposition("/w/replay.ts", "replay", priority)
+            .await
+            .unwrap(),
+        FileLoadDisposition::Held
+    );
+    hub.get_hover("/w/replay.ts", 0).await.unwrap();
+    assert!(matches!(
+        hub.applied_content("/w/replay.ts"),
+        AppliedContent::NotApplied
+    ));
+    assert_eq!(
+        hub.load_file_with_disposition("/w/live.ts", "live", priority)
+            .await
+            .unwrap(),
+        FileLoadDisposition::Held
+    );
+    assert!(matches!(
+        hub.applied_content("/w/live.ts"),
+        AppliedContent::NotApplied
+    ));
+    hub.open_file("/w/live.ts", "live").await.unwrap();
+    assert!(
+        matches!(hub.applied_content("/w/live.ts"), AppliedContent::Applied(bytes) if bytes.as_ref() == "live")
+    );
+    hub.shutdown().await.unwrap();
 }

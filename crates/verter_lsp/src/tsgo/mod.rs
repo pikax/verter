@@ -7,7 +7,6 @@
 
 pub mod composite;
 pub mod ipc;
-mod overlay_core;
 pub mod project_binding;
 pub mod resilient;
 pub mod shared;

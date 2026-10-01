@@ -72,6 +72,28 @@ pub(super) enum DesiredMutation {
 }
 
 impl DesiredMutation {
+    /// Open, load, or update bytes a successful forward commits.
+    pub(super) fn committed_file(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Open { path, content }
+            | Self::Load { path, content }
+            | Self::Update { path, content } => Some((path, content)),
+            Self::RegisterCarrier {
+                companion_path,
+                content,
+                ..
+            } => Some((companion_path, content)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn closed_path(&self) -> Option<&str> {
+        match self {
+            Self::Close { path } => Some(path),
+            _ => None,
+        }
+    }
+
     /// The paths whose crash attribution a successful application invalidates:
     /// the same position against NEW content is a new request.
     pub(super) fn touched_paths(&self) -> Vec<String> {
@@ -482,6 +504,26 @@ impl DesiredState {
                 })?;
         }
         Ok(())
+    }
+
+    /// Files a completed replay left on the engine: admitted overlays were
+    /// discarded and are not serving content.
+    pub(super) fn serving_file_contents(&self) -> Vec<(String, std::sync::Arc<str>)> {
+        self.files
+            .iter()
+            .map(|(path, file)| {
+                (
+                    path.clone(),
+                    std::sync::Arc::<str>::from(file.content.as_str()),
+                )
+            })
+            .chain(self.carriers.iter().map(|(path, carrier)| {
+                (
+                    path.clone(),
+                    std::sync::Arc::<str>::from(carrier.content.as_str()),
+                )
+            }))
+            .collect()
     }
 }
 

@@ -117,6 +117,7 @@ pub enum AdmissionRefusal {
     /// A higher-authority live overlay suppressed this mutation before forwarding.
     ShadowedMutation,
     DeadlineElapsed,
+    Cancelled,
 }
 
 struct WitnessInner {
@@ -579,6 +580,9 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
+        if receipt.disposition != crate::traits::FileLoadDisposition::Forwarded {
+            return Err(AdmissionRefusal::ShadowedMutation);
+        }
         if receipt.epoch == Some(admission.witness.0.epoch) {
             Ok(())
         } else {
@@ -636,6 +640,9 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
+        if receipt.disposition != crate::traits::FileLoadDisposition::Forwarded {
+            return Err(AdmissionRefusal::ShadowedMutation);
+        }
         if receipt.epoch == Some(epoch) {
             Ok(())
         } else {
@@ -680,6 +687,36 @@ where
         if serving.epoch != admission.witness.0.epoch {
             return Err(AdmissionRefusal::StaleProvider);
         }
+        // From here the write belongs to the engine, not to the issuer: it runs
+        // detached to its acknowledgement and settles even if the issuer stops
+        // waiting (see [`super::detach_application`]).
+        let hub = Self {
+            state: Arc::clone(&self.state),
+        };
+        let admission = admission.clone();
+        let path = path.to_string();
+        let content = content.to_string();
+        super::detach_application(async move {
+            hub.settle_admitted_file(serving, &admission, &path, &content, kind, priority)
+                .await
+        })
+        .await
+        .unwrap_or(Err(AdmissionRefusal::ProviderWriteFailed))
+    }
+
+    /// The physical half of [`Self::forward_admitted_file`]: one write to the
+    /// serving engine and its settlement against the live basis.
+    async fn settle_admitted_file(
+        &self,
+        serving: Serving<P>,
+        admission: &AdmittedRequest,
+        path: &str,
+        content: &str,
+        kind: OverlayFileKind,
+        priority: OverlayPriority,
+    ) -> Result<(), AdmissionRefusal> {
+        let mut application =
+            super::DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
         let forwarded = match kind {
             OverlayFileKind::Open => match priority {
                 OverlayPriority::Foreground => serving.provider.open_file(path, content).await,
@@ -703,19 +740,27 @@ where
                 }
             },
         };
-        match forwarded {
+        let result = match forwarded {
             Ok(()) => match check_current(&self.state.shared, admission) {
                 Ok(()) => {
-                    // The written path's content changed: lift its crash
-                    // attribution, exactly as a queued mutation would.
-                    let mut watch = self
-                        .state
-                        .shared
-                        .query_watch
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    watch.clear_path(path);
-                    Ok(())
+                    let disposition = super::note_file_receipt(
+                        &self.state.shared,
+                        serving.provider.as_ref(),
+                        path,
+                        content,
+                    );
+                    if disposition != crate::traits::FileLoadDisposition::Forwarded {
+                        Err(AdmissionRefusal::ShadowedMutation)
+                    } else {
+                        // A confirmed write lifts crash attribution for this path.
+                        self.state
+                            .shared
+                            .query_watch
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clear_path(path);
+                        Ok(())
+                    }
                 }
                 Err(AdmissionRefusal::StaleBasis) => {
                     // A BASIS-ONLY drift (a content-generation bump while the
@@ -743,7 +788,9 @@ where
                     .await;
                 Err(AdmissionRefusal::ProviderWriteFailed)
             }
-        }
+        };
+        application.0 = None;
+        result
     }
 
     /// The post-failure disposition of a direct admitted write: an on-demand

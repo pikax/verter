@@ -142,7 +142,142 @@ pub type ProviderFuture<'a, T> =
 /// the caller (LSP layer or resolver layer) before/after calling the provider.
 ///
 /// Uses boxed futures instead of `async fn` to allow `dyn TypeProvider` usage.
+/// Whether a discovery load was forwarded, held as desired state, or
+/// suppressed by a higher-authority editor overlay. This is a disposition,
+/// not an application or readiness certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLoadDisposition {
+    Forwarded,
+    Held,
+    Shadowed,
+}
+
+/// What a provider can prove about the bytes a serving incarnation accepted.
+///
+/// Production hubs return [`Applied`](Self::Applied) or [`NotApplied`](Self::NotApplied).
+/// [`Uncertified`](Self::Uncertified) is only the default for engines that do not
+/// own application; a caller must not treat it as a hub receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedContent {
+    Uncertified,
+    NotApplied,
+    Applied(Arc<str>),
+}
+
+/// Classify one completed write against what the provider can prove it accepted.
+///
+/// [`AppliedContent::Uncertified`] is not a forward: a caller must not record it
+/// as an application receipt.
+#[must_use]
+pub fn disposition_for_applied_bytes(
+    applied: &AppliedContent,
+    content: &str,
+) -> FileLoadDisposition {
+    match applied {
+        AppliedContent::Applied(bytes) if bytes.as_ref() == content => {
+            FileLoadDisposition::Forwarded
+        }
+        AppliedContent::Applied(_) => FileLoadDisposition::Shadowed,
+        AppliedContent::NotApplied | AppliedContent::Uncertified => FileLoadDisposition::Held,
+    }
+}
+
 pub trait TypeProvider: Send + Sync {
+    /// Preserve the load's disposition across router/wrapper boundaries.
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.load_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.load_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.load_file_background(path, content).await?
+                }
+            }
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    /// Same contract as [`Self::load_file_with_disposition`] for an editor open.
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.open_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.open_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.open_file_background(path, content).await?
+                }
+            }
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    /// Same contract as [`Self::load_file_with_disposition`] for a content update.
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: crate::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, FileLoadDisposition> {
+        Box::pin(async move {
+            match priority {
+                crate::provider_hub::OverlayPriority::Foreground => {
+                    self.update_file(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Normal => {
+                    self.update_file_normal(path, content).await?
+                }
+                crate::provider_hub::OverlayPriority::Background => {
+                    self.update_file_background(path, content).await?
+                }
+            }
+            Ok(disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    /// Exact bytes the serving incarnation accepted for `path`.
+    ///
+    /// The default does not certify application. Hubs, and wrappers that route
+    /// through a hub, override it. A local delivery ledger may describe a
+    /// prepared mapper, but it is not an application receipt while this returns
+    /// [`AppliedContent::NotApplied`].
+    fn applied_content(&self, _path: &str) -> AppliedContent {
+        AppliedContent::Uncertified
+    }
+
+    /// Drive previously recorded demand outside the foreground publication budget.
+    /// Implementations may materialize a lazy route, but callers still require
+    /// matching `applied_content` before committing a delivered surface.
+    fn synchronize_pending_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Stable identity of this provider implementation.
     ///
     /// Returns one of `"tsgo"`, `"tsserver"`, `"extension"`. The LSP layer

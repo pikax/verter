@@ -325,6 +325,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
 ) {
     if project_sync.is_none() && carrier_publish_coordinator.is_none() {
         pending_snapshot_provider_sync.clear();
+        carrier_coordinator.note_pending_sync_progress();
         return;
     }
     // Capture the published filesystem workspace once (the carrier-publish
@@ -432,6 +433,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             documents.refresh_owed_diagnostics(&canonical_id);
         }
     }
+    carrier_coordinator.note_pending_sync_progress();
 }
 
 /// Re-resolve aliased imports for all currently open `.vue` files and sync any
@@ -1140,7 +1142,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
             // this compile, so the just-run provider sync can only make the
             // record fail closed, never falsely pair `ide.code` with a source
             // it wasn't compiled from.
-            if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code) {
+            if let Some(delivered) = sync.receipt_for_commit(&ide_path, &ide.code) {
                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                     provider_surfaces,
                     Some(documents),
@@ -1151,8 +1153,10 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
                     ide.source_map.as_deref(),
                     open_pin,
                 );
+                true
+            } else {
+                false
             }
-            true
         }
         Err(error) => {
             tracing::warn!(
@@ -1399,18 +1403,23 @@ async fn apply_owner_resolved_carrier_sync(
                 } else {
                     sync.open_tsx(&ide_path, &ide.code).await
                 };
+                let result = match result {
+                    Ok(()) if sync.receipt_for_commit(&ide_path, &ide.code).is_none() => {
+                        sync.synchronize_pending_tsx(&ide_path, &ide.code).await
+                    }
+                    result => result,
+                };
                 match result {
                     Ok(()) => {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                        synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface), through
                         // the shared fenced choke point: `open_pin` was captured by
                         // the caller BEFORE this compile, so this just-run provider
                         // sync can only make the record fail closed, never falsely
                         // pair `ide.code` with a source it wasn't compiled from.
-                        if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code)
-                        {
+                        if let Some(delivered) = sync.receipt_for_commit(&ide_path, &ide.code) {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced.push(ProviderPathKind::Ide);
                             crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                 documents.provider_surfaces(),
                                 Some(documents),

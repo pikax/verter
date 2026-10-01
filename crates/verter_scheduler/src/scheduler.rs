@@ -7774,10 +7774,10 @@ mod tests {
         let (joiner_context, _joiner_token) = scoped_test_context(11);
         let leader_request = scoped_test_request(leader_context);
         let joiner_request = scoped_test_request(joiner_context);
+        let identity = leader_request.identity();
         let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
         let (leader_entered_tx, leader_entered_rx) = std::sync::mpsc::channel();
-        let (joiner_entered_tx, joiner_entered_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let coordinator = rayon::ThreadPoolBuilder::new()
@@ -7788,22 +7788,29 @@ mod tests {
         let scheduler_for_thread = Arc::clone(&scheduler);
         let scheduler_for_joiner = Arc::clone(&scheduler);
         let builds_for_thread = Arc::clone(&builds);
-        std::thread::spawn(move || {
+        let scheduler_for_publication = Arc::clone(&scheduler);
+        let coordinator_thread = std::thread::spawn(move || {
             let outcomes = coordinator.install(|| {
                 rayon::join(
                     || {
                         scheduler_for_thread.execute_scoped_cache_node(leader_request, move |_| {
                             builds_for_thread.fetch_add(1, Ordering::SeqCst);
-                            // The producer body only runs once its owner CLAIMED the
-                            // flight's builder slot, so announcing here (before the
-                            // joiner even submits) closes the claim-order race: a
-                            // pool-helper running the joiner branch early can no
-                            // longer win `try_claim_builder` ahead of the leader and
-                            // execute what the test requires to stay unexecuted.
+                            // Claim the builder before the coordinator re-enters
+                            // the joiner, then hold publication until it attaches.
                             leader_entered_tx.send(()).unwrap();
-                            joiner_entered_rx
-                                .recv_timeout(std::time::Duration::from_secs(5))
-                                .expect("the coordinator must re-enter the queued joiner");
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            while scheduler_for_publication.test_scoped_cache_owner_count(&identity)
+                                != 2
+                                && std::time::Instant::now() < deadline
+                            {
+                                std::thread::yield_now();
+                            }
+                            assert_eq!(
+                                scheduler_for_publication.test_scoped_cache_owner_count(&identity),
+                                2,
+                                "the re-entrant joiner must attach before publication"
+                            );
                             41_u64
                         })
                     },
@@ -7811,7 +7818,6 @@ mod tests {
                         leader_entered_rx
                             .recv_timeout(std::time::Duration::from_secs(5))
                             .expect("the leader must claim the builder before the joiner submits");
-                        joiner_entered_tx.send(()).unwrap();
                         scheduler_for_joiner.execute_scoped_cache_node(joiner_request, |_| -> u64 {
                             panic!("deduplicated joiner must not execute its closure")
                         })
@@ -7821,11 +7827,21 @@ mod tests {
             let _ = done_tx.send(outcomes);
         });
 
-        let (leader, joiner) = done_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("worker-side publication must release the re-entrant joiner");
-        assert_eq!(*leader.expect("leader result"), 41);
-        assert_eq!(*joiner.expect("joiner result"), 41);
+        let outcomes = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        if outcomes.is_err() {
+            scheduler.reset();
+        }
+        coordinator_thread.join().expect("coordinator must finish");
+        let (leader, joiner) =
+            outcomes.expect("worker-side publication must release the re-entrant joiner");
+        let leader = leader.expect("leader result");
+        let joiner = joiner.expect("joiner result");
+        assert_eq!(*leader, 41);
+        assert_eq!(*joiner, 41);
+        assert!(
+            Arc::ptr_eq(&leader, &joiner),
+            "owners share one publication"
+        );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert_eq!(
             scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
