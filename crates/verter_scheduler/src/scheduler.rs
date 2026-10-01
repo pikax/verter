@@ -7777,7 +7777,6 @@ mod tests {
         let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
         let (leader_entered_tx, leader_entered_rx) = std::sync::mpsc::channel();
-        let (joiner_entered_tx, joiner_entered_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let coordinator = rayon::ThreadPoolBuilder::new()
@@ -7787,6 +7786,7 @@ mod tests {
             .expect("coordinator pool must build");
         let scheduler_for_thread = Arc::clone(&scheduler);
         let scheduler_for_joiner = Arc::clone(&scheduler);
+        let scheduler_for_producer = Arc::clone(&scheduler);
         let builds_for_thread = Arc::clone(&builds);
         std::thread::spawn(move || {
             let outcomes = coordinator.install(|| {
@@ -7801,9 +7801,27 @@ mod tests {
                             // longer win `try_claim_builder` ahead of the leader and
                             // execute what the test requires to stay unexecuted.
                             leader_entered_tx.send(()).unwrap();
-                            joiner_entered_rx
-                                .recv_timeout(std::time::Duration::from_secs(5))
-                                .expect("the coordinator must re-enter the queued joiner");
+                            // Hold the build open until the joiner is an OWNER of
+                            // this flight. A signal the joiner sends before it
+                            // submits is not enough: the producer could return,
+                            // terminalize the flight, and leave the joiner to open
+                            // a fresh flight and run its own closure. The joiner's
+                            // submission is counted only after it joined.
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            while scheduler_for_producer
+                                .counters
+                                .submit_count
+                                .load(Ordering::Relaxed)
+                                - submissions_before
+                                < 2
+                            {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "the coordinator must re-enter the queued joiner"
+                                );
+                                std::thread::yield_now();
+                            }
                             41_u64
                         })
                     },
@@ -7811,7 +7829,6 @@ mod tests {
                         leader_entered_rx
                             .recv_timeout(std::time::Duration::from_secs(5))
                             .expect("the leader must claim the builder before the joiner submits");
-                        joiner_entered_tx.send(()).unwrap();
                         scheduler_for_joiner.execute_scoped_cache_node(joiner_request, |_| -> u64 {
                             panic!("deduplicated joiner must not execute its closure")
                         })
