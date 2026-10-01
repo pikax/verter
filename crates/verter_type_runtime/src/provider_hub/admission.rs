@@ -482,6 +482,36 @@ pub(super) fn generated_request<P: ?Sized>(
     Ok(Some(request))
 }
 
+/// Rebind a replayed unit after a content-only edit without repeating its
+/// provider write. A changed membership basis still invalidates the install.
+pub(super) fn refresh_replay_request<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    path: &str,
+    request: &mut AdmittedRequest,
+) -> Result<(), AdmissionRefusal> {
+    match check_witness_for_serving(shared, serving, &request.witness) {
+        Ok(()) => return Ok(()),
+        Err(AdmissionRefusal::StaleBasis) if membership_inputs_current(request) => {}
+        Err(reason) => return Err(reason),
+    }
+    let refreshed = generated_request(
+        shared,
+        Some(serving),
+        path,
+        Some(request.witness.source()),
+        Some(request.witness.project()),
+    )?
+    .ok_or(AdmissionRefusal::MissingGeneratedProof)?;
+    // The resolver observes the workspace independently of the actor. Do not
+    // let a publication change during re-admission certify earlier writes.
+    if !membership_inputs_current(request) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    *request = refreshed;
+    check_witness_for_serving(shared, serving, &request.witness)
+}
+
 pub(super) fn generated_mutation_requests<P: ?Sized>(
     shared: &Shared<P>,
     serving: Option<&Serving<P>>,

@@ -471,10 +471,10 @@ impl DesiredState {
             replayed.await.map_err(|error| {
                 TypeProviderError::new(format!("replay of {path} failed: {error}"))
             })?;
-            if let Some(admission) = admission {
-                super::admission::check_witness_for_serving(shared, serving, &admission.witness)
+            if let Some(mut admission) = admission {
+                super::admission::refresh_replay_request(shared, serving, path, &mut admission)
                     .map_err(TypeProviderError::admission)?;
-                admissions.push(admission);
+                admissions.push((path.as_str(), admission));
             }
         }
 
@@ -530,10 +530,15 @@ impl DesiredState {
                     "carrier replay of {companion_path} failed: {error}"
                 ))
             })?;
-            for request in requests {
-                super::admission::check_witness_for_serving(shared, serving, &request.witness)
-                    .map_err(TypeProviderError::admission)?;
-                admissions.push(request);
+            for mut request in requests {
+                super::admission::refresh_replay_request(
+                    shared,
+                    serving,
+                    companion_path,
+                    &mut request,
+                )
+                .map_err(TypeProviderError::admission)?;
+                admissions.push((companion_path.as_str(), request));
             }
             if let Some(script_kind) = carrier.script_kind {
                 activations.push(CarrierActivation {
@@ -545,10 +550,7 @@ impl DesiredState {
             }
         }
         if !activations.is_empty() {
-            for request in &admissions {
-                super::admission::check_witness_for_serving(shared, serving, &request.witness)
-                    .map_err(TypeProviderError::admission)?;
-            }
+            check_replay_admissions(shared, serving, &mut admissions)?;
             provider
                 .activate_carrier_members(&activations)
                 .await
@@ -556,10 +558,7 @@ impl DesiredState {
                     TypeProviderError::new(format!("carrier activation replay failed: {error}"))
                 })?;
         }
-        for request in &admissions {
-            super::admission::check_witness_for_serving(shared, serving, &request.witness)
-                .map_err(TypeProviderError::admission)?;
-        }
+        check_replay_admissions(shared, serving, &mut admissions)?;
         Ok(refused_paths)
     }
 
@@ -582,6 +581,24 @@ impl DesiredState {
             }))
             .collect()
     }
+}
+
+fn check_replay_admissions<P: ?Sized>(
+    shared: &super::Shared<P>,
+    serving: &super::Serving<P>,
+    admissions: &mut [(&str, AdmittedRequest)],
+) -> Result<(), TypeProviderError> {
+    for (path, request) in admissions.iter_mut() {
+        super::admission::refresh_replay_request(shared, serving, path, request)
+            .map_err(TypeProviderError::admission)?;
+    }
+    // Refreshing a later unit may observe another edit. Every retained proof
+    // must still be current after the bounded pass; stale work cannot install.
+    for (_, request) in admissions {
+        super::admission::check_witness_for_serving(shared, serving, &request.witness)
+            .map_err(TypeProviderError::admission)?;
+    }
+    Ok(())
 }
 
 fn folder_uri(folder: &serde_json::Value) -> Option<&str> {

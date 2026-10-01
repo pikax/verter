@@ -749,14 +749,18 @@ where
     ///
     /// The mutation's effect on the crash quarantine (a content change lifts
     /// the touched paths' attribution) is applied by the actor when it records
-    /// the mutation, so it holds even when the submitter's deadline elapses
-    /// before the settlement — the mutation stays queued and applies in order.
+    /// the mutation. Managed non-close mutations whose submitter expires before
+    /// application are refused; closes and unmanaged mutations stay queued.
+    /// Once recorded, a mutation retains its ordered desired state even when
+    /// the submitter stops waiting for settlement.
     async fn submit_mutation(
         &self,
         mutation: DesiredMutation,
         lane: Lane,
     ) -> Result<AppliedReceipt, TypeProviderError> {
         let deadline = crate::deadline::current();
+        let requires_admission = self.state.shared.generated_unit_resolver.get().is_some()
+            && mutation.closed_path().is_none();
         let (ack, ack_rx) = oneshot::channel();
         self.state
             .commands
@@ -769,11 +773,15 @@ where
             .map_err(|_| self.restarting())?;
         let settled = match deadline {
             Some(at) => tokio::time::timeout_at(at, ack_rx).await.map_err(|_| {
-                TypeProviderError::new(format!(
-                    "{}: request deadline elapsed before the state update settled; \
-                     it stays queued and applies in order",
-                    self.state.establisher.log_name()
-                ))
+                if requires_admission {
+                    TypeProviderError::admission(AdmissionRefusal::DeadlineElapsed)
+                } else {
+                    TypeProviderError::new(format!(
+                        "{}: request deadline elapsed before the state update settled; \
+                         it stays queued and applies in order",
+                        self.state.establisher.log_name()
+                    ))
+                }
             })?,
             None => ack_rx.await,
         };
