@@ -609,33 +609,32 @@ where
         if serving.epoch != epoch {
             return Err(self.restarting());
         }
-        let result = {
-            let serving = serving.clone();
-            let path = path.to_string();
-            detach_application(async move {
-                let mut application =
-                    DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
-                let result = serving.provider.close_file(&path).await;
-                application.0 = None;
-                result
-            })
-            .await
-            .unwrap_or_else(|_| {
-                Err(TypeProviderError::new(
-                    "overlay withdrawal did not complete",
-                ))
-            })
-        };
-        if result.is_err() {
-            serving.crash_signal.notify_one();
+        // The detached task owns the whole settlement — the failure
+        // disposition and the receipt release as well as the physical close —
+        // so an issuer that stops waiting changes only who reads the result.
+        let shared = Arc::clone(&self.state.shared);
+        let path = path.to_string();
+        let settled = detach_application(async move {
+            let mut application = DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
+            let result = serving.provider.close_file(&path).await;
+            application.0 = None;
+            if result.is_err() {
+                serving.crash_signal.notify_one();
+            }
+            let current = shared.serving_epoch() == Some(epoch);
+            if current && result.is_ok() {
+                applied_map(&shared).remove(&path);
+            }
+            (result, current)
+        })
+        .await;
+        match settled {
+            Ok((result, true)) => result,
+            Ok((_, false)) => Err(self.restarting()),
+            Err(_) => Err(TypeProviderError::new(
+                "overlay withdrawal did not complete",
+            )),
         }
-        if self.serving_epoch() != Some(epoch) {
-            return Err(self.restarting());
-        }
-        if result.is_ok() {
-            applied_map(&self.state.shared).remove(path);
-        }
-        result
     }
 
     /// The serving epoch, or `None` while no engine serves.
