@@ -11,6 +11,12 @@
  * release.yml publishes from, so this cannot drift from what actually ships:
  *   - Cargo.toml              [workspace.package] version (every crate inherits it)
  *   - Cargo.lock              workspace-member entries (packages with no `source =`)
+ *   - every other committed   the entries for root workspace members that a
+ *     Cargo.lock              detached crate (extensions/lapce, extensions/zed)
+ *                             consumes through a path dependency — those
+ *                             members inherit the workspace version, so a
+ *                             bump that skipped them leaves the lock stale and
+ *                             `cargo build --locked` refuses to run
  *   - packages/*              every package in the npm publish set
  *   - packages/<pkg>/npm/*    every platform sub-package in the publish set
  *
@@ -19,6 +25,7 @@
  * any target does not hold exactly <version>.
  */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
@@ -84,6 +91,18 @@ function writePkgVersion(path, next) {
 const CARGO_TOML = join(ROOT, "Cargo.toml");
 const CARGO_LOCK = join(ROOT, "Cargo.lock");
 
+/**
+ * Every committed Cargo.lock besides the root one, discovered from the index so
+ * a new detached crate is covered the day its lock file is committed.
+ */
+const DETACHED_LOCKS = execFileSync("git", ["ls-files", "-z", "--", "*Cargo.lock"], {
+  cwd: ROOT,
+  encoding: "utf8",
+})
+  .split("\0")
+  .filter((path) => path && path !== "Cargo.lock")
+  .map((path) => join(ROOT, path));
+
 /** Locate the `version = "..."` line inside [workspace.package]. */
 function workspaceVersionLine(lines) {
   const start = lines.findIndex((l) => l.trim() === "[workspace.package]");
@@ -130,10 +149,15 @@ function readLockVersions(text) {
   return out;
 }
 
-function writeLockVersions(text, oldVersion, next) {
+/**
+ * `only` limits the rewrite to the named packages: a detached lock's own crate
+ * carries its own version and must not move with the workspace.
+ */
+function writeLockVersions(text, oldVersion, next, only = null) {
   const { header, packages } = lockBlocks(text);
   const rewritten = packages.map((block) => {
     if (block.includes("source =")) return block;
+    if (only && !only.has(block.match(/name = "([^"]+)"/)[1])) return block;
     return block.replace(/version = "([^"]+)"/, (whole, v) =>
       v === oldVersion ? `version = "${next}"` : whole,
     );
@@ -145,6 +169,10 @@ function writeLockVersions(text, oldVersion, next) {
 // Run
 // ---------------------------------------------------------------------------
 
+// The root lock's member names are the packages that carry the workspace
+// version; the rewrite leaves names alone, so reading them once is enough.
+const workspaceMembers = new Set(readLockVersions(readFileSync(CARGO_LOCK, "utf8")).keys());
+
 if (!checkMode) {
   const oldVersion = readWorkspaceVersion();
   for (const target of pkgTargets) writePkgVersion(target.path, version);
@@ -153,6 +181,12 @@ if (!checkMode) {
     CARGO_LOCK,
     writeLockVersions(readFileSync(CARGO_LOCK, "utf8"), oldVersion, version),
   );
+  for (const lock of DETACHED_LOCKS) {
+    writeFileSync(
+      lock,
+      writeLockVersions(readFileSync(lock, "utf8"), oldVersion, version, workspaceMembers),
+    );
+  }
   console.log(`set-version: wrote ${version} (${oldVersion} -> ${version})`);
 }
 
@@ -170,6 +204,15 @@ if (workspaceVersion !== version) {
 for (const [name, v] of readLockVersions(readFileSync(CARGO_LOCK, "utf8"))) {
   if (v !== version) offenders.push(`  Cargo.lock ${name}: ${v} (expected ${version})`);
 }
+let detachedEntries = 0;
+for (const lock of DETACHED_LOCKS) {
+  const label = relative(ROOT, lock).replaceAll("\\", "/");
+  for (const [name, v] of readLockVersions(readFileSync(lock, "utf8"))) {
+    if (!workspaceMembers.has(name)) continue;
+    detachedEntries += 1;
+    if (v !== version) offenders.push(`  ${label} ${name}: ${v} (expected ${version})`);
+  }
+}
 
 if (offenders.length > 0) {
   console.error(
@@ -179,7 +222,7 @@ if (offenders.length > 0) {
   process.exit(1);
 }
 
-const total = pkgTargets.length + 2;
+const total = pkgTargets.length + 2 + detachedEntries;
 console.log(
   `set-version: ${checkMode ? "check passed" : "verified"} — all ${total} targets at ${version}`,
 );
