@@ -194,7 +194,7 @@ test("release.yml leaves BF2 to CI and publishes only after proving that CI pass
   assert.doesNotMatch(workflow, /node scripts\/bf2-authoritative\.mjs/);
   assert.doesNotMatch(workflow, /^ {2}bf2-authoritative:$/m);
   assert.match(yamlJob(workflow, "validate"), /node scripts\/release-proof\.mjs/);
-  for (const publishJob of ["publish-crates", "publish-npm", "github-release"]) {
+  for (const publishJob of ["publish-npm", "github-release"]) {
     assert.match(yamlJob(workflow, publishJob), /needs:\s*validate\b/);
   }
 });

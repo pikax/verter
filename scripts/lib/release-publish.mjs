@@ -11,7 +11,7 @@
  * synthetic fixtures:
  *
  *   - which CI artifact feeds which platform package, and what is missing;
- *   - how an npm / cargo publish attempt is classified (published, already
+ *   - how an npm publish attempt is classified (published, already
  *     on the registry, one-time password needed, provenance-log conflict,
  *     failed);
  *   - the executable bit on shipped binaries, which a tarball packed on a
@@ -255,18 +255,6 @@ export function classifyNpmPublishOutcome(exitCode, output) {
     return "already-published";
   }
   if (/TLOG_CREATE_ENTRY_ERROR/.test(text)) return "tlog-conflict";
-  return "failed";
-}
-
-/**
- * Classify one `cargo publish` attempt. crates.io reports an existing version
- * as "already uploaded"; older toolchains said "already exists".
- *
- * @returns {"published"|"already-published"|"failed"}
- */
-export function classifyCargoPublishOutcome(exitCode, output) {
-  if (exitCode === 0) return "published";
-  if (/already (?:exists|uploaded)/i.test(String(output ?? ""))) return "already-published";
   return "failed";
 }
 

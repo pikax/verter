@@ -36,16 +36,13 @@
  *       Confirm every package in the publish set exists on the registry at
  *       the workspace version.
  *
- *   node scripts/release-publish.mjs publish-crates [--dry-run]
- *       `cargo publish` the crates.io crates in dependency order.
- *
  *   node scripts/release-publish.mjs local [--run <id>] [--tag v<version>]
- *       [--dir <path>] [--skip-crates] [--dry-run] [--redownload]
+ *       [--dir <path>] [--dry-run] [--redownload]
  *       [--allow-head-mismatch] [--otp <code>]
  *       The whole local release: preflight, prove the tag (scripts/release-proof.mjs:
  *       its release pull request's CI run, or the proven run named by --run),
  *       download that run's artifacts with `gh`, then stage → prepare → publish-npm (interactive
- *       OTP) → verify-npm → publish-crates.
+ *       OTP) → verify-npm.
  *
  * Artifacts directory layout (what `gh run download` and
  * `actions/download-artifact` both produce): `<dir>/<artifact-name>/<files>`.
@@ -65,12 +62,11 @@ import {
 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
+import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
 import { releaseProof } from "./release-proof.mjs";
 import {
   BINARY_FAMILIES,
   invokedAsEntrypoint,
-  classifyCargoPublishOutcome,
   distTagForVersion,
   markTarballEntriesExecutable,
   npmPublishArgs,
@@ -83,9 +79,13 @@ import {
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const DEFAULT_RELEASE_DIR = ".release";
-const CRATES_INDEX_PROPAGATION_MS = 30_000;
-const VERIFY_RETRY_MS = 15_000;
-const DEFAULT_VERIFY_ATTEMPTS = 8;
+// A package that already has versions on the registry is served from a cached
+// packument, and the CDN can keep serving the copy without the new version for
+// several minutes after the publish succeeded: v0.0.1-beta.6 still saw five of
+// its packages missing six minutes after they were published. The window must
+// cover that delay, so verification polls for about fifteen minutes.
+const VERIFY_RETRY_MS = 30_000;
+const DEFAULT_VERIFY_ATTEMPTS = 30;
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -542,7 +542,15 @@ async function verifyNpm(flags) {
     }
     const still = [];
     for (const name of missing) {
-      const result = capture("npm", ["view", `${name}@${version}`, "version", "--json"]);
+      const result = capture("npm", [
+        "view",
+        `${name}@${version}`,
+        "version",
+        "--json",
+        // Revalidate instead of answering from npm's local cache, which would
+        // repeat the first miss on every attempt.
+        "--prefer-online",
+      ]);
       let found = null;
       try {
         found = result.exitCode === 0 ? JSON.parse(result.stdout) : null;
@@ -563,40 +571,6 @@ async function verifyNpm(flags) {
     fail(`${missing.length} package(s) not found on the registry`);
   }
   log("All packages verified on the registry");
-}
-
-// ---------------------------------------------------------------------------
-// publish-crates
-// ---------------------------------------------------------------------------
-
-async function publishCrates(flags) {
-  const version = workspaceVersion();
-  const dryRun = flags.get("dry-run") === true;
-  heading(`Publish crates @ ${version}${dryRun ? " (DRY RUN)" : ""}`);
-
-  for (let i = 0; i < PUBLISHED_CRATES.length; i++) {
-    const crate = PUBLISHED_CRATES[i];
-    log("");
-    log(`--- ${crate} ---`);
-    // `--allow-dirty`: the staged release binaries sit in the tree (all
-    // gitignored); cargo's cleanliness check must not refuse the publish.
-    const args = ["publish", "-p", crate, "--allow-dirty", ...(dryRun ? ["--dry-run"] : [])];
-    const result = capture("cargo", args);
-    process.stdout.write(result.output);
-    const outcome = classifyCargoPublishOutcome(result.exitCode, result.output);
-    if (outcome === "failed") fail(`cargo publish failed for ${crate}`);
-    if (outcome === "already-published") {
-      log(`  SKIP: ${crate} ${version} already on crates.io`);
-      continue;
-    }
-    log(`  OK: ${crate} ${version} published`);
-    if (!dryRun && i < PUBLISHED_CRATES.length - 1) {
-      log(
-        `  waiting ${CRATES_INDEX_PROPAGATION_MS / 1000}s for the crates.io index before the dependent crate`,
-      );
-      await sleep(CRATES_INDEX_PROPAGATION_MS);
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +618,6 @@ async function local(flags) {
   const version = workspaceVersion();
   const tag = flags.get("tag") ?? `v${version}`;
   const dryRun = flags.get("dry-run") === true;
-  const skipCrates = flags.get("skip-crates") === true;
   const releaseDir = resolve(ROOT, flags.get("dir") ?? join(DEFAULT_RELEASE_DIR, tag));
   const artifactsDir = join(releaseDir, "artifacts");
   const distTag = distTagForVersion(version);
@@ -742,17 +715,11 @@ async function local(flags) {
     ]),
   );
   if (!dryRun) await verifyNpm(new Map());
-  if (skipCrates) {
-    log("");
-    log("Skipping crates.io (--skip-crates)");
-  } else {
-    await publishCrates(new Map(dryRun ? [["dry-run", true]] : []));
-  }
 
   heading("Done");
-  log(`npm (${distTag}) and crates.io are published for ${tag}.`);
+  log(`npm (${distTag}) is published for ${tag}.`);
   log("Not covered here (release.yml owns them): the GitHub Release with its staged assets,");
-  log("the CHANGELOG commit, the platform VSIXes and the Marketplace publish.");
+  log("the platform VSIXes and the Marketplace publish.");
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +738,6 @@ if (invoked) {
     "publish-npm": () => publishNpm(flags),
     "tag-npm": () => tagNpm(flags),
     "verify-npm": () => verifyNpm(flags),
-    "publish-crates": () => publishCrates(flags),
     local: () => local(flags),
   };
 

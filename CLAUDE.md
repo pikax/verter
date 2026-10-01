@@ -675,7 +675,7 @@ program runs; this file carries the program banner and may cite blocks by identi
 
 ## CI/CD
 
-See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for CI/CD documentation: workflow specifications (CI, nightly, release), pre-release versioning flow (alpha → beta → rc → stable), publishing (npm + crates.io), nightly WASM builds + playground deployment, required GitHub secrets configuration.
+See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for CI/CD documentation: workflow specifications (CI, nightly, release), pre-release versioning flow (alpha → beta → rc → stable), publishing (npm), nightly WASM builds + playground deployment, required GitHub secrets configuration.
 
 ## Skills Reference
 
