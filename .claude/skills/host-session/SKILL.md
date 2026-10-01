@@ -169,6 +169,20 @@ replay, `ProviderHub::applied_content` is the bytes the serving incarnation
 accepted, including a rejected close, which keeps the prior surface. A close
 is committed only after the engine accepts it. tsserver companion content
 opens stay suppressed; that membership path is not a second content authority.
+Document receipts require completed transport delivery. TSGO transfers its document
+ordering gate to the stdin writer until the complete frame is written and flushed;
+dropping the submitter cannot reorder the next mutation. Queued replacements revoke
+the prior receipt, and failed or closed transports cannot certify cached bytes.
+TSGO publication deduplicates against delivered bytes, never the load-only conversion
+cache. tsserver uses acknowledged `updateOpen` writes for file receipts; completed
+carrier registration refreshes certify carrier bytes. ProviderHub validates wrapped
+provider receipts both after forwarding and during install replay, and rechecks the
+live receipt on reads so transport failure cannot leave a cached hub certificate.
+Cache-only loads remain `Held` until the wrapped provider certifies matching bytes.
+A recovery drain also wakes the existing post-scan completion check. A scan that
+finished during an engine replacement can announce completion once its queued
+work settles, without reinitializing the workspace or polling readiness. The
+waiter retains only a weak server reference and rejects superseded generations.
 Independent hub groups activate concurrently. A held engine on one project
 does not block another project's group. An A/B/A activation across two project
 hubs keeps aliases in one ordered bulk call per delivery and sends nothing

@@ -78,6 +78,11 @@ impl DesiredMutation {
             Self::Open { path, content }
             | Self::Load { path, content }
             | Self::Update { path, content } => Some((path, content)),
+            Self::RegisterCarrier {
+                companion_path,
+                content,
+                ..
+            } => Some((companion_path, content)),
             _ => None,
         }
     }
@@ -512,6 +517,12 @@ impl DesiredState {
                     std::sync::Arc::<str>::from(file.content.as_str()),
                 )
             })
+            .chain(self.carriers.iter().map(|(path, carrier)| {
+                (
+                    path.clone(),
+                    std::sync::Arc::<str>::from(carrier.content.as_str()),
+                )
+            }))
             .collect()
     }
 }

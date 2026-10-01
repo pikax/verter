@@ -174,6 +174,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         server,
     } = args;
 
+    // Release a prior generation's completion waiter without polling readiness.
+    carrier_transaction_coordinator.note_pending_sync_progress();
+
     let host = documents.host_arc();
     let tsx_profile = Arc::clone(&documents.tsx_profile);
     let canonical_roots: Vec<String> = roots
@@ -496,7 +499,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 return;
             }
 
-            server.complete_post_scan(my_gen).await;
+            let weak = Arc::downgrade(&server.core);
+            drop(server);
+            finish_post_scan(weak, my_gen).await;
         });
     }
 
@@ -556,6 +561,40 @@ async fn await_scan_complete_after_ready(
         return false;
     }
     ready_announced.await.is_ok()
+}
+
+/// Recheck the existing completion gate after a later recovery drain. The
+/// subscription precedes the queue check, so a drain cannot be lost between
+/// that check and waiting. Park with only a weak server reference: this tail
+/// neither keeps a closed session alive nor establishes a new readiness owner.
+pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen: u64) -> bool {
+    let mut progress = {
+        let Some(core) = server.upgrade() else {
+            return false;
+        };
+        core.carrier_transaction_coordinator
+            .subscribe_pending_sync_progress()
+    };
+    loop {
+        let Some(core) = server.upgrade() else {
+            return false;
+        };
+        let current = VerterLanguageServer { core };
+        if current
+            .init_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != my_gen
+        {
+            return false;
+        }
+        if current.complete_post_scan(my_gen).await {
+            return true;
+        }
+        drop(current);
+        if progress.changed().await.is_err() {
+            return false;
+        }
+    }
 }
 
 impl super::VerterLanguageServer {

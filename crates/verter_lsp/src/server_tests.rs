@@ -30022,6 +30022,56 @@ async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_resumes_after_a_late_provider_drain() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let path = format!("{}/src/helper.ts", fixture.root);
+    server.queue_snapshot_provider_sync(path.clone());
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    let completion = background_init::finish_post_scan(Arc::downgrade(&server.core), generation);
+    tokio::pin!(completion);
+    assert!(
+        futures_util::poll!(&mut completion).is_pending(),
+        "an unsettled scan must retain its completion until a later drain"
+    );
+    drain_pending_provider_sync_for(server).await;
+    assert!(!server.pending_snapshot_provider_sync.contains(&path));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .unwrap(),
+        "a recovery drain must announce the existing scan without a new initialization"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_recovery_never_announces_a_superseded_generation() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let path = format!("{}/src/helper.ts", fixture.root);
+    server.queue_snapshot_provider_sync(path.clone());
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    let announced = fixture.sync_complete.lock().len();
+    let completion = background_init::finish_post_scan(Arc::downgrade(&server.core), generation);
+    tokio::pin!(completion);
+    assert!(futures_util::poll!(&mut completion).is_pending());
+    server
+        .init_generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    drain_pending_provider_sync_for(server).await;
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fixture.sync_complete.lock().len(), announced);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_announces_only_the_current_settled_generation() {
     let fixture = watched_dependency_fixture(true).await;
     let server = fixture.service.inner();

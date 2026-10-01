@@ -580,7 +580,7 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
-        if !receipt.applied {
+        if receipt.disposition != crate::traits::FileLoadDisposition::Forwarded {
             return Err(AdmissionRefusal::ShadowedMutation);
         }
         if receipt.epoch == Some(admission.witness.0.epoch) {
@@ -640,7 +640,7 @@ where
             None => rx.await,
         };
         let receipt = settled.map_err(|_| AdmissionRefusal::NoServingProvider)??;
-        if !receipt.applied {
+        if receipt.disposition != crate::traits::FileLoadDisposition::Forwarded {
             return Err(AdmissionRefusal::ShadowedMutation);
         }
         if receipt.epoch == Some(epoch) {

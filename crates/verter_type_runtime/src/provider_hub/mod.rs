@@ -258,15 +258,15 @@ impl HubPolicy {
     }
 }
 
-/// Proof that the hub applied a desired-state mutation.
+/// Settlement of a desired-state mutation against the serving incarnation.
 ///
-/// `epoch` names the serving incarnation the mutation was forwarded to and
-/// accepted by; `None` means no engine was serving and the mutation is held
-/// in the desired state for the next establishment's replay.
+/// `epoch` names the incarnation used, or is absent when no engine serves.
+/// The disposition distinguishes a completed application from held cache-only
+/// work and writes shadowed by another document authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppliedReceipt {
     pub(crate) epoch: Option<ProviderEpoch>,
-    pub(crate) applied: bool,
+    pub(crate) disposition: crate::traits::FileLoadDisposition,
 }
 
 /// One serving incarnation.
@@ -1324,7 +1324,11 @@ async fn run_actor<P>(
                                             Ok(()) => {
                                                 desired.apply(&mutation, lane);
                                                 desired.record_admitted(&mutation, &admissions);
-                                                note_receipt(&shared, &mutation);
+                                                let disposition = note_receipt(
+                                                    &shared,
+                                                    serving.provider.as_ref(),
+                                                    &mutation,
+                                                );
                                                 let mut watch =
                                                     shared.query_watch.lock().unwrap_or_else(
                                                         |poisoned| poisoned.into_inner(),
@@ -1334,7 +1338,7 @@ async fn run_actor<P>(
                                                 }
                                                 Ok(AppliedReceipt {
                                                     epoch: Some(serving.epoch),
-                                                    applied: true,
+                                                    disposition,
                                                 })
                                             }
                                             Err(AdmissionRefusal::StaleBasis)
@@ -1438,12 +1442,12 @@ async fn run_actor<P>(
                         retract_unserved_close(&shared, &mutation);
                         Ok(AppliedReceipt {
                             epoch: None,
-                            applied: false,
+                            disposition: crate::traits::FileLoadDisposition::Held,
                         })
                     }
                     (Some(serving), Disposition::Shadowed) => Ok(AppliedReceipt {
                         epoch: Some(serving.epoch),
-                        applied: false,
+                        disposition: crate::traits::FileLoadDisposition::Shadowed,
                     }),
                     (Some(serving), Disposition::Forward) => {
                         let forwarding = async {
@@ -1473,10 +1477,11 @@ async fn run_actor<P>(
                                         watch.clear_path(path);
                                     }
                                 }
-                                note_receipt(&shared, &mutation);
+                                let disposition =
+                                    note_receipt(&shared, serving.provider.as_ref(), &mutation);
                                 Ok(AppliedReceipt {
                                     epoch: Some(serving.epoch),
-                                    applied: true,
+                                    disposition,
                                 })
                             }
                             Ok(Err(error)) => {
@@ -1580,7 +1585,7 @@ async fn run_actor<P>(
                 match outcome {
                     Ok(()) => {
                         let dropped = desired.discard_admitted();
-                        publish_serving_files(&shared, &desired);
+                        publish_serving_files(&shared, provider.as_ref(), &desired);
                         let epoch = shared.epochs.mint();
                         shared.overlay.observe_serving_epoch(epoch);
                         // Record the installed engine's tier BEFORE releasing
@@ -1640,17 +1645,43 @@ fn applied_map<P: ?Sized>(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Record a forward the serving engine accepted. A shadowed or held write
-/// does not call this.
-fn note_receipt<P: ?Sized>(shared: &Shared<P>, mutation: &DesiredMutation) {
+/// Certify only bytes the wrapped engine proves it applied. A cache-only
+/// forward can succeed while remaining held, or preserve different live bytes.
+fn note_receipt<P: TypeProvider + ?Sized>(
+    shared: &Shared<P>,
+    provider: &P,
+    mutation: &DesiredMutation,
+) -> crate::traits::FileLoadDisposition {
+    use crate::traits::{disposition_for_applied_bytes, AppliedContent, FileLoadDisposition};
     let mut applied = applied_map(shared);
     if let Some(path) = mutation.closed_path() {
         applied.remove(path);
-        return;
+        return FileLoadDisposition::Forwarded;
     }
     if let Some((path, content)) = mutation.committed_file() {
-        applied.insert(path.to_string(), Arc::from(content));
+        let receipt = provider.applied_content(path);
+        let disposition = disposition_for_applied_bytes(&receipt, content);
+        match receipt {
+            AppliedContent::Applied(bytes) => {
+                applied.insert(path.to_string(), bytes);
+            }
+            _ => {
+                applied.remove(path);
+            }
+        }
+        return disposition;
     }
+    for path in mutation.touched_paths() {
+        match provider.applied_content(&path) {
+            AppliedContent::Applied(bytes) => {
+                applied.insert(path, bytes);
+            }
+            _ => {
+                applied.remove(&path);
+            }
+        }
+    }
+    FileLoadDisposition::Forwarded
 }
 
 /// A close with no engine has nothing to forward. Drop any stale receipt.
@@ -1660,8 +1691,21 @@ fn retract_unserved_close<P: ?Sized>(shared: &Shared<P>, mutation: &DesiredMutat
     }
 }
 
-fn publish_serving_files<P: ?Sized>(shared: &Shared<P>, desired: &DesiredState) {
-    *applied_map(shared) = desired.serving_file_contents().into_iter().collect();
+fn publish_serving_files<P: TypeProvider + ?Sized>(
+    shared: &Shared<P>,
+    provider: &P,
+    desired: &DesiredState,
+) {
+    *applied_map(shared) = desired
+        .serving_file_contents()
+        .into_iter()
+        .filter_map(|(path, content)| match provider.applied_content(&path) {
+            crate::traits::AppliedContent::Applied(bytes) if bytes == content => {
+                Some((path, bytes))
+            }
+            _ => None,
+        })
+        .collect();
 }
 
 fn clear_applied<P: ?Sized>(shared: &Shared<P>) {

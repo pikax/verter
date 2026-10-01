@@ -647,6 +647,7 @@ struct MockInner {
     /// rejecting a state update it was forwarded (the divergence shape).
     update_fails: std::sync::atomic::AtomicBool,
     close_fails: std::sync::atomic::AtomicBool,
+    cache_only_loads: std::sync::atomic::AtomicBool,
     shutdowns: AtomicUsize,
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
@@ -677,6 +678,7 @@ impl MockProvider {
                 update_started: Notify::new(),
                 update_fails: std::sync::atomic::AtomicBool::new(false),
                 close_fails: std::sync::atomic::AtomicBool::new(false),
+                cache_only_loads: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
@@ -739,6 +741,35 @@ fn record_call(inner: &Arc<MockInner>, call: MockCall) {
 }
 
 impl TypeProvider for MockProvider {
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        use crate::traits::AppliedContent;
+        for call in self.calls().iter().rev() {
+            match call {
+                MockCall::OpenFile { path: p, content }
+                | MockCall::UpdateFile { path: p, content }
+                    if p == path =>
+                {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::LoadFile { path: p, content }
+                    if p == path && !self.inner.cache_only_loads.load(Ordering::SeqCst) =>
+                {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::RegisterCarrierMember {
+                    companion_path,
+                    content,
+                    ..
+                } if companion_path == path => {
+                    return AppliedContent::Applied(Arc::from(content.as_str()))
+                }
+                MockCall::CloseFile { path: p } if p == path => return AppliedContent::NotApplied,
+                _ => {}
+            }
+        }
+        AppliedContent::NotApplied
+    }
+
     fn provider_id(&self) -> &'static str {
         self.inner.id
     }
@@ -4750,4 +4781,40 @@ async fn synchronization_receipts_contain_only_successful_actual_members() {
         first_calls.len(),
         "warm synchronization performs no extra engine work"
     );
+}
+
+#[tokio::test]
+async fn cache_only_loads_remain_held_during_forward_and_replay() {
+    use crate::traits::{AppliedContent, FileLoadDisposition};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let engine = MockProvider::new("tsgo");
+    engine.inner.cache_only_loads.store(true, Ordering::SeqCst);
+    let hub = on_demand_hub(ScriptedBackend::new(vec![engine], &attempts));
+    let priority = crate::provider_hub::OverlayPriority::Background;
+    assert_eq!(
+        hub.load_file_with_disposition("/w/replay.ts", "replay", priority)
+            .await
+            .unwrap(),
+        FileLoadDisposition::Held
+    );
+    hub.get_hover("/w/replay.ts", 0).await.unwrap();
+    assert!(matches!(
+        hub.applied_content("/w/replay.ts"),
+        AppliedContent::NotApplied
+    ));
+    assert_eq!(
+        hub.load_file_with_disposition("/w/live.ts", "live", priority)
+            .await
+            .unwrap(),
+        FileLoadDisposition::Held
+    );
+    assert!(matches!(
+        hub.applied_content("/w/live.ts"),
+        AppliedContent::NotApplied
+    ));
+    hub.open_file("/w/live.ts", "live").await.unwrap();
+    assert!(
+        matches!(hub.applied_content("/w/live.ts"), AppliedContent::Applied(bytes) if bytes.as_ref() == "live")
+    );
+    hub.shutdown().await.unwrap();
 }

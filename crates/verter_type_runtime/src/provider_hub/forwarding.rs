@@ -2,19 +2,13 @@
 //! queries run against the serving incarnation under crash quarantine and
 //! epoch settlement.
 
-use std::sync::Arc;
-
 use super::quarantine::hash_extra;
 use super::*;
 use crate::protocol::*;
 use crate::traits::ProviderFuture;
 
 fn receipt_disposition(receipt: &AppliedReceipt) -> crate::traits::FileLoadDisposition {
-    match (receipt.epoch, receipt.applied) {
-        (None, _) => crate::traits::FileLoadDisposition::Held,
-        (Some(_), false) => crate::traits::FileLoadDisposition::Shadowed,
-        (Some(_), true) => crate::traits::FileLoadDisposition::Forwarded,
-    }
+    receipt.disposition
 }
 
 impl<P> ProviderHub<P>
@@ -87,16 +81,20 @@ where
         )
     }
     fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
-        match self
+        let Some(serving) = self.state.shared.serving() else {
+            return crate::traits::AppliedContent::NotApplied;
+        };
+        let applied = self
             .state
             .shared
             .applied_files
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(path)
-        {
-            Some(content) => crate::traits::AppliedContent::Applied(Arc::clone(content)),
-            None => crate::traits::AppliedContent::NotApplied,
+            .unwrap_or_else(|p| p.into_inner());
+        match (applied.get(path), serving.provider.applied_content(path)) {
+            (Some(content), crate::traits::AppliedContent::Applied(bytes)) if *content == bytes => {
+                crate::traits::AppliedContent::Applied(bytes)
+            }
+            _ => crate::traits::AppliedContent::NotApplied,
         }
     }
 

@@ -921,7 +921,7 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         sweep_generation: u64,
     ) {
         let queried_source = carrier_source_of(provider_path);
-        let _ = self
+        if let Err(reason) = self
             .inner
             .hub
             .synchronize(
@@ -933,7 +933,10 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
                 },
                 |companion| self.generated_unit_write_permit(core, companion),
             )
-            .await;
+            .await
+        {
+            tracing::debug!(?reason, "shared provider synchronization refused");
+        }
     }
 
     /// Withdraw the carrier `source`'s units from a live serving incarnation after
@@ -949,7 +952,7 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
             return;
         };
         let core = self.inner.hub.overlay_state();
-        let _ = self
+        if let Err(reason) = self
             .inner
             .hub
             .synchronize(
@@ -958,7 +961,10 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
                 |companion, _| carrier_source_of(companion).as_deref() == Some(source),
                 |companion| self.generated_unit_write_permit(core, companion),
             )
-            .await;
+            .await
+        {
+            tracing::debug!(?reason, "shared provider synchronization refused");
+        }
     }
 
     /// Whether this is the FIRST admission refusal reported for `source` at
@@ -1670,8 +1676,8 @@ impl TsgoCompositeProvider {
         }
     }
 
-    /// Record the carrier's content into the SHARED overlay (a cheap in-memory insert
-    /// off the managed lifecycle critical path) — a no-op when SHARED is not opted in.
+    /// Forward a managed write and preserve its application disposition. Only
+    /// non-shadowed writes update shared desired content.
     async fn forward_managed(
         &self,
         path: &str,
@@ -1715,6 +1721,7 @@ impl TsgoCompositeProvider {
         Ok(disposition)
     }
 
+    /// Record desired carrier content in the shared overlay when enabled.
     fn shared_record(&self, path: &str, content: &str, priority: OverlayPriority) {
         if let Some(shared) = &self.shared {
             shared.record_content(path, content, priority);

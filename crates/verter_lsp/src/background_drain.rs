@@ -325,6 +325,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
 ) {
     if project_sync.is_none() && carrier_publish_coordinator.is_none() {
         pending_snapshot_provider_sync.clear();
+        carrier_coordinator.note_pending_sync_progress();
         return;
     }
     // Capture the published filesystem workspace once (the carrier-publish
@@ -432,6 +433,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             documents.refresh_owed_diagnostics(&canonical_id);
         }
     }
+    carrier_coordinator.note_pending_sync_progress();
 }
 
 /// Re-resolve aliased imports for all currently open `.vue` files and sync any

@@ -24,6 +24,8 @@ use crate::traits::{ProviderFuture, TypeProvider};
 use crate::uri::percent_decode;
 use crate::uri::{file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string};
 
+type DiagnosticsCache = Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>;
+
 fn trace_preview(contents: &str, max_len: usize) -> String {
     let mut preview = String::new();
     for ch in contents.chars().take(max_len) {
@@ -125,8 +127,45 @@ impl Drop for PendingRequest {
 enum StdinMessage {
     /// Write a framed LSP message to stdin.
     Frame(Vec<u8>),
+    /// Completion owns document ordering until the entire frame is flushed.
+    Document(Vec<u8>, Box<DocumentDelivery>),
     /// Shut down the writer task.
     Shutdown,
+}
+
+/// The writer retains the document gate even if the caller is cancelled.
+/// Only a successful flush commits the ledger; dropping a failed delivery
+/// releases its gate and completion without certifying any bytes.
+struct DocumentDelivery {
+    versions: tokio::sync::OwnedMutexGuard<HashMap<String, i32>>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    accepted: Arc<StdMutex<HashMap<String, Arc<str>>>>,
+    key: String,
+    value: Option<(i32, Arc<str>)>,
+    done: oneshot::Sender<()>,
+    diagnostics: Option<DiagnosticsCache>,
+}
+
+impl DocumentDelivery {
+    async fn complete(mut self) {
+        let mut contents = self.contents.lock().await;
+        match self.value {
+            Some((version, content)) => {
+                self.versions.insert(self.key.clone(), version);
+                contents.insert(self.key.clone(), Arc::clone(&content));
+                note_accepted(&self.accepted, &self.key, content);
+            }
+            None => {
+                self.versions.remove(&self.key);
+                contents.remove(&self.key);
+                forget_accepted(&self.accepted, &self.key);
+            }
+        }
+        if let Some(diagnostics) = &self.diagnostics {
+            forget_cached_diagnostics(diagnostics, &self.key).await;
+        }
+        let _ = self.done.send(());
+    }
 }
 
 /// Per-lane bounded-channel capacity for the Interactive / Normal / Background
@@ -204,7 +243,17 @@ where
             }
         }
     }
-    let _ = tokio::time::timeout(writer_stall, stdin.flush()).await;
+    if !matches!(
+        tokio::time::timeout(writer_stall, stdin.flush()).await,
+        Ok(Ok(()))
+    ) {
+        if !teardown_intent.load(Ordering::SeqCst) {
+            if let Some(notify) = crash_notify {
+                notify.notify_waiters();
+            }
+        }
+        return false;
+    }
     buffer.clear();
     true
 }
@@ -239,6 +288,7 @@ async fn stdin_writer_loop(
     writer_stall: std::time::Duration,
 ) {
     let mut buffer = Vec::new();
+    let mut deliveries: Vec<DocumentDelivery> = Vec::new();
 
     // Drain a lane FULLY (unbounded) into `buffer`; evaluates to `true` when a
     // `Shutdown` was seen (caller flushes then returns).
@@ -248,6 +298,10 @@ async fn stdin_writer_loop(
             loop {
                 match $rx.try_recv() {
                     Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Ok(StdinMessage::Shutdown) => {
                         shutdown = true;
                         break;
@@ -266,6 +320,10 @@ async fn stdin_writer_loop(
             for _ in 0..$cap {
                 match $rx.try_recv() {
                     Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Ok(StdinMessage::Shutdown) => {
                         shutdown = true;
                         break;
@@ -289,18 +347,26 @@ async fn stdin_writer_loop(
             {
                 break;
             }
+            for delivery in deliveries.drain(..) {
+                delivery.complete().await;
+            }
         };
     }
     macro_rules! flush_and_return {
         () => {{
-            let _ = flush_stdin_guarded(
+            if flush_stdin_guarded(
                 &mut stdin,
                 &mut buffer,
                 writer_stall,
                 &crash_notify,
                 &teardown_intent,
             )
-            .await;
+            .await
+            {
+                for delivery in deliveries.drain(..) {
+                    delivery.complete().await;
+                }
+            }
             return;
         }};
     }
@@ -312,24 +378,40 @@ async fn stdin_writer_loop(
             msg = control_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = interactive_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = normal_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = background_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Document(data, delivery)) => {
+                        buffer.extend_from_slice(&data);
+                        deliveries.push(*delivery);
+                    }
                     Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
@@ -814,10 +896,8 @@ impl LspTransport {
 
     /// Enqueue an LSP notification onto `priority`'s lane WITHOUT awaiting.
     ///
-    /// Synchronous by construction. A caller that must commit local state in the
-    /// SAME non-cancellable step as an accepted enqueue — the document-sync
-    /// ledger below — cannot express that against an async send: a dropped future
-    /// would leave the state written and the frame unsent.
+    /// This enqueue has no delivery receipt; document mutations use
+    /// `deliver_document` and wait for writer completion.
     fn try_notify_with_priority(
         &self,
         method: &str,
@@ -856,6 +936,38 @@ impl LspTransport {
                 Err(TypeProviderError::new("stdin writer closed"))
             }
         }
+    }
+
+    async fn deliver_document(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        priority: ProviderPriority,
+        delivery: DocumentDelivery,
+        done: oneshot::Receiver<()>,
+    ) -> Result<(), TypeProviderError> {
+        let body = serde_json::to_string(&jsonrpc_body(None, method, params))
+            .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes();
+        {
+            let accepted = Arc::clone(&delivery.accepted);
+            let key = delivery.key.clone();
+            let mut receipts = accepted.lock().unwrap_or_else(|p| p.into_inner());
+            self.tx_for_priority(priority)
+                .try_send(StdinMessage::Document(frame, Box::new(delivery)))
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => TypeProviderError::new("channel full"),
+                    mpsc::error::TrySendError::Closed(_) => {
+                        TypeProviderError::new("stdin writer closed")
+                    }
+                })?;
+            // The old bytes cease to be certified while their replacement is
+            // in flight. Hold the receipt lock across enqueue to order this
+            // invalidation before the writer's completion on another thread.
+            receipts.remove(&key);
+        }
+        done.await
+            .map_err(|_| TypeProviderError::new("document transport delivery failed"))
     }
 
     /// Send an LSP notification at a specific priority (no response expected).
@@ -947,21 +1059,14 @@ fn describe_sync_mode(mode: DocumentSyncMode) -> String {
 /// `didOpen` the protocol requires (tsgo panics with "overlay not found" on a
 /// `didChange` for a document it never opened).
 ///
-/// Committing either map BEFORE the transport accepts claims a sync the child never
-/// received — and a refused enqueue (a full lane behind a writer stalled on a busy
-/// child) then strands the document indefinitely, because every later sync reads the
-/// ledger, believes the document is open, and sends a `didChange` it cannot apply.
-///
-/// Both maps are locked before the enqueue, and the commit runs in the same step as
-/// an accepted synchronous `try_send` with no `.await` between them. So there is no
-/// cancellation point at which an optimistic write could outlive a dropped future,
-/// and the read-then-write on `versions` stays mutually exclusive against a
-/// concurrent sync of the same path.
-fn note_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str, content: &str) {
+/// The writer owns the version gate from enqueue through flush and ledger
+/// commit. Cancellation cannot reorder a later document mutation ahead of it.
+/// Cache-only loads are never evidence of transport delivery.
+fn note_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str, content: Arc<str>) {
     accepted
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(key.to_string(), Arc::from(content));
+        .insert(key.to_string(), content);
 }
 
 fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
@@ -973,16 +1078,15 @@ fn forget_accepted(accepted: &StdMutex<HashMap<String, Arc<str>>>, key: &str) {
 
 async fn deliver_document_sync(
     transport: &LspTransport,
-    versions: &Mutex<HashMap<String, i32>>,
-    contents: &Mutex<HashMap<String, Arc<str>>>,
-    accepted: &StdMutex<HashMap<String, Arc<str>>>,
+    versions: &Arc<Mutex<HashMap<String, i32>>>,
+    contents: &Arc<Mutex<HashMap<String, Arc<str>>>>,
+    accepted: &Arc<StdMutex<HashMap<String, Arc<str>>>>,
     path: &str,
     content: &str,
     priority: ProviderPriority,
 ) -> Result<DocumentSyncMode, TypeProviderError> {
     let uri = TsgoTypeProvider::path_to_uri(path);
-    let mut versions_guard = versions.lock().await;
-    let mut contents_guard = contents.lock().await;
+    let versions_guard = Arc::clone(versions).lock_owned().await;
     // ONE document identity for BOTH ledger maps — see [`contents_key`].
     let document_key = contents_key(path);
 
@@ -990,14 +1094,16 @@ async fn deliver_document_sync(
     // notifications that reach the wire — there is no mode without a frame.
     let (mode, version, method, params) = match versions_guard.get(&document_key) {
         Some(version) => {
-            if contents_guard
+            let unchanged = accepted
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
                 .get(&document_key)
-                .is_some_and(|held| held.as_ref() == content)
-            {
-                // No new frame. Do not write `accepted` here: `load_file`
-                // overwrites `contents` without notifying the child, so a
-                // match is not evidence the child holds these bytes. A prior
-                // successful notify already recorded the receipt.
+                .is_some_and(|held| held.as_ref() == content);
+            if unchanged && !transport.interactive_tx.is_closed() {
+                contents
+                    .lock()
+                    .await
+                    .insert(document_key, Arc::from(content));
                 return Ok(DocumentSyncMode::Unchanged);
             }
             let version = version + 1;
@@ -1026,13 +1132,25 @@ async fn deliver_document_sync(
         ),
     };
 
-    transport.try_notify_with_priority(method, &params, priority)?;
+    let (done, completed) = oneshot::channel();
+    transport
+        .deliver_document(
+            method,
+            &params,
+            priority,
+            DocumentDelivery {
+                versions: versions_guard,
+                contents: Arc::clone(contents),
+                accepted: Arc::clone(accepted),
+                key: document_key,
+                value: Some((version, Arc::from(content))),
+                done,
+                diagnostics: None,
+            },
+            completed,
+        )
+        .await?;
 
-    versions_guard.insert(document_key.clone(), version);
-    contents_guard.insert(document_key.clone(), Arc::from(content));
-    // Application evidence is the bytes the transport accepted, not the
-    // `load_file` cache (that cache never notifies the child).
-    note_accepted(accepted, &document_key, content);
     Ok(mode)
 }
 
@@ -1041,10 +1159,7 @@ async fn deliver_document_sync(
 /// cache keeps one entry per document ever opened for the life of the
 /// engine. Keys are matched in normalized form because the publish path
 /// stores the engine's own spelling of the URI.
-async fn forget_cached_diagnostics(
-    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
-    path: &str,
-) {
+async fn forget_cached_diagnostics(diagnostics_cache: &DiagnosticsCache, path: &str) {
     let closed = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
     diagnostics_cache
         .lock()
@@ -1071,38 +1186,47 @@ async fn forget_cached_diagnostics(
 /// diagnostics (see [`forget_cached_diagnostics`]).
 async fn deliver_document_close(
     transport: &LspTransport,
-    versions: &Mutex<HashMap<String, i32>>,
-    contents: &Mutex<HashMap<String, Arc<str>>>,
-    accepted: &StdMutex<HashMap<String, Arc<str>>>,
-    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    versions: &Arc<Mutex<HashMap<String, i32>>>,
+    contents: &Arc<Mutex<HashMap<String, Arc<str>>>>,
+    accepted: &Arc<StdMutex<HashMap<String, Arc<str>>>>,
+    diagnostics_cache: &DiagnosticsCache,
     path: &str,
     priority: ProviderPriority,
 ) -> Result<(), TypeProviderError> {
     let uri = TsgoTypeProvider::path_to_uri(path);
-    let mut versions_guard = versions.lock().await;
-    let mut contents_guard = contents.lock().await;
+    let versions_guard = Arc::clone(versions).lock_owned().await;
     // ONE document identity for BOTH ledger maps — see [`contents_key`].
     let document_key = contents_key(path);
-    // Forgotten while the contents lock is held through the content's
-    // retirement below, so no diagnostics admission can land in between (see
-    // [`admit_diagnostics_for_incarnation`]).
-    forget_cached_diagnostics(diagnostics_cache, path).await;
-
     if !versions_guard.contains_key(&document_key) {
-        contents_guard.remove(&document_key);
+        let mut contents = contents.lock().await;
+        forget_cached_diagnostics(diagnostics_cache, path).await;
+        contents.remove(&document_key);
         forget_accepted(accepted, &document_key);
         return Ok(());
     }
 
-    transport.try_notify_with_priority(
-        "textDocument/didClose",
-        &serde_json::json!({ "textDocument": { "uri": uri } }),
-        priority,
-    )?;
+    // Forget prior diagnostics before submitting the close. The writer also
+    // clears them while retiring content, excluding concurrent admission.
+    forget_cached_diagnostics(diagnostics_cache, path).await;
 
-    versions_guard.remove(&document_key);
-    contents_guard.remove(&document_key);
-    forget_accepted(accepted, &document_key);
+    let (done, completed) = oneshot::channel();
+    transport
+        .deliver_document(
+            "textDocument/didClose",
+            &serde_json::json!({ "textDocument": { "uri": uri } }),
+            priority,
+            DocumentDelivery {
+                versions: versions_guard,
+                contents: Arc::clone(contents),
+                accepted: Arc::clone(accepted),
+                key: document_key,
+                value: None,
+                done,
+                diagnostics: Some(Arc::clone(diagnostics_cache)),
+            },
+            completed,
+        )
+        .await?;
     Ok(())
 }
 
@@ -1122,7 +1246,7 @@ async fn deliver_document_close(
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     pending: Arc<PendingRequestTable>,
-    diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    diagnostics_cache: DiagnosticsCache,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     control_tx: mpsc::UnboundedSender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
@@ -1450,8 +1574,8 @@ async fn diagnostics_for_pulled_incarnation(
 ///
 /// Every sync registers a fresh content `Arc` and every close retires it, so
 /// the registered `Arc` IS the document's incarnation. The identity check and
-/// the insertion hold the contents lock, which [`deliver_document_close`] holds
-/// from forgetting the document's diagnostics through retiring its content. A
+/// the insertion hold the contents lock, which the writer's close completion
+/// holds while retiring content and forgetting diagnostics. A
 /// batch read before a close therefore either lands first and is forgotten by
 /// it, or finds its incarnation retired (or replaced by a reopen) and is
 /// dropped: it can never repopulate the cache for a closed document, nor serve
@@ -2115,11 +2239,11 @@ pub struct TsgoTypeProvider {
     /// application receipt.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Bytes a successful `didOpen` / `didChange` left with the child, keyed
-    /// by [`contents_key`]. Absent after a close and after a cache-only load.
+    /// by [`contents_key`]. A close removes it; cache-only loads never create it.
     accepted: Arc<StdMutex<HashMap<String, Arc<str>>>>,
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
-    diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    diagnostics_cache: DiagnosticsCache,
     /// Deliberate-teardown intent, shared with the transport + read loop. See
     /// [`LspTransport::teardown_intent`].
     teardown_intent: Arc<AtomicBool>,
@@ -2898,6 +3022,9 @@ fn inlay_hint_preferences() -> serde_json::Value {
 
 impl TypeProvider for TsgoTypeProvider {
     fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        if self.transport.interactive_tx.is_closed() || self.transport.pending.is_closed() {
+            return crate::traits::AppliedContent::NotApplied;
+        }
         let key = contents_key(path);
         match self
             .accepted

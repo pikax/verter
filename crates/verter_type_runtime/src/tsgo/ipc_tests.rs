@@ -376,8 +376,9 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
 
 /// Decode the JSON body of a framed stdin message.
 fn frame_body(msg: &StdinMessage) -> serde_json::Value {
-    let StdinMessage::Frame(bytes) = msg else {
-        panic!("expected a framed message, got a control signal");
+    let bytes = match msg {
+        StdinMessage::Frame(bytes) | StdinMessage::Document(bytes, _) => bytes,
+        StdinMessage::Shutdown => panic!("expected a framed message, got a control signal"),
     };
     let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
     let body = text
@@ -3372,21 +3373,20 @@ async fn test_provider_operations_fail_after_process_death() {
     };
 
     // All operations should NOT hang, which is the critical invariant.
-    // With channel-based transport, fire-and-forget notifications (open/update/close)
-    // may appear to succeed on the first call if the writer loop hasn't exited yet.
-    // Subsequent calls will fail once the writer loop detects the dead pipe and exits.
+    // Document notifications wait for the writer and fail on the dead pipe.
     //
     // Request operations have no latency timeout. Process death is instead a
     // sticky transport state, so calls made after EOF must fail promptly.
     let timeout = std::time::Duration::from_secs(2);
 
-    // First call: may succeed (channel send works, writer loop hasn't failed yet)
+    // A queued frame is not success: the writer must observe the dead pipe.
     let result =
         tokio::time::timeout(timeout, provider.open_file("test.tsx", "const x = 1;")).await;
-    assert!(result.is_ok(), "open_file should not hang");
-
-    // Give the writer loop time to detect the dead pipe and exit
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(result.expect("open_file should not hang").is_err());
+    assert_eq!(
+        provider.applied_content("test.tsx"),
+        crate::traits::AppliedContent::NotApplied
+    );
 
     // Subsequent calls should fail because the writer loop has exited (channel closed)
     let result =
@@ -4922,71 +4922,40 @@ async fn writer_stall_watchdog_fires_crash_notify_when_the_child_stops_reading_s
 /// the writer-stall watchdog covers a parked `write_all`, not a refused enqueue.
 #[tokio::test]
 async fn a_refused_didopen_leaves_no_synced_entry_in_the_local_ledger() {
-    // 16-byte duplex + a child that never reads → the writer parks on its first
-    // `write_all`, so the one-frame interactive lane saturates and stays full.
-    let (provider_side, child_side) = tokio::io::duplex(16);
-    let (provider_read, provider_write) = tokio::io::split(provider_side);
-    let _child_side = child_side;
-
-    let provider = TsgoTypeProvider::from_transport_parts_configured(
-        provider_read,
-        provider_write,
-        None,
-        None,
-        1,                                  // one-frame lane
-        std::time::Duration::from_secs(30), // long watchdog: NOT the escape hatch here
-    );
-
-    // Larger than the duplex buffer, so the writer's first `write_all` cannot
-    // complete and no lane slot is ever released.
-    let payload = "x".repeat(4096);
-
+    let (provider, mut pending) = manual_ledger_provider(1);
     let accepted_path = "/w/accepted.tsx";
+    let refused_path = "/w/refused.tsx";
+    let mut open = provider.open_file(accepted_path, "accepted");
+    assert!(futures_util::poll!(open.as_mut()).is_pending());
+    let StdinMessage::Document(_, delivery) = pending.recv().await.unwrap() else {
+        panic!("document frame")
+    };
+    delivery.complete().await;
+    open.await.unwrap();
+    // A full bounded lane must reject without touching the existing ledger.
     provider
-        .open_file(accepted_path, &payload)
-        .await
-        .expect("the first didOpen is accepted into the empty lane");
-
-    // Keep pushing until the transport refuses one: that refusal is the subject.
-    let mut refused_path = None;
-    for index in 0..64 {
-        let path = format!("/w/refused{index}.tsx");
-        if provider.open_file(&path, &payload).await.is_err() {
-            refused_path = Some(path);
-            break;
-        }
-    }
-    let refused_path =
-        refused_path.expect("the lane must actually saturate, else this test proves nothing");
-
-    // Positive control: an ACCEPTED didOpen IS recorded, so the assertions below
-    // discriminate a refused sync from a provider that records nothing at all.
-    assert!(
-        provider.versions.lock().await.contains_key(accepted_path),
-        "an accepted didOpen must be recorded in the version ledger"
+        .transport
+        .interactive_tx
+        .try_send(StdinMessage::Frame(vec![]))
+        .unwrap_or_else(|_| panic!("empty lane"));
+    assert!(provider.open_file(refused_path, "refused").await.is_err());
+    assert_eq!(provider.versions.lock().await.get(accepted_path), Some(&1));
+    assert_eq!(
+        provider.contents.lock().await[accepted_path].as_ref(),
+        "accepted"
     );
-    assert!(
-        provider
-            .contents
-            .lock()
-            .await
-            .contains_key(&contents_key(accepted_path)),
-        "an accepted didOpen must be recorded in the contents ledger"
-    );
-
-    assert!(
-        !provider.versions.lock().await.contains_key(&refused_path),
-        "a REFUSED didOpen must leave no version entry: the entry makes the next \
-         update_file send a didChange for a document the engine never opened"
-    );
-    assert!(
-        !provider
-            .contents
-            .lock()
-            .await
-            .contains_key(&contents_key(&refused_path)),
-        "a REFUSED didOpen must leave no cached contents claiming the child holds them"
-    );
+    assert!(!provider.versions.lock().await.contains_key(refused_path));
+    assert!(!provider.contents.lock().await.contains_key(refused_path));
+    pending.recv().await.unwrap();
+    let mut retry = provider.update_file(refused_path, "refused");
+    assert!(futures_util::poll!(retry.as_mut()).is_pending());
+    let message = pending.recv().await.unwrap();
+    assert_eq!(frame_body(&message)["method"], "textDocument/didOpen");
+    let StdinMessage::Document(_, delivery) = message else {
+        panic!("document frame")
+    };
+    delivery.complete().await;
+    retry.await.unwrap();
 }
 
 /// The writer-stall watchdog must bound time WITHOUT PROGRESS, not the total time
@@ -5022,26 +4991,38 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
 
     let payload_len = 8192usize;
     let drained = tokio::spawn(async move {
-        let mut seen = 0usize;
+        let mut seen = Vec::new();
+        let mut expected_len = None;
         let mut chunk = [0u8; 256];
-        while seen < payload_len {
+        while expected_len.is_none_or(|len| seen.len() < len) {
             // Steady, slow progress: each pause is inside the window, but the
             // cumulative write time is roughly an order of magnitude beyond it.
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             match child_side.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(n) => seen += n,
+                Ok(n) => {
+                    seen.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = std::str::from_utf8(&seen[..end]).unwrap();
+                        let length: usize = header
+                            .strip_prefix("Content-Length: ")
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        expected_len = Some(end + 4 + length);
+                    }
+                }
                 Err(_) => break,
             }
         }
-        seen
+        (seen.len(), child_side)
     });
 
     let payload = "x".repeat(payload_len);
     provider
         .update_file("/w/a.tsx", &payload)
         .await
-        .expect("the frame must enqueue");
+        .expect("the entire frame must be delivered");
 
     // Well past several whole windows: a watchdog measuring TOTAL write time has
     // long since tripped by here, while a progress-based one has not.
@@ -5054,7 +5035,7 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
 
     // Positive control: the child genuinely received the whole frame, so the
     // no-crash assertion cannot pass vacuously against a writer that wrote nothing.
-    let seen = tokio::time::timeout(std::time::Duration::from_secs(5), drained)
+    let (seen, _child_side) = tokio::time::timeout(std::time::Duration::from_secs(5), drained)
         .await
         .expect("the slow child must finish draining the frame")
         .expect("drain task panicked");
@@ -5080,6 +5061,25 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
 /// assertion can name EXACTLY which document notifications reached the wire.
 /// `child: None` — nothing to spawn, nothing for `Drop` to kill.
 fn ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMessage>) {
+    let (provider, mut pending_rx) = manual_ledger_provider(capacity);
+    let (observed_tx, stdin_rx) = mpsc::channel(capacity);
+    tokio::spawn(async move {
+        while let Some(message) = pending_rx.recv().await {
+            match message {
+                StdinMessage::Document(frame, delivery) => {
+                    observed_tx.send(StdinMessage::Frame(frame)).await.unwrap();
+                    delivery.complete().await;
+                }
+                other => {
+                    observed_tx.send(other).await.unwrap();
+                }
+            }
+        }
+    });
+    (provider, stdin_rx)
+}
+
+fn manual_ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMessage>) {
     let (stdin_tx, stdin_rx) = mpsc::channel(capacity);
     let provider = TsgoTypeProvider {
         transport: Arc::new(test_transport(stdin_tx)),
@@ -5992,5 +5992,135 @@ async fn a_background_pull_answered_across_a_close_and_reopen_is_refused() {
     assert!(
         pulled.is_err(),
         "a response for the previous incarnation must not be served: {pulled:?}"
+    );
+}
+
+#[tokio::test]
+async fn queued_document_has_no_receipt_until_transport_delivery() {
+    use crate::traits::AppliedContent;
+    use tokio::io::AsyncReadExt;
+    let (client, mut child) = tokio::io::duplex(16);
+    let (read, write) = tokio::io::split(client);
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        read,
+        write,
+        None,
+        None,
+        4,
+        std::time::Duration::from_secs(5),
+    );
+    let path = "/w/queued.ts";
+    let content = "export const value = 123;";
+    let mut publish = provider.open_file(path, content);
+    assert!(
+        futures_util::poll!(publish.as_mut()).is_pending(),
+        "enqueue is not delivery"
+    );
+    assert!(matches!(
+        provider.applied_content(path),
+        AppliedContent::NotApplied
+    ));
+    let drain = async {
+        let mut bytes = vec![0; 4096];
+        let mut frame = Vec::new();
+        loop {
+            let n = child.read(&mut bytes).await.unwrap();
+            assert!(n > 0);
+            frame.extend_from_slice(&bytes[..n]);
+            if frame.ends_with(b"}}") {
+                break;
+            }
+        }
+        frame
+    };
+    let (result, frame) = tokio::join!(publish, drain);
+    result.unwrap();
+    assert!(String::from_utf8(frame).unwrap().contains(content));
+    assert!(
+        matches!(provider.applied_content(path), AppliedContent::Applied(bytes) if bytes.as_ref() == content)
+    );
+    drop(child);
+    assert!(provider.update_file(path, "new bytes").await.is_err());
+    assert!(matches!(
+        provider.applied_content(path),
+        AppliedContent::NotApplied
+    ));
+}
+
+#[tokio::test]
+async fn cached_replacement_cannot_suppress_a_document_change() {
+    let (provider, mut wire) = ledger_provider(64);
+    let path = "/w/cached.ts";
+    provider.open_file(path, "first").await.unwrap();
+    drained_notifications(&mut wire);
+    provider.load_file(path, "second").await.unwrap();
+    provider.update_file(path, "second").await.unwrap();
+    let changes = drained_notifications(&mut wire);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].0, "textDocument/didChange");
+    assert_eq!(changes[0].1["contentChanges"][0]["text"], "second");
+    provider.load_file(path, "cached only").await.unwrap();
+    provider.update_file(path, "second").await.unwrap();
+    assert!(drained_notifications(&mut wire).is_empty());
+    assert_eq!(provider.contents.lock().await[path].as_ref(), "second");
+}
+
+#[tokio::test]
+async fn cancelled_document_delivery_keeps_order_until_writer_completion() {
+    use crate::traits::AppliedContent;
+    let (provider, mut wire) = manual_ledger_provider(4);
+    let path = "/w/cancelled.ts";
+    let mut open = provider.open_file_background(path, "first");
+    assert!(futures_util::poll!(open.as_mut()).is_pending());
+    let first = wire.recv().await.unwrap();
+    drop(open);
+    let mut change = provider.update_file(path, "second");
+    assert!(futures_util::poll!(change.as_mut()).is_pending());
+    assert!(
+        wire.try_recv().is_err(),
+        "interactive cannot overtake cancelled background open"
+    );
+    assert_eq!(provider.applied_content(path), AppliedContent::NotApplied);
+    let StdinMessage::Document(_, first) = first else {
+        panic!("document frame")
+    };
+    first.complete().await;
+    assert!(futures_util::poll!(change.as_mut()).is_pending());
+    assert_eq!(provider.applied_content(path), AppliedContent::NotApplied);
+    let second = wire.recv().await.unwrap();
+    assert_eq!(frame_body(&second)["method"], "textDocument/didChange");
+    assert_eq!(frame_body(&second)["params"]["textDocument"]["version"], 2);
+    let StdinMessage::Document(_, second) = second else {
+        panic!("document frame")
+    };
+    second.complete().await;
+    change.await.unwrap();
+    assert_eq!(
+        provider.applied_content(path),
+        AppliedContent::Applied(Arc::from("second"))
+    );
+    let mut close = provider.close_file(path);
+    assert!(futures_util::poll!(close.as_mut()).is_pending());
+    let closing = wire.recv().await.unwrap();
+    drop(close);
+    assert_eq!(provider.applied_content(path), AppliedContent::NotApplied);
+    let mut reopen = provider.open_file(path, "third");
+    assert!(futures_util::poll!(reopen.as_mut()).is_pending());
+    assert!(wire.try_recv().is_err());
+    let StdinMessage::Document(_, closing) = closing else {
+        panic!("document frame")
+    };
+    closing.complete().await;
+    assert!(futures_util::poll!(reopen.as_mut()).is_pending());
+    let reopened = wire.recv().await.unwrap();
+    assert_eq!(frame_body(&reopened)["method"], "textDocument/didOpen");
+    let StdinMessage::Document(_, reopened) = reopened else {
+        panic!("document frame")
+    };
+    reopened.complete().await;
+    reopen.await.unwrap();
+    assert_eq!(
+        provider.applied_content(path),
+        AppliedContent::Applied(Arc::from("third"))
     );
 }
