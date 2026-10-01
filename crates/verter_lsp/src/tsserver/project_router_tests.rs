@@ -1161,3 +1161,76 @@ async fn a_held_provider_batch_does_not_delay_an_independently_admitted_provider
         "the healthy group remains one actual bulk call: {calls:?}"
     );
 }
+
+/// A recovery re-arm whose activation settles on a basis an unrelated edit
+/// moved while the engine was applying it is re-issued under a fresh admission.
+///
+/// The hub refuses such a settlement (a content-only drift) and leaves the
+/// re-application to its issuer, so a re-arm that gives up instead leaves the
+/// carrier registered but never activated in the replacement engine — and
+/// nothing else re-drives it: its documents keep waiting on a provider that
+/// never received them.
+#[tokio::test]
+async fn recovery_rearm_racing_a_content_edit_is_reissued() {
+    use verter_type_runtime::provider_hub::DroppedAdmittedCarrier;
+    let BatchRouterFixture {
+        _temp,
+        router,
+        workspace,
+        providers,
+        members,
+    } = batch_router_fixture().await;
+    let member = members[0].clone();
+    let (arrived, release) = providers[0].block_next_carrier_activation();
+    let router = Arc::new(router);
+    let dropped = DroppedAdmittedState {
+        carriers: vec![DroppedAdmittedCarrier {
+            source_path: member.source_path.clone(),
+            companion_path: member.companion_path.clone(),
+            content: "export {};".to_string(),
+            project_file_name: member.project_file_name.clone(),
+            script_kind: Some(member.script_kind),
+        }],
+        files: Vec::new(),
+    };
+    let rearm = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.rearm_admitted_state(&dropped).await }
+    });
+    arrived.notified().await;
+
+    workspace.inject_file(
+        format!("{}.unrelated.ts", member.source_path),
+        Arc::from("export {};"),
+    );
+    // Engine discovery is substituted in this fixture: carry the pre-resolved
+    // engines over to the drifted basis, as a real install's re-resolution would.
+    let drifted = ResolvedPublication::current(&router.host).unwrap();
+    for mut spec in router.engine_specs.iter_mut() {
+        spec.basis = drifted.clone();
+    }
+    release.notify_one();
+    rearm.await.unwrap();
+
+    let activations = providers[0]
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                MockCall::ActivateCarrierMember { companion_path, .. }
+                    if *companion_path == member.companion_path
+            )
+        })
+        .count();
+    assert_eq!(
+        activations, 2,
+        "the refused activation must be re-issued under a fresh admission"
+    );
+    assert!(
+        router
+            .routes
+            .contains_key(&ProjectTsserverProvider::normalized(&member.companion_path)),
+        "a re-armed carrier must be routed to its owning engine again"
+    );
+}

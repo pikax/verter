@@ -87,3 +87,76 @@ it("keeps the deadline when the readiness request itself stalls", async () => {
   await vi.advanceTimersByTimeAsync(500);
   await rejected;
 });
+
+it("names the last readiness it saw when the server never certifies the editor version", async () => {
+  vi.useFakeTimers();
+  const result = waitForDiagnosticReceipt(
+    async () => ({ version: 3, ready: false }),
+    () => 4,
+    () => 0,
+    () => [],
+    500,
+    100,
+  );
+  const rejected = expect(result).rejects.toThrow(
+    "Diagnostics did not complete within 500ms (last readiness: ready=false, server version=3, editor version=4)",
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  await rejected;
+});
+
+it("names a certified version whose editor collection never went quiet", async () => {
+  vi.useFakeTimers();
+  let changed = Date.now();
+  const churn = setInterval(() => {
+    changed = Date.now();
+  }, 40);
+  const result = waitForDiagnosticReceipt(
+    async () => ({ version: 2, ready: true }),
+    () => 2,
+    () => changed,
+    () => [],
+    500,
+    100,
+  );
+  const rejected = expect(result).rejects.toThrow(
+    /last readiness: ready=true, server version=2, editor version=2, editor collection quiet for \d+ms of 100ms\)$/,
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  clearInterval(churn);
+  await rejected;
+});
+
+it("names a readiness request that never answered", async () => {
+  vi.useFakeTimers();
+  const result = waitForDiagnosticReceipt(
+    () => new Promise(() => {}),
+    () => 1,
+    () => 0,
+    () => [],
+    500,
+    100,
+  );
+  const rejected = expect(result).rejects.toThrow(
+    "(no readiness answer from the server; readiness request pending for 500ms; editor version=1)",
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  await rejected;
+});
+
+it("names a document the server holds no diagnostics state for", async () => {
+  vi.useFakeTimers();
+  const result = waitForDiagnosticReceipt(
+    async () => undefined,
+    () => 1,
+    () => 0,
+    () => [],
+    500,
+    100,
+  );
+  const rejected = expect(result).rejects.toThrow(
+    "(server tracks no diagnostics state for the document; editor version=1)",
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  await rejected;
+});
