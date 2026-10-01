@@ -72,7 +72,7 @@ use verter_type_runtime::provider_hub::ProviderEpoch;
 /// (fail-closed). Concurrent queries during establishment reuse the one bounded
 /// attempt (singleflight); a failed attempt re-arms on a fresh advertisement/editor
 /// generation OR a fresh workspace/config generation (see
-/// [`LazyTransport`](verter_type_runtime::provider_hub::LazyTransport)). Establishment is
+/// [`ProviderHub::establish_rearming`]). Establishment is
 /// reached only from a query path, never the managed lifecycle path — so opting into
 /// SHARED never trips the managed
 /// foreground-sync budget.
@@ -1441,9 +1441,9 @@ impl TsgoCompositeProvider {
     ///
     /// A NON-carrier path (plain `.ts`/`.tsx`, `carrier_source_of == None`) is UNGATED:
     /// it delegates to managed unchanged. A carrier companion admits through the
-    /// generation-scoped [`CarrierAdmissionCache`] (the ONE shared `resolve_carrier_bound`
-    /// resolver, memoized): only a resolved `BoundProject` admits. Every non-bound state —
-    /// and, by the cache's construction, any never-produced state — FAILS CLOSED: the
+    /// canonical `resolve_carrier_bound` resolver: only a resolved `BoundProject`
+    /// reaches route selection. Shared writes additionally require the owning hub's
+    /// current generated-unit admission. Every non-bound state FAILS CLOSED: the
     /// caller serves its type's empty/none external default, NEVER a `tsgo --lsp`
     /// self-discovery fall-through. `feature` ties each method to its [`ProviderFeature`]
     /// variant (the method↔variant registry) and labels the fail-closed trace.

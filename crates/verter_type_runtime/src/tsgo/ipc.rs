@@ -181,7 +181,7 @@ const BACKGROUND_BATCH_CAP: usize = 3;
 /// write, not the total time to write a buffer: a child that accepts NO bytes for
 /// this long has stopped reading its stdin — the write side of a bidirectional
 /// stdio-pipe deadlock. When it trips, the writer fires `crash_notify` (unless a
-/// deliberate teardown is in flight) so the `ResilientTypeProvider` restart
+/// deliberate teardown is in flight) so the `ProviderHub` restart
 /// machinery (kill, backoff, respawn, replay) recovers the session, and the writer
 /// task ends. Generous by design: a child not draining stdin at all for this long
 /// is wedged, not merely busy.
@@ -499,9 +499,9 @@ struct LspTransport {
     /// drives hang detection. Shared with the read loop, which stamps output,
     /// and with the silence watchdog. When the counter reaches `HANG_THRESHOLD`
     /// the transport fires `crash_notify` to trigger a restart via the existing
-    /// `ResilientTypeProvider` crash recovery machinery.
+    /// `ProviderHub` crash recovery machinery.
     liveness: Arc<EngineLiveness>,
-    /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
+    /// Shared with `ProviderHub` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
     /// pair is sent, so the child's resulting exit (stdout EOF) and any in-flight
@@ -535,7 +535,7 @@ const COMPLETION_DETAIL_RESOLVE_CONCURRENCY: usize = 8;
 const INITIALIZE_TIMEOUT_SECS: u64 = 30;
 
 /// Number of consecutive request timeouts before the transport signals a hang.
-/// When reached, `crash_notify` is fired to trigger the `ResilientTypeProvider`'s
+/// When reached, `crash_notify` is fired to trigger the `ProviderHub`'s
 /// existing restart machinery (kill process, backoff, re-spawn, replay file cache).
 const HANG_THRESHOLD: u32 = 3;
 
@@ -1236,7 +1236,7 @@ async fn deliver_document_close(
 /// auto-responds to server→client requests (e.g., `client/registerCapability`).
 ///
 /// When `crash_notify` is provided, it is signaled on any exit (EOF, I/O error,
-/// read failure) so that the `ResilientTypeProvider` can detect the crash and restart.
+/// read failure) so that the `ProviderHub` can detect the crash and restart.
 ///
 /// `teardown_intent` disarms that signal: a deliberate `shutdown()` sets it BEFORE
 /// sending `shutdown`/`exit`, so the child's resulting EOF is recognized as the
@@ -2289,7 +2289,7 @@ impl TsgoTypeProvider {
     /// Spawn a TSGO process with an optional crash notification signal.
     ///
     /// When `crash_notify` is `Some`, the `Notify` is signaled when the read loop
-    /// exits (EOF, I/O error), allowing the `ResilientTypeProvider` to detect the
+    /// exits (EOF, I/O error), allowing the `ProviderHub` to detect the
     /// crash and trigger a restart. The child is spawned in its OWN process
     /// group / job ([`verter_tsgo_api::process::configure_tree_spawn`]) so
     /// teardown kills the whole tree, never just the direct child.

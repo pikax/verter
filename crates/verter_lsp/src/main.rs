@@ -106,7 +106,7 @@ async fn serve() {
     };
 
     // Deferred client cell — populated inside LspService::build, used by
-    // ResilientTypeProvider's crash monitor to send user notifications.
+    // ProviderHub's crash monitor to send user notifications.
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
 
     // Provider selection: identity-based serving order (editor tsgo → editor
