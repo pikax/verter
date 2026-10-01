@@ -445,7 +445,40 @@ pub struct ProviderHub<P: ?Sized> {
 
 /// A dropped direct application has an unknown physical outcome. Wake only
 /// that incarnation's crash monitor so it cannot keep serving partial state.
+///
+/// Only an application that genuinely stops mid-write (a panic, a runtime
+/// shutting down) reaches this: an issuer that stops WAITING does not, because
+/// every direct application runs through [`detach_application`].
 struct DirectApplicationGuard(Option<Arc<Notify>>);
+
+/// Run one direct engine application to completion, detached from its issuer.
+///
+/// An engine write cannot be taken back once the provider has been handed it,
+/// and a provider acknowledges it only after the engine applied it (a first
+/// open of a plain script loads its whole configured project first). An issuer
+/// that stops waiting in that window — an editor request the client cancelled
+/// — used to drop the write mid-flight, leaving an UNKNOWN outcome that only an
+/// engine restart could clear: every project the engine held was thrown away
+/// for one cancelled request. Detached, the write settles exactly as if the
+/// issuer had stayed, and the issuer simply never reads the result. A task that
+/// fails to complete (`Err`) is the genuine unknown, and its
+/// [`DirectApplicationGuard`] has already armed recovery. The issuer's ambient
+/// request deadline travels with the work, so the provider hops stay bounded
+/// exactly as they were on the issuer's task.
+fn detach_application<T>(
+    application: impl Future<Output = T> + Send + 'static,
+) -> impl Future<Output = Result<T, tokio::task::JoinError>>
+where
+    T: Send + 'static,
+{
+    let deadline = crate::deadline::current();
+    tokio::spawn(async move {
+        match deadline {
+            Some(at) => crate::deadline::with_deadline_at(at, application).await,
+            None => application.await,
+        }
+    })
+}
 
 impl Drop for DirectApplicationGuard {
     fn drop(&mut self) {
@@ -576,9 +609,23 @@ where
         if serving.epoch != epoch {
             return Err(self.restarting());
         }
-        let mut application = DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
-        let result = serving.provider.close_file(path).await;
-        application.0 = None;
+        let result = {
+            let serving = serving.clone();
+            let path = path.to_string();
+            detach_application(async move {
+                let mut application =
+                    DirectApplicationGuard(Some(Arc::clone(&serving.crash_signal)));
+                let result = serving.provider.close_file(&path).await;
+                application.0 = None;
+                result
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(TypeProviderError::new(
+                    "overlay withdrawal did not complete",
+                ))
+            })
+        };
         if result.is_err() {
             serving.crash_signal.notify_one();
         }
@@ -1275,7 +1322,7 @@ async fn run_actor<P>(
                 admissions,
                 lane,
                 deadline,
-                mut ack,
+                ack,
             } => {
                 let current = || {
                     admissions
@@ -1297,21 +1344,25 @@ async fn run_actor<P>(
                             if disposition == Disposition::Shadowed {
                                 Err(AdmissionRefusal::ShadowedMutation)
                             } else {
+                                // Once the engine has been handed the mutation it runs to
+                                // its acknowledgement, whether or not the submitter is still
+                                // waiting: its outcome is then KNOWN and settles like any
+                                // other. Abandoning it would leave the engine holding an
+                                // unknown write, which only a restart can clear — one editor
+                                // request cancelled while its write waited behind a slow
+                                // acknowledgement would cost the whole engine. A submitter
+                                // gone BEFORE application is refused above with zero writes.
                                 let forwarding = async {
                                     let forwarded = desired::forward(
                                         serving.provider.as_ref(),
                                         &mutation,
                                         lane,
                                     );
-                                    tokio::select! {
-                                        biased;
-                                        _ = ack.closed() => Err(TypeProviderError::new("admitted synchronization cancelled during application")),
-                                        result = async {
-                                            match deadline {
-                                                Some(at) => crate::deadline::with_deadline_at(at, forwarded).await,
-                                                None => forwarded.await,
-                                            }
-                                        } => result,
+                                    match deadline {
+                                        Some(at) => {
+                                            crate::deadline::with_deadline_at(at, forwarded).await
+                                        }
+                                        None => forwarded.await,
                                     }
                                 };
                                 match await_receptive(

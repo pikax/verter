@@ -4719,10 +4719,25 @@ async fn cancelled_queued_overlay_never_reaches_the_engine_or_replay() {
     );
 }
 
+/// Whether a respawn was announced within `bound` (paused clock: the bound
+/// elapses as soon as every task is idle).
+async fn respawned_within(harness: &ResilientHarness, bound: std::time::Duration) -> bool {
+    tokio::time::timeout(bound, harness.notifier.await_started(2))
+        .await
+        .is_ok()
+}
+
+/// An issuer that stops waiting does not make its write's outcome unknown: the
+/// write was already handed to the engine, so it runs to its acknowledgement
+/// and settles exactly as if the issuer had stayed. Restarting the engine
+/// instead would throw away every project it holds because one caller (an
+/// editor request the client cancelled) went away while its write sat behind
+/// a slow acknowledgement.
 #[tokio::test(start_paused = true)]
-async fn cancelling_an_inflight_direct_overlay_arms_exact_epoch_recovery() {
+async fn cancelling_the_issuer_of_an_inflight_direct_overlay_lets_it_settle() {
     use super::{OverlayFileKind, OverlayPriority};
     let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let epoch = harness.provider.serving_epoch().unwrap();
     let gate = Arc::new(Semaphore::new(0));
     *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
     let hub = Arc::clone(&harness.provider);
@@ -4741,14 +4756,79 @@ async fn cancelling_an_inflight_direct_overlay_arms_exact_epoch_recovery() {
     assert!(write.await.unwrap_err().is_cancelled());
     gate.add_permits(1);
     harness.spawn_gate.add_permits(1);
-    let recovery = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        harness.notifier.await_started(2),
-    )
-    .await;
     assert!(
-        recovery.is_ok(),
-        "unknown partial application must retire its exact incarnation and arm recovery"
+        !respawned_within(&harness, std::time::Duration::from_secs(2)).await,
+        "an abandoned issuer must not restart a healthy engine"
+    );
+    assert_eq!(harness.provider.serving_epoch(), Some(epoch));
+    assert_eq!(engine.inner.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(
+        engine.calls().iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, content }
+                if path == "d:/ws/src/Foo.vue.tsx" && content == "unsaved"
+        )),
+        "the write the engine was given must run to its acknowledgement"
+    );
+}
+
+/// The actor-path counterpart: an admitted overlay whose submitter is dropped
+/// after the engine started applying it settles normally — recorded as applied
+/// (so a later replacement re-arms it) — and the serving engine stays.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_issuer_of_an_inflight_actor_overlay_lets_it_settle() {
+    use super::{OverlayFileKind, OverlayMutation, OverlayPriority};
+    let (harness, engine, admitted) = admitted_overlay_fixture().await;
+    let epoch = harness.provider.serving_epoch().unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let write = tokio::spawn(async move {
+        hub.apply_overlay(
+            &admitted,
+            OverlayMutation::File {
+                path: "d:/ws/src/Foo.vue.tsx".into(),
+                content: "unsaved".into(),
+                kind: OverlayFileKind::Update,
+                priority: OverlayPriority::Foreground,
+            },
+        )
+        .await
+    });
+    engine.inner.update_started.notified().await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    // An ordinary mutation queued behind the abandoned one proves the actor
+    // finished settling it before the assertions below run.
+    harness
+        .provider
+        .configure_paths("d:/ws", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        !respawned_within(&harness, std::time::Duration::from_secs(2)).await,
+        "an abandoned issuer must not restart a healthy engine"
+    );
+    assert_eq!(harness.provider.serving_epoch(), Some(epoch));
+    assert_eq!(engine.inner.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(
+        engine.calls().iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, content }
+                if path == "d:/ws/src/Foo.vue.tsx" && content == "unsaved"
+        )),
+        "the write the engine was given must run to its acknowledgement"
+    );
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_dropped(1).await;
+    assert!(
+        harness.notifier.dropped().iter().any(|dropped| dropped
+            .files
+            .iter()
+            .any(|file| file == "d:/ws/src/Foo.vue.tsx")),
+        "the settled write is applied state a replacement must re-arm"
     );
 }
 
