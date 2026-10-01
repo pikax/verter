@@ -715,16 +715,24 @@ where
         let result = match forwarded {
             Ok(()) => match check_current(&self.state.shared, admission) {
                 Ok(()) => {
-                    // The written path's content changed: lift its crash
-                    // attribution, exactly as a queued mutation would.
-                    let mut watch = self
-                        .state
-                        .shared
-                        .query_watch
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    watch.clear_path(path);
-                    Ok(())
+                    let disposition = super::note_file_receipt(
+                        &self.state.shared,
+                        serving.provider.as_ref(),
+                        path,
+                        content,
+                    );
+                    if disposition != crate::traits::FileLoadDisposition::Forwarded {
+                        Err(AdmissionRefusal::ShadowedMutation)
+                    } else {
+                        // A confirmed write lifts crash attribution for this path.
+                        self.state
+                            .shared
+                            .query_watch
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clear_path(path);
+                        Ok(())
+                    }
                 }
                 Err(AdmissionRefusal::StaleBasis) => {
                     // A BASIS-ONLY drift (a content-generation bump while the

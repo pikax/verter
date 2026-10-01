@@ -1248,10 +1248,14 @@ mod inner {
                     .filter(|(blocked_path, _)| blocked_path == companion_path)
                     .map(|(_, gate)| gate.clone())
             };
+            let this = self.clone();
+            let companion = companion_path.to_string();
+            let bytes = content.to_string();
             Box::pin(async move {
                 if let Some(gate) = block {
                     gate.notified().await;
                 }
+                this.accept_applied(&companion, &bytes);
                 Ok(())
             })
         }

@@ -22,6 +22,7 @@ use crate::provider_hub::ProviderEpoch;
 struct FakeTransport {
     alive: AtomicBool,
     ops: SyncMutex<Vec<String>>,
+    documents: SyncMutex<std::collections::HashMap<String, String>>,
     inject_fails: AtomicBool,
     retract_hangs: AtomicBool,
     inject_gated: AtomicBool,
@@ -38,6 +39,7 @@ impl FakeTransport {
         Self {
             alive: AtomicBool::new(true),
             ops: SyncMutex::new(Vec::new()),
+            documents: SyncMutex::new(std::collections::HashMap::new()),
             inject_fails: AtomicBool::new(false),
             retract_hangs: AtomicBool::new(false),
             inject_gated: AtomicBool::new(false),
@@ -112,6 +114,7 @@ impl OverlayTransport for FakeTransport {
         let gated = self.inject_gated.load(Ordering::SeqCst);
         let yields = self.inject_yields.load(Ordering::SeqCst);
         let entry = format!("{path}={content}");
+        let document = (path.to_string(), content.to_string());
         Box::pin(async move {
             if yields {
                 for _ in 0..4 {
@@ -128,6 +131,7 @@ impl OverlayTransport for FakeTransport {
                 // A barrier error: the shared Program did NOT accept this content.
                 return Err(TypeProviderError::new("fake inject barrier failed"));
             }
+            self.documents.lock().insert(document.0, document.1);
             self.ops.lock().push(entry);
             Ok(())
         })
@@ -137,6 +141,7 @@ impl OverlayTransport for FakeTransport {
         let hangs = self.retract_hangs.load(Ordering::SeqCst);
         let gated = self.retract_gated.load(Ordering::SeqCst);
         let entry = format!("close:{path}");
+        let path = path.to_string();
         Box::pin(async move {
             if gated {
                 // Signal the retract is in-flight, then block until released — models the
@@ -151,6 +156,7 @@ impl OverlayTransport for FakeTransport {
                 // timeout must fire and return regardless.
                 std::future::pending::<()>().await;
             }
+            self.documents.lock().remove(&path);
             self.ops.lock().push(entry);
             Ok(())
         })
@@ -457,7 +463,7 @@ async fn retract_is_bounded_when_the_relay_close_never_answers() {
     let bound = Duration::from_millis(150);
     let start = tokio::time::Instant::now();
     let current_transport = Arc::clone(&transport);
-    core.retract_bounded("/ws/Foo.vue.tsx", bound, move || {
+    core.retract_bounded("/ws/Foo.vue.tsx", bound, move |_| {
         Some(Arc::clone(&current_transport))
     })
     .await;
@@ -1435,7 +1441,7 @@ async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
         let current = Arc::clone(&transport);
         tokio::spawn(async move {
             let current = current;
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move |_| {
                 Some(Arc::clone(&current))
             })
             .await;
@@ -1520,7 +1526,7 @@ async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reo
         let current = Arc::clone(&transport);
         tokio::spawn(async move {
             let current = current;
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move |_| {
                 Some(Arc::clone(&current))
             })
             .await;
@@ -1590,7 +1596,7 @@ async fn retract_bounded_retracts_the_committed_overlay_when_not_reopened() {
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
 
     let current = Arc::clone(&transport);
-    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move |_| {
         Some(Arc::clone(&current))
     })
     .await;
@@ -1638,7 +1644,7 @@ async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close
         let current = Arc::clone(&transport);
         tokio::spawn(async move {
             let current = current;
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move |_| {
                 Some(Arc::clone(&current))
             })
             .await;
@@ -1708,7 +1714,7 @@ async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
         let core = Arc::clone(&core);
         let serving_cell = Arc::clone(&serving_cell);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move || {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5), move |_| {
                 serving_cell.lock().clone()
             })
             .await;
@@ -1774,8 +1780,10 @@ async fn retract_bounded_respects_the_close_deadline_when_the_gate_is_held() {
         let core = Arc::clone(&core);
         tokio::spawn(async move {
             let current = Arc::clone(&established.transport);
-            core.retract_bounded("/ws/Foo.vue.tsx", bound, move || Some(Arc::clone(&current)))
-                .await;
+            core.retract_bounded("/ws/Foo.vue.tsx", bound, move |_| {
+                Some(Arc::clone(&current))
+            })
+            .await;
         })
     };
     // Watchdog: 2s virtual. A correct impl returns at the 150ms Instant
@@ -1887,4 +1895,46 @@ async fn take_content_prunes_dead_carrier_gate_entries() {
         0,
         "take_content prunes dead carrier-gate registry entries"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn timed_out_close_is_withdrawn_by_the_next_sweep() {
+    for mode in ["held gate", "hung close", "no transport", "cancelled"] {
+        let hold_gate = matches!(mode, "held gate" | "cancelled");
+        let core = LazyOverlayCore::<FakeTransport>::new();
+        let path = "/ws/Closed.vue.tsx";
+        core.record_content(path, "old editor bytes");
+        let serving = establish_alive(&core, 1).await;
+        core.inject_dirty(&serving, path, 1).await;
+        assert!(serving.transport.documents.lock().contains_key(path));
+        let gate = core.carrier_gate(path);
+        let held = if hold_gate {
+            Some(gate.lock().await)
+        } else {
+            None
+        };
+        serving.transport.set_retract_hangs(mode == "hung close");
+        {
+            let close = core.retract_bounded(path, Duration::from_millis(150), |_| {
+                (mode != "no transport").then(|| Arc::clone(&serving.transport))
+            });
+            tokio::pin!(close);
+            if mode == "cancelled" {
+                assert!(futures_util::poll!(close.as_mut()).is_pending());
+            } else {
+                close.await;
+            }
+        }
+        assert!(!core.is_synced(path));
+        assert!(core.recorded_paths().is_empty());
+        assert!(serving.transport.documents.lock().contains_key(path));
+        drop(held);
+        serving.transport.set_retract_hangs(false);
+        core.inject_all_dirty(&serving, 2, |_, _| false, |_| false)
+            .await;
+        assert!(
+            !serving.transport.documents.lock().contains_key(path),
+            "a closed carrier must be physically withdrawn even outside the injection scope"
+        );
+    }
 }

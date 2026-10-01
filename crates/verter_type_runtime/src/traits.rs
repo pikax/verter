@@ -271,6 +271,13 @@ pub trait TypeProvider: Send + Sync {
         AppliedContent::Uncertified
     }
 
+    /// Drive previously recorded demand outside the foreground publication budget.
+    /// Implementations may materialize a lazy route, but callers still require
+    /// matching `applied_content` before committing a delivered surface.
+    fn synchronize_pending_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Stable identity of this provider implementation.
     ///
     /// Returns one of `"tsgo"`, `"tsserver"`, `"extension"`. The LSP layer

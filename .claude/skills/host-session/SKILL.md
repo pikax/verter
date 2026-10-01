@@ -178,7 +178,22 @@ cache. tsserver uses acknowledged `updateOpen` writes for file receipts; complet
 carrier registration refreshes certify carrier bytes. ProviderHub validates wrapped
 provider receipts both after forwarding and during install replay, and rechecks the
 live receipt on reads so transport failure cannot leave a cached hub certificate.
+Direct admitted writes use the same engine-receipt check as queued mutations;
+successful physical overlay withdrawal removes that receipt.
 Cache-only loads remain `Held` until the wrapped provider certifies matching bytes.
+When a background drain encounters a held IDE write, it calls
+`TypeProvider::synchronize_pending_file`: the shared composite resolves the current
+configured owner and drives the existing hub engagement/synchronization path.
+This runs outside the foreground publication budget and breaks the dependency
+between first query and first delivered surface. ProjectSync then certifies the
+matching bytes without rewriting its captured snapshot; concurrent edits remain
+protected. A lazy managed fallback staying `Held` cannot mask an applied shared
+receipt.
+Overlay close removes desired content immediately but retains an epoch-bound
+withdrawal until transport close succeeds. Synchronization drains withdrawals
+outside the editor-demand injection filter. Deadlines and cancellation retain
+ownership, successful reopen supersedes the pending close under the carrier gate,
+and retired-incarnation closes never target the replacement transport.
 A recovery drain also wakes the existing post-scan completion check. A scan that
 finished during an engine replacement can announce completion once its queued
 work settles, without reinitializing the workspace or polling readiness. The

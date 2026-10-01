@@ -599,11 +599,13 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         self.inner
             .hub
             .overlay_state()
-            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT, move || {
-                hub.serving().map(|(provider, epoch)| {
-                    Arc::new(HubAdmittedTransport::new(provider, Arc::clone(&hub), epoch))
-                        as Arc<HubAdmittedTransport<P>>
-                })
+            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT, move |expected| {
+                hub.serving()
+                    .filter(|(_, epoch)| Some(*epoch) == expected)
+                    .map(|(provider, epoch)| {
+                        Arc::new(HubAdmittedTransport::new(provider, Arc::clone(&hub), epoch))
+                            as Arc<HubAdmittedTransport<P>>
+                    })
             })
             .await;
     }
@@ -1718,6 +1720,14 @@ impl TsgoCompositeProvider {
             };
             self.shared_record(path, content, shared_priority);
         }
+        // A lazy managed fallback remains Held throughout a healthy shared session.
+        // Reconcile against the actual shared receipt once its demand has settled.
+        if disposition == FileLoadDisposition::Held {
+            return Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ));
+        }
         Ok(disposition)
     }
 
@@ -1780,6 +1790,29 @@ impl TypeProvider for TsgoCompositeProvider {
         Box::pin(async move {
             self.forward_managed(path, content, priority, ManagedWrite::Update)
                 .await
+        })
+    }
+
+    fn synchronize_pending_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        Box::pin(async move {
+            let Some(shared) = &self.shared else {
+                return Ok(());
+            };
+            let Some(source) = carrier_source_of(&path) else {
+                return Ok(());
+            };
+            let carrier = project_binding::resolve_carrier_bound(&self.host, &source)
+                .into_bound()
+                .ok_or_else(|| TypeProviderError::new("pending carrier has no configured owner"))?;
+            tokio::time::timeout(
+                SHARED_OVERLAY_TIMEOUT,
+                shared.engage_provider(&path, &carrier),
+            )
+            .await
+            .map_err(|_| TypeProviderError::new("pending shared synchronization timed out"))?
+            .map_err(|error| TypeProviderError::new(error.to_string()))?;
+            Ok(())
         })
     }
 

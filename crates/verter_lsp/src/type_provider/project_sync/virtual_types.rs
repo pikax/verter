@@ -4,6 +4,23 @@
 use super::*;
 
 impl ProjectSync {
+    /// Drive held lazy demand from the background drain, then certify its exact
+    /// delivery without republishing an older snapshot over a concurrent edit.
+    pub async fn synchronize_pending_tsx(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.synchronize_pending_file(path).await?;
+        let lock = self.virtual_verter_types_lock(path);
+        let _guard = lock.lock().await;
+        let prepared = self.prepare_tsx_surface(path, content)?;
+        if let Some(delivered) = self.certified_delivery(path, prepared.prepared) {
+            self.record_delivered_carrier_surface(path, content, delivered);
+        }
+        Ok(())
+    }
+
     /// Produce the exact carrier bytes owned by this provider topology.
     ///
     /// Managed/editor-owned tsgo cannot add compiler options to a configured

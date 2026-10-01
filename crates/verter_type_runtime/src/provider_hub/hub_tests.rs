@@ -4307,6 +4307,29 @@ async fn forward_admitted_file_refusals_write_nothing() {
             == 1,
         "exactly one provider write for the admitted unit"
     );
+    assert!(
+        matches!(hub.applied_content(unit.as_str()), crate::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const v = 1;"),
+        "a direct admitted write must expose the engine's receipt through the hub"
+    );
+    engine.inner.cache_only_loads.store(true, Ordering::SeqCst);
+    assert_eq!(
+        hub.forward_admitted_file(
+            &admission,
+            unit.as_str(),
+            "cache-only replacement",
+            OverlayFileKind::Load,
+            OverlayPriority::Foreground,
+        )
+        .await,
+        Err(AdmissionRefusal::ShadowedMutation),
+        "a successful cache-only load cannot settle direct application"
+    );
+    assert!(
+        matches!(hub.applied_content(unit.as_str()), crate::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const v = 1;"),
+        "a cache-only replacement preserves the actual engine receipt"
+    );
 }
 
 /// A BASIS-ONLY drift observed after a successful direct write (a

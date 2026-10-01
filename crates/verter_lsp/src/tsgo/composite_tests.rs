@@ -73,6 +73,7 @@ fn authored_file_check_directive_overrides_the_configured_check_js_policy() {
 /// models a request in flight while its serving incarnation is replaced.
 struct RecordingAttach {
     ops: parking_lot::Mutex<Vec<String>>,
+    applied: parking_lot::Mutex<std::collections::HashMap<String, Arc<str>>>,
     hover_reached: tokio::sync::Notify,
     hover_release: tokio::sync::Notify,
     hover_gated: std::sync::atomic::AtomicBool,
@@ -82,6 +83,7 @@ impl RecordingAttach {
     fn new() -> Self {
         Self {
             ops: parking_lot::Mutex::new(Vec::new()),
+            applied: parking_lot::Mutex::default(),
             hover_reached: tokio::sync::Notify::new(),
             hover_release: tokio::sync::Notify::new(),
             hover_gated: std::sync::atomic::AtomicBool::new(false),
@@ -124,9 +126,23 @@ impl TypeProvider for RecordingAttach {
         "tsgo"
     }
 
-    fn open_file(&self, path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        self.applied
+            .lock()
+            .get(path)
+            .cloned()
+            .map(verter_type_runtime::traits::AppliedContent::Applied)
+            .unwrap_or(verter_type_runtime::traits::AppliedContent::NotApplied)
+    }
+
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         self.ops.lock().push(format!("write:{path}"));
-        Box::pin(async { Ok(()) })
+        let path = path.to_string();
+        let content = Arc::from(content);
+        Box::pin(async move {
+            self.applied.lock().insert(path, content);
+            Ok(())
+        })
     }
 
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -139,7 +155,11 @@ impl TypeProvider for RecordingAttach {
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
         self.ops.lock().push(format!("retract:{path}"));
-        Box::pin(async { Ok(()) })
+        let path = path.to_string();
+        Box::pin(async move {
+            self.applied.lock().remove(&path);
+            Ok(())
+        })
     }
 
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {

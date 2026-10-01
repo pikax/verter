@@ -1403,6 +1403,12 @@ async fn apply_owner_resolved_carrier_sync(
                 } else {
                     sync.open_tsx(&ide_path, &ide.code).await
                 };
+                let result = match result {
+                    Ok(()) if sync.receipt_for_commit(&ide_path, &ide.code).is_none() => {
+                        sync.synchronize_pending_tsx(&ide_path, &ide.code).await
+                    }
+                    result => result,
+                };
                 match result {
                     Ok(()) => {
                         // Record a fresh generation pinning the EXACT IDE bytes just

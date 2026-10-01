@@ -585,6 +585,9 @@ where
         if self.serving_epoch() != Some(epoch) {
             return Err(self.restarting());
         }
+        if result.is_ok() {
+            applied_map(&self.state.shared).remove(path);
+        }
         result
     }
 
@@ -1652,25 +1655,15 @@ fn note_receipt<P: TypeProvider + ?Sized>(
     provider: &P,
     mutation: &DesiredMutation,
 ) -> crate::traits::FileLoadDisposition {
-    use crate::traits::{disposition_for_applied_bytes, AppliedContent, FileLoadDisposition};
-    let mut applied = applied_map(shared);
+    use crate::traits::{AppliedContent, FileLoadDisposition};
     if let Some(path) = mutation.closed_path() {
-        applied.remove(path);
+        applied_map(shared).remove(path);
         return FileLoadDisposition::Forwarded;
     }
     if let Some((path, content)) = mutation.committed_file() {
-        let receipt = provider.applied_content(path);
-        let disposition = disposition_for_applied_bytes(&receipt, content);
-        match receipt {
-            AppliedContent::Applied(bytes) => {
-                applied.insert(path.to_string(), bytes);
-            }
-            _ => {
-                applied.remove(path);
-            }
-        }
-        return disposition;
+        return note_file_receipt(shared, provider, path, content);
     }
+    let mut applied = applied_map(shared);
     for path in mutation.touched_paths() {
         match provider.applied_content(&path) {
             AppliedContent::Applied(bytes) => {
@@ -1682,6 +1675,27 @@ fn note_receipt<P: TypeProvider + ?Sized>(
         }
     }
     FileLoadDisposition::Forwarded
+}
+
+/// Shared certification boundary for queued mutations and direct admitted writes.
+fn note_file_receipt<P: TypeProvider + ?Sized>(
+    shared: &Shared<P>,
+    provider: &P,
+    path: &str,
+    content: &str,
+) -> crate::traits::FileLoadDisposition {
+    let receipt = provider.applied_content(path);
+    let disposition = crate::traits::disposition_for_applied_bytes(&receipt, content);
+    let mut applied = applied_map(shared);
+    match receipt {
+        crate::traits::AppliedContent::Applied(bytes) => {
+            applied.insert(path.to_string(), bytes);
+        }
+        _ => {
+            applied.remove(path);
+        }
+    }
+    disposition
 }
 
 /// A close with no engine has nothing to forward. Drop any stale receipt.
