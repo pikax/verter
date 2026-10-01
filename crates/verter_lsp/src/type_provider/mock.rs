@@ -164,6 +164,12 @@ mod inner {
             std::sync::Arc<tokio::sync::Notify>,
             std::sync::Arc<tokio::sync::Notify>,
         )>,
+        /// One-shot pause for the next `activate_carrier_member`: `(arrived,
+        /// release)`, as [`MockTypeProvider::block_next_carrier_activation`].
+        carrier_activation_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
         /// Bytes this engine accepted. Absent means not applied.
         applied: std::collections::HashMap<String, Arc<str>>,
         calls: Vec<MockCall>,
@@ -619,6 +625,21 @@ mod inner {
             let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
             let release = std::sync::Arc::new(tokio::sync::Notify::new());
             self.state.lock().unwrap().carrier_batch_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Pause the next `activate_carrier_member` until `release` is
+        /// signalled. `arrived` fires once the engine has entered it.
+        pub fn block_next_carrier_activation(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_activation_block =
                 Some((arrived.clone(), release.clone()));
             (arrived, release)
         }
@@ -1293,17 +1314,23 @@ mod inner {
             project_file_name: &str,
             script_kind: verter_type_runtime::CarrierScriptKind,
         ) -> ProviderFuture<'_, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::ActivateCarrierMember {
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ActivateCarrierMember {
                     source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     project_file_name: project_file_name.to_string(),
                     script_kind,
                 });
-            Box::pin(async { Ok(()) })
+                state.carrier_activation_block.take()
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn activate_carrier_members<'a>(
