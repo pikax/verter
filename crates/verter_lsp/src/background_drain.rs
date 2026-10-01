@@ -403,6 +403,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             &canonical_id,
             Some(&carrier_publish),
             carrier_coordinator,
+            is_tsgo,
         )
         .await;
 
@@ -903,6 +904,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     canonical_id: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    rewrite_import_specifiers: bool,
 ) -> SyncOutcome {
     if carrier_language_for(canonical_id).is_some() {
         sync_pending_carrier_provider_file(
@@ -932,6 +934,37 @@ pub(super) async fn sync_pending_snapshot_provider_file(
                 .is_none()
         {
             return SyncOutcome::Terminal;
+        }
+        // An OPEN self-file document (a plain script or a rune module) is
+        // delivered through the same shared shadow sync the coordinator tick and
+        // the editor ingress use. It records the provider surface and the
+        // position mapper that match the delivered bytes, and it rewrites import
+        // specifiers only for a provider that resolves the explicit source graph
+        // itself. Delivering an open plain script here with specifiers rewritten
+        // for tsserver would shift every provider position in it against the
+        // editor's text, so its hovers and navigation would land on the wrong
+        // tokens.
+        if let (Some(file_language), Some(uri)) = (
+            crate::server::self_file_language_for(canonical_id),
+            documents.canonical_id_to_uri(canonical_id),
+        ) {
+            let published = || Some(snapshot.clone());
+            let delivered = crate::server::sync_self_file_shadow_state(
+                documents,
+                sync,
+                provider_sync_states,
+                &published,
+                &uri,
+                canonical_id,
+                &file_language,
+                rewrite_import_specifiers,
+            )
+            .await;
+            return if delivered {
+                SyncOutcome::FullyReconciled
+            } else {
+                SyncOutcome::Nothing
+            };
         }
         // Non-carrier files have a single Shadow kind: synced fully or not at all.
         if sync_pending_non_carrier_provider_file(

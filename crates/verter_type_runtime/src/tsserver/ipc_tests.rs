@@ -4289,6 +4289,48 @@ async fn real_publication_refresh_admits_plugin_carriers() {
     real.shutdown().await;
 }
 
+/// tsserver asserts (`Debug Failure. False expression.`) when `updateOpen`
+/// closes a file it holds a ScriptInfo for but does not have open, and the
+/// acknowledged close turns that into a failed write that restarts the engine.
+/// A close the provider never opened — a project member that was only ever read
+/// from disk, a carrier companion whose registration is already gone, or a
+/// repeated close — must therefore settle without reaching tsserver.
+#[tokio::test]
+async fn real_close_of_a_file_tsserver_does_not_hold_open_succeeds() {
+    let real = RealReloadHarness::new().await;
+    // The companions are on-disk members of the configured project the anchor
+    // open loaded, but no carrier was registered and nothing opened them.
+    for carrier in &real.carriers {
+        real.provider
+            .close_file(&carrier.companion_path)
+            .await
+            .expect("closing a never-opened project member must not reach tsserver");
+    }
+    let path = real
+        ._project
+        .path()
+        .join("closed-twice.ts")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let content = "export const closedTwice: number = 1;";
+    real.provider.open_file(&path, content).await.unwrap();
+    real.provider.close_file(&path).await.unwrap();
+    real.provider
+        .close_file(&path)
+        .await
+        .expect("a repeated close must not reach tsserver");
+
+    // The engine is still the one that served before the closes.
+    real.provider.open_file(&path, content).await.unwrap();
+    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    assert!(
+        hover.contents.contains("closedTwice: number"),
+        "{}",
+        hover.contents
+    );
+    real.shutdown().await;
+}
+
 #[tokio::test]
 async fn real_source_identity_observes_targeted_refresh_without_reload_projects() {
     let real = RealReloadHarness::new().await;

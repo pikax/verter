@@ -3187,14 +3187,19 @@ impl TypeProvider for TsserverTypeProvider {
                         );
                     }
                     forget_content(&contents_cache, &content_generations, &file).await;
-                    opened_files.lock().await.remove(&file);
+                    let was_open = opened_files.lock().await.remove(&file).is_some();
                     // Retract the carrier→project routing for a closed companion so
                     // it no longer injects `projectFileName` (a closed companion is
                     // no longer a member; a stale route would target a project the
                     // companion left). A no-op for a real `.ts`/`.tsx` file (never in
                     // the carrier map).
                     carrier_projects.write().remove(&file);
-                    if carrier_source.is_none() {
+                    // Only a file this provider opened is closed in tsserver: closing
+                    // one it merely loaded from disk (a project member, a companion
+                    // whose registration is already gone, a repeated close) fails
+                    // tsserver's open-file assertion, and the acknowledged failure
+                    // would read as a broken write that restarts the engine.
+                    if carrier_source.is_none() && was_open {
                         transport
                             .request("updateOpen", serde_json::json!({ "closedFiles": [file] }))
                             .await?;

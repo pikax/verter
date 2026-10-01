@@ -16289,6 +16289,107 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     );
 }
 
+/// An open plain script queued before the resolver snapshot was published is
+/// delivered to tsserver with its AUTHORED import specifiers, exactly as the
+/// coordinator tick and the editor ingress deliver it. Rewriting
+/// `./Comp.vue` to its generated API companion is a tsgo-only projection; on
+/// tsserver the editor-side position mapper stays the identity, so rewritten
+/// bytes would shift every hover and navigation position in the file onto a
+/// neighbouring token.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_snapshot_drain_delivers_an_open_script_with_authored_specifiers_on_tsserver() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace dir");
+    std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
+    let component_source = "<script setup lang=\"ts\">
+const label = 1;
+</script>
+<template><div>{{ label }}</div></template>";
+    let authored = "import Comp from \"./Comp.vue\";
+
+export const direct = Comp;
+";
+    std::fs::write(workspace.join("src").join("Comp.vue"), component_source)
+        .expect("write carrier");
+    std::fs::write(workspace.join("src").join("consumer.ts"), authored).expect("write consumer");
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    let consumer_id = format!("{workspace_id}/src/consumer.ts");
+    let project = verter_workspace::ide_project_config(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    );
+
+    let host = Arc::new(VerterHost::new(
+        HostConfig::default(),
+        Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        )),
+    ));
+    host.configure_projects(vec![project.clone()]);
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    for (relative, language_id, text) in [
+        ("src/Comp.vue", "vue", component_source),
+        ("src/consumer.ts", "typescript", authored),
+    ] {
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: crate::uri::path_to_file_uri(&format!("{workspace_id}/{relative}"))
+                .expect("file uri"),
+            language_id: language_id.to_string(),
+            version: 1,
+            text: text.to_string(),
+        });
+    }
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![project]),
+        resolution_view: None,
+        ownership_ready: true,
+    };
+    let outcome = super::background_drain::sync_pending_snapshot_provider_file(
+        Some(&sync),
+        &documents,
+        &snapshot,
+        &DashMap::new(),
+        &consumer_id,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+        false,
+    )
+    .await;
+
+    let delivered: Vec<String> = provider
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, content }
+            | MockCall::OpenFileBackground { path, content }
+            | MockCall::LoadFile { path, content }
+            | MockCall::UpdateFile { path, content }
+                if path == consumer_id =>
+            {
+                Some(content)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delivered.last().map(String::as_str),
+        Some(authored),
+        "the drained script must reach tsserver verbatim: {delivered:?}"
+    );
+    assert!(
+        matches!(
+            outcome,
+            super::background_drain::SyncOutcome::FullyReconciled
+        ),
+        "a delivered script is reconciled"
+    );
+}
+
 /// DISCRIMINATING: a pending carrier whose sync failed while the provider was
 /// unavailable (a replacement gap between epochs) must be re-driven by the
 /// drain's own bounded successor chain once the provider serves again. After
