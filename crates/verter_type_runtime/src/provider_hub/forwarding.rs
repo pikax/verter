@@ -7,10 +7,97 @@ use super::*;
 use crate::protocol::*;
 use crate::traits::ProviderFuture;
 
+fn receipt_disposition(receipt: &AppliedReceipt) -> crate::traits::FileLoadDisposition {
+    receipt.disposition
+}
+
+impl<P> ProviderHub<P>
+where
+    P: TypeProvider + ?Sized + Send + Sync + 'static,
+{
+    fn mutation_disposition<'a>(
+        &'a self,
+        mutation: DesiredMutation,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            let lane = match priority {
+                OverlayPriority::Foreground => Lane::Foreground,
+                OverlayPriority::Normal => Lane::Normal,
+                OverlayPriority::Background => Lane::Background,
+            };
+            let receipt = self.submit_mutation(mutation, lane).await?;
+            Ok(receipt_disposition(&receipt))
+        })
+    }
+}
+
 impl<P> TypeProvider for ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Load {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Open {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Update {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        let Some(serving) = self.state.shared.serving() else {
+            return crate::traits::AppliedContent::NotApplied;
+        };
+        let applied = self
+            .state
+            .shared
+            .applied_files
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        match (applied.get(path), serving.provider.applied_content(path)) {
+            (Some(content), crate::traits::AppliedContent::Applied(bytes)) if *content == bytes => {
+                crate::traits::AppliedContent::Applied(bytes)
+            }
+            _ => crate::traits::AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         // The engine identity is tier-accurate while an incarnation serves.
         // Between incarnations the LAST serving tier is the truthful identity:

@@ -4181,6 +4181,108 @@ async fn reload_projects_recovery_fires_again_after_cooldown() {
 async fn real_publication_refresh_admits_plugin_carriers() {
     let real = RealReloadHarness::new().await;
     real.register_carriers().await;
+    for carrier in &real.carriers {
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::Applied(Arc::from(carrier.content)),
+        );
+    }
+    let mut activations = Vec::new();
+    for carrier in &real.carriers {
+        real.provider
+            .close_file(&carrier.companion_path)
+            .await
+            .unwrap();
+        real.provider
+            .register_carrier_metadata(
+                &carrier.source_path,
+                &carrier.companion_path,
+                carrier.content,
+                &real.project_file_name,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::NotApplied
+        );
+        activations.push(crate::traits::CarrierActivation {
+            source_path: carrier.source_path.clone(),
+            companion_path: carrier.companion_path.clone(),
+            project_file_name: real.project_file_name.clone(),
+            script_kind: crate::traits::CarrierScriptKind::Tsx,
+        });
+    }
+    let cached = &real.carriers[0];
+    real.provider
+        .load_file(&cached.companion_path, "cache-only replacement")
+        .await
+        .unwrap();
+    real.provider
+        .activate_carrier_members(&activations)
+        .await
+        .unwrap();
+    assert_eq!(
+        real.provider.applied_content(&cached.companion_path),
+        crate::traits::AppliedContent::NotApplied,
+        "activation cannot certify a cache-only replacement as registered carrier content"
+    );
+    real.provider
+        .register_carrier_metadata(
+            &cached.source_path,
+            &cached.companion_path,
+            cached.content,
+            &real.project_file_name,
+        )
+        .await
+        .unwrap();
+    for carrier in &real.carriers {
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::Applied(Arc::from(carrier.content))
+        );
+    }
+    let path = real
+        ._project
+        .path()
+        .join("receipt.ts")
+        .to_string_lossy()
+        .into_owned();
+    let before = "export const receipt: number = 1;";
+    let after = "export const receipt: string = 'delivered';";
+    real.provider.load_file(&path, before).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::NotApplied
+    );
+    real.provider.open_file(&path, before).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(before))
+    );
+    // A shorter cache-only load must not shorten the next full replacement's
+    // old range or become proof of delivered bytes.
+    real.provider.load_file(&path, "x").await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(before))
+    );
+    real.provider.update_file(&path, after).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(after))
+    );
+    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    assert!(
+        hover.contents.contains("receipt: string"),
+        "{}",
+        hover.contents
+    );
+    real.provider.close_file(&path).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::NotApplied
+    );
     real.publish_ready(2, 1, false);
     real.refresh_publication(2).await;
     real.assert_raw_types(false).await;

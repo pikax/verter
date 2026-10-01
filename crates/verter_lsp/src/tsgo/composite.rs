@@ -58,12 +58,12 @@ use verter_type_runtime::provider_hub::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
-use crate::tsgo::overlay_core::{
+use crate::tsgo::project_binding::{self, AdmissionEpoch};
+use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
+use verter_type_runtime::provider_hub::overlay::{
     GeneratedUnitWritePermit, HubAdmittedTransport, LazyOverlayCore, OverlayPriority,
     OverlaySyncState, OverlayTransport, ServingTransport,
 };
-use crate::tsgo::project_binding::{self, AdmissionEpoch};
-use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
 use verter_type_runtime::provider_hub::ProviderEpoch;
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
@@ -312,8 +312,8 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                 // captured epoch AND that epoch must still be the hub's
                 // serving one.
                 if !core
-                    .core
-                    .sync_state_for_epoch(&provider_path, transport_epoch)
+                    .hub
+                    .overlay_sync_state(&provider_path, transport_epoch)
                     .is_synced()
                     || !still_serving()
                 {
@@ -327,8 +327,8 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                 // into the managed fallback.
                 if still_serving()
                     && core
-                        .core
-                        .sync_state_for_epoch(&provider_path, transport_epoch)
+                        .hub
+                        .overlay_sync_state(&provider_path, transport_epoch)
                         .is_synced()
                 {
                     shared_result
@@ -375,12 +375,6 @@ struct OverlayInner<P: SharedAttach> {
     host: Arc<VerterHost>,
     /// The rendezvous evidence the attach is lazily established from.
     rendezvous: SharedRendezvous,
-    /// The lazy overlay core: the per-carrier content cache lifecycle records
-    /// into OFF the critical path, plus the per-carrier synchronization state
-    /// the query path drives against the hub-owned serving incarnation. The
-    /// serving identity itself — establishment, replacement, and the serving
-    /// epoch — belongs to [`OverlayInner::hub`] below, never to the core.
-    core: LazyOverlayCore<HubAdmittedTransport<P>>,
     /// The ProviderHub that OWNS the shared attach: it establishes lazily
     /// through its discriminant re-arm door, mints the serving epoch every
     /// witness and admitted request binds to, retires the epoch fail-closed
@@ -535,7 +529,6 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
             inner: Arc::new(OverlayInner {
                 host,
                 rendezvous,
-                core: LazyOverlayCore::new(),
                 hub,
                 attach_demand,
                 source_shadow_safety: parking_lot::Mutex::default(),
@@ -560,7 +553,6 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
                     session_key: "test-session".to_string(),
                     workspace_root: "/test".to_string(),
                 },
-                core: LazyOverlayCore::new(),
                 hub,
                 attach_demand: Arc::new(StdMutex::new(None)),
                 source_shadow_safety: parking_lot::Mutex::default(),
@@ -568,6 +560,12 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
                 reported_refusals: parking_lot::Mutex::default(),
             }),
         }
+    }
+
+    /// Bytes the shared hub's serving incarnation accepted. Desired-only
+    /// `record_content` is not an application receipt.
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        verter_type_runtime::traits::TypeProvider::applied_content(self.inner.hub.as_ref(), path)
     }
 
     /// Record the carrier's current content for the SHARED overlay — a cheap in-memory
@@ -581,7 +579,8 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
             return;
         }
         self.inner
-            .core
+            .hub
+            .overlay_state()
             .record_content_at_priority(provider_path, content, priority);
     }
 
@@ -598,12 +597,15 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         }
         let hub = Arc::clone(&self.inner.hub);
         self.inner
-            .core
-            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT, move || {
-                hub.serving().map(|(provider, _)| {
-                    Arc::new(HubAdmittedTransport::new(provider, Arc::clone(&hub)))
-                        as Arc<HubAdmittedTransport<P>>
-                })
+            .hub
+            .overlay_state()
+            .retract_bounded(provider_path, SHARED_CLOSE_TIMEOUT, move |expected| {
+                hub.serving()
+                    .filter(|(_, epoch)| Some(*epoch) == expected)
+                    .map(|(provider, epoch)| {
+                        Arc::new(HubAdmittedTransport::new(provider, Arc::clone(&hub), epoch))
+                            as Arc<HubAdmittedTransport<P>>
+                    })
             })
             .await;
     }
@@ -646,7 +648,7 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         // authorizes each physical write is minted per unit by the write gate below,
         // against the serving epoch the attach lands under.)
         let sweep_generation = self.sweep_generation();
-        let generated_units = Self::recorded_units_of(&self.inner.core, &source);
+        let generated_units = Self::recorded_units_of(self.inner.hub.overlay_state(), &source);
         let resolver_admission = if generated_units.is_empty() {
             None
         } else {
@@ -722,7 +724,7 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         }
 
         self.inject_editor_demand(
-            &self.inner.core,
+            self.inner.hub.overlay_state(),
             &established,
             provider_path,
             sweep_generation,
@@ -741,8 +743,8 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         // slot). Only a carrier whose current content is confirmed synced is served.
         let sync_state = self
             .inner
-            .core
-            .sync_state_for_epoch(provider_path, established.epoch);
+            .hub
+            .overlay_sync_state(provider_path, established.epoch);
         if !sync_state.is_synced() {
             return Err(refusal(
                 SharedEngageFailureKind::QueriedCarrierNotSynced,
@@ -913,24 +915,30 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
     /// project-generation change — so neither a real user file appearing at a companion
     /// path (`carrier_never_shadows_real_user_file`) nor a narrowed `include` is answered
     /// from a stale decision.
-    async fn inject_editor_demand<T: OverlayTransport>(
+    async fn inject_editor_demand(
         &self,
-        core: &LazyOverlayCore<T>,
-        established: &ServingTransport<T>,
+        core: &LazyOverlayCore<HubAdmittedTransport<P>>,
+        established: &ServingTransport<HubAdmittedTransport<P>>,
         provider_path: &str,
         sweep_generation: u64,
     ) {
         let queried_source = carrier_source_of(provider_path);
-        core.inject_all_dirty(
-            established,
-            sweep_generation,
-            |companion, priority| {
-                priority >= OverlayPriority::Normal
-                    || carrier_source_of(companion) == queried_source
-            },
-            |companion| self.generated_unit_write_permit(core, companion),
-        )
-        .await;
+        if let Err(reason) = self
+            .inner
+            .hub
+            .synchronize(
+                established.epoch,
+                sweep_generation,
+                |companion, priority| {
+                    priority >= OverlayPriority::Normal
+                        || carrier_source_of(companion) == queried_source
+                },
+                |companion| self.generated_unit_write_permit(core, companion),
+            )
+            .await
+        {
+            tracing::debug!(?reason, "shared provider synchronization refused");
+        }
     }
 
     /// Withdraw the carrier `source`'s units from a live serving incarnation after
@@ -942,24 +950,23 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         // Non-establishing: the hub's serving read never demands an attach —
         // with no serving incarnation nothing was written, so there is
         // nothing to withdraw.
-        let Some((provider, epoch)) = self.inner.hub.serving() else {
+        let Some((_, epoch)) = self.inner.hub.serving() else {
             return;
         };
-        let core = &self.inner.core;
-        let established = ServingTransport {
-            transport: Arc::new(HubAdmittedTransport::new(
-                provider,
-                Arc::clone(&self.inner.hub),
-            )),
-            epoch,
-        };
-        core.inject_all_dirty(
-            &established,
-            sweep_generation,
-            |companion, _| carrier_source_of(companion).as_deref() == Some(source),
-            |companion| self.generated_unit_write_permit(core, companion),
-        )
-        .await;
+        let core = self.inner.hub.overlay_state();
+        if let Err(reason) = self
+            .inner
+            .hub
+            .synchronize(
+                epoch,
+                sweep_generation,
+                |companion, _| carrier_source_of(companion).as_deref() == Some(source),
+                |companion| self.generated_unit_write_permit(core, companion),
+            )
+            .await
+        {
+            tracing::debug!(?reason, "shared provider synchronization refused");
+        }
     }
 
     /// Whether this is the FIRST admission refusal reported for `source` at
@@ -983,7 +990,7 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
     ) -> Result<Vec<TypeDiagnostic>, SharedEngageFailure> {
         let engaged = self.engage_provider(provider_path, carrier).await?;
         let diagnostics_result = observe_epoch_bound(
-            &self.inner.core,
+            self.inner.hub.overlay_state(),
             provider_path,
             engaged.transport_epoch,
             || {
@@ -1150,12 +1157,11 @@ impl<P: SharedAttach> SharedTsgoOverlay<P> {
         // Observe the serving epoch BEFORE handing the incarnation to the
         // injection path — a re-attachment (new epoch) resets the markers so
         // the open set replays into it.
-        self.inner.core.observe_serving_epoch(serving_epoch);
         if epoch != serving_epoch {
             return None;
         }
         Some(ServingTransport {
-            transport: Arc::new(HubAdmittedTransport::new(provider, hub)),
+            transport: Arc::new(HubAdmittedTransport::new(provider, hub, serving_epoch)),
             epoch: serving_epoch,
         })
     }
@@ -1373,6 +1379,12 @@ fn effective_javascript_check_policy(
         Some(FileCheckDirective::NoCheck) => Some(false),
         None => configured_check_js,
     }
+}
+
+enum ManagedWrite {
+    Open,
+    Load,
+    Update,
 }
 
 impl TsgoCompositeProvider {
@@ -1666,8 +1678,60 @@ impl TsgoCompositeProvider {
         }
     }
 
-    /// Record the carrier's content into the SHARED overlay (a cheap in-memory insert
-    /// off the managed lifecycle critical path) — a no-op when SHARED is not opted in.
+    /// Forward a managed write and preserve its application disposition. Only
+    /// non-shadowed writes update shared desired content.
+    async fn forward_managed(
+        &self,
+        path: &str,
+        content: &str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+        kind: ManagedWrite,
+    ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
+        use verter_type_runtime::traits::FileLoadDisposition;
+        let disposition = match kind {
+            ManagedWrite::Open => {
+                self.managed
+                    .open_file_with_disposition(path, content, priority)
+                    .await?
+            }
+            ManagedWrite::Load => {
+                self.managed
+                    .load_file_with_disposition(path, content, priority)
+                    .await?
+            }
+            ManagedWrite::Update => {
+                self.managed
+                    .update_file_with_disposition(path, content, priority)
+                    .await?
+            }
+        };
+        if disposition != FileLoadDisposition::Shadowed {
+            self.record_file_check_directive(path, content);
+            let shared_priority = match priority {
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground => {
+                    OverlayPriority::Interactive
+                }
+                verter_type_runtime::provider_hub::OverlayPriority::Normal => {
+                    OverlayPriority::Normal
+                }
+                verter_type_runtime::provider_hub::OverlayPriority::Background => {
+                    OverlayPriority::Background
+                }
+            };
+            self.shared_record(path, content, shared_priority);
+        }
+        // A lazy managed fallback remains Held throughout a healthy shared session.
+        // Reconcile against the actual shared receipt once its demand has settled.
+        if disposition == FileLoadDisposition::Held {
+            return Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ));
+        }
+        Ok(disposition)
+    }
+
+    /// Record desired carrier content in the shared overlay when enabled.
     fn shared_record(&self, path: &str, content: &str, priority: OverlayPriority) {
         if let Some(shared) = &self.shared {
             shared.record_content(path, content, priority);
@@ -1693,6 +1757,80 @@ impl std::fmt::Debug for TsgoCompositeProvider {
 }
 
 impl TypeProvider for TsgoCompositeProvider {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            self.forward_managed(path, content, priority, ManagedWrite::Load)
+                .await
+        })
+    }
+
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            self.forward_managed(path, content, priority, ManagedWrite::Open)
+                .await
+        })
+    }
+
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: verter_type_runtime::provider_hub::OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            self.forward_managed(path, content, priority, ManagedWrite::Update)
+                .await
+        })
+    }
+
+    fn synchronize_pending_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        Box::pin(async move {
+            let Some(shared) = &self.shared else {
+                return Ok(());
+            };
+            let Some(source) = carrier_source_of(&path) else {
+                return Ok(());
+            };
+            let carrier = project_binding::resolve_carrier_bound(&self.host, &source)
+                .into_bound()
+                .ok_or_else(|| TypeProviderError::new("pending carrier has no configured owner"))?;
+            tokio::time::timeout(
+                SHARED_OVERLAY_TIMEOUT,
+                shared.engage_provider(&path, &carrier),
+            )
+            .await
+            .map_err(|_| TypeProviderError::new("pending shared synchronization timed out"))?
+            .map_err(|error| TypeProviderError::new(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.managed.applied_content(path) {
+            AppliedContent::Applied(bytes) => AppliedContent::Applied(bytes),
+            other => match self
+                .shared
+                .as_ref()
+                .map(|shared| shared.applied_content(path))
+            {
+                Some(AppliedContent::Applied(bytes)) => AppliedContent::Applied(bytes),
+                _ => other,
+            },
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         // The composite IS the tsgo provider — the SHARED overlay is an internal
         // implementation detail of the ONE provider; every engine-identifying branch
@@ -1714,9 +1852,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1725,9 +1867,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1736,9 +1882,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Interactive);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1757,9 +1907,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1768,9 +1922,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1779,9 +1937,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file_background(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Background);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Background,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1800,9 +1962,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.open_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Open,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1811,9 +1977,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.load_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Load,
+            )
+            .await?;
             Ok(())
         })
     }
@@ -1822,9 +1992,13 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.managed.update_file_normal(&path, &content).await?;
-            self.record_file_check_directive(&path, &content);
-            self.shared_record(&path, &content, OverlayPriority::Normal);
+            self.forward_managed(
+                &path,
+                &content,
+                verter_type_runtime::provider_hub::OverlayPriority::Normal,
+                ManagedWrite::Update,
+            )
+            .await?;
             Ok(())
         })
     }

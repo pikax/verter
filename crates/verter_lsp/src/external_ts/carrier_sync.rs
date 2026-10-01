@@ -1226,12 +1226,23 @@ pub struct CarrierTransactionCoordinator {
     /// own exhaustion record — the chain instead yields to it (skips the
     /// record, so the cleared budget stands and a fresh chain follows).
     pending_redrive_signal_generation: std::sync::atomic::AtomicU64,
+    /// Completed drain passes wake the existing post-scan completion gate.
+    /// This carries progress only; the server still checks the live queue and generation.
+    pending_sync_progress: tokio::sync::watch::Sender<()>,
 }
 
 impl CarrierTransactionCoordinator {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn subscribe_pending_sync_progress(&self) -> tokio::sync::watch::Receiver<()> {
+        self.pending_sync_progress.subscribe()
+    }
+
+    pub(crate) fn note_pending_sync_progress(&self) {
+        self.pending_sync_progress.send_replace(());
     }
 
     /// Begin a pending-snapshot re-drive chain: `true` only for the one

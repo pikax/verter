@@ -366,6 +366,154 @@ async fn carrier_batches_preserve_each_provider_order_without_scalar_dispatch() 
 }
 
 #[tokio::test]
+async fn two_provider_aba_aliases_share_a_group_and_withdrawal_blocks_stale_delivery() {
+    let fixture = batch_router_fixture().await;
+    let group_a: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/a/tsconfig.json"))
+        .cloned()
+        .collect();
+    let group_b: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/b/tsconfig.json"))
+        .cloned()
+        .collect();
+    assert!(
+        group_a.len() >= 2 && group_b.len() == 1,
+        "project A aliases share one group; project B is the other instance"
+    );
+
+    fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .unwrap();
+    fixture
+        .router
+        .activate_carrier_members(&group_b)
+        .await
+        .unwrap();
+    fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .unwrap();
+
+    let rebuilds = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::ActivateCarrierMembers { .. }))
+            .count()
+    };
+    let scalars = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::ActivateCarrierMember { .. }))
+            .count()
+    };
+    let a_calls = fixture.providers[0].calls();
+    let b_calls = fixture.providers[1].calls();
+    assert_eq!(
+        rebuilds(&a_calls),
+        2,
+        "A/B/A rebuilds project A twice, once per bulk delivery: {a_calls:?}"
+    );
+    assert_eq!(
+        scalars(&a_calls),
+        0,
+        "scalarization would count members: {a_calls:?}"
+    );
+    assert_eq!(
+        rebuilds(&b_calls),
+        1,
+        "project B receives only its own group: {b_calls:?}"
+    );
+    assert!(
+        matches!(
+            a_calls.first(),
+            Some(MockCall::ActivateCarrierMembers { members }) if members == &group_a
+        ),
+        "aliases of A stay in one ordered group: {a_calls:?}"
+    );
+
+    for provider in &fixture.providers {
+        provider.clear_calls();
+    }
+    fixture
+        .workspace
+        .publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(Arc::new(
+            verter_workspace::WorkspaceSnapshot {
+                owners_memo: Default::default(),
+                projects: Vec::new(),
+                resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+                generation: SnapshotGeneration(2),
+            },
+        )));
+    assert!(fixture
+        .router
+        .activate_carrier_members(&group_a)
+        .await
+        .is_err());
+    for provider in &fixture.providers {
+        assert!(
+            provider.calls().is_empty(),
+            "withdrawal must not deliver the previous binding"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_held_project_engine_does_not_block_an_independent_hub_group() {
+    let fixture = batch_router_fixture().await;
+    let group_a: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/a/tsconfig.json"))
+        .cloned()
+        .collect();
+    let group_b: Vec<_> = fixture
+        .members
+        .iter()
+        .filter(|member| member.project_file_name.ends_with("/b/tsconfig.json"))
+        .cloned()
+        .collect();
+    let (arrived, release) = fixture.providers[0].block_next_carrier_batch();
+    let held = fixture.router.activate_carrier_members(&group_a);
+    tokio::pin!(held);
+    let independent = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+            .await
+            .expect("the held engine entered its batch");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.router.activate_carrier_members(&group_b),
+        )
+        .await
+        .expect("an independent hub group must not wait on the held engine")
+        .expect("project B is admitted");
+    };
+    tokio::select! {
+        biased;
+        _ = &mut held => panic!("the held group returned while its engine was blocked"),
+        _ = independent => {}
+    }
+    assert!(
+        fixture.providers[1]
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::ActivateCarrierMembers { .. })),
+        "project B ran its own bulk activation"
+    );
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), held)
+        .await
+        .expect("releasing the engine settles the held group")
+        .expect("project A is admitted once its engine accepts the batch");
+}
+
+#[tokio::test]
 async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered() {
     let fixture = batch_router_fixture().await;
     fixture
@@ -973,5 +1121,43 @@ async fn generated_write_admission_racing_a_content_edit_is_readmitted() {
                 if *companion_path == member.companion_path
         )),
         "the re-admitted registration must reach the owning engine"
+    );
+}
+
+#[tokio::test]
+async fn a_held_provider_batch_does_not_delay_an_independently_admitted_provider() {
+    let fixture = batch_router_fixture().await;
+    let router = Arc::new(fixture.router);
+    let held_hub = router
+        .provider_for_path(&fixture.members[0].source_path)
+        .await
+        .unwrap();
+    let (started, release) = fixture.providers[0].block_configure_paths();
+    let held = tokio::spawn(async move {
+        held_hub
+            .configure_paths("/held", serde_json::json!({}))
+            .await
+            .unwrap();
+    });
+    started.notified().await;
+    let healthy_applied = fixture.providers[1].observe_carrier_batch();
+    let members = fixture.members.clone();
+    let batch = tokio::spawn(async move { router.activate_carrier_members(&members).await });
+    let healthy_progress = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        healthy_applied.notified(),
+    )
+    .await;
+    release.notify_one();
+    held.await.unwrap();
+    batch.await.unwrap().unwrap();
+    assert!(
+        healthy_progress.is_ok(),
+        "the healthy provider must receive its bulk call while the other hub's actor is held"
+    );
+    let calls = fixture.providers[1].calls();
+    assert!(
+        matches!(calls.as_slice(), [MockCall::ActivateCarrierMembers { members }] if members == &vec![fixture.members[1].clone()]),
+        "the healthy group remains one actual bulk call: {calls:?}"
     );
 }

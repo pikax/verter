@@ -1784,8 +1784,6 @@ async fn sync_file(
                             return SyncFileOutcome::Retry;
                         }
                         Ok(true) => {
-                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                            synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
                             // just synced (interactive queries capture this surface),
                             // through the shared fenced choke point: `open_pin` was
@@ -1798,8 +1796,10 @@ async fn sync_file(
                             // `VerterLanguageServer::record_carrier_ide_snapshot_if_current`
                             // on the interactive repair path.
                             if let Some(delivered) =
-                                project_sync.carrier_provider_surface(&ide_path, &ide.code)
+                                project_sync.receipt_for_commit(&ide_path, &ide.code)
                             {
+                                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                                synced_kinds.push(ProviderPathKind::Ide);
                                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
@@ -2003,15 +2003,14 @@ async fn preserve_open_unresolved_carrier(
         };
         match result {
             Ok(()) => {
-                ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface), through the
                 // shared fenced choke point: `open_pin` was captured by the
                 // caller BEFORE this compile, so the just-run provider await
                 // can only make this record fail closed, never falsely pair
                 // `ide.code` with a source it wasn't compiled from.
-                if let Some(delivered) = project_sync.carrier_provider_surface(&ide_path, &ide.code)
-                {
+                if let Some(delivered) = project_sync.receipt_for_commit(&ide_path, &ide.code) {
+                    ide_synced = true;
                     crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),

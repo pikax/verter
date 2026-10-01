@@ -4,6 +4,23 @@
 use super::*;
 
 impl ProjectSync {
+    /// Drive held lazy demand from the background drain, then certify its exact
+    /// delivery without republishing an older snapshot over a concurrent edit.
+    pub async fn synchronize_pending_tsx(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.synchronize_pending_file(path).await?;
+        let lock = self.virtual_verter_types_lock(path);
+        let _guard = lock.lock().await;
+        let prepared = self.prepare_tsx_surface(path, content)?;
+        if let Some(delivered) = self.certified_delivery(path, prepared.prepared) {
+            self.record_delivered_carrier_surface(path, content, delivered);
+        }
+        Ok(())
+    }
+
     /// Produce the exact carrier bytes owned by this provider topology.
     ///
     /// Managed/editor-owned tsgo cannot add compiler options to a configured
@@ -125,34 +142,31 @@ impl ProjectSync {
         content: &str,
         lane: ProviderLane,
         verb: ProviderFileVerb,
-    ) -> Result<(), TypeProviderError> {
-        match (lane, verb) {
-            (ProviderLane::Foreground, ProviderFileVerb::Load) => {
-                self.provider.load_file(path, content).await
+    ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
+        let priority = match lane {
+            ProviderLane::Foreground => {
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Open) => {
-                self.provider.open_file(path, content).await
+            ProviderLane::Normal => verter_type_runtime::provider_hub::OverlayPriority::Normal,
+            ProviderLane::Background => {
+                verter_type_runtime::provider_hub::OverlayPriority::Background
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Update) => {
-                self.provider.update_file(path, content).await
+        };
+        match verb {
+            ProviderFileVerb::Load => {
+                self.provider
+                    .load_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Load) => {
-                self.provider.load_file_background(path, content).await
+            ProviderFileVerb::Open => {
+                self.provider
+                    .open_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Open) => {
-                self.provider.open_file_background(path, content).await
-            }
-            (ProviderLane::Background, ProviderFileVerb::Update) => {
-                self.provider.update_file_background(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Load) => {
-                self.provider.load_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Open) => {
-                self.provider.open_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Update) => {
-                self.provider.update_file_normal(path, content).await
+            ProviderFileVerb::Update => {
+                self.provider
+                    .update_file_with_disposition(path, content, priority)
+                    .await
             }
         }
     }
@@ -222,6 +236,16 @@ impl ProjectSync {
         let result = self
             .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
+        if matches!(
+            &result,
+            Ok(verter_type_runtime::traits::FileLoadDisposition::Shadowed
+                | verter_type_runtime::traits::FileLoadDisposition::Held)
+        ) {
+            if virtual_path.is_some() && !virtual_was_live {
+                self.close_virtual_verter_types(tsx_path, lane).await?;
+            }
+            return Ok(false);
+        }
         if let Err(error) = result {
             // A dependency created solely for a failed carrier publication has
             // no live consumer. Preserve an older overlay because the provider

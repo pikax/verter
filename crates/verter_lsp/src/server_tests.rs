@@ -625,15 +625,33 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 }
 
 #[derive(Default)]
-struct DotTriggerRequiredCompletionProvider;
+struct DotTriggerRequiredCompletionProvider {
+    applied: std::sync::Mutex<HashMap<String, Arc<str>>>,
+}
 
 impl TypeProvider for DotTriggerRequiredCompletionProvider {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.applied.lock().unwrap().get(path) {
+            Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsgo"
     }
 
-    fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = Arc::<str>::from(content);
+        Box::pin(async move {
+            self.applied
+                .lock()
+                .unwrap()
+                .insert(path, Arc::clone(&content));
+            Ok(())
+        })
     }
 
     /// This double does not distinguish a background load from an editor open.
@@ -641,12 +659,16 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         self.open_file(path, content)
     }
 
-    fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
     }
 
-    fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        Box::pin(async move {
+            self.applied.lock().unwrap().remove(&path);
+            Ok(())
+        })
     }
 
     fn get_completions(
@@ -1058,6 +1080,7 @@ impl TypeProvider for GatedDeclOverlayProvider {
 #[derive(Default)]
 struct LostContentCompletionProvider {
     open_paths: std::sync::Mutex<HashSet<String>>,
+    applied: std::sync::Mutex<HashMap<String, std::sync::Arc<str>>>,
     calls: std::sync::Mutex<Vec<MockCall>>,
     require_current_api: bool,
 }
@@ -1080,6 +1103,14 @@ impl LostContentCompletionProvider {
 }
 
 impl TypeProvider for LostContentCompletionProvider {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.applied.lock().unwrap().get(path) {
+            Some(bytes) => AppliedContent::Applied(std::sync::Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsgo"
     }
@@ -1089,6 +1120,10 @@ impl TypeProvider for LostContentCompletionProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.open_paths.lock().unwrap().insert(path.clone());
+            self.applied
+                .lock()
+                .unwrap()
+                .insert(path.clone(), std::sync::Arc::from(content.as_str()));
             self.calls
                 .lock()
                 .unwrap()
@@ -1106,6 +1141,10 @@ impl TypeProvider for LostContentCompletionProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
+            self.applied
+                .lock()
+                .unwrap()
+                .insert(path.clone(), std::sync::Arc::from(content.as_str()));
             self.calls
                 .lock()
                 .unwrap()
@@ -1118,6 +1157,7 @@ impl TypeProvider for LostContentCompletionProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.open_paths.lock().unwrap().remove(&path);
+            self.applied.lock().unwrap().remove(&path);
             self.calls
                 .lock()
                 .unwrap()
@@ -1664,6 +1704,33 @@ async fn synced_type_provider_context(
     synced_type_provider_context_surface_only(server, uri)
 }
 
+/// Publish `content` through the production open path on a helper thread.
+///
+/// The seeder is synchronous and is often called from a test that already
+/// owns the runtime; `block_on` on that runtime deadlocks. The helper has
+/// its own current-thread runtime, so the open runs the same `open_tsx`
+/// receipt gate production uses.
+fn publish_seed_surface(server: &VerterLanguageServer, tsx_path: &str, content: &str) {
+    let Some(sync) = server.project_sync.clone() else {
+        return;
+    };
+    let path = tsx_path.to_string();
+    let content = content.to_string();
+    std::thread::Builder::new()
+        .name("seed-provider-open".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("seed runtime");
+            runtime.block_on(sync.open_tsx(&path, &content))
+        })
+        .expect("seed thread")
+        .join()
+        .expect("seed thread panicked")
+        .expect("seeded provider open");
+}
+
 /// The surface half of [`synced_type_provider_context`], WITHOUT the
 /// DependencyReady settle — for seeding helpers whose handlers are not
 /// receipt-gated (hover / completion).
@@ -1702,6 +1769,7 @@ fn synced_type_provider_context_surface_only(
     // pin captured right here (nothing can have moved between this capture
     // and the record just below) records normally.
     let seed_revision = server.documents.snapshot_identity(uri);
+    publish_seed_surface(server, &tsx_path, &ide.code);
     server.record_carrier_ide_snapshot_with_pin(
         seed_revision.as_ref().map(|revision| (uri, revision)),
         &canonical_id,
@@ -15646,7 +15714,7 @@ const outerLabel = 'outer'
 
 #[tokio::test]
 async fn completion_synthesizes_dot_trigger_for_member_access_without_trigger_character() {
-    let provider = Arc::new(DotTriggerRequiredCompletionProvider);
+    let provider = Arc::new(DotTriggerRequiredCompletionProvider::default());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     // The provider identifies as tsgo, so exercise the direct-open surface. A
     // tsserver-kind service would route this synthetic provider through the
@@ -29954,6 +30022,56 @@ async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_resumes_after_a_late_provider_drain() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let path = format!("{}/src/helper.ts", fixture.root);
+    server.queue_snapshot_provider_sync(path.clone());
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    let completion = background_init::finish_post_scan(Arc::downgrade(&server.core), generation);
+    tokio::pin!(completion);
+    assert!(
+        futures_util::poll!(&mut completion).is_pending(),
+        "an unsettled scan must retain its completion until a later drain"
+    );
+    drain_pending_provider_sync_for(server).await;
+    assert!(!server.pending_snapshot_provider_sync.contains(&path));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .unwrap(),
+        "a recovery drain must announce the existing scan without a new initialization"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_recovery_never_announces_a_superseded_generation() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let path = format!("{}/src/helper.ts", fixture.root);
+    server.queue_snapshot_provider_sync(path.clone());
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    let announced = fixture.sync_complete.lock().len();
+    let completion = background_init::finish_post_scan(Arc::downgrade(&server.core), generation);
+    tokio::pin!(completion);
+    assert!(futures_util::poll!(&mut completion).is_pending());
+    server
+        .init_generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    drain_pending_provider_sync_for(server).await;
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fixture.sync_complete.lock().len(), announced);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_announces_only_the_current_settled_generation() {
     let fixture = watched_dependency_fixture(true).await;
     let server = fixture.service.inner();
@@ -30754,6 +30872,11 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
     // surface, not an independent committed-path read. Fenced with the open
     // document's own current identity (no race here — this is test seeding).
     let seed_revision = server.documents.snapshot_identity(&source_uri);
+    if let Some(sync) = server.project_sync.clone() {
+        sync.open_tsx(tsx_path, virtual_content)
+            .await
+            .expect("virtual completion fixture publishes through the production open path");
+    }
     server.record_carrier_ide_snapshot_with_pin(
         seed_revision
             .as_ref()
@@ -32412,6 +32535,11 @@ async fn make_virtual_file_fixture(
         },
     );
     let seed_revision = server.documents.snapshot_identity(&source_uri);
+    if let Some(sync) = server.project_sync.clone() {
+        sync.open_tsx(&tsx_path, recorded_content)
+            .await
+            .expect("virtual fixture publishes through the production open path");
+    }
     server.record_carrier_ide_snapshot_with_pin(
         seed_revision
             .as_ref()
