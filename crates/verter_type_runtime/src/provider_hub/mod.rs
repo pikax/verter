@@ -338,8 +338,6 @@ struct Shared<P: ?Sized> {
     /// Desired state can be ahead of this map: a held or failed write is not
     /// an application receipt.
     applied_files: StdRwLock<HashMap<String, Arc<str>>>,
-    #[cfg(test)]
-    withdrawal_settlement_gate: std::sync::OnceLock<(Notify, tokio::sync::Semaphore)>,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -519,8 +517,6 @@ where
             generated_unit_resolver: std::sync::OnceLock::new(),
             overlay: overlay::LazyOverlayCore::new(),
             applied_files: StdRwLock::new(HashMap::new()),
-            #[cfg(test)]
-            withdrawal_settlement_gate: std::sync::OnceLock::new(),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();
@@ -626,15 +622,6 @@ where
             application.0 = None;
             if result.is_err() {
                 serving.crash_signal.notify_one();
-            }
-            #[cfg(test)]
-            if let Some((started, resume)) = shared.withdrawal_settlement_gate.get() {
-                started.notify_one();
-                resume
-                    .acquire()
-                    .await
-                    .expect("settlement gate is open")
-                    .forget();
             }
             // Fence the epoch check and receipt removal together, just as for
             // compensating closes. A replacement cannot install while this
