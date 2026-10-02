@@ -204,14 +204,17 @@ export const POLL_BUDGETS = {
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
   restartTypeProviderSync: {
-    budgetMs: 30_000,
+    budgetMs: 45_000,
     parentTimeoutMs: 60_000,
     reason:
       "passed explicitly by `restartParityReady`: an explicit language-server restart repeats the " +
-      "SAME provider handshake `rootTypeProviderSync` budgets at 30s (process start, workspace " +
-      "scan, cold provider project), so it takes the same budget. Every caller restarts under a " +
-      "hook or test that declares at least 60s. It used to take the ordinary 12s default only " +
-      "because the wait was vacuous: the previous server's log lines satisfied it instantly",
+      "root provider handshake (process start, workspace scan, provider project) AND serves a " +
+      "did_open replay of every document VS Code still holds, about fifty by the time the parity " +
+      "suites restart, concurrently with that scan. It is therefore slower than the cold root " +
+      "handshake and must not share its 30s: CI restarts take 15-18s on a healthy runner and " +
+      "19-36s on a loaded one, and every 30s timeout seen in CI was a sync that completed 0.2-6.4s " +
+      "after the deadline with the scanner still advancing, not a stuck one. 45s is what the 60s " +
+      "suiteSetup leaves after the entry document's readiness wait and the margin",
   },
   waitForExtensionReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForTypeProviderSync: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -372,10 +375,10 @@ export const POLL_SEQUENCES = {
       "restartTypeProviderSync",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 90_000,
+    parentTimeoutMs: 120_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
-      "server epoch: restart, provider sync, file ready — twice, in series, under its own 90s",
+      "server epoch: restart, provider sync, file ready — twice, in series, under its own 120s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],

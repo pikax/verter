@@ -5880,6 +5880,82 @@ async fn cancelling_the_issuer_of_an_inflight_actor_overlay_lets_it_settle() {
     );
 }
 
+/// Withdrawal receipt release is one critical section with its serving-epoch
+/// check. The close is parked, then the applied map is held so removal blocks
+/// after the epoch check: the serving cell must still be read-locked there.
+/// On the unfenced settlement the epoch read has already been dropped, so
+/// `try_write` succeeds and a replacement can publish the same path before
+/// the stale close erases it.
+// Holds the applied-map guard across awaits to park that removal. Two workers
+// keep the probe running while the parked release blocks the other.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_receipt_release_holds_the_serving_fence() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement).await;
+    let hub = &harness.provider;
+    let path = "/w/overlay.ts";
+    hub.open_file(path, "old bytes").await.unwrap();
+    let epoch = hub.serving_epoch().unwrap();
+    let close_gate = Arc::new(Semaphore::new(0));
+    *initial.inner.close_gate.lock() = Some(Arc::clone(&close_gate));
+    let withdrawing = Arc::clone(hub);
+    let withdrawal = tokio::spawn(async move { withdrawing.retract_overlay(epoch, path).await });
+    initial.inner.close_started.notified().await;
+
+    let applied = hub
+        .state
+        .shared
+        .applied_files
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        applied.contains_key(path),
+        "the open must have certified a receipt before withdrawal settlement"
+    );
+    close_gate.add_permits(1);
+    let mut fenced = false;
+    for _ in 0..100_000 {
+        if hub.state.shared.serving.try_write().is_err() {
+            // A transient actor read is not the fence. The removal holds the
+            // serving read until this guard is dropped.
+            tokio::task::yield_now().await;
+            if hub.state.shared.serving.try_write().is_err() {
+                fenced = true;
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(applied);
+    let result = withdrawal
+        .await
+        .expect("the withdrawal task must not panic");
+    assert!(
+        fenced,
+        "a withdrawal parked on the applied map must keep the serving cell \
+         fenced until its receipt removal lands"
+    );
+    assert!(
+        result.is_ok(),
+        "the close checked the epoch that still served: {result:?}"
+    );
+    assert!(
+        !super::applied_map(&hub.state.shared).contains_key(path),
+        "a current close must drop its own applied receipt"
+    );
+    assert_eq!(hub.serving_epoch(), Some(epoch));
+    assert_eq!(
+        initial
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::CloseFile { path: closed } if closed == path))
+            .count(),
+        1
+    );
+}
+
 /// A withdrawal owns its whole settlement, not just the physical close: an
 /// issuer that stops waiting while the engine closes the path must still
 /// leave no applied receipt behind once the close succeeds.

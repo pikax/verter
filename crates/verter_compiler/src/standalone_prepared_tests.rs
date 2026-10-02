@@ -2316,8 +2316,10 @@ fn mixed_product_compile_publishes_primary_diagnostics_only() {
     );
 }
 
-/// Run `work` on a fresh 1 MiB thread, where a script 157 levels deep needs
-/// a stack region for its parse.
+/// Run `work` on a fresh thread asking for 1 MiB of stack. The thread may
+/// get more — glibc hands a thread a cached stack up to four times the size
+/// asked for — so a source whose parse must reserve a region is sized from
+/// the stack the thread actually has ([`levels_past_this_stack`]).
 fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
@@ -2329,32 +2331,43 @@ fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
     })
 }
 
-/// A component whose script nests 157 parentheses deep.
+/// A nesting depth whose parse needs more stack than this thread has left,
+/// so the parse of a source nesting this deep reserves a region for it.
+fn levels_past_this_stack() -> usize {
+    let remaining = verter_parser::oxc_parse::faults::remaining_stack()
+        .expect("a native thread reports its remaining stack");
+    remaining / verter_parser::oxc_parse::PARSE_STACK_BYTES_PER_LEVEL + 1
+}
+
+/// A component whose script nests deeper than this thread's stack.
 fn deep_vue_component() -> String {
+    let depth = levels_past_this_stack();
     format!(
         "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div>{{{{ w }}}}</div></template>\n",
-        "(".repeat(157),
-        ")".repeat(157)
+        "(".repeat(depth),
+        ")".repeat(depth)
     )
 }
 
 fn deep_svelte_component() -> String {
+    let depth = levels_past_this_stack();
     format!(
         "<script>let v = {}1{};\nlet count = $state(0);</script>\n<button>{{count}}</button>\n",
-        "(".repeat(163),
-        ")".repeat(163)
+        "(".repeat(depth),
+        ")".repeat(depth)
     )
 }
 
-/// A component whose markup expression nests 167 parentheses deep: its
-/// preparation parses the expression.
+/// A component whose markup expression nests deeper than this thread's
+/// stack: its preparation parses the expression.
 fn deep_svelte_markup() -> String {
+    let depth = levels_past_this_stack();
     format!(
         "<script>let n = $state(0);</script>
 <p>{{{}n{}}}</p>
 ",
-        "(".repeat(167),
-        ")".repeat(167)
+        "(".repeat(depth),
+        ")".repeat(depth)
     )
 }
 
@@ -2367,11 +2380,12 @@ fn is_stack_refusal(outcome: &Result<DirectCompileOutput, DirectCompileError>) -
 /// program; the same compile once the stack can be had compiles.
 #[test]
 fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
-    let vue_source = deep_vue_component();
-    let svelte_source = deep_svelte_component();
     let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     on_a_small_thread(|| {
+        // Sized on the thread itself: see `on_a_small_thread`.
+        let vue_source = deep_vue_component();
+        let svelte_source = deep_svelte_component();
         for (source, request, inputs) in [
             (
                 &vue_source,
@@ -2398,11 +2412,12 @@ fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
 /// batch refuses its item either way.
 #[test]
 fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
-    let vue_source = deep_vue_component();
-    let svelte_source = deep_svelte_markup();
     let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     on_a_small_thread(|| {
+        // Sized on the thread itself: see `on_a_small_thread`.
+        let vue_source = deep_vue_component();
+        let svelte_source = deep_svelte_markup();
         use verter_parser::oxc_parse::faults::fail_next_reservations;
         fail_next_reservations(1);
         let refused = StandaloneCompiler.prepare(&svelte_source, &svelte);

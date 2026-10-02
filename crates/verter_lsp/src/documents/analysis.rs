@@ -210,8 +210,20 @@ impl DocumentRegistry {
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
+        // The structure this revision was committed with, not the projection
+        // host's current registration. The host can re-register unchanged bytes
+        // under a new artifact after the commit (a closed file's scheduler
+        // reload landing after its reopen), and an enrichment built from that
+        // newer envelope fails the artifact check below and is dropped, which
+        // leaves the revision uncertified until its next edit.
         let registered_structure = is_framework_carrier
-            .then(|| self.host().registered_file_structure(&canonical_id))
+            .then(|| {
+                document
+                    .feature_snapshot
+                    .as_ref()
+                    .filter(|feature| feature.document_revision == document_revision)
+                    .map(|feature| feature.structure.clone())
+            })
             .flatten();
         if !self.semantic_generation_is_current(semantic_generation) {
             return None;

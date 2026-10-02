@@ -22,6 +22,7 @@ import {
   restartParityReady,
 } from "./parityHarness";
 import type { MatrixCase } from "./matrixCases";
+import { sequenceParent } from "./timeouts";
 
 async function runCase(c: MatrixCase): Promise<void> {
   switch (c.kind) {
@@ -106,7 +107,7 @@ export function registerMatrixSuite(options: {
 
   suite(options.title, function () {
     suiteSetup(async function () {
-      this.timeout(60_000);
+      this.timeout(sequenceParent("restartedSuiteSetup"));
       await restartParityReady(options.entry);
     });
 

@@ -1255,3 +1255,81 @@ fn reestablish_host_overlay_from_open_buffer_restores_the_live_buffer_over_disk(
     let closed_id = format!("{workspace_root}/src/NotOpen.vue");
     assert!(!registry.reestablish_host_overlay_from_open_buffer(&closed_id));
 }
+
+/// A reopened carrier is published again by the projection host while its
+/// semantic enrichment is queued: `did_close` hands the file back to the
+/// scheduler, whose disk reload can land after the reopen and re-register the
+/// SAME bytes under a new artifact. The enrichment belongs to the revision the
+/// editor opened, so it must still be published; otherwise the document's
+/// diagnostics are never certified, and nothing re-arms them until an edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_enrichment_publishes_when_the_projection_re_registers_unchanged_bytes() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Reopen.vue".parse().unwrap();
+    let canonical = uri_to_canonical_id(&uri);
+    let open = || {
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 13,
+            text: SEMANTIC_REVISION_A.to_string(),
+        });
+    };
+    open();
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    assert!(
+        registry
+            .feature_snapshot(&uri)
+            .expect("feature snapshot")
+            .analysis()
+            .is_some(),
+        "precondition: the first open publishes its enrichment"
+    );
+
+    // Close exactly as `did_close` does, then reopen the same bytes and version.
+    registry.did_close(&uri);
+    registry.host().evict(&canonical);
+    registry.host().scheduler().close_file(&canonical);
+    open();
+    let opened = registry
+        .feature_snapshot(&uri)
+        .expect("reopened feature snapshot")
+        .structure()
+        .artifact_id()
+        .clone();
+
+    // The scheduler's reload of the closed file lands after the reopen.
+    let _ = registry.host().upsert(verter_session::UpsertRequest {
+        canonical_id: Some(canonical.clone()),
+        input_id: canonical.clone(),
+        source: Arc::from(SEMANTIC_REVISION_A),
+        file_language: registry.document_file_language("vue", &canonical),
+        aliases: vec![],
+    });
+    let reloaded = registry
+        .host()
+        .registered_file_structure(&canonical)
+        .expect("the reload registers the file")
+        .artifact_id()
+        .clone();
+    assert_ne!(
+        reloaded, opened,
+        "precondition: the reload registers the unchanged bytes under a new artifact"
+    );
+
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    let feature = registry.feature_snapshot(&uri).expect("feature snapshot");
+    assert_eq!(feature.structure().artifact_id(), &opened);
+    assert!(
+        feature.analysis().is_some(),
+        "the reopened revision's enrichment must publish against the structure it was opened with"
+    );
+}

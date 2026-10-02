@@ -8193,17 +8193,23 @@ fn testing_surface_reports_the_dialect_of_the_code_it_carries() {
 /// empty program; retried, it generates. Its subject is the whole source.
 #[test]
 fn a_tsc_generation_whose_parse_is_refused_is_the_typed_refusal() {
-    use verter_parser::oxc_parse::faults::fail_next_reservations;
-    let sfc = format!(
-        "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
-        "(".repeat(157),
-        ")".repeat(157)
-    );
+    use verter_parser::oxc_parse::faults::{fail_next_reservations, remaining_stack};
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(1 << 20)
             .spawn_scoped(scope, || {
                 use super::script::{extract_tsc_state, TscExtractOptions, TscGenerationError};
+                // Deeper than the stack this thread actually has, which glibc
+                // may make up to four times the 1 MiB asked for: the parse
+                // must reserve a region for the fault to refuse.
+                let depth = remaining_stack().expect("a native thread reports its stack")
+                    / verter_parser::oxc_parse::PARSE_STACK_BYTES_PER_LEVEL
+                    + 1;
+                let sfc = format!(
+                    "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
+                    "(".repeat(depth),
+                    ")".repeat(depth)
+                );
                 let refused = |error: &TscGenerationError| {
                     matches!(error, TscGenerationError::StackUnavailable { .. })
                         && error.subject() == super::script::TscFailureSubject::Source
