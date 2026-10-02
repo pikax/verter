@@ -928,6 +928,10 @@ fn svelte_registration() -> FrameworkRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_language::carrier_grammar::CarrierAcceptanceError;
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
     use verter_language::{LanguageRegistry, LanguageRow};
 
     fn built_in() -> FrameworkAdapterRegistry {
@@ -1363,9 +1367,26 @@ mod tests {
                 GrammarRegistrationError::ConfigLanguageMismatch
             )
         );
-        // The same authority still accepts the composition the host publishes,
-        // so a rejected composition left nothing behind that blocks the next
-        // one.
+        // The leading Vue row must not have been committed: the authority has
+        // no Vue registration, so no Vue source is accepted against it.
+        let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+        let vue_source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///workspace/App.vue"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                FileLanguage::vue(),
+                Arc::from("<template><p/></template>"),
+            )
+            .expect("registered source");
+        assert_eq!(
+            authority
+                .accept_registered_source(&source_authority, &vue_source, registered_vue_grammar())
+                .err(),
+            Some(CarrierAcceptanceError::NoRegisteredGrammar),
+            "a rejected composition must leave the caller authority untouched"
+        );
+        // The same authority still accepts the composition the host publishes.
         FrameworkCapabilityCatalog::built_in()
             .expect("built-in catalog")
             .register_all(&authority)

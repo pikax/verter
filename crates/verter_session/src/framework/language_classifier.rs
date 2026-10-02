@@ -87,16 +87,7 @@ impl HostLanguageClassifier {
     /// be checked against a composed framework catalog row by row.
     #[must_use]
     pub fn carrier_rows(&self) -> Vec<(&str, FileLanguage)> {
-        self.registry
-            .carrier_extensions()
-            .into_iter()
-            .filter_map(
-                |extension| match self.registry.classify_static(&format!(".{extension}")) {
-                    StaticClassification::Resolved(language) => Some((extension, language)),
-                    StaticClassification::Gated(_) | StaticClassification::Unknown => None,
-                },
-            )
-            .collect()
+        self.registry.carrier_rows()
     }
 
     /// The adapter-module extensions THIS host's registry classifies, across
