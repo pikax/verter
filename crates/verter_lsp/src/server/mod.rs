@@ -1392,6 +1392,28 @@ impl VerterLanguageServer {
         self.ensure_current_file_synced(uri).await;
     }
 
+    /// Wait until the debounced coordinator owes an open document nothing: it
+    /// holds a complete diagnostics receipt and no publication is in flight.
+    /// The coordinator delivers a document's provider sync inline in the same
+    /// tick that dispatches the pull producing that receipt, so a complete
+    /// receipt proves the sync its open queued has landed (test harness access).
+    pub(crate) async fn test_settle_open_document(&self, uri: &tower_lsp_server::ls_types::Uri) {
+        self.sync_coordinator
+            .await_until(
+                || {
+                    self.documents.diagnostics_ready(uri)
+                        && self.sync_coordinator.diag_tasks_live() == 0
+                },
+                || {
+                    panic!(
+                        "{} never settled into a complete diagnostics receipt",
+                        uri.as_str()
+                    )
+                },
+            )
+            .await;
+    }
+
     /// Deterministically settle the background-owned import dependency receipt
     /// for cross-file contract tests. Interactive production handlers never use
     /// this joining path.
