@@ -2126,6 +2126,27 @@ async function runHarnessSmokeChecks(ctx) {
 //      `verter_shipped_cfg_contract`. NOT a second workspace archive.
 //   5. Reduce fixed receipt slots; tolerated-only complete Surface 1 coverage => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
+// Rust tests start TypeScript through node_modules/.bin/tsc(.cmd), which finds `node` on the PATH they
+// inherit, not this process's execPath. A host whose PATH lacks node fails those tests as though the
+// commit were wrong (2026-10-02: three svelte_assets tests panicked because tsc.cmd could not spawn node,
+// on the candidate and on its baseline alike). That is a MISSING BUILD PREREQUISITE (exit 127), never a
+// Surface 1 verdict.
+function checkNodeOnTestPath(ctx) {
+  const probe = spawnSync("node", ["--version"], { env: ctx.cargoEnv, encoding: "utf8", timeout: 60_000, windowsHide: true });
+  const version = String(probe.stdout ?? "").trim();
+  if (probe.status === 0 && /^v\d+/u.test(version)) {
+    log(`node prerequisite: ${version} starts from the test PATH`);
+    return true;
+  }
+  const why = probe.error ? probe.error.code ?? probe.error.message : `exit ${probe.status ?? probe.signal}`;
+  err(
+    `MISSING BUILD PREREQUISITE: \`node\` cannot be started from the PATH the tests inherit (${why}); ` +
+      "tests that run TypeScript through node_modules/.bin would fail for this host, not for the commit. " +
+      "Put node on PATH and rerun.",
+  );
+  return false;
+}
+
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
@@ -2135,6 +2156,9 @@ async function runGate(opts, ctx) {
   // integration-test binary must fail the gate before compilation balloons it.
   const layoutResult = await runIntegrationTestLayoutCheck(ctx);
   if (layoutResult !== EXIT_PASS) return layoutResult;
+
+  // ---------- NODE ON THE TEST PATH ----------
+  if (!checkNodeOnTestPath(ctx)) return EXIT_USAGE;
 
   // ---------- REAL CONFORMANCE-HARNESS SMOKES ----------
   // These smokes exercise the two broader runtime boundaries before Cargo pays to build the Rust universe:
