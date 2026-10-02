@@ -36,7 +36,7 @@
 use std::sync::Arc;
 
 use verter_identity::canonical::Canonical;
-use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::InputBasisId;
 use verter_semantic::analysis::types::Hash16;
 
@@ -260,8 +260,25 @@ struct SnapshotFileBasis<'a> {
     file: &'a SnapshotFile,
 }
 
+/// Ordered `[start, end)` carrier ranges, encoded as a length-delimited
+/// SEQUENCE in the order the parser reported them. Not a set: two stamps whose
+/// ranges are a permutation describe different carrier geometry, and a
+/// re-ordered stamp is a different published row.
+fn encode_ranges(encoder: &mut CanonicalEncoder, tag: u16, ranges: &[[u32; 2]]) {
+    let mut payload = Vec::with_capacity(8 + ranges.len() * 8);
+    payload.extend_from_slice(&(ranges.len() as u64).to_le_bytes());
+    for range in ranges {
+        payload.extend_from_slice(&range[0].to_le_bytes());
+        payload.extend_from_slice(&range[1].to_le_bytes());
+    }
+    encoder.field_bytes(tag, &payload);
+}
+
 impl CanonicalEncode for SnapshotFileBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.external_ts.snapshot_file_basis.v1";
+    // v2: the content-free structure stamp the store copies into the published
+    // row and the published bytes themselves joined the basis. A structure-only
+    // change and a bytes-only-behind-one-identity change are different publishes.
+    const DOMAIN_TAG: &'static str = "verter.session.external_ts.snapshot_file_basis.v2";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_str(1, &self.file.source_uri);
@@ -273,13 +290,42 @@ impl CanonicalEncode for SnapshotFileBasis<'_> {
         encoder.field_u64(7, self.file.version);
         encoder.field_enum_discriminant(8, open_state_discriminant(self.file.open_state));
         encoder.field_option(9, self.file.map_json.as_ref().map(|json| json.as_bytes()));
+        // The PUBLISHED BYTES, not only the identity the caller declared for
+        // them. `content_hash` is a caller-supplied claim; hashing the bytes it
+        // names is what makes the basis derived from the publish rather than
+        // from the claim, so two snapshots that differ only in carrier content
+        // cannot compose ONE basis and a certification minted over the first
+        // can no longer admit the second. One streaming blake3 pass per
+        // `input_basis()` — no copy, no second parse — over a buffer the store
+        // is about to write to disk anyway.
+        encoder.field_bytes(
+            10,
+            &CanonicalDigest::of_bytes(self.file.content.as_bytes()).as_bytes()[..16],
+        );
+        // The content-free structure stamp the store copies onto the published
+        // row beside the source map. A stamp-only change changes what every
+        // consumer of the published row reads, so it is a different publish.
+        match &self.file.structure {
+            None => {
+                encoder.field_enum_discriminant(11, 0);
+            }
+            Some(structure) => {
+                encoder.field_enum_discriminant(11, 1);
+                encoder.field_u32(12, structure.schema_version);
+                encoder.field_str(13, &structure.artifact_token);
+                encode_ranges(encoder, 14, &structure.script_content_ranges);
+                encode_ranges(encoder, 15, &structure.markup_opening_ranges);
+            }
+        }
     }
 }
 
-/// Descriptor a [`PublishSnapshot`]'s basis hashes through: the identity the
+/// Descriptor a [`PublishSnapshot`]'s basis hashes through: everything the
 /// store keys its own rows on — project, resolution-map version, FS generation,
-/// and each published file's carrier identity and mapped bytes. Content and
-/// geometry are covered by identity, never re-hashed.
+/// and, per published file, the carrier identity, the declared hashes, the
+/// source-map bytes, the published carrier bytes and the content-free structure
+/// stamp the row carries. Nothing the store writes is outside the basis, and
+/// nothing in it is a claim the store did not receive.
 struct PublishSnapshotBasis<'a> {
     snapshot: &'a PublishSnapshot,
 }
@@ -355,7 +401,59 @@ pub struct Diagnostics {
     pub required_snapshot: u64,
 }
 
-/// Negotiated engine capabilities (never assumed — handshaked per engine).
+/// Where an [`EngineCapabilities`] version string came from — the dimension that
+/// decides whether it is evidence about the ENGINE or only a local declaration.
+///
+/// The string alone cannot carry that distinction, so it is carried by the
+/// type: a publisher that never handshook cannot hand the local string over in
+/// the handshake's place, and a profile composed over it can never be read as an
+/// observation of the peer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EngineVersion {
+    /// The capability record carries neither an observation nor a declaration.
+    /// Certification refuses it: a profile composed over an assumed
+    /// interpretation is the self-certification this plane rejects.
+    #[default]
+    Undeclared,
+    /// The engine reported this string in-band during its handshake — the only
+    /// form that is evidence about the engine that will answer.
+    Reported(Arc<str>),
+    /// The LOCAL publisher's own contract segment — e.g. the carrier-store
+    /// host-version directory — recorded where no engine handshake happened (a
+    /// publisher that spawns or attaches to no engine of its own). It separates
+    /// two differently-pinned publishers, exactly as the wire pin does, and is
+    /// never evidence of what a peer speaks.
+    Declared(Arc<str>),
+}
+
+impl EngineVersion {
+    /// The version string, whatever its provenance — or `None` when the record
+    /// carries no version at all (the certifiable refusal).
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Undeclared => None,
+            Self::Reported(version) | Self::Declared(version) => Some(version),
+        }
+    }
+
+    /// The provenance discriminant a certified profile hashes through.
+    /// Exhaustive over [`EngineVersion`], so a new form cannot silently alias an
+    /// existing one. Crate-internal: the certified profile is composed by
+    /// `semantic_capability`, the sole consumer.
+    pub(crate) const fn provenance_discriminant(&self) -> u32 {
+        match self {
+            Self::Undeclared => 1,
+            Self::Reported(_) => 2,
+            Self::Declared(_) => 3,
+        }
+    }
+}
+
+/// Negotiated engine capabilities. The two flags and the version are a RECORD of
+/// what was established about an engine, never an assumption: the version's
+/// provenance ([`EngineVersion`]) says whether it was reported by that engine or
+/// only declared by this publisher.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EngineCapabilities {
     /// The engine exposes a static module-resolution-map endpoint (the
@@ -364,8 +462,8 @@ pub struct EngineCapabilities {
     pub static_module_resolution_map: bool,
     /// The engine supports an async / cancellable query lane.
     pub async_cancellable_queries: bool,
-    /// The engine version string it reported during the handshake.
-    pub reported_version: Option<Arc<str>>,
+    /// The engine version, with the provenance that qualifies it.
+    pub version: EngineVersion,
 }
 
 /// An error a backend operation can fail with. Closed for the contract; backends

@@ -35,13 +35,15 @@ const EVERY_CAPABILITY: &[verter_session::external_ts::QueryFeature] = &[
     verter_session::external_ts::QueryFeature::InlayHints,
 ];
 
-/// Negotiated capabilities that carry a recorded handshake version — the
+/// Negotiated capabilities whose version the engine REPORTED in-band — the
 /// observation certification requires.
 fn observed_capabilities(version: &str) -> EngineCapabilities {
     EngineCapabilities {
         static_module_resolution_map: false,
         async_cancellable_queries: false,
-        reported_version: Some(std::sync::Arc::<str>::from(version)),
+        version: verter_session::external_ts::EngineVersion::Reported(std::sync::Arc::<str>::from(
+            version,
+        )),
     }
 }
 

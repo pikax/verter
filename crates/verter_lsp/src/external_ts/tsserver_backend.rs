@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use verter_session::external_ts::{
     BoundProject, Diagnostics, DiagnosticsOutcome, EngineBackend, EngineCapabilities, EngineError,
-    EngineIdentity, EngineSessionFacts, EnsureProject, PublishSnapshot, Query, QueryOutcome,
-    ServeMode,
+    EngineIdentity, EngineSessionFacts, EngineVersion, EnsureProject, PublishSnapshot, Query,
+    QueryOutcome, ServeMode,
 };
 use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 
@@ -58,10 +58,12 @@ pub struct TsserverEngineBackend {
     host_version: Arc<str>,
     /// Per-workspace-root publish stores, keyed by workspace root.
     stores: dashmap::DashMap<Arc<str>, Arc<WorkspaceStore>>,
-    /// The negotiated capabilities reported for every bound project. The shipped
+    /// The capabilities recorded for every bound project. The shipped
     /// tsserver plugin model exposes NO static module-resolution-map endpoint (the
     /// `.x`→carrier redirect rides the host FS proxy) and the plugin read path is
     /// synchronous (no async/cancellable query lane), so both flags are `false`.
+    /// The version is this publisher's own host-version segment, recorded as
+    /// [`EngineVersion::Declared`] — this backend handshakes no engine.
     capabilities: EngineCapabilities,
     /// The source-indexed active-membership ledger — INTERNAL transition bookkeeping
     /// ONLY. It is the reconciler's own state for a membership transition (its
@@ -92,7 +94,14 @@ impl TsserverEngineBackend {
             capabilities: EngineCapabilities {
                 static_module_resolution_map: false,
                 async_cancellable_queries: false,
-                reported_version: Some(Arc::clone(&host_version)),
+                // The host version is this publisher's OWN carrier-store segment
+                // (see `default_carrier_store_host_version`), and this backend
+                // spawns/attaches to no engine to report one — so it is recorded
+                // as DECLARED, never as a handshake. The profile hashes the
+                // provenance alongside the string, so a declared segment cannot
+                // compose the identity a reported engine version would, and it
+                // still separates two differently-pinned publishers.
+                version: EngineVersion::Declared(Arc::clone(&host_version)),
             },
             host_version,
             stores: dashmap::DashMap::new(),
@@ -113,17 +122,19 @@ impl TsserverEngineBackend {
     /// The serving identity a [`CertifiedTypeEngineBinding`] is certified over.
     ///
     /// Composed ONLY from facts this backend observed or contracts this
-    /// backend itself declares, never from a placeholder: the negotiated host
-    /// version it was constructed with (the same string its handshake reported
-    /// as `EngineCapabilities::reported_version`), the carrier-store wire
-    /// contract this publisher writes ([`CARRIER_STORE_WIRE_PIN`]) — a locally
-    /// authored FORMAT pin whose TypeScript readers mirror the number as a
-    /// literal and fail closed on a mismatch, so it is a declared contract and
-    /// not a negotiated observation — and the membership session generation the
-    /// ledger is advertising under right now. A different serving session — a
-    /// new generation, a different wire contract — composes a different observed
-    /// profile, so one session's facts cannot launder into another session's
-    /// certified identities.
+    /// backend itself declares, never from a placeholder: the host-version
+    /// segment it was constructed with (this publisher's own carrier-store
+    /// dir — a DECLARED contract, not an engine's report), the carrier-store
+    /// wire contract this publisher writes ([`CARRIER_STORE_WIRE_PIN`]) — a
+    /// locally authored FORMAT pin whose TypeScript readers mirror the number
+    /// as a literal and fail closed on a mismatch, so it is a declared contract
+    /// and not a negotiated observation — and the membership session generation
+    /// the ledger is advertising under right now. A different serving session —
+    /// a new generation, a different wire contract — composes a different
+    /// observed profile AND is refused by
+    /// [`CertifiedTypeEngineBinding::serving_admitted`] at the store write, so
+    /// one session's facts cannot launder into another session's certified
+    /// identities, nor its answers into another session's published rows.
     pub(in crate::external_ts) fn serving_identity(&self) -> EngineIdentity {
         EngineIdentity::for_mode(
             ServeMode::Owned,
@@ -369,7 +380,11 @@ impl EngineBackend for TsserverEngineBackend {
     ///
     /// The certification is re-checked against the snapshot here rather than
     /// trusted from the caller: the store write is the warm, so the publication
-    /// rule runs where the warm happens.
+    /// rule runs where the warm happens. Both halves run there — the snapshot's
+    /// basis must be the one certified, and the serving session must still be
+    /// the one the certification observed (the ledger rotates its session
+    /// generation independently of any snapshot change, so an unchanged
+    /// snapshot under a rotated session is a different publish).
     fn publish_snapshot(
         &self,
         project: &CertifiedTypeEngineBinding,
@@ -379,6 +394,12 @@ impl EngineBackend for TsserverEngineBackend {
             return Err(ensure_failed(
                 "publish_snapshot: the certified binding does not admit this snapshot's basis \
                  (superseded before the store write)",
+            ));
+        }
+        if !project.serving_admitted(&self.serving_identity()) {
+            return Err(ensure_failed(
+                "publish_snapshot: the serving session rotated past the one the binding was \
+                 certified under (refused before the store write)",
             ));
         }
         // The snapshot's project must match the certified project it is published under.

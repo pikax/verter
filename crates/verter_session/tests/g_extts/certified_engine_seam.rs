@@ -4,18 +4,27 @@
 //! The dormant half of this plane is covered by `semantic_capability_closure`.
 //! These cases cover the part that only exists once the plane is switched ON:
 //! the snapshot identity a certification is admitted against, and the
-//! publication rule that refuses a superseded basis before it can warm. They
-//! drive the same production types the publish coordinator drives
-//! (`EngineBackend::publish_snapshot` takes the certified binding), so a green
-//! run is evidence about the activated route rather than about a helper.
+//! publication rule that refuses a superseded basis. They drive the SAME
+//! production types the publish coordinator drives
+//! (`CertifiedTypeEngineBinding::certify` over a real resolved project, and
+//! `PublishSnapshot::input_basis` over the snapshot the coordinator publishes),
+//! so a green run is evidence about the activated route's identity contract.
+//!
+//! What these cases are NOT evidence for: the store write itself. The refusal in
+//! FRONT of the warm is `CertifiedTypeEngineBinding::publish_admitted`, and the
+//! cases below call it directly; whether a refused publish actually leaves the
+//! on-disk manifest untouched is the engine seam's own question, answered where
+//! the store lives — in `verter_lsp`'s `tsserver_backend_tests` (a
+//! certify-here/publish-there case and a rotated-session case, each asserting an
+//! unchanged manifest).
 
 use std::sync::Arc;
 
 use verter_identity::encoding::CanonicalDigest;
 use verter_session::external_ts::{
     BoundProject, CarrierOwnershipResolution, EngineCapabilities, EngineIdentity,
-    EngineSessionFacts, OpenState, PublishSnapshot, QueryFeature, ScriptKind, ServeMode,
-    SnapshotFile, SnapshotRole,
+    EngineSessionFacts, EngineVersion, OpenState, PublishSnapshot, QueryFeature, ScriptKind,
+    ServeMode, SnapshotFile, SnapshotRole, SnapshotStructureStamp,
 };
 use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 
@@ -24,13 +33,13 @@ use super::shared::resolve_with;
 const PROJECT: &str = "file:///project/tsconfig.json";
 const SOURCE: &str = "file:///project/src/Foo.vue";
 
-/// Negotiated capabilities that carry a recorded handshake version — the
+/// Negotiated capabilities whose version the engine REPORTED in-band — the
 /// observation certification requires.
 fn observed_capabilities(version: &str) -> EngineCapabilities {
     EngineCapabilities {
         static_module_resolution_map: false,
         async_cancellable_queries: false,
-        reported_version: Some(Arc::<str>::from(version)),
+        version: EngineVersion::Reported(Arc::<str>::from(version)),
     }
 }
 
@@ -61,6 +70,17 @@ fn snapshot_file(content: &str, version: u64) -> SnapshotFile {
         structure: None,
         version,
         open_state: OpenState::Closed,
+    }
+}
+
+/// The content-free structure stamp the store copies onto the published row
+/// beside the source map.
+fn structure_stamp(token: &str) -> SnapshotStructureStamp {
+    SnapshotStructureStamp {
+        schema_version: 1,
+        artifact_token: Arc::from(token),
+        script_content_ranges: vec![[0, 12]],
+        markup_opening_ranges: vec![[0, 10]],
     }
 }
 
@@ -127,12 +147,27 @@ fn a_certified_binding_admits_the_snapshot_it_was_certified_over() {
 
 #[test]
 fn a_superseded_snapshot_is_refused_before_it_can_warm() {
-    let certified = certify_for(&snapshot_of(vec![snapshot_file("const a = 1;", 7)]));
+    // Certified over a companion that carries a structure stamp: the stamp is
+    // part of what the store publishes, so the variants below separate from THIS
+    // snapshot on axes the declared hashes do not move.
+    let mut certified_file = snapshot_file("const a = 1;", 7);
+    certified_file.structure = Some(structure_stamp("token-a"));
+    let certified = certify_for(&snapshot_of(vec![certified_file]));
 
     // Each variant is the SAME publish arriving against a snapshot whose basis
     // has moved on: new carrier bytes, a new companion version, a new project,
     // a new generation. Every one must be refused, not downgraded and not
     // published — a stale basis has no result to return, let alone to warm.
+    //
+    // The last three are the ones the store would act on while every DECLARED
+    // identity stays put: a different content-free structure stamp, the same
+    // stamp arriving unstamped, and different carrier bytes behind one declared
+    // content hash (the store writes those bytes).
+    let mut restamped = snapshot_file("const a = 1;", 7);
+    restamped.structure = Some(structure_stamp("token-b"));
+    let mut behind_one_identity = snapshot_file("const a = 1;", 7);
+    behind_one_identity.structure = Some(structure_stamp("token-a"));
+    behind_one_identity.content = Arc::from("const a = 2;");
     let superseded = [
         snapshot_of(vec![snapshot_file("const a = 2;", 7)]),
         snapshot_of(vec![snapshot_file("const a = 1;", 8)]),
@@ -158,6 +193,9 @@ fn a_superseded_snapshot_is_refused_before_it_can_warm() {
         // subset of it: dropping the companions must not inherit the
         // certification of the populated snapshot.
         snapshot_of(Vec::new()),
+        snapshot_of(vec![restamped]),
+        snapshot_of(vec![snapshot_file("const a = 1;", 7)]),
+        snapshot_of(vec![behind_one_identity]),
     ];
 
     for candidate in &superseded {
@@ -231,6 +269,100 @@ fn an_unobserved_engine_never_reaches_the_publication_rule() {
     assert!(
         refusal.is_err(),
         "an unobserved engine has no certification, so no snapshot is admitted"
+    );
+}
+
+#[test]
+fn a_locally_declared_version_never_composes_an_engine_observation() {
+    // A publisher that handshakes no engine still needs a version dimension, and
+    // gets one by DECLARING its own local segment. The provenance is part of
+    // what composes the profile, so the same text over the same project and
+    // serving session is two profiles — a local segment can never be read as an
+    // observation of the peer, which is the self-certification this plane
+    // rejects. Two declarations of the same segment still compose ONE profile.
+    let snapshot = snapshot_of(vec![snapshot_file("const a = 1;", 7)]);
+    let declared = |version: &str| EngineCapabilities {
+        static_module_resolution_map: false,
+        async_cancellable_queries: false,
+        version: EngineVersion::Declared(Arc::<str>::from(version)),
+    };
+    let reported = |version: &str| EngineCapabilities {
+        static_module_resolution_map: false,
+        async_cancellable_queries: false,
+        version: EngineVersion::Reported(Arc::<str>::from(version)),
+    };
+    let profile_over = |capabilities: EngineCapabilities| {
+        CertifiedTypeEngineBinding::certify(
+            &bound_witness(capabilities),
+            &owned_serving("5.9.2"),
+            snapshot.input_basis(),
+        )
+        .expect("a declared or reported version certifies")
+        .observed_profile()
+        .clone()
+    };
+
+    assert_ne!(
+        profile_over(declared("0.1.22")),
+        profile_over(reported("0.1.22")),
+        "a locally declared segment and an engine-reported version over the same text are \\
+         different profiles"
+    );
+    assert_eq!(
+        profile_over(declared("0.1.22")),
+        profile_over(declared("0.1.22")),
+        "the same local segment is the same profile"
+    );
+    assert_ne!(
+        profile_over(declared("0.1.22")),
+        profile_over(declared("0.1.23")),
+        "two differently pinned publishers never compose one profile"
+    );
+}
+
+#[test]
+fn a_retained_binding_is_not_admitted_by_a_rotated_serving_session() {
+    // The basis cannot express the serving session: a snapshot can sit unchanged
+    // across a ledger session rotation, and the rotation changes what every
+    // published row means. So the binding carries the session it observed, and
+    // the seam re-checks it where the store write happens.
+    let snapshot = snapshot_of(vec![snapshot_file("const a = 1;", 7)]);
+    let certified = certify_for(&snapshot);
+
+    assert!(
+        certified.serving_admitted(&owned_serving("5.9.2")),
+        "the session the binding was certified under is the one it admits"
+    );
+
+    let rotated = EngineIdentity::for_mode(
+        ServeMode::Owned,
+        &EngineSessionFacts {
+            observed_version: Arc::<str>::from("5.9.2"),
+            wire_pin: 7,
+            editor_session_generation: 4,
+        },
+    );
+    assert!(
+        !certified.serving_admitted(&rotated),
+        "a rotated session generation is a different serving session, even over identical \\
+         bytes and an identical basis"
+    );
+    assert!(
+        certified.publish_admitted(&snapshot),
+        "the snapshot is unchanged — it is the SESSION, not the bytes, that moved"
+    );
+
+    let repinned = EngineIdentity::for_mode(
+        ServeMode::Shared,
+        &EngineSessionFacts {
+            observed_version: Arc::<str>::from("5.9.2"),
+            wire_pin: 7,
+            editor_session_generation: 3,
+        },
+    );
+    assert!(
+        !certified.serving_admitted(&repinned),
+        "a SHARED session over the same facts is a different serving session"
     );
 }
 

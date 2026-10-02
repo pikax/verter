@@ -104,7 +104,14 @@ fn capabilities_report_tsserver_shape() {
     // The shipped tsserver plugin model: synchronous, no static resolution map.
     assert!(!caps.static_module_resolution_map);
     assert!(!caps.async_cancellable_queries);
-    assert_eq!(caps.reported_version.as_deref(), Some(HOST_VERSION));
+    // The publish backend handshakes no engine: the host version is this
+    // publisher's own carrier-store segment, recorded as a DECLARATION so it can
+    // never be read as an engine report.
+    assert_eq!(caps.version.as_str(), Some(HOST_VERSION));
+    assert_eq!(
+        caps.version,
+        EngineVersion::Declared(Arc::from(HOST_VERSION))
+    );
 }
 
 #[test]
@@ -148,6 +155,128 @@ fn publish_snapshot_runs_two_phase_publish_through_the_store() {
     for ready in project.ready_files.values() {
         assert!(store.workspace_dir().join(&ready.blob_rel).exists());
     }
+}
+
+/// The refusal has to be proven where the WARM is: the store write. A
+/// certify-here/publish-there pair over a superseded basis, asserting both the
+/// error and the manifest the store did NOT change.
+#[test]
+fn a_superseded_snapshot_never_reaches_the_store_write() {
+    let backend = TsserverEngineBackend::new(HOST_VERSION);
+    let user_tree = tempfile::tempdir().expect("tempdir");
+    let ws = user_tree.path().to_string_lossy().to_string();
+    let witness = ensure(&backend, &ws, "d:/ws/tsconfig.json");
+
+    // Certified over the FIRST publish, published with the SECOND: same project,
+    // same companion, new carrier bytes — the basis the certification named is
+    // no longer the one being published.
+    let certified_over = PublishSnapshot {
+        project: Arc::from("d:/ws/tsconfig.json"),
+        files: vec![file(
+            "d:/ws/src/A.vue.tsx",
+            "d:/ws/src/A.vue",
+            "export const A = 1;",
+            3,
+        )],
+        resolution_map_version: 1,
+        fs_generation: 1,
+    };
+    let superseded = PublishSnapshot {
+        files: vec![file(
+            "d:/ws/src/A.vue.tsx",
+            "d:/ws/src/A.vue",
+            "export const A = 2;",
+            3,
+        )],
+        ..certified_over.clone()
+    };
+    let certified = certified_for(&backend, &witness, &certified_over);
+
+    let error = backend
+        .publish_snapshot(&certified, superseded)
+        .expect_err("a superseded basis is refused before the store write");
+    assert!(
+        format!("{error:?}").contains("does not admit"),
+        "the refusal names the basis, not an unrelated failure: {error:?}"
+    );
+
+    let store = CarrierPublishStore::open(HOST_VERSION, &ws);
+    let manifest = store.current_manifest();
+    let project = manifest.projects.get("d:/ws/tsconfig.json");
+    assert!(
+        project.is_none_or(|entry| entry.ready_files.is_empty()),
+        "a refused publish advertises nothing: {project:?}"
+    );
+    assert!(
+        !store.workspace_dir().join("blobs").exists()
+            || store
+                .workspace_dir()
+                .join("blobs")
+                .read_dir()
+                .is_ok_and(|mut d| d.next().is_none()),
+        "a refused publish writes no blob"
+    );
+}
+
+/// The serving session rotates independently of any snapshot change, so an
+/// unchanged snapshot under a rotated session is a different publish — refused
+/// at the same place, and equally absent from the manifest.
+#[test]
+fn a_rotated_serving_session_never_reaches_the_store_write() {
+    let backend = TsserverEngineBackend::new(HOST_VERSION);
+    let user_tree = tempfile::tempdir().expect("tempdir");
+    let ws = user_tree.path().to_string_lossy().to_string();
+    let witness = ensure(&backend, &ws, "d:/ws/tsconfig.json");
+
+    let snap = PublishSnapshot {
+        project: Arc::from("d:/ws/tsconfig.json"),
+        files: vec![file(
+            "d:/ws/src/A.vue.tsx",
+            "d:/ws/src/A.vue",
+            "export const A = 1;",
+            3,
+        )],
+        resolution_map_version: 1,
+        fs_generation: 1,
+    };
+    let certified = certified_for(&backend, &witness, &snap);
+    // The membership ledger rotates its session generation (the transition every
+    // ownership move drives); the snapshot itself does not move with it.
+    backend.membership_ledger().advance_session();
+
+    let error = backend
+        .publish_snapshot(&certified, snap.clone())
+        .expect_err("a rotated serving session is refused before the store write");
+    assert!(
+        format!("{error:?}").contains("serving session rotated"),
+        "the refusal names the rotated session: {error:?}"
+    );
+
+    let store = CarrierPublishStore::open(HOST_VERSION, &ws);
+    let manifest = store.current_manifest();
+    let project = manifest.projects.get("d:/ws/tsconfig.json");
+    assert!(
+        project.is_none_or(|entry| entry.ready_files.is_empty()),
+        "a refused publish advertises nothing: {project:?}"
+    );
+
+    // Re-certifying under the NEW session publishes normally: the rule refuses
+    // the stale witness, not the route.
+    let recertified = certified_for(&backend, &witness, &snap);
+    backend
+        .publish_snapshot(&recertified, snap)
+        .expect("the same snapshot publishes under the session it was re-certified for");
+    let after = store.current_manifest();
+    assert_eq!(
+        after
+            .projects
+            .get("d:/ws/tsconfig.json")
+            .expect("project entry")
+            .ready_files
+            .len(),
+        1,
+        "the re-certified publish warms"
+    );
 }
 
 #[test]

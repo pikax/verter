@@ -69,9 +69,15 @@ fn capability_handshake_records_api_wire_cancel_false_and_no_static_map() {
         "the shipped tsgo --api exposes no static module-resolution-map endpoint"
     );
     assert_eq!(
-        caps.reported_version.as_deref(),
+        caps.version.as_str(),
         Some(ENGINE_VERSION),
-        "the handshake records the negotiated engine version"
+        "the record names the negotiated engine version"
+    );
+    assert_eq!(
+        caps.version,
+        verter_session::external_ts::EngineVersion::Declared(Arc::from(ENGINE_VERSION)),
+        "a version this session negotiated is a DECLARATION here, not a handshake the \
+         engine never made"
     );
 }
 
@@ -81,7 +87,7 @@ fn witness_capabilities_match_the_backend_handshake() {
     let witness = ensure(&backend, "file:///ws", "file:///ws/tsconfig.json");
     // The witness carries the SAME negotiated capabilities the backend reports.
     assert_eq!(
-        witness.capabilities().reported_version.as_deref(),
+        witness.capabilities().version.as_str(),
         Some(ENGINE_VERSION)
     );
     assert!(!witness.capabilities().async_cancellable_queries);
