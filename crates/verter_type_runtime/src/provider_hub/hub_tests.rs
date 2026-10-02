@@ -4400,7 +4400,7 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
 
     let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
     let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
-    // The live basis drifts once the write has LANDED on the engine — every
+    // The live basis drifts once the second write has LANDED on the engine — every
     // check before the write still sees the original basis — simulating a
     // content-generation bump that lands while the write is awaited.
     let drifted = ProjectBasis::new(Arc::clone(&publication), 2, 1);
@@ -4409,9 +4409,9 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
         let unit_for_reader = unit.clone();
         let engine_reader = engine.clone();
         Arc::new(move || {
-            let written = engine_reader.calls().iter().any(|call| {
+            let written = engine_reader.calls().iter().filter(|call| {
                 matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
-            });
+            }).count() > 1;
             if written {
                 Some(drifted.clone())
             } else {
@@ -4425,6 +4425,19 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
         .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
         .unwrap();
 
+    hub.forward_admitted_file(
+        &admission,
+        unit.as_str(),
+        "export const v = 0;",
+        OverlayFileKind::Open,
+        OverlayPriority::Foreground,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        hub.applied_content(unit.as_str()),
+        crate::traits::AppliedContent::Applied(_)
+    ));
     let refusal = hub
         .forward_admitted_file(
             &admission,
@@ -4445,8 +4458,8 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
             .iter()
             .filter(|call| matches!(call, MockCall::OpenFile { path, .. } if path == unit.as_str()))
             .count(),
-        1,
-        "the write itself landed on the healthy engine"
+        2,
+        "both writes landed on the healthy engine"
     );
     assert_eq!(
         engine
@@ -4458,9 +4471,198 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
         "the drifted admission's written path is compensated with exactly one close"
     );
     assert!(
+        !super::applied_map(&hub.state.shared).contains_key(unit.as_str()),
+        "confirmed compensation releases the prior applied receipt"
+    );
+    assert!(
         hub.is_serving(),
         "a basis-only drift must not retire or crash-signal the shared lazy attachment"
     );
+}
+
+#[tokio::test]
+async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
+    use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    engine.set_failing_closes();
+    let healthy_engine = MockProvider::new("tsgo");
+    let healthy = ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, healthy_engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    );
+    healthy.establish().await.unwrap();
+    let healthy_epoch = healthy.serving_epoch().unwrap();
+    let hub = Arc::new(ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    ));
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    hub.open_file("d:/ws/prior.ts", "export {};").await.unwrap();
+    assert!(matches!(
+        hub.applied_content("d:/ws/prior.ts"),
+        crate::traits::AppliedContent::Applied(_)
+    ));
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    // Membership changes only after the first physical write. No overlay
+    // marker exists for the excluded-unit sweep to discover.
+    workspace.inject_file(project.to_string(), Arc::<str>::from(r#"{"files":[]}"#));
+    let excluded = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(2),
+    ));
+    let drifted = ProjectBasis::new(Arc::new(PublishedRoot::new_vfs_only(excluded)), 2, 2);
+    let reader = {
+        let live_basis = basis.clone();
+        let unit_for_reader = unit.clone();
+        let engine_reader = engine.clone();
+        Arc::new(move || {
+            let written = engine_reader.calls().iter().any(|call| {
+                matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
+            });
+            if written {
+                Some(drifted.clone())
+            } else {
+                Some(live_basis.clone())
+            }
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let healthy_reader = {
+        let basis = basis.clone();
+        Arc::new(move || Some(basis.clone())) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let healthy_witness = healthy
+        .bind_project(ProjectBindingInput::new(
+            source.into(),
+            project.into(),
+            Vec::new(),
+            basis.clone(),
+            healthy_reader,
+        ))
+        .unwrap();
+    let healthy_admission = healthy
+        .admit_request(&healthy_witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    let epoch = hub.serving_epoch().unwrap();
+    assert!(matches!(
+        engine.applied_content(unit.as_str()),
+        crate::traits::AppliedContent::NotApplied
+    ));
+    hub.overlay_state()
+        .record_content(unit.as_str(), "export const v = 1;");
+    let result = hub
+        .synchronize(
+            epoch,
+            1,
+            |_, _| true,
+            |_| {
+                Some(super::overlay::GeneratedUnitWritePermit::admitted(
+                    admission.clone(),
+                ))
+            },
+        )
+        .await;
+    let physically_landed = engine.calls().iter().any(|call| {
+        matches!(call,
+        MockCall::OpenFile { path, .. } if path == unit.as_str())
+    });
+    assert!(physically_landed, "the first injection reached the engine");
+    assert!(
+        matches!(result, Err(AdmissionRefusal::StaleProvider)),
+        "failed compensation must retire before synchronization settles"
+    );
+    assert_eq!(hub.serving_epoch(), None);
+    assert_eq!(
+        engine.inner.shutdowns.load(Ordering::SeqCst),
+        1,
+        "the lifecycle owner disposes of the physically landed overlay's incarnation"
+    );
+    assert!(matches!(
+        hub.applied_content(unit.as_str()),
+        crate::traits::AppliedContent::NotApplied
+    ));
+    assert!(
+        super::applied_map(&hub.state.shared).is_empty(),
+        "retirement releases all receipts belonging to the failed incarnation"
+    );
+    assert!(!hub.overlay_sync_state(unit.as_str(), epoch).is_synced());
+    assert!(hub
+        .synchronize(epoch, 2, |_, _| true, |_| None)
+        .await
+        .is_err());
+    assert!(hub.get_hover(unit.as_str(), 0).await.is_err());
+    assert!(
+        hub.establish_rearming(|| None).await.is_err(),
+        "the failed attach cannot re-arm at the same discriminant"
+    );
+    healthy
+        .forward_admitted_file(
+            &healthy_admission,
+            unit.as_str(),
+            "export {};",
+            super::OverlayFileKind::Open,
+            super::OverlayPriority::Foreground,
+        )
+        .await
+        .unwrap();
+    healthy.get_hover(unit.as_str(), 0).await.unwrap();
+    assert_eq!(healthy.serving_epoch(), Some(healthy_epoch));
+    assert_eq!(healthy_engine.inner.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(healthy_engine.calls().iter().any(|call| matches!(call,
+        MockCall::Hover { path, .. } if path == unit.as_str())));
 }
 
 /// A CONTENT-ONLY basis drift observed after a successful actor-applied

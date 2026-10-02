@@ -982,15 +982,38 @@ where
                     }
                 }
                 Err(AdmissionRefusal::StaleBasis) => {
-                    // A BASIS-ONLY drift (a content-generation bump while the
-                    // write was awaited): the engine itself is healthy, so
-                    // retiring it — or arming the crash monitor a lazy attach
-                    // answers to — would take a shared provider down for a
-                    // condition its own recovery cannot repair. Compensate the
-                    // ONE written path instead: the engine must not keep
-                    // serving this admission's state, and a fresh admission
-                    // re-writes it through the ordinary sync path.
-                    let _ = serving.provider.close_file(path).await;
+                    // Basis drift alone does not make the engine unhealthy.
+                    // Withdraw this write instead of restarting it: a fresh
+                    // admission can then reapply on the same incarnation.
+                    if serving.provider.close_file(path).await.is_err() {
+                        // The write landed but removal is unconfirmed. Retire
+                        // this incarnation through the lifecycle owner before
+                        // returning: a first overlay has no marker from which
+                        // a later sweep could recover withdrawal ownership.
+                        if self.state.policy.on_demand.is_none() {
+                            self.recover(serving.epoch).await;
+                        }
+                        // Another recovery may already own the transition.
+                        // Its control message can still be queued: fail this
+                        // exact epoch closed before settling either way.
+                        super::retire(&self.state.shared, serving.epoch).await;
+                    } else {
+                        // Keep the epoch check and receipt release atomic with
+                        // replacement. Compensation must not erase a new
+                        // incarnation's receipt for the same path.
+                        let current = self
+                            .state
+                            .shared
+                            .serving
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if current
+                            .as_ref()
+                            .is_some_and(|current| current.epoch == serving.epoch)
+                        {
+                            super::applied_map(&self.state.shared).remove(path);
+                        }
+                    }
                     Err(AdmissionRefusal::StaleBasis)
                 }
                 Err(_) => {
