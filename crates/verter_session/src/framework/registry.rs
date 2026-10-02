@@ -18,7 +18,11 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use verter_compiler::framework_common::FrameworkParseArtifact;
-use verter_language::{CarrierParse, FrameworkAdapterId, LanguageId};
+use verter_language::carrier_grammar::{
+    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
+    FrameworkAdapterSemanticVersion, GrammarRegistrationError,
+};
+use verter_language::{CarrierParse, FileLanguage, FrameworkAdapterId, LanguageId};
 use verter_protocol::typeinfo::graph::FrameworkTag;
 
 use crate::framework::api_projector::ComponentApiProjector;
@@ -266,6 +270,259 @@ impl ActiveProviderIndex {
                 import_specifiers.into_iter().any(|s| s == *specifier)
             }
         }
+    }
+}
+
+/// The registered adapter-semantic version of every built-in capability row.
+///
+/// Version metadata, not framework identity: the catalog composes the SET of
+/// carrier grammars, this constant stamps each one. Per-framework version
+/// pairs are exactly the branch matrix composition removes — a framework that
+/// needs its own version pair is a catalog row, not a host literal.
+const BUILT_IN_ADAPTER_SEMANTIC_VERSION: u32 = 1;
+
+/// The registered parser-grammar version of every built-in capability row.
+const BUILT_IN_PARSER_GRAMMAR_VERSION: u32 = 1;
+
+/// One composed carrier-grammar capability row: the exact facts the host
+/// registers for one adapter × carrier-language pair.
+///
+/// Identity comes from the compiler's catalog row (`adapter_id` ×
+/// `carrier_language_id`), never from a `FileLanguage` literal, so the row
+/// is a projection of the capability catalog rather than a restatement of it.
+#[derive(Debug, Clone)]
+pub struct CarrierGrammarCapability {
+    file_language: FileLanguage,
+    adapter_semantic_version: FrameworkAdapterSemanticVersion,
+    parser_grammar_version: CarrierParserGrammarVersion,
+    grammar: CarrierGrammarConfig,
+}
+
+impl CarrierGrammarCapability {
+    /// The carrier language this row's grammar is registered under.
+    #[must_use]
+    pub fn file_language(&self) -> &FileLanguage {
+        &self.file_language
+    }
+
+    /// The adapter semantic version stamped on the registration.
+    #[must_use]
+    pub fn adapter_semantic_version(&self) -> FrameworkAdapterSemanticVersion {
+        self.adapter_semantic_version
+    }
+
+    /// The parser grammar version stamped on the registration.
+    #[must_use]
+    pub fn parser_grammar_version(&self) -> CarrierParserGrammarVersion {
+        self.parser_grammar_version
+    }
+
+    /// The canonicalized-input carrier grammar config.
+    #[must_use]
+    pub fn grammar(&self) -> &CarrierGrammarConfig {
+        &self.grammar
+    }
+
+    /// The adapter this row belongs to.
+    #[must_use]
+    pub fn adapter_id(&self) -> &FrameworkAdapterId {
+        self.file_language
+            .adapter_id()
+            .expect("a composed capability row is a framework carrier row")
+    }
+}
+
+/// A frontend capability-catalog row that carries no registered
+/// carrier-grammar fact.
+///
+/// The catalog is the sole authority for which carrier grammars exist, so a
+/// row without a grammar is a fail-closed defect, never a skipped framework.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingRegisteredGrammar {
+    /// The adapter whose row carried no grammar fact.
+    pub adapter_id: FrameworkAdapterId,
+    /// The carrier language of that row.
+    pub carrier_language_id: LanguageId,
+}
+
+impl std::fmt::Display for MissingRegisteredGrammar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "frontend catalog row for adapter '{}' × language '{}' carries no \
+             registered grammar fact",
+            self.adapter_id, self.carrier_language_id
+        )
+    }
+}
+
+impl std::error::Error for MissingRegisteredGrammar {}
+
+/// The composed framework capability catalog: one [`CarrierGrammarCapability`]
+/// per frontend registration the compiler's immutable capability catalog
+/// publishes, in that catalog's own deterministic order.
+///
+/// This is the host's ONE framework enumeration. The compiler catalog states
+/// which adapter × carrier-language pairs exist and which grammar each one
+/// parses; the host consumes those rows rather than re-listing frameworks, so
+/// a framework added upstream registers itself and one removed upstream
+/// disappears instead of lingering as a dead row.
+#[derive(Debug, Clone)]
+pub struct FrameworkCapabilityCatalog {
+    rows: Vec<CarrierGrammarCapability>,
+}
+
+impl FrameworkCapabilityCatalog {
+    /// Compose the catalog from the compiler's built-in frontend capability
+    /// registrations.
+    ///
+    /// # Errors
+    ///
+    /// [`MissingRegisteredGrammar`] when a catalog row publishes no grammar
+    /// fact. Host construction turns that into a construction failure — a host
+    /// that silently dropped a row would serve a framework it cannot parse.
+    pub fn built_in() -> Result<Self, MissingRegisteredGrammar> {
+        let catalog =
+            verter_compiler::framework_common::registered_carrier_projection::built_in_frontend_catalog();
+        Self::compose(catalog.iter().map(|row| {
+            let identity = row.identity();
+            (
+                identity.adapter_id().clone(),
+                identity.carrier_language_id().clone(),
+                row.registered_grammar(),
+            )
+        }))
+    }
+
+    /// Compose rows from `(adapter, carrier language, registered grammar)`
+    /// triples, in order. The grammar is optional so the missing-fact case is
+    /// representable and fails closed instead of being unreachable.
+    fn compose<I>(rows: I) -> Result<Self, MissingRegisteredGrammar>
+    where
+        I: IntoIterator<
+            Item = (
+                FrameworkAdapterId,
+                LanguageId,
+                Option<&'static CarrierGrammarConfig>,
+            ),
+        >,
+    {
+        let mut composed = Vec::new();
+        for (adapter_id, carrier_language_id, grammar) in rows {
+            let grammar = grammar.cloned().ok_or_else(|| MissingRegisteredGrammar {
+                adapter_id: adapter_id.clone(),
+                carrier_language_id: carrier_language_id.clone(),
+            })?;
+            composed.push(CarrierGrammarCapability {
+                file_language: FileLanguage::Framework {
+                    adapter_id,
+                    language_id: carrier_language_id,
+                },
+                adapter_semantic_version: FrameworkAdapterSemanticVersion::new(
+                    BUILT_IN_ADAPTER_SEMANTIC_VERSION,
+                )
+                .expect("built-in adapter semantic version is representable"),
+                parser_grammar_version: CarrierParserGrammarVersion::new(
+                    BUILT_IN_PARSER_GRAMMAR_VERSION,
+                )
+                .expect("built-in parser grammar version is representable"),
+                grammar,
+            });
+        }
+        Ok(Self { rows: composed })
+    }
+
+    /// Every composed row, in catalog order.
+    #[must_use]
+    pub fn rows(&self) -> &[CarrierGrammarCapability] {
+        &self.rows
+    }
+
+    /// The composed adapter ids, one per row, in catalog order.
+    pub fn adapter_ids(&self) -> impl Iterator<Item = &FrameworkAdapterId> {
+        self.rows.iter().map(CarrierGrammarCapability::adapter_id)
+    }
+
+    /// Whether the catalog composes a row for `adapter_id`.
+    #[must_use]
+    pub fn contains(&self, adapter_id: &FrameworkAdapterId) -> bool {
+        self.rows.iter().any(|row| row.adapter_id() == adapter_id)
+    }
+
+    /// Register every composed row's carrier grammar into `authority`.
+    ///
+    /// # Errors
+    ///
+    /// The first [`GrammarRegistrationError`] a row raises — a duplicate or
+    /// identity-mismatched registration fails the whole composition rather
+    /// than leaving a half-populated authority.
+    pub fn register_all(
+        &self,
+        authority: &CarrierGrammarAuthority,
+    ) -> Result<(), GrammarRegistrationError> {
+        for row in &self.rows {
+            authority.register_carrier_grammar(
+                row.file_language.clone(),
+                row.adapter_semantic_version,
+                row.parser_grammar_version,
+                row.grammar.clone(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The host's explicitly composed framework services.
+///
+/// One construction step produces the whole framework axis of a host: the
+/// capability catalog that names the carrier grammars, and the adapter
+/// registry those grammars dispatch through. Both are built here and
+/// validated against each other, so a host is never published with a grammar
+/// authority and a dispatch authority that disagree about which frameworks
+/// exist.
+#[derive(Debug)]
+pub struct HostServices {
+    capabilities: FrameworkCapabilityCatalog,
+    registry: FrameworkAdapterRegistry,
+}
+
+impl HostServices {
+    /// Compose the built-in framework services.
+    ///
+    /// # Panics
+    ///
+    /// When a frontend capability row publishes no grammar fact, or when the
+    /// adapter registry has no registration for a composed row. Both mean the
+    /// compiler catalog and the adapter legs disagree; a partially composed
+    /// host would serve a framework through one authority and not the other.
+    #[must_use]
+    pub fn built_in() -> Self {
+        let capabilities = FrameworkCapabilityCatalog::built_in()
+            .expect("every built-in frontend capability row publishes a carrier grammar fact");
+        let registry = FrameworkAdapterRegistry::built_in();
+        for adapter_id in capabilities.adapter_ids() {
+            assert!(
+                registry.contains(adapter_id),
+                "the framework adapter registry has no registration for capability-catalog \
+                 adapter '{adapter_id}' — the composed host would drop the framework"
+            );
+        }
+        Self {
+            capabilities,
+            registry,
+        }
+    }
+
+    /// The composed capability catalog.
+    #[must_use]
+    pub fn capabilities(&self) -> &FrameworkCapabilityCatalog {
+        &self.capabilities
+    }
+
+    /// The composed adapter registry.
+    #[must_use]
+    pub fn framework_registry(&self) -> &FrameworkAdapterRegistry {
+        &self.registry
     }
 }
 
@@ -795,5 +1052,104 @@ mod tests {
         // Importing something else does not.
         let inactive = index.active_for(None, ["vue"]);
         assert!(inactive.is_empty());
+    }
+
+    /// The composed rows ARE the frontend capability rows: every row's
+    /// registration identity is the `FileLanguage` the host used to spell by
+    /// hand, and the authority accepts each registration on its own identity
+    /// validation (a mismatched adapter/language/config triple is rejected).
+    #[test]
+    fn composed_rows_project_the_frontend_catalog_identities() {
+        let catalog = FrameworkCapabilityCatalog::built_in()
+            .expect("the built-in frontend catalog publishes a grammar fact per row");
+        assert!(
+            !catalog.rows().is_empty(),
+            "a composed catalog with no rows would leave the host without any carrier grammar"
+        );
+        for row in catalog.rows() {
+            let language = row.file_language();
+            assert!(
+                language.is_framework_carrier(),
+                "a composed capability row must be a framework carrier row, got {language:?}"
+            );
+            assert!(
+                catalog.contains(row.adapter_id()),
+                "each row must be reachable by its own adapter id"
+            );
+        }
+        // Composition preserves the rows the host used to enumerate: the
+        // registration identity is derived, never re-spelled.
+        let vue = catalog
+            .rows()
+            .iter()
+            .find(|row| row.adapter_id() == &FrameworkAdapterId::vue())
+            .expect("the frontend catalog publishes the Vue carrier frontend");
+        assert_eq!(
+            vue.file_language(),
+            &FileLanguage::vue(),
+            "a composed row must register under the identity its catalog row names"
+        );
+        let authority = CarrierGrammarAuthority::new().expect("carrier grammar authority");
+        catalog
+            .register_all(&authority)
+            .expect("every composed row passes the authority's own identity validation");
+    }
+
+    /// Composition is deterministic: the rows arrive in the frontend
+    /// catalog's order, so two hosts compose the same registration sequence.
+    #[test]
+    fn composed_rows_keep_the_frontend_catalog_order() {
+        let first = FrameworkCapabilityCatalog::built_in().expect("composed catalog");
+        let second = FrameworkCapabilityCatalog::built_in().expect("composed catalog");
+        let ids = |catalog: &FrameworkCapabilityCatalog| -> Vec<String> {
+            catalog
+                .adapter_ids()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&first),
+            ids(&second),
+            "two compositions of the same catalog must agree on row order"
+        );
+    }
+
+    /// A catalog row that publishes no grammar fact fails closed: the
+    /// composition reports the exact adapter × language, never a catalog that
+    /// silently omits the framework.
+    #[test]
+    fn composition_fails_closed_on_a_row_without_a_registered_grammar() {
+        let error = FrameworkCapabilityCatalog::compose([(
+            FrameworkAdapterId::svelte(),
+            LanguageId::new("svelte"),
+            None,
+        )])
+        .expect_err("a row with no registered grammar fact must not compose");
+        assert_eq!(error.adapter_id, FrameworkAdapterId::svelte());
+        assert_eq!(error.carrier_language_id, LanguageId::new("svelte"));
+    }
+
+    /// The two framework authorities of a composed host describe the SAME
+    /// framework set, in both directions. A grammar the host parses but
+    /// cannot dispatch to — or an adapter it dispatches to but cannot parse —
+    /// fails composition instead of half-existing.
+    #[test]
+    fn host_services_catalog_and_registry_describe_the_same_frameworks() {
+        let services = HostServices::built_in();
+        let catalog = services.capabilities();
+        let registry = services.framework_registry();
+        for adapter_id in catalog.adapter_ids() {
+            assert!(
+                registry.contains(adapter_id),
+                "capability-catalog adapter '{adapter_id}' has no adapter registration"
+            );
+        }
+        for descriptor in registry.descriptors() {
+            assert!(
+                catalog.contains(&descriptor.id),
+                "registered adapter '{}' has no composed capability catalog row",
+                descriptor.id
+            );
+        }
     }
 }

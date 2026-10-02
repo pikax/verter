@@ -57,7 +57,8 @@ pub use public_contract::{
     PublicTypeReference,
 };
 pub use registry::{
-    CarrierLeg, FrameworkAdapterRegistry, FrameworkRegistration, SurfaceRegistration,
+    CarrierGrammarCapability, CarrierLeg, FrameworkAdapterRegistry, FrameworkCapabilityCatalog,
+    FrameworkRegistration, HostServices, MissingRegisteredGrammar, SurfaceRegistration,
     TagDisposition,
 };
 pub use self_file::{

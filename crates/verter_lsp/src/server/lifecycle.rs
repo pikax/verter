@@ -259,7 +259,11 @@ pub(super) async fn handle_initialize(
         .is_some_and(|tp| tp.supports_completion_resolve());
 
     Ok(InitializeResult {
-        capabilities: server_capabilities(&encoding, resolve_provider),
+        capabilities: server_capabilities(
+            &encoding,
+            resolve_provider,
+            server.documents.host().language_classifier(),
+        ),
         server_info: Some(ServerInfo {
             name: "verter-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -456,23 +460,27 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // build tools, other editors). Enables non-VS Code clients (Neovim, etc.)
     // to get full external change detection via the standard LSP mechanism.
     let watch_kind = Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete);
+    // Watcher globs are derived from the serving host's OWN composed
+    // classification authority, so the files this server watches are exactly
+    // the files its host classifies as framework carriers.
+    let host = server.documents.host();
+    let framework = host.language_classifier();
     let mut watchers = vec![FileSystemWatcher {
-        // Carrier-file watcher glob, built from the registry's carrier
+        // Carrier-file watcher glob, built from the host's registry carrier
         // rows. File-watching is a SERVER concern (the client manifest
         // carries no watch globs); this glob is the descriptor-derived
         // authority. It covers carrier extensions today (`.vue`,
         // `.svelte`) — including carrier rows with no registered
         // implementation, whose events produce no provider sync state
         // until a carrier lands.
-        glob_pattern: GlobPattern::String(carrier_watch_glob()),
+        glob_pattern: GlobPattern::String(carrier_watch_glob(framework)),
         kind: watch_kind,
     }];
     // Dedicated ADAPTER-MODULE watcher glob (`**/*.{svelte.js,svelte.ts}`),
-    // built from `LanguageRegistry::all_adapter_module_extensions()`. A rune
-    // module is NOT a carrier and its coverage is its OWN descriptor-derived
-    // glob — the generic TS/JS glob below no longer carries rune-module
-    // responsibility.
-    if let Some(adapter_module_glob) = adapter_module_watch_glob() {
+    // built from the same host-composed registry. A rune module is NOT a
+    // carrier and its coverage is its OWN descriptor-derived glob — the
+    // generic TS/JS glob below no longer carries rune-module responsibility.
+    if let Some(adapter_module_glob) = adapter_module_watch_glob(framework) {
         watchers.push(FileSystemWatcher {
             glob_pattern: GlobPattern::String(adapter_module_glob),
             kind: watch_kind,

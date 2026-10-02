@@ -66,6 +66,24 @@ impl HostLanguageClassifier {
     pub fn capability_is_enabled(&self, capability: &CapabilityId) -> bool {
         self.capabilities.is_enabled(capability)
     }
+
+    /// The framework-carrier extensions THIS host's registry classifies, in
+    /// registry order (longest suffix first).
+    ///
+    /// The host's own composition is the classification authority below the
+    /// host seam: a watcher that needs the carrier surface reads it here, not
+    /// from a process-global registry it never composed.
+    #[must_use]
+    pub fn carrier_extensions(&self) -> Vec<&str> {
+        self.registry.carrier_extensions()
+    }
+
+    /// The adapter-module extensions THIS host's registry classifies, across
+    /// every adapter, in registry order.
+    #[must_use]
+    pub fn adapter_module_extensions(&self) -> Vec<&str> {
+        self.registry.all_adapter_module_extensions()
+    }
 }
 
 impl Default for HostLanguageClassifier {
@@ -95,7 +113,7 @@ mod tests {
         ] {
             assert_eq!(
                 classifier.classify(path),
-                LanguageRegistry::global()
+                LanguageRegistry::built_in()
                     .classify_static(path)
                     .static_resolution(),
                 "empty snapshot must match pure static resolution for {path}"
