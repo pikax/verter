@@ -24319,6 +24319,124 @@ fn tsgo_resolve_envelope_item(
     }
 }
 
+/// Generation-only drift permits one recomputation; document and ownership races
+/// cannot rebase the original request, including during that recomputation.
+#[tokio::test]
+async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_document_races() {
+    let source =
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
+    for change in [
+        "steady",
+        "generation",
+        "edit",
+        "reopen",
+        "workspace",
+        "repeated",
+        "retry_edit",
+    ] {
+        let service = make_hover_test_service(Arc::new(MockTypeProvider::new()));
+        let server = service.inner();
+        install_test_resolver(server);
+        let canonical = "/workspace/App.vue";
+        let uri = open_test_vue(server, canonical, source);
+        let calls = std::cell::Cell::new(0);
+        let response = server
+            .settle_foreground_with_generation_retry(&uri, || {
+                let attempt = calls.get();
+                calls.set(attempt + 1);
+                let generation = server
+                    .documents
+                    .host()
+                    .get_diagnostics_generation(canonical);
+                if change == "repeated"
+                    || (attempt == 0 && matches!(change, "generation" | "retry_edit"))
+                {
+                    server
+                        .documents
+                        .host()
+                        .bump_diagnostics_generation(canonical);
+                } else if (attempt == 0 && change == "edit")
+                    || (attempt == 1 && change == "retry_edit")
+                {
+                    server.documents.did_change(&uri, 2, source);
+                } else if attempt == 0 && change == "reopen" {
+                    server.documents.did_close(&uri);
+                    open_test_vue(server, canonical, source);
+                } else if attempt == 0 && change == "workspace" {
+                    install_test_resolver(server);
+                }
+                std::future::ready(Ok(Some((attempt, generation))))
+            })
+            .await;
+        let retried = matches!(change, "generation" | "repeated" | "retry_edit");
+        assert_eq!(calls.get(), if retried { 2 } else { 1 }, "{change}");
+        if matches!(change, "steady" | "generation") {
+            assert_eq!(
+                response.unwrap(),
+                Some((
+                    usize::from(retried),
+                    server
+                        .documents
+                        .host()
+                        .get_diagnostics_generation(canonical)
+                )),
+                "{change}"
+            );
+        } else {
+            assert!(
+                matches!(response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                "{change}"
+            );
+        }
+    }
+}
+
+/// A closed carrier cannot enrich a completion with unqualified provider data.
+#[tokio::test]
+async fn completion_resolve_requires_an_open_document_for_provider_envelopes() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let service = make_hover_test_service(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
+    );
+    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    server.completion_resolve(item.clone()).await.unwrap();
+    assert!(provider
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::ResolveCompletion { .. })));
+    provider.clear_calls();
+    server.documents.did_close(&uri);
+
+    for explicit_uri in [false, true] {
+        let mut closed_item = item.clone();
+        if explicit_uri {
+            closed_item.data.as_mut().unwrap()["uri"] = serde_json::json!(uri.as_str());
+        }
+        let result = server.completion_resolve(closed_item).await;
+        assert!(
+            matches!(result, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified)
+        );
+    }
+    assert!(!provider
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::ResolveCompletion { .. })));
+    let native = CompletionItem {
+        label: "native".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        server.completion_resolve(native.clone()).await.unwrap(),
+        native
+    );
+}
+
 /// Dispatch reaches `resolve_completion` for the provider-NEUTRAL
 /// `verter_resolve` envelope — NOT the old provider-baked `data.tsgo` gate.
 ///

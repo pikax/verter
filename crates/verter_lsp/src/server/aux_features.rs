@@ -185,6 +185,18 @@ pub(super) async fn handle_document_highlight(
     server: &VerterLanguageServer,
     params: DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
+    let uri = &params.text_document_position_params.text_document.uri;
+    server
+        .settle_foreground_with_generation_retry(uri, || {
+            handle_document_highlight_attempt(server, &params)
+        })
+        .await
+}
+
+async fn handle_document_highlight_attempt(
+    server: &VerterLanguageServer,
+    params: &DocumentHighlightParams,
+) -> Result<Option<Vec<DocumentHighlight>>> {
     let _hg = HandlerGuard::new("document_highlight");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
@@ -345,6 +357,17 @@ pub(super) async fn handle_signature_help(
 pub(super) async fn handle_code_action(
     server: &VerterLanguageServer,
     params: CodeActionParams,
+) -> Result<Option<CodeActionResponse>> {
+    server
+        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
+            handle_code_action_attempt(server, &params)
+        })
+        .await
+}
+
+async fn handle_code_action_attempt(
+    server: &VerterLanguageServer,
+    params: &CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     let _hg = HandlerGuard::new("code_action");
     let uri = &params.text_document.uri;
@@ -743,9 +766,7 @@ pub(super) async fn handle_code_action_with_audit(
         None,
         async move {
             server.prepare_foreground(&uri).await?;
-            server
-                .settle_foreground(&uri, handle_code_action(server, params))
-                .await
+            handle_code_action(server, params).await
         },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
@@ -759,6 +780,17 @@ pub(super) async fn handle_code_action_with_audit(
 pub(super) async fn handle_semantic_tokens_full(
     server: &VerterLanguageServer,
     params: SemanticTokensParams,
+) -> Result<Option<SemanticTokensResult>> {
+    server
+        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
+            handle_semantic_tokens_full_attempt(server, &params)
+        })
+        .await
+}
+
+async fn handle_semantic_tokens_full_attempt(
+    server: &VerterLanguageServer,
+    params: &SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
     let _hg = HandlerGuard::new("semantic_tokens");
     let uri = &params.text_document.uri;
@@ -816,11 +848,7 @@ pub(super) async fn handle_semantic_tokens_full_with_audit(
         verter_audit::payloads::tags::LspMethodTag::SemanticTokens,
         target_identity,
         None,
-        async move {
-            server
-                .settle_foreground(&uri, handle_semantic_tokens_full(server, params))
-                .await
-        },
+        async move { handle_semantic_tokens_full(server, params).await },
         |payload, value| {
             let count = match value {
                 Some(SemanticTokensResult::Tokens(t)) => t.data.len(),
@@ -857,6 +885,17 @@ pub(super) async fn handle_code_lens(
 pub(super) async fn handle_inlay_hint(
     server: &VerterLanguageServer,
     params: InlayHintParams,
+) -> Result<Option<Vec<InlayHint>>> {
+    server
+        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
+            handle_inlay_hint_attempt(server, &params)
+        })
+        .await
+}
+
+async fn handle_inlay_hint_attempt(
+    server: &VerterLanguageServer,
+    params: &InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
     let _hg = HandlerGuard::new("inlay_hint");
     let uri = &params.text_document.uri;
@@ -1035,11 +1074,7 @@ pub(super) async fn handle_inlay_hint_with_audit(
         verter_audit::payloads::tags::LspMethodTag::InlayHints,
         target_identity,
         None,
-        async move {
-            server
-                .settle_foreground(&uri, handle_inlay_hint(server, params))
-                .await
-        },
+        async move { handle_inlay_hint(server, params).await },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
             payload.response_size_bytes =
