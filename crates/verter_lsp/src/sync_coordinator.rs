@@ -1208,6 +1208,37 @@ async fn coordinator_loop(
                             .ok()
                             .and_then(|uri| deps.documents.get(&uri).map(|document| document.version));
                         let sync_outcome = sync_file(&deps, &canonical_id, &signal.uri).await;
+                        if sync_outcome == SyncFileOutcome::LaneBusy {
+                            // Another transaction owns this document. Requeue the
+                            // work bit `will_sync` consumed above and keep the
+                            // document's FULL retry budget: yielding for a lane is
+                            // not a failed attempt, so spending one here would
+                            // strand a document whose only failure was contention.
+                            //
+                            // The receipt is RE-stamped, exactly as the `Retry`
+                            // arm does. Keeping the elapsed stamp would make the
+                            // loop's next deadline already due, and this serial
+                            // loop would re-dispatch the same busy document in a
+                            // hot spin while the lane stays held; the re-stamp
+                            // parks it for one quiet window so every OTHER
+                            // document's sync is serviced meanwhile.
+                            // `sync_file` additionally parked the id on the shared
+                            // pending-snapshot queue, so the work is redriven even
+                            // if this receipt is later coalesced away.
+                            deps.needs_provider_sync.insert(canonical_id.clone());
+                            let requeued_at = Instant::now();
+                            pending_files.insert(
+                                canonical_id,
+                                (
+                                    requeued_at,
+                                    PendingSignal {
+                                        received_at: requeued_at,
+                                        ..signal.clone()
+                                    },
+                                ),
+                            );
+                            continue;
+                        }
                         if sync_outcome == SyncFileOutcome::Retry
                             && signal.sync_retries_remaining > 0
                         {
@@ -1537,6 +1568,12 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
 enum SyncFileOutcome {
     Settled,
     Retry,
+    /// The document's per-document sync lane is held by another transaction
+    /// (an interactive repair, a background drain). The coordinator NEVER waits
+    /// for it: this serial loop services one document per dispatch, so blocking
+    /// here would park every other document's sync behind one user's repair.
+    /// The document is requeued instead, without spending its retry budget.
+    LaneBusy,
 }
 
 async fn sync_file(
@@ -1546,6 +1583,33 @@ async fn sync_file(
 ) -> SyncFileOutcome {
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return SyncFileOutcome::Settled;
+    };
+    // ONE lane per open document, shared with the interactive repair and every
+    // other background writer. Asked at the point of DELIVERY, so a transaction
+    // that started while the document was closed and finds it open now serializes
+    // on the open document's live transaction instead of interleaving with it.
+    let _document_lane = match deps
+        .documents
+        .document_lanes()
+        .try_delivery_lane(canonical_id)
+    {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+        // Closed: no editor has it open, so there is no interactive transaction
+        // to interleave with and the coordinator proceeds unserialized.
+        crate::document_sync_lane::DeliveryLane::Closed => None,
+        crate::document_sync_lane::DeliveryLane::Busy => {
+            tracing::debug!(
+                "sync_coordinator: yielding {canonical_id}, its document sync lane is held"
+            );
+            // The in-band parking queue every other transient refusal already
+            // uses (`Superseded`, an `Ok(false)` delivery fence). Its bounded
+            // redrive chain and exhaustion budget live on the shared carrier
+            // transaction coordinator, so this yield competes with NONE of the
+            // coordinator's own retry budget.
+            deps.pending_snapshot_provider_sync
+                .insert(canonical_id.to_string());
+            return SyncFileOutcome::LaneBusy;
+        }
     };
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Re-readable: the self-file sync below revalidates the published snapshot

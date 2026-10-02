@@ -5,6 +5,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
+use crate::document_sync_lane::DocumentLaneLease;
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
@@ -265,78 +266,6 @@ pub(crate) struct ResolvedComponentDocument {
     pub(crate) line_index: LineIndex,
 }
 
-/// One generation-aware IDE-sync repair lane. Retirement belongs to the lane
-/// object, never merely to its canonical-id key, so a stale close cannot retire
-/// a reopened document's replacement lane (the key-reuse/ABA case).
-struct IdeSyncRepairLane {
-    mutex: tokio::sync::Mutex<()>,
-    generation: std::sync::atomic::AtomicU64,
-    /// Advances once an admitted projection-less repair has attempted its
-    /// compile. Waiters that observed the prior value join that attempt; a
-    /// later request observes the new value and may retry transient failure.
-    repair_sequence: std::sync::atomic::AtomicU64,
-    retired: std::sync::atomic::AtomicBool,
-}
-
-impl IdeSyncRepairLane {
-    fn new(generation: u64) -> Self {
-        Self {
-            mutex: tokio::sync::Mutex::new(()),
-            generation: std::sync::atomic::AtomicU64::new(generation),
-            repair_sequence: std::sync::atomic::AtomicU64::new(0),
-            retired: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
-/// One participant in a document's generation-bound IDE-sync repair lane. A
-/// closed lane is retired synchronously by the final participant's drop, so
-/// cleanup is event-driven and never needs a polling task.
-struct IdeSyncRepairLease {
-    canonical_id: String,
-    lane: Arc<IdeSyncRepairLane>,
-    lanes: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
-}
-
-impl IdeSyncRepairLease {
-    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.lane.mutex.lock().await
-    }
-
-    fn retire(&self) {
-        self.lane
-            .retired
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    fn lane(&self) -> &Arc<IdeSyncRepairLane> {
-        &self.lane
-    }
-
-    fn repair_sequence(&self) -> u64 {
-        self.lane
-            .repair_sequence
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    fn complete_repair_attempt(&self) {
-        self.lane
-            .repair_sequence
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
-impl Drop for IdeSyncRepairLease {
-    fn drop(&mut self) {
-        if !self.lane.retired.load(std::sync::atomic::Ordering::Acquire) {
-            return;
-        }
-        self.lanes.remove_if(&self.canonical_id, |_, current| {
-            Arc::ptr_eq(current, &self.lane) && Arc::strong_count(&self.lane) == 2
-        });
-    }
-}
-
 #[cfg(test)]
 struct IdeSyncPausePoint {
     canonical_id: String,
@@ -545,20 +474,13 @@ pub struct ServerCore {
     /// Canonical IDs needing **interactive IDE sync** (set by did_change, cleared by
     /// `ensure_current_file_synced`). Only the IDE TSX path is flushed on hover/completion.
     needs_ide_sync: Arc<DashSet<String>>,
-    /// Per-document singleflight for the interactive IDE-sync repair
-    /// (`ensure_current_file_synced`). A hover/completion/definition storm on one
-    /// document must coalesce into ONE repair, not N concurrent foreground repairs
-    /// stampeding the provider (recompile + carrier gateway + sync per request).
-    /// The guard serializes repairs per canonical id; a waiter re-checks freshness
-    /// after acquiring it and returns without re-repairing when a concurrent repair
-    /// already made the document fresh.
-    ide_sync_repair_locks: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
-    /// Current open-document generation per canonical ID. A repair captures this
-    /// before lane acquisition and revalidates it after locking; close removes
-    /// only its exact generation, so reopen/key reuse cannot be mistaken for the
-    /// document instance that initiated stale work.
-    ide_sync_open_generations: Arc<DashMap<String, u64>>,
-    ide_sync_next_generation: std::sync::atomic::AtomicU64,
+    /// The ONE owner of the per-document provider-sync lanes, shared with every
+    /// background writer through [`DocumentRegistry`]. A hover/completion/
+    /// definition storm on one document coalesces into ONE transaction, and a
+    /// background sync of the same document (coordinator, API task, drains,
+    /// scanner) waits or yields on that SAME transaction instead of interleaving
+    /// with it. See [`crate::document_sync_lane`] for the lock order.
+    ide_sync_repair_locks: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Per-document import-set freshness memo and its singleflight locks.
     /// Shared with `background_init` so a workspace swap evicts both.
     import_sync: Arc<ImportSyncMemo>,
@@ -874,138 +796,26 @@ impl VerterLanguageServer {
     /// Acquire the current lifecycle lane. Open and close use this before
     /// mutating registry membership, so a reopen cannot land in the middle of a
     /// close of the prior document generation.
-    fn ide_sync_lifecycle_lease(&self, canonical_id: &str) -> IdeSyncRepairLease {
-        let lane = match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                if entry
-                    .get()
-                    .retired
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
-                    let generation = self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .map(|entry| *entry)
-                        .unwrap_or(0);
-                    let replacement = Arc::new(IdeSyncRepairLane::new(generation));
-                    entry.insert(Arc::clone(&replacement));
-                    replacement
-                } else {
-                    Arc::clone(entry.get())
-                }
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let generation = self
-                    .ide_sync_open_generations
-                    .get(canonical_id)
-                    .map(|entry| *entry)
-                    .unwrap_or(0);
-                let lane = Arc::new(IdeSyncRepairLane::new(generation));
-                entry.insert(Arc::clone(&lane));
-                lane
-            }
-        };
-        IdeSyncRepairLease {
-            canonical_id: canonical_id.to_string(),
-            lane,
-            lanes: Arc::clone(&self.ide_sync_repair_locks),
-        }
+    fn ide_sync_lifecycle_lease(&self, canonical_id: &str) -> DocumentLaneLease {
+        self.ide_sync_repair_locks.lifecycle_lease(canonical_id)
     }
 
     /// Acquire only the lane belonging to `generation`. A stale repair never
     /// inserts or replaces the lane of a closed/reopened document: it receives a
     /// detached retired lane, fails generation revalidation after locking, and
     /// disappears on drop without touching the map.
-    fn ide_sync_repair_lease(&self, canonical_id: &str, generation: u64) -> IdeSyncRepairLease {
-        let generation_is_current = self
-            .ide_sync_open_generations
-            .get(canonical_id)
-            .is_some_and(|current| *current == generation);
-        let lane = if generation_is_current {
-            match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
-                dashmap::mapref::entry::Entry::Occupied(entry)
-                    if !entry
-                        .get()
-                        .retired
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        && entry
-                            .get()
-                            .generation
-                            .load(std::sync::atomic::Ordering::Acquire)
-                            == generation =>
-                {
-                    Arc::clone(entry.get())
-                }
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                    // Re-check while owning the map entry. If this request lost
-                    // the generation race, it must not replace the winner's lane.
-                    if self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .is_some_and(|current| *current == generation)
-                    {
-                        let replacement = Arc::new(IdeSyncRepairLane::new(generation));
-                        entry.insert(Arc::clone(&replacement));
-                        replacement
-                    } else {
-                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
-                        detached
-                            .retired
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        detached
-                    }
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    if self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .is_some_and(|current| *current == generation)
-                    {
-                        let lane = Arc::new(IdeSyncRepairLane::new(generation));
-                        entry.insert(Arc::clone(&lane));
-                        lane
-                    } else {
-                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
-                        detached
-                            .retired
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        detached
-                    }
-                }
-            }
-        } else {
-            let detached = Arc::new(IdeSyncRepairLane::new(generation));
-            detached
-                .retired
-                .store(true, std::sync::atomic::Ordering::Release);
-            detached
-        };
-        IdeSyncRepairLease {
-            canonical_id: canonical_id.to_string(),
-            lane,
-            lanes: Arc::clone(&self.ide_sync_repair_locks),
-        }
+    fn ide_sync_repair_lease(&self, canonical_id: &str, generation: u64) -> DocumentLaneLease {
+        self.ide_sync_repair_locks
+            .repair_lease(canonical_id, generation)
     }
 
     fn begin_ide_sync_open_generation(
         &self,
         canonical_id: &str,
-        lane: &Arc<IdeSyncRepairLane>,
+        lane: &Arc<crate::document_sync_lane::DocumentSyncLane>,
     ) -> u64 {
-        let generation = self
-            .ide_sync_next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        lane.generation
-            .store(generation, std::sync::atomic::Ordering::Release);
-        lane.repair_sequence
-            .store(0, std::sync::atomic::Ordering::Release);
-        lane.retired
-            .store(false, std::sync::atomic::Ordering::Release);
         self.ide_sync_repair_locks
-            .insert(canonical_id.to_string(), Arc::clone(lane));
-        self.ide_sync_open_generations
-            .insert(canonical_id.to_string(), generation);
-        generation
+            .begin_open_generation(canonical_id, lane)
     }
 
     /// Test helpers often register directly through `DocumentRegistry`; lazily
@@ -1018,36 +828,22 @@ impl VerterLanguageServer {
         if self.documents.get_canonical_id(uri).as_deref() != Some(canonical_id) {
             return None;
         }
-        if let Some(generation) = self.ide_sync_open_generations.get(canonical_id) {
-            return Some(*generation);
-        }
-        let generation = self
-            .ide_sync_next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let generation = match self
-            .ide_sync_open_generations
-            .entry(canonical_id.to_string())
-        {
-            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(generation);
-                generation
-            }
-        };
-        Some(generation)
+        Some(
+            self.ide_sync_repair_locks
+                .init_open_generation(canonical_id),
+        )
     }
 
     fn ide_sync_generation_is_open(&self, uri: &Uri, canonical_id: &str, generation: u64) -> bool {
         self.documents.get_canonical_id(uri).as_deref() == Some(canonical_id)
             && self
-                .ide_sync_open_generations
-                .get(canonical_id)
-                .is_some_and(|current| *current == generation)
+                .ide_sync_repair_locks
+                .generation_is_open(canonical_id, generation)
     }
 
     fn close_ide_sync_open_generation(&self, canonical_id: &str, generation: u64) {
-        self.ide_sync_open_generations
-            .remove_if(canonical_id, |_, current| *current == generation);
+        self.ide_sync_repair_locks
+            .close_open_generation(canonical_id, generation);
     }
 
     #[cfg(test)]
@@ -1217,10 +1013,12 @@ impl VerterLanguageServer {
         });
 
         let needs_ide_sync = Arc::new(DashSet::new());
-        let ide_sync_repair_locks = Arc::new(DashMap::new());
-        let ide_sync_open_generations = Arc::new(DashMap::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
         let documents = Arc::new(DocumentRegistry::new(config.host));
+        // The one per-document sync-lane registry. Owned by the registry above and
+        // read here, so the server and every background writer share ONE lane per
+        // open document instead of each holding its own view of it.
+        let ide_sync_repair_locks = Arc::clone(documents.document_lanes());
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
@@ -1327,8 +1125,6 @@ impl VerterLanguageServer {
             ),
             needs_ide_sync,
             ide_sync_repair_locks,
-            ide_sync_open_generations,
-            ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
             import_sync: Arc::new(ImportSyncMemo::default()),
             child_public_contracts: Arc::new(DashMap::new()),
             child_public_contract_failures: Arc::new(DashMap::new()),

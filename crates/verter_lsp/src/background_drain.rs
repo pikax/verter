@@ -385,6 +385,22 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
     };
 
     for canonical_id in pending_ids {
+        // ONE lane per open document, shared with the interactive repair and the
+        // coordinator. Asked here, at the point of delivery, so a drain pass that
+        // started while the document was closed and finds it open now serializes
+        // on the live transaction. A busy lane YIELDS: the id stays queued (the
+        // dequeue below is never reached), and the pass moves on to the next
+        // document instead of blocking behind an interactive repair.
+        let _document_lane = match documents.document_lanes().try_delivery_lane(&canonical_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "background_drain: yielding {canonical_id}, its document sync lane is held"
+                );
+                continue;
+            }
+        };
         let outcome = sync_pending_snapshot_provider_file(
             project_sync,
             documents,
@@ -540,6 +556,19 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 
     // Lightweight sync: compile and sync the provider artifacts needed by the backend.
     for import_id in &all_import_ids {
+        // ONE lane per open document. A busy lane YIELDS this import for a later
+        // pass rather than queueing behind an interactive transaction — a
+        // background sweep must never hold up, or wait on, a user's request.
+        let _document_lane = match documents.document_lanes().try_delivery_lane(import_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "background_drain: yielding aliased-import resync for {import_id}, its document sync lane is held"
+                );
+                continue;
+            }
+        };
         if let Some(state) = provider_sync_states.get(import_id.as_str()) {
             let already_loaded = if is_tsgo {
                 state.ide_background_loaded && state.api_background_loaded
@@ -1606,7 +1635,25 @@ pub(super) async fn sync_api_to_provider_background_task(
     is_jsx: bool,
     carrier_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
     pending_snapshot_provider_sync: Arc<dashmap::DashSet<String>>,
+    document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
 ) {
+    // ONE lane per open document, shared with the interactive repair and every
+    // other background writer. This detached task has no `DocumentRegistry`, so
+    // the registry's lane owner is threaded in explicitly. A busy lane YIELDS:
+    // the source is parked on the shared pending queue and a later drain pass
+    // redrives it, so background API work never holds — or waits on — the lane
+    // across a provider round trip ahead of an interactive request.
+    let _document_lane = match document_lanes.try_delivery_lane(&canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+        crate::document_sync_lane::DeliveryLane::Closed => None,
+        crate::document_sync_lane::DeliveryLane::Busy => {
+            tracing::debug!(
+                "sync_api(background): yielding {canonical_id}, its document sync lane is held"
+            );
+            pending_snapshot_provider_sync.insert(canonical_id);
+            return;
+        }
+    };
     // Route through the SINGLE carrier-sync gateway. This API-only background task
     // is the tsgo path (the tsserver coordinator route returns before spawning it),
     // so the gateway returns `DirectOpen` carrying the transition + a POST-open

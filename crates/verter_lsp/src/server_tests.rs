@@ -17627,10 +17627,10 @@ async fn did_close_sweeps_only_the_closed_documents_ide_sync_repair_lock() {
     assert!(
         server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closed.vue")
+            .has_lane("/workspace/src/Closed.vue")
             && server
                 .ide_sync_repair_locks
-                .contains_key("/workspace/src/Retained.vue"),
+                .has_lane("/workspace/src/Retained.vue"),
         "precondition: each touched document owns a repair lock"
     );
 
@@ -17647,13 +17647,13 @@ async fn did_close_sweeps_only_the_closed_documents_ide_sync_repair_lock() {
     assert!(
         !server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closed.vue"),
+            .has_lane("/workspace/src/Closed.vue"),
         "did_close must sweep the closed document's repair lock"
     );
     assert!(
         server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Retained.vue"),
+            .has_lane("/workspace/src/Retained.vue"),
         "did_close must not sweep another open document's repair lock"
     );
 }
@@ -17673,7 +17673,7 @@ async fn did_close_does_not_accumulate_repair_locks_across_distinct_documents() 
         );
         server.ensure_current_file_synced(&uri).await;
         assert!(
-            server.ide_sync_repair_locks.contains_key(&canonical_id),
+            server.ide_sync_repair_locks.has_lane(&canonical_id),
             "precondition: transient document {index} owns a repair lock"
         );
 
@@ -17685,7 +17685,7 @@ async fn did_close_does_not_accumulate_repair_locks_across_distinct_documents() 
         )
         .await;
         assert!(
-            !server.ide_sync_repair_locks.contains_key(&canonical_id),
+            !server.ide_sync_repair_locks.has_lane(&canonical_id),
             "closed transient document {index} must not retain a repair lock"
         );
     }
@@ -17707,9 +17707,9 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
         "<script setup lang=\"ts\">const value = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let generation = *server
-        .ide_sync_open_generations
-        .get("/workspace/src/Closing.vue")
+    let generation = server
+        .ide_sync_repair_locks
+        .open_generation("/workspace/src/Closing.vue")
         .expect("open generation");
     let retained_lease = server.ide_sync_repair_lease("/workspace/src/Closing.vue", generation);
 
@@ -17723,17 +17723,14 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
 
     let mapped_lane = server
         .ide_sync_repair_locks
-        .get("/workspace/src/Closing.vue")
+        .lane("/workspace/src/Closing.vue")
         .expect("a retained waiter prevents unsafe lane removal");
     assert!(
         Arc::ptr_eq(&mapped_lane, retained_lease.lane()),
         "did_close must not split a retained repair lane into a second mutex"
     );
     assert!(
-        retained_lease
-            .lane()
-            .retired
-            .load(std::sync::atomic::Ordering::Acquire),
+        retained_lease.is_retired(),
         "close must retire the exact retained lane object"
     );
     drop(mapped_lane);
@@ -17742,7 +17739,7 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
     assert!(
         !server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closing.vue"),
+            .has_lane("/workspace/src/Closing.vue"),
         "the final lease drop must synchronously retire the lane"
     );
 }
@@ -17779,14 +17776,10 @@ async fn encoded_virtual_uri_open_close_leaves_no_repair_generation_or_lane() {
     assert!(
         server.ide_sync_repair_locks.is_empty(),
         "virtual documents never own carrier repair lanes: {:?}",
-        server
-            .ide_sync_repair_locks
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>()
+        server.ide_sync_repair_locks.mapped_canonical_ids()
     );
     assert!(
-        server.ide_sync_open_generations.is_empty(),
+        server.ide_sync_repair_locks.has_no_open_generations(),
         "virtual documents never own carrier open generations"
     );
 }
@@ -17817,7 +17810,7 @@ async fn stale_repair_paused_before_lease_cannot_recreate_lane_after_close() {
         )
         .await;
         assert!(
-            !server.ide_sync_repair_locks.contains_key(canonical_id),
+            !server.ide_sync_repair_locks.has_lane(canonical_id),
             "close must retire its lane before the stale repair resumes"
         );
         release.notify_one();
@@ -17829,11 +17822,13 @@ async fn stale_repair_paused_before_lease_cannot_recreate_lane_after_close() {
         "document must stay closed"
     );
     assert!(
-        !server.ide_sync_open_generations.contains_key(canonical_id),
+        !server
+            .ide_sync_repair_locks
+            .has_open_generation(canonical_id),
         "close must retire the exact open generation"
     );
     assert!(
-        !server.ide_sync_repair_locks.contains_key(canonical_id),
+        !server.ide_sync_repair_locks.has_lane(canonical_id),
         "a stale post-close lease acquisition must not recreate a mapped lane"
     );
 }
@@ -17850,9 +17845,9 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
         "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let old_generation = *server
-        .ide_sync_open_generations
-        .get(canonical_id)
+    let old_generation = server
+        .ide_sync_repair_locks
+        .open_generation(canonical_id)
         .expect("old open generation");
     server.needs_ide_sync.insert(canonical_id.to_string());
 
@@ -17880,9 +17875,9 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
             },
         )
         .await;
-        let new_generation = *server
-            .ide_sync_open_generations
-            .get(canonical_id)
+        let new_generation = server
+            .ide_sync_repair_locks
+            .open_generation(canonical_id)
             .expect("reopened generation");
         assert_ne!(
             new_generation, old_generation,
@@ -17895,15 +17890,15 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
 
     let lane = server
         .ide_sync_repair_locks
-        .get(canonical_id)
+        .lane(canonical_id)
         .expect("reopened document must retain its live lane");
     assert_eq!(
-        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        lane.generation(),
         new_generation,
         "mapped lane must belong to the reopened generation"
     );
     assert!(
-        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        !lane.is_retired(),
         "the stale prior-generation repair must not retire the reopened lane"
     );
     drop(lane);
@@ -17941,9 +17936,9 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
         "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let old_generation = *server
-        .ide_sync_open_generations
-        .get(canonical_id)
+    let old_generation = server
+        .ide_sync_repair_locks
+        .open_generation(canonical_id)
         .expect("old open generation");
     server.needs_ide_sync.insert(canonical_id.to_string());
 
@@ -17997,9 +17992,9 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
         close_release.notify_one();
         close.as_mut().await;
         reopen.as_mut().await;
-        let new_generation = *server
-            .ide_sync_open_generations
-            .get(canonical_id)
+        let new_generation = server
+            .ide_sync_repair_locks
+            .open_generation(canonical_id)
             .expect("reopened generation");
         assert_ne!(
             new_generation, old_generation,
@@ -18015,15 +18010,15 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
 
     let lane = server
         .ide_sync_repair_locks
-        .get(canonical_id)
+        .lane(canonical_id)
         .expect("reopened document must retain its live lane");
     assert_eq!(
-        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        lane.generation(),
         new_generation,
         "mapped lane must belong to the reopened generation"
     );
     assert!(
-        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        !lane.is_retired(),
         "a stale repair holding a pre-close lease must not retire the revived lane"
     );
     drop(lane);
@@ -19783,6 +19778,10 @@ defineProps<{ msg: string }>()
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
+        // The task's lane probe is answered by a standalone registry that holds no
+        // open generation for this canonical, so it takes the same unserialized
+        // path the task took before the shared per-document lane existed.
+        Arc::clone(documents.document_lanes()),
     )
     .await;
 
@@ -19905,6 +19904,10 @@ defineProps<{ msg: string }>()
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         Arc::clone(&requeue),
+        // No open generation for this canonical in a registry that never opened
+        // it, so the lane probe reports Closed and the task runs unserialized —
+        // the same path it took before the shared lane existed.
+        Arc::clone(documents.document_lanes()),
     )
     .await;
 
@@ -20021,6 +20024,10 @@ defineProps<{ msg: string }>()
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
+        // The task's lane probe is answered by a standalone registry that holds no
+        // open generation for this canonical, so it takes the same unserialized
+        // path the task took before the shared per-document lane existed.
+        Arc::clone(documents.document_lanes()),
     )
     .await;
 

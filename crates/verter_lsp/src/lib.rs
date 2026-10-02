@@ -83,6 +83,7 @@ pub mod carrier_registry;
 pub mod config;
 pub mod configured_owner;
 pub mod css;
+pub(crate) mod document_sync_lane;
 pub mod documents;
 pub(crate) mod edit_quiet_window;
 pub mod editor_tsserver;

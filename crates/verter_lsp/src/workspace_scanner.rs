@@ -1037,6 +1037,29 @@ pub(crate) async fn sync_file_to_provider(
     let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
+    // ONE lane per open document, shared with the interactive repair, the
+    // coordinator and the drains. Taken HERE — after the compile, immediately
+    // before the gateway's membership decision and provider write — because that
+    // is the delivery point. A scanner transaction that started while the
+    // document was closed and finds it open now therefore serializes on the live
+    // transaction instead of interleaving with it (AC1). A busy lane YIELDS: the
+    // scanner re-sweeps on its next pass, and never blocks behind a repair.
+    let _document_lane = match documents.map(|documents| documents.document_lanes()) {
+        Some(lanes) => match lanes.try_delivery_lane(canonical_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "workspace_scanner: yielding {canonical_id}, its document sync lane is held"
+                );
+                return;
+            }
+        },
+        // No registry wired (a standalone scan with no editor session): there is
+        // no open document and no lane to take.
+        None => None,
+    };
+
     // Route through the SINGLE carrier-sync gateway: the membership decision
     // (publish on owned / retract on owner-loss for tsserver) is FUSED with the
     // provider-state commit. The background full-project scan previously committed a

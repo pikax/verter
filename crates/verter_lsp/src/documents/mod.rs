@@ -60,6 +60,14 @@ pub struct DocumentRegistry {
     /// captures the current snapshot set under a fence and maps a returned offset
     /// only against the exact generation it captured.
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
+    /// The ONE per-document provider-sync lane registry. Owned here for the
+    /// same reason [`Self::provider_surfaces`] is: the registry already reaches
+    /// every writer — the server, the debounced coordinator, the background
+    /// drain free functions and the workspace scanner all hold this same
+    /// `Arc<DocumentRegistry>` — so every transaction that delivers or commits
+    /// an open document's provider surface serializes on ONE lane per document.
+    /// See [`crate::document_sync_lane`] for the lock order.
+    document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
     /// Full Verter semantic enrichment is deliberately isolated from the
@@ -537,6 +545,7 @@ impl DocumentRegistry {
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
+            document_lanes: Arc::new(crate::document_sync_lane::DocumentSyncLanes::default()),
             registration: registration_signal::RegistrationSignal::default(),
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
@@ -676,6 +685,12 @@ impl DocumentRegistry {
     /// fail-closed cross-file rename mapping).
     pub fn provider_surfaces(&self) -> &crate::provider_surface_store::ProviderSurfaceStore {
         &self.provider_surfaces
+    }
+
+    /// The shared per-document sync-lane registry — the single owner of the
+    /// lane every provider-sync transaction of an open document takes.
+    pub(crate) fn document_lanes(&self) -> &Arc<crate::document_sync_lane::DocumentSyncLanes> {
+        &self.document_lanes
     }
 
     /// Set the negotiated position encoding. Called once during `initialize()`,

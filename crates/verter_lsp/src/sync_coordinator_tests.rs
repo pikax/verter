@@ -6151,3 +6151,404 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         "a restart pulse after coordinator shutdown must not start drain passes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-document sync lane (H4).
+//
+// ONE lane per `(canonical id, open generation)` is shared by the interactive
+// request repair and EVERY background writer — the debounced coordinator here,
+// the synchronous and detached API syncs, the snapshot/pending drains and the
+// workspace scanner. Without it, a background transaction of one revision
+// delivers its bytes between another transaction's own delivery and its commit.
+//
+// The tests below drive the real `sync_file` against the real mock provider and
+// use only `test_hooks` arrival/release barriers, so every ordering they assert
+// is decided rather than raced.
+// ---------------------------------------------------------------------------
+
+/// Open `source` under a fresh registry and mint the open generation that the
+/// server's `did_open` mints. Without a generation the document has no lane and
+/// every writer would legitimately proceed unserialized.
+fn open_with_lane(
+    documents: &Arc<DocumentRegistry>,
+    uri: &Uri,
+    canonical_id: &str,
+    source: &str,
+) -> crate::document_sync_lane::DocumentLaneLease {
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let lanes = documents.document_lanes();
+    let lease = lanes.lifecycle_lease(canonical_id);
+    lanes.begin_open_generation(canonical_id, lease.lane());
+    lease
+}
+
+fn lane_test_deps(
+    documents: &Arc<DocumentRegistry>,
+    provider: &Arc<MockTypeProvider>,
+) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents: Arc::clone(documents),
+        project_sync: Some(ProjectSync::new(
+            Arc::clone(provider) as Arc<dyn crate::type_provider::traits::TypeProvider>,
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            "/other",
+            Some("/other/tsconfig.json"),
+        )),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// Every provider write of this document's IDE companion path.
+fn ide_companion_writes(provider: &MockTypeProvider, ide_path: &str) -> Vec<MockCall> {
+    provider
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::OpenFileBackground { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    if path == ide_path
+            )
+        })
+        .collect()
+}
+
+/// AC6(a)/(b): the debounced transaction is parked after its compile — holding
+/// the document's lane — and a second transaction of the same document arrives.
+///
+/// It does NOT interleave and does NOT wait: the serial loop asks the lane, is
+/// told it is busy, and yields the document for a later pass. Exactly ONE
+/// provider write for the revision reaches the provider, so there is no second
+/// application to supersede the first transaction's commit and no half-applied
+/// state between them.
+///
+/// RED-before (no shared lane): the second `sync_file` runs to completion while
+/// the first is parked, so `ide_companion_writes` returns two writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_debounced_sync_yields_the_document_lane_to_an_in_flight_transaction() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // Unique canonical id: the pause-hook registry is keyed by it, so the shared
+    // "/workspace/src/App.vue" literal would let a concurrent test steal it.
+    let canonical_id = "/workspace/src/LaneHolderParked.vue";
+    let uri: Uri = "file:///workspace/src/LaneHolderParked.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                          <template><div>{{ msg }}</div></template>\n";
+    let _lease = open_with_lane(&documents, &uri, canonical_id, SOURCE);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = lane_test_deps(&documents, &provider);
+    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+
+    // Park the first transaction right after its compile. From here until it is
+    // released it owns the document's lane.
+    let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
+    let first = sync_file(&deps, canonical_id, uri.as_str());
+    let contending = async {
+        arrived.notified().await;
+
+        // The serial loop never waits on a lane. Prove it returned rather than
+        // blocking: `sync_file` is a plain future, so awaiting it here would
+        // deadlock the single-threaded join if it took the lane.
+        let contended = sync_file(&deps, canonical_id, uri.as_str()).await;
+        let writes_while_held = ide_companion_writes(&provider, &ide_path).len();
+        release.notify_one();
+        (contended, writes_while_held)
+    };
+    let (first_outcome, (contended, writes_while_held)) =
+        futures_util::future::join(first, contending).await;
+
+    assert_eq!(
+        first_outcome,
+        SyncFileOutcome::Settled,
+        "the lane holder's own transaction delivers normally"
+    );
+    assert_eq!(
+        contended,
+        SyncFileOutcome::LaneBusy,
+        "a second transaction of a document whose lane is held must yield, not wait and not deliver"
+    );
+    assert_eq!(
+        writes_while_held, 0,
+        "the contending transaction delivered nothing while the lane was held"
+    );
+    let final_writes = ide_companion_writes(&provider, &ide_path);
+    assert_eq!(
+        final_writes.len(),
+        1,
+        "exactly ONE provider application for the revision: no interleaved delivery to \
+         supersede the holder's commit. Writes: {final_writes:?}"
+    );
+    assert!(
+        deps.pending_snapshot_provider_sync.contains(canonical_id),
+        "the yielded document is requeued on the shared pending queue, so it is \
+         redriven even if the coordinator receipt is coalesced away"
+    );
+}
+
+/// AC2: a busy document is requeued WITHOUT spending its retry budget, and
+/// another document is still serviced. A contended document must not consume
+/// the budget that exists for genuine delivery failures — otherwise repeated
+/// contention alone would strand it with the provider permanently unsynced.
+#[tokio::test(flavor = "multi_thread")]
+async fn contention_on_one_document_leaves_another_documents_sync_unaffected() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let contended_id = "/workspace/src/LaneContended.vue";
+    let contended_uri: Uri = "file:///workspace/src/LaneContended.vue"
+        .parse()
+        .expect("test uri");
+    let free_id = "/workspace/src/LaneFree.vue";
+    let free_uri: Uri = "file:///workspace/src/LaneFree.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                          <template><div>{{ msg }}</div></template>\n";
+    let _contended_lease = open_with_lane(&documents, &contended_uri, contended_id, SOURCE);
+    let _free_lease = open_with_lane(&documents, &free_uri, free_id, SOURCE);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = lane_test_deps(&documents, &provider);
+
+    // Hold the contended document's lane for the whole interleaving.
+    let held = match documents.document_lanes().try_delivery_lane(contended_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the held document must hand out its lane, got {other:?}"),
+    };
+    let contended_ide =
+        verter_semantic::resolver_core::carrier_ide_provider_path(contended_id, false);
+    let free_ide = verter_semantic::resolver_core::carrier_ide_provider_path(free_id, false);
+
+    let contended_outcome = sync_file(&deps, contended_id, contended_uri.as_str()).await;
+    let free_outcome = sync_file(&deps, free_id, free_uri.as_str()).await;
+
+    assert_eq!(
+        contended_outcome,
+        SyncFileOutcome::LaneBusy,
+        "the contended document yields"
+    );
+    assert_eq!(
+        free_outcome,
+        SyncFileOutcome::Settled,
+        "a different document is not blocked by another document's lane"
+    );
+    assert!(
+        ide_companion_writes(&provider, &contended_ide).is_empty(),
+        "the contended document delivered nothing"
+    );
+    assert_eq!(
+        ide_companion_writes(&provider, &free_ide).len(),
+        1,
+        "the uncontended document's provider work completed while the other was held"
+    );
+    drop(held);
+}
+
+/// AC6(e): a transaction that starts while its document is CLOSED and finds it
+/// open before delivery must take the lane (or yield to its holder).
+///
+/// `try_delivery_lane` is asked at the delivery point, not at the start of the
+/// transaction, so it observes the document's live open generation rather than
+/// the state the transaction began with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transaction_that_starts_closed_takes_the_lane_when_it_finds_the_document_open() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneOpensMidFlight.vue";
+    let uri: Uri = "file:///workspace/src/LaneOpensMidFlight.vue"
+        .parse()
+        .expect("test uri");
+    let lanes = documents.document_lanes();
+
+    // The transaction starts with the document closed: no open generation, so
+    // there is nothing to serialize against and it proceeds.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Closed
+        ),
+        "a closed document has no lane to take"
+    );
+
+    // The editor opens the document mid-flight and a request begins repairing it.
+    let _lease = open_with_lane(
+        &documents,
+        &uri,
+        canonical_id,
+        "<script setup lang=\"ts\">\n</script>\n",
+    );
+    let held = match lanes.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the newly open document must hand out a lane, got {other:?}"),
+    };
+
+    // The still-running transaction now delivers and finds an open document whose
+    // transaction owns it. It yields rather than interleaving.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "a transaction that started closed must still take (or yield to) the lane of a \
+         document that became open before delivery"
+    );
+    drop(held);
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Acquired(_)
+        ),
+        "once the open document's transaction completes the lane is free again"
+    );
+}
+
+/// AC7: background API work never holds or waits on the lane across a provider
+/// round trip ahead of an interactive request.
+///
+/// An interactive transaction parks in the middle of its own work (here: a
+/// provider round trip, the longest hold a transaction can have). A background
+/// writer asked during that window must return BUSY straight away rather than
+/// blocking, and the interactive transaction must remain the only one running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_writer_yields_immediately_instead_of_waiting_for_an_interactive_holder() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneApiWaiter.vue";
+    let uri: Uri = "file:///workspace/src/LaneApiWaiter.vue"
+        .parse()
+        .expect("test uri");
+    let _lease = open_with_lane(
+        &documents,
+        &uri,
+        canonical_id,
+        "<script setup lang=\"ts\">\n</script>\n",
+    );
+    let lanes = Arc::clone(documents.document_lanes());
+
+    // The interactive request's transaction takes the lane for repair.
+    let interactive = lanes.repair_lease(
+        canonical_id,
+        lanes
+            .open_generation(canonical_id)
+            .expect("the document was opened"),
+    );
+    let holder = interactive.lock().await;
+
+    // A background API task arrives while that holder is parked mid-transaction.
+    // It must observe the busy lane NOW. This is decisive rather than
+    // timing-sensitive: `holder` is deliberately still alive across the whole
+    // await, so a probe that BLOCKED on the lane could never complete and the
+    // timeout would fire. Completing at all IS the non-blocking proof.
+    let probe = {
+        let lanes = Arc::clone(&lanes);
+        let canonical_id = canonical_id.to_string();
+        tokio::spawn(async move { lanes.try_delivery_lane(&canonical_id) })
+    };
+    let background = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+        .await
+        .expect("a background writer must not block on the document's lane")
+        .expect("the background probe task must not panic");
+    assert!(
+        matches!(background, crate::document_sync_lane::DeliveryLane::Busy),
+        "the background writer observed the held lane, got {background:?}"
+    );
+
+    // The interactive transaction still holds the lane throughout — the
+    // background writer neither waited nor displaced it.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "the background writer neither waited for nor displaced the interactive holder"
+    );
+    drop(holder);
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Acquired(_)
+        ),
+        "the lane is released with the interactive transaction"
+    );
+}
+
+/// AC6(d): a waiter of a RETIRED open generation never commits into a reopened
+/// one's lane. A close/reopen overlaps the stale transaction; the stale lease is
+/// detached, so locking it neither blocks nor serializes with the live document,
+/// and revalidating the generation refuses its commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiter_of_a_retired_open_generation_never_takes_the_reopened_documents_lane() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneStaleGeneration.vue";
+    let lanes = documents.document_lanes();
+
+    // The transaction captures the open generation, then the document is closed.
+    let stale = lanes.repair_lease(canonical_id, lanes.init_open_generation(canonical_id));
+    let stale_generation = stale.generation();
+    assert!(lanes.generation_is_open(canonical_id, stale_generation));
+
+    // `did_close` retires the exact generation AND the lane object serving it.
+    // The retirement is what makes the reopen install a DIFFERENT lane rather
+    // than handing the stale transaction's own lane back to the new document.
+    let close_lease = lanes.lifecycle_lease(canonical_id);
+    let close_guard = close_lease.lock().await;
+    lanes.close_open_generation(canonical_id, stale_generation);
+    close_lease.retire();
+    drop(close_guard);
+    drop(close_lease);
+
+    // The editor reopens: a NEW generation and a live lane now exist.
+    let live = lanes.lifecycle_lease(canonical_id);
+    let live_guard = live.lock().await;
+    let reopened = lanes.begin_open_generation(canonical_id, live.lane());
+    assert_ne!(
+        reopened, stale_generation,
+        "a reopen mints a fresh generation"
+    );
+
+    // The stale transaction locks its DETACHED lane while the reopened document's
+    // live transaction holds the live one. It cannot deadlock and cannot block:
+    // the live lane reports `Busy` because the LIVE transaction owns it, and the
+    // live transaction was the one already holding before the stale lock.
+    let stale_guard = stale.lock().await;
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "the reopened document's live transaction still owns its lane; the stale \
+         waiter serialized on its own detached lane and did not interfere"
+    );
+
+    // ...and it cannot commit: its generation no longer validates.
+    assert!(
+        !lanes.generation_is_open(canonical_id, stale_generation),
+        "the retired generation must fail revalidation after the reopen"
+    );
+    drop(stale_guard);
+    drop(live_guard);
+}

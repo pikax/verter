@@ -798,6 +798,28 @@ impl VerterLanguageServer {
             .as_ref()
             .map(|ide| ide.is_jsx)
             .unwrap_or_else(|| self.documents.is_jsx(uri));
+        // ONE lane per open document. The API leg is a provider-surface commit
+        // like any other, so it serializes on the SAME lane as the IDE leg: two
+        // transactions of one revision can no longer interleave a commit with a
+        // delivery. Asked immediately before the gateway (the delivery point).
+        // `did_open` has already released its lifecycle lease by here, so this
+        // never re-acquires what the caller holds.
+        let _document_lane = match self
+            .documents
+            .document_lanes()
+            .try_delivery_lane(&canonical_id)
+        {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                // The holder is delivering this document's own surface right now.
+                // Park the source instead of queueing behind it; a later drain
+                // pass redrives the API leg, and an interactive caller still gets
+                // the IDE leg it asked for.
+                self.queue_snapshot_provider_sync(canonical_id.clone());
+                return;
+            }
+        };
         // Route through the SINGLE carrier-sync gateway: membership fused with the
         // provider-state commit. tsserver ⇒ `Published` (the plugin serves both
         // companions); tsgo ⇒ `DirectOpen` (open the API companion buffer directly).
@@ -1358,6 +1380,7 @@ impl VerterLanguageServer {
         let provider_surfaces = self.documents.provider_surfaces().clone();
         let carrier_coordinator = Arc::clone(&self.carrier_transaction_coordinator);
         let pending_snapshot_provider_sync = Arc::clone(&self.pending_snapshot_provider_sync);
+        let api_task_document_lanes = Arc::clone(self.documents.document_lanes());
         tokio::spawn(
             super::background_drain::sync_api_to_provider_background_task(
                 sync,
@@ -1370,6 +1393,7 @@ impl VerterLanguageServer {
                 is_jsx,
                 carrier_coordinator,
                 pending_snapshot_provider_sync,
+                api_task_document_lanes,
             ),
         );
     }
@@ -1446,12 +1470,7 @@ impl VerterLanguageServer {
             // generation is only reassigned under the lane mutex this repair now
             // holds (did_open's `begin_ide_sync_open_generation`), so the check is
             // exact.
-            if repair_lease
-                .lane()
-                .generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                == open_generation
-            {
+            if repair_lease.generation() == open_generation {
                 repair_lease.retire();
             }
             return;
@@ -1976,12 +1995,7 @@ impl VerterLanguageServer {
         if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
             // Same revived-lane guard as `ensure_current_file_synced`: never
             // retire a lane a close→reopen revived for a newer generation.
-            if repair_lease
-                .lane()
-                .generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                == open_generation
-            {
+            if repair_lease.generation() == open_generation {
                 repair_lease.retire();
             }
             return;
@@ -3364,6 +3378,28 @@ impl VerterLanguageServer {
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
+        // ONE lane per open document. Taken HERE — after the caller's destructive
+        // reload + compile, and deliberately AFTER every `did_change_mutex` scope
+        // in `resync_background_carrier_file` so the documented lock order (1.
+        // lifecycle commit, 2. document lane, 3. per-path delivery lock) is never
+        // inverted here. A busy lane YIELDS the resync and queues the canonical for
+        // a later pass instead of delivering a transaction that could interleave
+        // with an interactive repair of the same open document.
+        let _document_lane = match self
+            .documents
+            .document_lanes()
+            .try_delivery_lane(canonical_id)
+        {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "resync_background: yielding {canonical_id}, its document sync lane is held"
+                );
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return;
+            }
+        };
         // Route the owner-resolved sync through the SINGLE carrier-sync gateway: the
         // membership decision is FUSED with the provider-state transition + the
         // sealed receipt that gates the commit. tsserver advertised ⇒ `Published`
