@@ -348,6 +348,7 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
   "crates/verter_protocol/src/component_meta.rs",
   "crates/verter_scheduler/src/scheduler.rs",
+  "crates/verter_scheduler/src/scheduler/driver.rs",
   "crates/verter_scheduler/src/dag.rs",
   "crates/verter_semantic/src/analysis/build.rs",
   "crates/verter_semantic/src/analysis/component_meta.rs",
