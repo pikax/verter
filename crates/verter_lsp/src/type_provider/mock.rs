@@ -656,6 +656,12 @@ mod inner {
             self.state.lock().unwrap().applied.remove(path);
         }
 
+        /// Model an engine restart: the new incarnation holds none of the bytes
+        /// the previous one accepted, so no earlier delivery is still applied.
+        pub fn forget_applied_content(&self) {
+            self.state.lock().unwrap().applied.clear();
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()

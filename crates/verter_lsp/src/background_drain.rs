@@ -1428,6 +1428,10 @@ async fn apply_owner_resolved_carrier_sync(
             let mut committed_state = transition.next;
             let mut attempted: Vec<ProviderPathKind> = Vec::new();
             let mut synced: Vec<ProviderPathKind> = Vec::new();
+            // The receipt this pass's own IDE delivery produced, carried to the
+            // commit below. `None` when no IDE companion opened.
+            let mut ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface> =
+                None;
 
             let api =
                 match block_in_place_if_available(|| documents.host().get_public_api(canonical_id))
@@ -1508,6 +1512,15 @@ async fn apply_owner_resolved_carrier_sync(
                                 ide.source_map.as_deref(),
                                 open_pin,
                             );
+                            // The commit seals the SAME content this pass
+                            // delivered and recorded, carried forward whole
+                            // instead of re-read from the path's ledger.
+                            ide_delivery = Some(
+                                crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                                    &ide_path,
+                                    delivered,
+                                ),
+                            );
                         }
                     }
                     Err(error) => {
@@ -1524,11 +1537,9 @@ async fn apply_owner_resolved_carrier_sync(
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let ide_surface = committed_state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| sync.synced_tsx_surface(path));
-                let receipt = pending.confirm_opened_with_ide_surface(&synced, ide_surface);
+                // The IDE evidence is the SAME delivery content the record above pinned,
+                // carried forward — not a re-read of the provider path's ledger.
+                let receipt = pending.confirm_opened_with_ide_surface(&synced, ide_delivery);
                 if carrier_coordinator.admit_owned(
                     &documents.host(),
                     provider_sync_states,

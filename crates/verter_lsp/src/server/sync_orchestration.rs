@@ -23,9 +23,11 @@ use crate::type_provider::auto_import::{
     resolve_script_import_anchor_from_structure, ScriptImportInsertionAnchor,
 };
 use crate::type_provider::merge;
+use crate::type_provider::project_sync::CarrierDelivery;
 
 use super::background_init::{background_init, BackgroundInitArgs};
 use super::handler_guard::block_in_place_if_available;
+use super::provider_state::CarrierSyncCommit;
 use super::server_utils::*;
 use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguageServer};
 
@@ -735,6 +737,7 @@ impl VerterLanguageServer {
                 };
                 tracing::info!("sync_ide: {} ({} bytes)", ide_path, ide.code.len());
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                let mut ide_delivery = None;
                 if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
                     tracing::warn!("sync_ide: failed for {ide_path}: {e}");
                 } else {
@@ -750,15 +753,28 @@ impl VerterLanguageServer {
                         &ide.code,
                         ide.source_map.as_deref(),
                     );
+                    // …and hand the same delivery's evidence to the commit, so
+                    // the receipt seals these bytes rather than whatever the
+                    // provider path holds when the commit runs.
+                    ide_delivery = sync
+                        .receipt_for_commit(&ide_path, &ide.code)
+                        .map(|delivered| {
+                            crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                                &ide_path, delivered,
+                            )
+                        });
                     tracing::info!("sync_ide: ok for {}", ide_path);
                 }
                 self.commit_and_close_after_sync(
                     &canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                    pending,
+                    CarrierSyncCommit {
+                        previous_state: previous_state.as_ref(),
+                        state: committed_state,
+                        stale_paths: &stale_paths,
+                        synced_kinds: &synced_kinds,
+                        ide_delivery,
+                        pending,
+                    },
                 )
                 .await;
             }
@@ -846,6 +862,17 @@ impl VerterLanguageServer {
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                // FENCE (pre-API-delivery — the API leg's own basis check).
+                // The IDE leg re-checks the revision before every one of its
+                // awaits; the API leg had none, so an edit landing across the
+                // gateway + projection below would deliver a `.d.ts` built from
+                // the previous revision and then commit it as this
+                // document's state. The pin above was captured before the
+                // compile, so a moved document is caught here.
+                if !self.open_pin_is_current(open_pin) {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                    return;
+                }
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let api = match self.documents.host().get_public_api(&canonical_id) {
                         Ok(api) => api,
@@ -883,13 +910,29 @@ impl VerterLanguageServer {
                         }
                     }
                 }
+                // FENCE (pre-commit — the commit leg's own basis check).
+                // The delivery + surface record above both awaited; an edit
+                // landing across them means the `.d.ts` now in the provider and
+                // the state about to be committed describe a superseded
+                // revision. Cancel rather than commit a state the live
+                // revision's own transaction will replace a moment later.
+                if !self.open_pin_is_current(open_pin) {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                    return;
+                }
                 self.commit_and_close_after_sync(
                     &canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                    pending,
+                    CarrierSyncCommit {
+                        previous_state: previous_state.as_ref(),
+                        state: committed_state,
+                        stale_paths: &stale_paths,
+                        synced_kinds: &synced_kinds,
+                        // This transaction delivered the API companion only; it
+                        // opened no IDE buffer, so it seals no IDE-surface evidence
+                        // — the receipt attests the kinds that actually opened.
+                        ide_delivery: None,
+                        pending,
+                    },
                 )
                 .await;
             }
@@ -1782,6 +1825,37 @@ impl VerterLanguageServer {
             self.needs_ide_sync.insert(canonical_id);
             return;
         }
+        // FRESHNESS (the IDE leg's own basis, under the document lane): another
+        // transaction — typically the debounced tick — already delivered,
+        // recorded and committed exactly these bytes for this revision under the
+        // live owner, and the serving engine still holds them. Nothing is owed,
+        // so the repair applies nothing rather than a second copy of the
+        // revision.
+        // The committed binding is the live owner when no reconcile is owed and
+        // the commit this repair would make keeps the same resolved/unresolved
+        // arm.
+        let binding_is_live = !needs_owner_reconcile
+            && current_state
+                .as_ref()
+                .is_some_and(|state| state.is_unresolved() == unresolved);
+        if binding_is_live
+            && self.ide_leg_is_current(
+                uri,
+                &canonical_id,
+                current_state.as_ref(),
+                &ide_path,
+                &ide.code,
+            )
+        {
+            tracing::debug!(
+                "ensure_current_file_synced: {canonical_id}'s IDE leg is already current"
+            );
+            if unresolved {
+                self.pending_snapshot_provider_sync
+                    .insert(canonical_id.clone());
+            }
+            return;
+        }
 
         // Choose open_file vs update_file based on existing state. The same
         // revision fence runs once more UNDER the provider's per-path delivery
@@ -1802,12 +1876,19 @@ impl VerterLanguageServer {
         };
 
         match result {
-            Ok(false) => {
+            Ok(CarrierDelivery::Refused) => {
                 // The document moved while this repair waited for the delivery
-                // lock: the newer revision's own repair delivers its bytes.
-                self.needs_ide_sync.insert(canonical_id);
+                // lock, or the engine is holding a newer copy of the path: the
+                // newer revision's own repair delivers its bytes. Every
+                // remaining leg of THIS transaction is cancelled with it.
+                self.cancel_legs_after_moved_revision(&canonical_id);
             }
-            Ok(true) => {
+            Ok(delivery) => {
+                // The receipt this transaction's own delivery produced. It is
+                // carried into the commit below rather than re-read from the
+                // provider path's ledger afterwards, so the commit can only
+                // ever seal bytes THIS transaction delivered.
+                let ide_delivery = delivery.ide_surface();
                 // FENCE (pre-record): the provider sync awaited. The record
                 // resolves the carrier source from the LIVE open document, so an
                 // edit landing across that await would pin these bytes and this
@@ -1817,7 +1898,7 @@ impl VerterLanguageServer {
                 // mis-mapping, not a stale read: fail closed and let the newer
                 // revision's own repair record its own surface.
                 if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
-                    self.needs_ide_sync.insert(canonical_id);
+                    self.cancel_legs_after_moved_revision(&canonical_id);
                     return;
                 }
                 #[cfg(test)]
@@ -1837,7 +1918,22 @@ impl VerterLanguageServer {
                     &ide.code,
                     ide.source_map.as_deref(),
                 ) {
-                    self.needs_ide_sync.insert(canonical_id);
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                    return;
+                }
+                #[cfg(test)]
+                self.maybe_pause_ide_sync_after_surface_record(&canonical_id)
+                    .await;
+                // FENCE (pre-commit — the last leg's own basis check).
+                // Every earlier fence guards a DELIVERY; this one guards the
+                // commit, which is the leg that would otherwise publish a
+                // superseded revision's whole state over the live one. The
+                // record above awaited the provider surface store, so an edit
+                // can land between it and here; the commit is then cancelled
+                // outright instead of being attempted and refused at the
+                // admission gate, and the stale-path close below never runs.
+                if !self.retained_ide_response_is_current(uri, Some(compiled_revision)) {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
                     return;
                 }
                 // Commit state. An UNRESOLVED open-document liveness state is
@@ -1870,10 +1966,9 @@ impl VerterLanguageServer {
                     // API companion is opened by the dedicated background API-sync task /
                     // served by the tsserver store), so the receipt attests ONLY the IDE
                     // kind — a partial open never stamps a companion this pass did not open.
-                    let ide_surface = self
-                        .project_sync
-                        .as_ref()
-                        .and_then(|sync| sync.synced_tsx_surface(&ide_path));
+                    // The evidence is THIS transaction's own delivery receipt, carried out
+                    // of the delivery above; nothing is read back from the provider path.
+                    let ide_surface = ide_delivery;
                     let receipt = authorization
                         .confirm_with_ide_surface(&[ProviderPathKind::Ide], ide_surface);
                     // The owner is the receipt's bound tsconfig (the gateway's resolved
@@ -2986,6 +3081,7 @@ impl VerterLanguageServer {
                         let stale_paths = transition.stale_paths;
                         let mut committed_state = transition.next;
                         let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                        let mut ide_delivery = None;
 
                         if let Some(ide) = ide.as_ref() {
                             if let Some(ide_path) = committed_state.ide_path.clone() {
@@ -3010,6 +3106,16 @@ impl VerterLanguageServer {
                                         &ide.code,
                                         ide.source_map.as_deref(),
                                     );
+                                    // The commit seals THIS delivery's evidence, not
+                                    // a re-read of the path's ledger.
+                                    ide_delivery = sync
+                                        .receipt_for_commit(&ide_path, &ide.code)
+                                        .map(|delivered| {
+                                            crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                                                &ide_path,
+                                                delivered,
+                                            )
+                                        });
                                 } else if let Err(error) = result {
                                     tracing::warn!(
                                         "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
@@ -3050,11 +3156,14 @@ impl VerterLanguageServer {
 
                         self.commit_and_close_after_sync(
                             canonical_id,
-                            previous_state.as_ref(),
-                            committed_state,
-                            &stale_paths,
-                            &synced_kinds,
-                            pending,
+                            CarrierSyncCommit {
+                                previous_state: previous_state.as_ref(),
+                                state: committed_state,
+                                stale_paths: &stale_paths,
+                                synced_kinds: &synced_kinds,
+                                ide_delivery,
+                                pending,
+                            },
                         )
                         .await;
                     }
@@ -3429,6 +3538,7 @@ impl VerterLanguageServer {
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                let mut ide_delivery = None;
 
                 // Owner-resolved IDE sync runs only when fresh IDE code is available.
                 // On a transient IDE compile miss (`ide == None`) the owner binding is
@@ -3456,6 +3566,16 @@ impl VerterLanguageServer {
                             &ide.code,
                             ide.source_map.as_deref(),
                         );
+                        // The commit seals THIS delivery's evidence, never a
+                        // re-read of the provider path's ledger.
+                        ide_delivery =
+                            sync.receipt_for_commit(&tsx_path, &ide.code)
+                                .map(|delivered| {
+                                    crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                                        &tsx_path,
+                                        delivered,
+                                    )
+                                });
                     } else if let Err(e) = result {
                         tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                     }
@@ -3506,11 +3626,14 @@ impl VerterLanguageServer {
 
                 self.commit_and_close_after_sync(
                     canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                    pending,
+                    CarrierSyncCommit {
+                        previous_state: previous_state.as_ref(),
+                        state: committed_state,
+                        stale_paths: &stale_paths,
+                        synced_kinds: &synced_kinds,
+                        ide_delivery,
+                        pending,
+                    },
                 )
                 .await;
             }

@@ -652,7 +652,12 @@ async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface(
         .await
         .expect("provider open succeeds");
     let exact_surface = sync
-        .synced_tsx_surface(&ide_path)
+        .receipt_for_commit(&ide_path, compiler_surface)
+        .map(|delivered| {
+            crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                &ide_path, delivered,
+            )
+        })
         .expect("successful open mints exact surface evidence");
     assert_ne!(
         exact_surface.content().as_ref(),

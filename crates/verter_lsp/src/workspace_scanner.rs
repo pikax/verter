@@ -1042,7 +1042,7 @@ pub(crate) async fn sync_file_to_provider(
     // before the gateway's membership decision and provider write — because that
     // is the delivery point. A scanner transaction that started while the
     // document was closed and finds it open now therefore serializes on the live
-    // transaction instead of interleaving with it (AC1). A busy lane YIELDS: the
+    // transaction instead of interleaving with it. A busy lane YIELDS: the
     // scanner re-sweeps on its next pass, and never blocks behind a repair.
     let _document_lane = match documents.map(|documents| documents.document_lanes()) {
         Some(lanes) => match lanes.try_delivery_lane(canonical_id) {
@@ -1149,6 +1149,10 @@ pub(crate) async fn sync_file_to_provider(
             let stale_paths = transition.stale_paths;
             let mut committed_state = transition.next;
             let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+            // The receipt this scan pass's own IDE delivery produced, carried to
+            // the commit below. `None` when no IDE companion opened.
+            let mut ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface> =
+                None;
 
             // Sync DTS (tsgo opens the companion buffer directly).
             let api = match host.get_public_api(canonical_id) {
@@ -1226,6 +1230,15 @@ pub(crate) async fn sync_file_to_provider(
                                 ide.source_map.as_deref(),
                                 open_pin,
                             );
+                            // The commit seals the SAME content this pass
+                            // delivered and recorded, carried forward whole
+                            // instead of re-read from the path's ledger.
+                            ide_delivery = Some(
+                                crate::type_provider::project_sync::SyncedTsxSurface::from_delivered(
+                                    &tsx_path,
+                                    delivered,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1237,11 +1250,8 @@ pub(crate) async fn sync_file_to_provider(
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let ide_surface = committed_state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| sync.synced_tsx_surface(path));
-                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
+                // The IDE evidence is THIS pass's own delivery receipt.
+                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_delivery);
                 // Gate the stale-path close on ADMISSION and never drop the outcome: a
                 // `Superseded` commit (a newer transaction reclaimed the source, or an
                 // owner-loss advanced the barrier) re-queues the source and closes NOTHING —

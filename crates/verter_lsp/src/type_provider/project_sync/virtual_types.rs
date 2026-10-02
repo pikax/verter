@@ -184,8 +184,9 @@ impl ProjectSync {
     }
 
     /// [`Self::publish_tsx`] with a delivery fence: `fence` is evaluated UNDER
-    /// the per-path delivery lock, immediately before the provider write, and a
-    /// `false` answer delivers nothing and returns `Ok(false)`.
+    /// the per-path delivery lock, immediately before the provider write. A
+    /// `false` answer delivers nothing and answers
+    /// [`CarrierDelivery::Refused`].
     ///
     /// The lock serializes every writer of one provider path (the interactive
     /// repair and the debounced coordinator both deliver here), so a writer
@@ -197,6 +198,9 @@ impl ProjectSync {
     /// written to tsgo after the foreground repair had delivered the edit, so
     /// the next hover mapped fresh offsets onto a stale buffer and fell back
     /// to the Verter-only answer.
+    ///
+    /// A success hands back the receipt for the content THIS call delivered, so
+    /// the commit seals its own bytes instead of re-reading the path's ledger.
     pub(super) async fn publish_tsx_fenced(
         &self,
         tsx_path: &str,
@@ -204,9 +208,9 @@ impl ProjectSync {
         lane: ProviderLane,
         verb: ProviderFileVerb,
         fence: Option<&(dyn Fn() -> bool + Sync)>,
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         if self.carrier_companion_open_suppressed() {
-            return Ok(true);
+            return Ok(CarrierDelivery::Published);
         }
 
         let lock = self.virtual_verter_types_lock(tsx_path);
@@ -217,7 +221,7 @@ impl ProjectSync {
                     "project_sync: not delivering {tsx_path} — its document revision moved \
                      before the provider write"
                 );
-                return Ok(false);
+                return Ok(CarrierDelivery::Refused);
             }
         }
         let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
@@ -244,7 +248,7 @@ impl ProjectSync {
             if virtual_path.is_some() && !virtual_was_live {
                 self.close_virtual_verter_types(tsx_path, lane).await?;
             }
-            return Ok(false);
+            return Ok(CarrierDelivery::Refused);
         }
         if let Err(error) = result {
             // A dependency created solely for a failed carrier publication has
@@ -256,6 +260,13 @@ impl ProjectSync {
             return Err(error);
         }
 
+        // The receipt is built from the content THIS delivery published, before
+        // the ledger write moves it, so the commit can never seal a different
+        // transaction's delivery of the same path. It is minted only when the
+        // serving engine certifies it accepted exactly these bytes.
+        let receipt = self
+            .certified_delivery(tsx_path, prepared.prepared.clone())
+            .map(|delivered| SyncedTsxSurface::from_delivered(tsx_path, delivered));
         self.record_delivered_carrier_surface(tsx_path, tsx_content, prepared.prepared);
 
         // When an installed package becomes available, publish the unrewritten
@@ -264,18 +275,20 @@ impl ProjectSync {
         if virtual_path.is_none() {
             self.close_virtual_verter_types(tsx_path, lane).await?;
         }
-        Ok(true)
+        Ok(CarrierDelivery::Delivered(receipt))
     }
 
     /// [`Self::sync_tsx`] guarded by a delivery fence evaluated under the
-    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
-    /// the fence refused and the provider received nothing.
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). The answer
+    /// carries the delivery's own receipt, so the caller's commit seals exactly
+    /// the bytes this call published; [`CarrierDelivery::Refused`] means the
+    /// fence refused and the provider received nothing.
     pub(crate) async fn sync_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
         fence: &(dyn Fn() -> bool + Sync),
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         self.publish_tsx_fenced(
             tsx_path,
             tsx_content,
@@ -287,14 +300,16 @@ impl ProjectSync {
     }
 
     /// [`Self::open_tsx`] guarded by a delivery fence evaluated under the
-    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
-    /// the fence refused and the provider received nothing.
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). The answer
+    /// carries the delivery's own receipt, so the caller's commit seals exactly
+    /// the bytes this call published; [`CarrierDelivery::Refused`] means the
+    /// fence refused and the provider received nothing.
     pub(crate) async fn open_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
         fence: &(dyn Fn() -> bool + Sync),
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         self.publish_tsx_fenced(
             tsx_path,
             tsx_content,

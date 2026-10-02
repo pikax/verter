@@ -6153,7 +6153,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-document sync lane (H4).
+// Per-document sync lane.
 //
 // ONE lane per `(canonical id, open generation)` is shared by the interactive
 // request repair and EVERY background writer — the debounced coordinator here,
@@ -6234,7 +6234,7 @@ fn ide_companion_writes(provider: &MockTypeProvider, ide_path: &str) -> Vec<Mock
         .collect()
 }
 
-/// AC6(a)/(b): the debounced transaction is parked after its compile — holding
+/// The debounced transaction is parked after its compile — holding
 /// the document's lane — and a second transaction of the same document arrives.
 ///
 /// It does NOT interleave and does NOT wait: the serial loop asks the lane, is
@@ -6309,7 +6309,7 @@ async fn the_debounced_sync_yields_the_document_lane_to_an_in_flight_transaction
     );
 }
 
-/// AC2: a busy document is requeued WITHOUT spending its retry budget, and
+/// A busy document is requeued WITHOUT spending its retry budget, and
 /// another document is still serviced. A contended document must not consume
 /// the budget that exists for genuine delivery failures — otherwise repeated
 /// contention alone would strand it with the provider permanently unsynced.
@@ -6367,7 +6367,7 @@ async fn contention_on_one_document_leaves_another_documents_sync_unaffected() {
     drop(held);
 }
 
-/// AC6(e): a transaction that starts while its document is CLOSED and finds it
+/// A transaction that starts while its document is CLOSED and finds it
 /// open before delivery must take the lane (or yield to its holder).
 ///
 /// `try_delivery_lane` is asked at the delivery point, not at the start of the
@@ -6425,7 +6425,7 @@ async fn a_transaction_that_starts_closed_takes_the_lane_when_it_finds_the_docum
     );
 }
 
-/// AC7: background API work never holds or waits on the lane across a provider
+/// Background API work never holds or waits on the lane across a provider
 /// round trip ahead of an interactive request.
 ///
 /// An interactive transaction parks in the middle of its own work (here: a
@@ -6495,7 +6495,7 @@ async fn a_background_writer_yields_immediately_instead_of_waiting_for_an_intera
     );
 }
 
-/// AC6(d): a waiter of a RETIRED open generation never commits into a reopened
+/// A waiter of a RETIRED open generation never commits into a reopened
 /// one's lane. A close/reopen overlaps the stale transaction; the stale lease is
 /// detached, so locking it neither blocks nor serializes with the live document,
 /// and revalidating the generation refuses its commit.
@@ -6551,4 +6551,88 @@ async fn a_waiter_of_a_retired_open_generation_never_takes_the_reopened_document
     );
     drop(stale_guard);
     drop(live_guard);
+}
+
+/// A transaction of a revision whose IDE leg another transaction already
+/// delivered, recorded and committed applies nothing: one IDE-companion
+/// application per revision however many writers arrive for it. Every part of
+/// the leg's basis still forces it — an engine restart (the serving engine no
+/// longer holds the bytes) and an edit (a new revision) each deliver again.
+/// Covered for both the owned direct-open commit and the unowned open-document
+/// liveness commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_current_ide_leg_is_skipped_until_its_basis_moves() {
+    for (case, owner_root, tsconfig) in [
+        ("unowned", "/other", "/other/tsconfig.json"),
+        ("owned", "/workspace", "/workspace/tsconfig.json"),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let canonical_id = "/workspace/src/LaneFreshLeg.vue";
+        let uri: Uri = "file:///workspace/src/LaneFreshLeg.vue"
+            .parse()
+            .expect("test uri");
+        const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                              <template><div>{{ msg }}</div></template>\n";
+        const EDITED: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-b'\n</script>\n\
+                              <template><div>{{ msg }}</div></template>\n";
+        let _lease = open_with_lane(&documents, &uri, canonical_id, SOURCE);
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let mut deps = lane_test_deps(&documents, &provider);
+        deps.vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            owner_root,
+            Some(tsconfig),
+        ));
+        let ide_path =
+            verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+        let writes = || ide_companion_writes(&provider, &ide_path);
+
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            1,
+            "{case}: the first transaction delivers the revision"
+        );
+
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            1,
+            "{case}: a transaction of an already-current revision applies nothing. Writes: {:?}",
+            writes()
+        );
+
+        provider.forget_applied_content();
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            2,
+            "{case}: a restarted engine no longer holds the bytes, so the leg is owed again"
+        );
+
+        let _ = documents.did_change(&uri, 2, EDITED);
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            3,
+            "{case}: an edit is a new revision, so its leg is delivered"
+        );
+    }
 }

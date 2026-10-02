@@ -314,12 +314,11 @@ real_provider_test!(
         // returning the old provider surface (or Verter-only fallback) would omit
         // `boolean`, while a request-time sync resolves the edited union exactly.
         //
-        // The debounced coordinator's own sync of this document is no longer
-        // settled out of the way first. It now serializes on this document's ONE
-        // per-document sync lane, so its transaction either fully precedes this
-        // request's repair or yields to it — it can no longer deliver a
-        // pre-edit revision's bytes between the request's own delivery and its
-        // commit, which is exactly what PR #720's settle call worked around.
+        // The debounced coordinator's own sync of this document is not settled
+        // first: it serializes on the document's one sync lane, so its
+        // transaction either fully precedes this request's repair or yields to
+        // it, and never delivers a pre-edit revision's bytes between the
+        // request's own delivery and its commit.
         let edited = session
             .server()
             .test_documents()

@@ -13522,6 +13522,94 @@ const extra = 42
     );
 }
 
+/// The commit is a write point of its own. Every earlier fence in
+/// the interactive repair guards a DELIVERY; the surface record pins a
+/// generation and the commit then publishes the document's whole provider
+/// state. An edit landing across the record's await must CANCEL the transaction
+/// — the commit and the stale-path close never run, and the document is left in
+/// the owed state a fresh edit leaves it in — rather than completing the
+/// remaining legs and letting the admission gate refuse at the very end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_surface_record_cancels_the_remaining_legs() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'commit-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    // A restarted engine no longer holds the delivered bytes, so the repair
+    // owes the IDE leg and runs it through to the record.
+    provider.forget_applied_content();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_after_surface_record(canonical_id);
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    assert!(
+        server.needs_ide_sync.contains(canonical_id),
+        "a repair that observed its revision move must hand the IDE leg back \
+         owed, exactly as a fresh edit does — never finish its commit for \
+         superseded bytes"
+    );
+    assert!(
+        server.needs_deferred_sync.contains(canonical_id),
+        "the cancelled transaction's API leg is owed to the live revision's own \
+         transaction; the cancellation re-arms it rather than dropping it"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "revision B committed but no surface for B was ever synced, so the \
+         capture must still fail closed: the cancelled repair published nothing \
+         for the live revision"
+    );
+}
+
+/// The per-leg basis re-check the API and commit fences call must see an edit
+/// that lands after the pin was captured, and must treat a document with no open
+/// generation as un-movable (a closed source has no pin to go stale).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_leg_pin_recheck_follows_the_live_revision() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'api-leg-pin'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let (pin_uri, pin_revision) = server.documents.open_compile_pin(canonical_id);
+    let pin_uri = pin_uri.expect("the fixture's document is open");
+    let pin_revision = pin_revision.expect("the open document has a revision");
+    assert!(
+        server.open_pin_is_current(Some((&pin_uri, &pin_revision))),
+        "a pin captured for the live revision is current"
+    );
+
+    let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+    assert!(
+        !server.open_pin_is_current(Some((&pin_uri, &pin_revision))),
+        "the API leg's fence must see the edit that landed after its pin — \
+         without it a `.d.ts` built from the previous revision would be \
+         delivered and committed as this document's public API"
+    );
+    assert!(
+        server.open_pin_is_current(None),
+        "a source with no open generation has no pin that can have moved, so \
+         its leg proceeds"
+    );
+}
+
 /// The unresolved-preserve helper owns its own provider await and surface
 /// record, so it must carry the same retained revision through that await and
 /// use the identity-fenced record choke point.
@@ -37235,4 +37323,54 @@ async fn an_incomplete_publication_is_re_armed_when_the_drain_settles_the_carrie
             || panic!("the re-armed publication completes into a current receipt"),
         )
         .await;
+}
+
+/// A request repair re-armed for a revision whose IDE leg is already delivered,
+/// recorded and committed — the debounced tick got there first — applies
+/// nothing: one IDE-companion application per revision. A restarted engine no
+/// longer holds those bytes, so the same re-armed repair then delivers again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rearmed_repair_of_a_current_ide_leg_applies_nothing_until_the_engine_restarts() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the fixture's direct IDE sync commits a live IDE path");
+    let ide_writes = || {
+        provider
+            .file_sync_calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                        if path == &ide_path
+                )
+            })
+            .count()
+    };
+    let delivered = ide_writes();
+    assert!(delivered >= 1, "the fixture delivered the IDE companion");
+
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_writes(),
+        delivered,
+        "a re-armed repair of an already-current revision must not apply it again"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "skipping a current leg leaves the committed surface serving requests"
+    );
+
+    provider.forget_applied_content();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_writes(),
+        delivered + 1,
+        "a restarted engine no longer holds the bytes, so the repair delivers again"
+    );
 }

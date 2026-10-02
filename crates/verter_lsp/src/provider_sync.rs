@@ -776,6 +776,84 @@ pub fn committed_binding_matches_current(
     committed.owner_binding == *current
 }
 
+/// The full basis an IDE-companion leg is current against: what one provider-sync
+/// transaction is about to deliver for an OPEN document, under its document lane.
+///
+/// A leg whose basis is already current delivers and commits nothing, so one
+/// open or edit causes one IDE-companion application per revision however many
+/// writers (the interactive repair, the debounced tick, a drain) arrive for it.
+pub(crate) struct IdeLegBasis<'a> {
+    pub canonical_id: &'a str,
+    pub ide_path: &'a str,
+    /// The generated IDE bytes this transaction compiled from the live revision.
+    pub generated: &'a str,
+    /// The owner binding this transaction would commit.
+    pub owner_binding: &'a ProviderOwnerBinding,
+    /// The live open document's source — the revision the leg must describe.
+    pub live_source: &'a str,
+}
+
+impl IdeLegBasis<'_> {
+    /// Whether every part of the basis is already current: the committed state
+    /// owns this path under the same owner (ownership + projection path), the
+    /// serving engine incarnation holds exactly the bytes a fresh preparation of
+    /// `generated` produces (provider epoch + projection identity), and the
+    /// recorded surface for that path is the committed one and describes the
+    /// live source (revision). Any miss — including a leg another path delivered
+    /// but left uncommitted or unrecorded — leaves the leg owed.
+    pub(crate) fn is_current(
+        &self,
+        project_sync: &crate::type_provider::project_sync::ProjectSync,
+        provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+        committed: Option<&ProviderSyncState>,
+    ) -> bool {
+        let Some(committed) = committed else {
+            return false;
+        };
+        if !committed.ide_background_loaded
+            || committed.ide_path.as_deref() != Some(self.ide_path)
+            || committed.owner_binding != *self.owner_binding
+        {
+            return false;
+        }
+        let Some(applied) = project_sync.carrier_companion_applied(self.ide_path, self.generated)
+        else {
+            return false;
+        };
+        let Some(snapshot) = provider_surfaces.current_snapshot(self.ide_path) else {
+            return false;
+        };
+        snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+            && snapshot.source_canonical.as_ref() == self.canonical_id
+            && snapshot.provider_content.as_ref() == applied.content().as_ref()
+            && committed.authorizes_carrier_ide_capture(
+                snapshot.stamp.content_hash.to_hash16(),
+                snapshot.stamp.map_hash,
+            )
+            && snapshot.source_hash == ContentHash::of(self.live_source)
+    }
+}
+
+/// Whether an API-companion (`.d.ts`) leg is already current: the committed state
+/// delivered exactly `api_code` under `dts_path` for the same owner, nothing has
+/// observed a different public API since, and the serving engine incarnation
+/// still holds those bytes. A restarted engine, an owner change or a moved public
+/// API leaves the leg owed.
+pub(crate) fn api_leg_is_current(
+    project_sync: &crate::type_provider::project_sync::ProjectSync,
+    committed: Option<&ProviderSyncState>,
+    owner_binding: &ProviderOwnerBinding,
+    dts_path: &str,
+    api_code: &str,
+) -> bool {
+    committed.is_some_and(|committed| {
+        committed.owner_binding == *owner_binding
+            && committed.api_path.as_deref() == Some(dts_path)
+            && committed.api_companion_is_live_and_current()
+            && committed.api_delivered_hash == Some(api_declaration_identity(api_code))
+    }) && project_sync.companion_applied_verbatim(dts_path, api_code)
+}
+
 /// Resolve the [`verter_session::FileLanguage`] for a non-carrier
 /// provider-sync target.
 ///

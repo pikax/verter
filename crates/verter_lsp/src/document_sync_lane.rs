@@ -9,7 +9,7 @@
 //! is refused at an equal key, or overwrites the earlier one's whole state, and
 //! a request captured between them fails closed to a reduced answer.
 //!
-//! # Lock order (AC2)
+//! # Lock order
 //!
 //! Every path takes these in exactly this order, and no path takes them twice:
 //!
