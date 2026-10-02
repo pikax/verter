@@ -624,6 +624,8 @@ real_provider_test!(
         // its unique resolved name — proving the `import defer * as deferred`
         // namespace binding resolved through Verter's preserved `defer` modifier.
         let ns_member_pos = session.find_position(&defer_uri, "deferred.deferredValueOnly", 9);
+        // The completion probe above can precede the queued publication.
+        session.server().test_settle_open_document(&defer_uri).await;
         let ns_member_hover = session
             .hover_text(&defer_uri, ns_member_pos)
             .await

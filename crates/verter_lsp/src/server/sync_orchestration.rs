@@ -622,7 +622,7 @@ impl VerterLanguageServer {
         &self,
         uri: &Uri,
         diagnostics: Vec<Diagnostic>,
-        publication: &crate::documents::DiagnosticPublication,
+        publication: &crate::documents::BackgroundPublication,
     ) {
         let _timer = self
             .statistics

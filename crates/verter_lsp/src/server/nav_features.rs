@@ -190,6 +190,8 @@ pub(super) async fn handle_hover(
     let _hg = HandlerGuard::new("hover");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
+    let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, uri);
+    let settle = |response| settlement.settle(&server.documents, uri, response);
     tracing::info!(
         "hover ENTER {} at {}:{}",
         uri.as_str(),
@@ -208,9 +210,9 @@ pub(super) async fn handle_hover(
                     // Post-await validation (fail closed): a hover produced
                     // against a superseded surface must be dropped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
-                        return Ok(None);
+                        return settle(None);
                     }
-                    return Ok(Some(Hover {
+                    return settle(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
                             value: info.contents,
@@ -219,7 +221,7 @@ pub(super) async fn handle_hover(
                     }));
                 }
             }
-            return Ok(None);
+            return settle(None);
         }
     }
 
@@ -299,7 +301,29 @@ pub(super) async fn handle_hover(
         )?;
         match child_hover {
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
-                return Ok(Some(child_hover));
+                if !settlement.is_current(&server.documents, uri)
+                    && settlement.document_and_workspace_are_current(&server.documents, uri)
+                {
+                    // A cold native projection can hydrate an imported declaration.
+                    // Recompute once; never carry the old payload into a new basis.
+                    let retry =
+                        crate::documents::ForegroundSettlement::capture(&server.documents, uri);
+                    let child_hover = transport_child_hover_result(
+                        &crate::documents::uri_to_canonical_id(uri),
+                        server.child_hover_for_target(uri, target),
+                    )?;
+                    return retry.settle(
+                        &server.documents,
+                        uri,
+                        match child_hover {
+                            super::component_resolve::ChildHoverOutcome::Hover(hover) => {
+                                Some(hover)
+                            }
+                            _ => None,
+                        },
+                    );
+                }
+                return settle(Some(child_hover));
             }
             super::component_resolve::ChildHoverOutcome::SurfaceUnavailable
                 if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
@@ -308,7 +332,7 @@ pub(super) async fn handle_hover(
                 // answer. Missing child data must not suppress it; the fallback
                 // describes authored syntax and does not claim that the child
                 // declared a matching slot.
-                return Ok(verter_result);
+                return settle(verter_result);
             }
             super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
                 if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
@@ -316,7 +340,7 @@ pub(super) async fn handle_hover(
                 // A resolved child slot surface is authoritative. An absent name
                 // fails closed instead of turning authored parent syntax into
                 // an affirmative declaration claim.
-                return Ok(None);
+                return settle(None);
             }
             super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
             | super::component_resolve::ChildHoverOutcome::SurfaceUnavailable => {}
@@ -350,7 +374,7 @@ pub(super) async fn handle_hover(
                         // Post-await validation (fail closed): drop a provider
                         // result produced against a superseded surface.
                         if server.provider_context_still_valid(uri, &ctx) {
-                            return Ok(Some(Hover {
+                            return settle(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                     kind: MarkupKind::Markdown,
                                     value: format!("**v-bind({expr})**\n\n{}", info.contents),
@@ -363,7 +387,7 @@ pub(super) async fn handle_hover(
             }
         }
         // No provider / unmappable declaration — native v-bind hover only.
-        return Ok(verter_result);
+        return settle(verter_result);
     }
 
     // Slot syntax: verter provides rich hover; type provider returns unhelpful
@@ -373,7 +397,7 @@ pub(super) async fn handle_hover(
             if let Some(doc) = server.documents.get(uri) {
                 if let Some(carrier_offset) = doc.line_index.position_to_offset(position) {
                     if hover::is_on_slot_syntax(carrier_offset, &analysis) {
-                        return Ok(verter_result);
+                        return settle(verter_result);
                     }
                 }
             }
@@ -464,7 +488,7 @@ pub(super) async fn handle_hover(
 
             // If TSGO returned a result, merge and return.
             if type_hover.is_some() {
-                return Ok(merge::merge_hover(
+                return settle(merge::merge_hover(
                     verter_result,
                     type_hover,
                     &ctx.mapper,
@@ -510,7 +534,7 @@ pub(super) async fn handle_hover(
                                         let redirect_hover = redirect_hover.filter(|_| {
                                             server.provider_context_still_valid(uri, &ctx)
                                         });
-                                        return Ok(merge::merge_hover(
+                                        return settle(merge::merge_hover(
                                             verter_result,
                                             redirect_hover,
                                             &ctx.mapper,
@@ -527,7 +551,7 @@ pub(super) async fn handle_hover(
                 }
             }
 
-            return Ok(merge::merge_hover(
+            return settle(merge::merge_hover(
                 verter_result,
                 None,
                 &ctx.mapper,
@@ -547,7 +571,7 @@ pub(super) async fn handle_hover(
     // Early returns (virtual file, child-hover, type-provider merge)
     // intentionally skip enrichment for now; the opt-in feature
     // targets the common "verter-only hover on a Vue binding" case.
-    Ok(enrich_hover_with_provenance(
+    settle(enrich_hover_with_provenance(
         server,
         uri,
         position,
@@ -589,38 +613,6 @@ impl CompletionSourceContext {
     }
 }
 
-#[derive(Clone)]
-struct CompletionDocumentIdentity {
-    version: i32,
-    document_revision: crate::documents::DocumentRevisionId,
-}
-
-fn completion_document_identity(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-) -> Option<CompletionDocumentIdentity> {
-    server
-        .documents
-        .get(uri)
-        .map(|document| CompletionDocumentIdentity {
-            version: document.version,
-            document_revision: document.document_revision,
-        })
-}
-
-fn completion_document_identity_matches(
-    before: Option<&CompletionDocumentIdentity>,
-    after: Option<&CompletionDocumentIdentity>,
-) -> bool {
-    match (before, after) {
-        (Some(before), Some(after)) => {
-            before.version == after.version && before.document_revision == after.document_revision
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 pub(super) async fn handle_completion(
     server: &VerterLanguageServer,
     params: CompletionParams,
@@ -637,17 +629,19 @@ pub(super) async fn handle_completion(
     // so it returns the coherent post-fence snapshot even if the pre-wait identity
     // sampled here was older.
     for _attempt in 0..2 {
-        let identity_before = completion_document_identity(server, &uri);
+        let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
         let response = handle_completion_attempt(server, &params, false).await?;
-        let identity_after = completion_document_identity(server, &uri);
-        if completion_document_identity_matches(identity_before.as_ref(), identity_after.as_ref()) {
+        if settlement.is_current(&server.documents, &uri) {
             return Ok(response);
         }
         tracing::debug!(
-            "completion: retrying {} after document identity advanced {:?} -> {:?}",
+            "completion: retrying {} after readiness basis advanced (version {:?} -> {:?})",
             uri.as_str(),
-            identity_before.as_ref().map(|identity| identity.version),
-            identity_after.as_ref().map(|identity| identity.version)
+            settlement.version(),
+            server
+                .documents
+                .snapshot_identity(&uri)
+                .map(|identity| identity.version)
         );
     }
     #[cfg(test)]
@@ -769,6 +763,8 @@ async fn handle_completion_attempt(
         edit_fence = server.did_change_mutex.lock().await;
     }
 
+    let final_settlement = native_only
+        .then(|| crate::documents::ForegroundSettlement::capture(&server.documents, uri));
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -1095,6 +1091,14 @@ async fn handle_completion_attempt(
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
     if native_only || (recognized_authored_component_contract_miss.get() && !provider_only) {
+        if final_settlement
+            .as_ref()
+            .is_some_and(|settlement| !settlement.is_current(&server.documents, uri))
+        {
+            return Err(tower_lsp_server::jsonrpc::Error::new(
+                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            ));
+        }
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
@@ -1328,55 +1332,38 @@ async fn handle_completion_attempt(
                             ))
                         .then_some(".")
                     });
-                let mut type_completion_result = tp
-                    .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                    .await;
-                // Recover a "No content available" completion: the carrier surface
-                // the provider needs is not currently materialised. The recovery
-                // mechanism is engine-specific:
-                //   * tsserver — the carrier is served from the publish store via
-                //     the plugin (NOT an open buffer), so re-PUBLISH the carrier
-                //     companions (the change notification fires inside
-                //     `publish_carrier`) to refresh the store + evict the stale
-                //     resolution; the carrier-companion open verbs are no-ops here.
-                //   * tsgo — the carrier is an open buffer, so reopen it (close +
-                //     open) and re-sync the API to re-establish the lost content.
-                if matches!(
-                    server.type_provider_kind,
-                    crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::Tsgo
-                ) {
-                    for retry_delay_ms in [50u64, 150, 300] {
-                        let needs_retry = matches!(
-                            type_completion_result,
-                            Err(ref error) if error.message.contains("No content available")
-                        );
-                        if !needs_retry {
-                            break;
-                        }
-                        tracing::debug!(
-                            "completion: retrying completion after no-content error for {} (delay={}ms)",
-                            ctx.tsx_path,
-                            retry_delay_ms
-                        );
-                        if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-                            if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-                                server.publish_carrier_to_external_ts(&canonical_id).await;
+                // Repair once, then recapture the exact surface and remap the
+                // requested position. Provider writes supply their own ordering
+                // barrier; elapsed time cannot certify content availability.
+                let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+                    "completion",
+                    position,
+                    ctx,
+                    tsx_offset,
+                    |path: String, offset: u32| async move {
+                        tp.get_completions(&path, offset, tp_trigger).await
+                    },
+                    || async {
+                        match server.type_provider_kind {
+                            crate::TypeProviderKind::Tsserver => {
+                                if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
+                                    server.publish_carrier_to_external_ts(&canonical_id).await;
+                                }
                             }
-                        } else {
-                            server.force_reopen_current_file_in_type_provider(uri).await;
-                            server.sync_api_to_provider(uri).await;
+                            crate::TypeProviderKind::Tsgo => {
+                                server.force_reopen_current_file_in_type_provider(uri).await;
+                                server.sync_api_to_provider(uri).await;
+                            }
+                            _ => server.ensure_current_file_synced(uri).await,
                         }
-                        // Capture-only: a no-content recovery may re-enqueue the
-                        // background dependency publication, never await it.
                         let _ = server.dependency_readiness_capture(uri);
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-                        type_completion_result = tp
-                            .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                            .await;
-                    }
-                }
-                match type_completion_result {
-                    Ok(mut type_result) => {
+                    },
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                match outcome.value {
+                    Some(mut type_result) => {
                         tracing::debug!(
                             "completion: type provider returned {} items (incomplete={})",
                             type_result.items.len(),
@@ -1403,9 +1390,18 @@ async fn handle_completion_attempt(
                             tracing::debug!(
                                 "completion: retrying member access without dot trigger after empty backend result"
                             );
-                            if let Ok(mut retry_result) =
-                                tp.get_completions(&ctx.tsx_path, tsx_offset, None).await
-                            {
+                            let retry_result = match merge::carrier_position_to_tsx_offset_validated(
+                                position,
+                                &ctx.carrier_line_index,
+                                &ctx.mapper,
+                                &ctx.tsx_line_index,
+                            ) {
+                                Some(offset) => {
+                                    tp.get_completions(&ctx.tsx_path, offset, None).await.ok()
+                                }
+                                None => None,
+                            };
+                            if let Some(mut retry_result) = retry_result {
                                 filter_type_provider_completion_result(
                                     &mut retry_result,
                                     expr_context.as_ref(),
@@ -1476,8 +1472,10 @@ async fn handle_completion_attempt(
                             }))
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("completion: type provider error: {e}");
+                    None => {
+                        tracing::warn!(
+                            "completion: provider recovery did not settle a current result"
+                        );
                     }
                 }
             }

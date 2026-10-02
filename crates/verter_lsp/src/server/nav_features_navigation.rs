@@ -184,6 +184,9 @@ pub(super) async fn handle_goto_definition(
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = server.type_provider.as_ref() {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            let settlement =
+                crate::documents::ForegroundSettlement::capture(&server.documents, uri);
+            let settle = |response| settlement.settle(&server.documents, uri, response);
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
@@ -191,7 +194,7 @@ pub(super) async fn handle_goto_definition(
                     // Post-await validation (fail closed): a response produced
                     // against a superseded surface must not be mapped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
-                        return Ok(None);
+                        return settle(None);
                     }
                     let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
@@ -236,11 +239,11 @@ pub(super) async fn handle_goto_definition(
                         })
                         .collect();
                     if !locations.is_empty() {
-                        return Ok(Some(GotoDefinitionResponse::Array(locations)));
+                        return settle(Some(GotoDefinitionResponse::Array(locations)));
                     }
                 }
             }
-            return Ok(None);
+            return settle(None);
         }
     }
 
@@ -473,13 +476,31 @@ pub(super) async fn handle_goto_definition(
     // try_component_contract_definition. The old separate resolve_component_event_definition
     // and resolve_component_prop_definition calls are subsumed by it.
 
+    // Prepare once before capturing the basis; partial syntax may remain repairable.
+    let before_repair = server.documents.snapshot_identity(uri);
+    let prepared_ctx = if server.type_provider.is_some() {
+        server.repaired_type_provider_context(uri).await
+    } else {
+        None
+    };
+    if before_repair
+        .as_ref()
+        .is_some_and(|before| !server.documents.snapshot_identity_is_current(uri, before))
+    {
+        return Err(tower_lsp_server::jsonrpc::Error::new(
+            tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+        ));
+    }
+    let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, uri);
+    let settle = |response| settlement.settle(&server.documents, uri, response);
+
     // Enhance with the TypeProvider immediately. Dependency readiness above is
     // a background-healing signal, not an admission gate for non-destructive
     // navigation; a partial provider answer during project loading is preferable
     // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
+        if let Some(initial_ctx) = prepared_ctx {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
             if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
@@ -531,7 +552,7 @@ pub(super) async fn handle_goto_definition(
                             "definition: dropping provider locations — captured surface \
                                  no longer valid"
                         );
-                        return Ok(verter_result);
+                        return settle(verter_result);
                     }
                     tracing::debug!(
                         "definition: type provider returned {} locations",
@@ -613,7 +634,7 @@ pub(super) async fn handle_goto_definition(
                         Some(GotoDefinitionResponse::Scalar(_)) => false,
                     };
                     if !(provider_had_defs && resolved_is_empty) {
-                        return Ok(resolved);
+                        return settle(resolved);
                     }
                     tracing::debug!(
                         "definition: all provider targets were synthetic — retrying {} \
@@ -633,10 +654,10 @@ pub(super) async fn handle_goto_definition(
                     }
                     // Post-await validation (fail closed), same as above.
                     if !server.provider_context_still_valid(uri, &ctx) {
-                        return Ok(None);
+                        return settle(None);
                     }
                     if probe_defs.is_empty() {
-                        return Ok(None);
+                        return settle(None);
                     }
                     // A provider may follow the augmentation member THROUGH
                     // `typeof C` to the component's synthesized API carrier
@@ -659,7 +680,7 @@ pub(super) async fn handle_goto_definition(
                         false
                     });
                     if probe_defs.is_empty() {
-                        return Ok(if native_locations.is_empty() {
+                        return settle(if native_locations.is_empty() {
                             None
                         } else {
                             Some(GotoDefinitionResponse::Array(native_locations))
@@ -699,7 +720,7 @@ pub(super) async fn handle_goto_definition(
                         None => Vec::new(),
                     };
                     locations.extend(native_locations);
-                    return Ok(if locations.is_empty() {
+                    return settle(if locations.is_empty() {
                         None
                     } else {
                         Some(GotoDefinitionResponse::Array(locations))
@@ -716,7 +737,7 @@ pub(super) async fn handle_goto_definition(
         }
     }
 
-    Ok(verter_result)
+    settle(verter_result)
 }
 
 pub(super) async fn handle_goto_type_definition(

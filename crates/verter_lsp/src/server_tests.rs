@@ -21482,7 +21482,7 @@ const msg = 'hello'
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn completion_reopens_current_file_when_open_buffer_provider_loses_virtual_file_content() {
     let provider = Arc::new(LostContentCompletionProvider::default());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -21521,6 +21521,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     provider.drop_open_path(&ctx.tsx_path);
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
+    let recovery_started = tokio::time::Instant::now();
     let labels = completion_labels(
         server
             .completion(completion_params(&uri, position, None))
@@ -21528,6 +21529,11 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             .expect("completion request should succeed"),
     );
     let calls = provider.calls();
+    assert_eq!(
+        tokio::time::Instant::now(),
+        recovery_started,
+        "successful content repair must settle completion without a readiness timer"
+    );
     let open_count = calls
         .iter()
         .filter(|call| {
@@ -24311,6 +24317,124 @@ fn tsgo_resolve_envelope_item(
         })),
         ..Default::default()
     }
+}
+
+/// Generation-only drift permits one recomputation; document and ownership races
+/// cannot rebase the original request, including during that recomputation.
+#[tokio::test]
+async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_document_races() {
+    let source =
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
+    for change in [
+        "steady",
+        "generation",
+        "edit",
+        "reopen",
+        "workspace",
+        "repeated",
+        "retry_edit",
+    ] {
+        let service = make_hover_test_service(Arc::new(MockTypeProvider::new()));
+        let server = service.inner();
+        install_test_resolver(server);
+        let canonical = "/workspace/App.vue";
+        let uri = open_test_vue(server, canonical, source);
+        let calls = std::cell::Cell::new(0);
+        let response = server
+            .settle_foreground_with_generation_retry(&uri, || {
+                let attempt = calls.get();
+                calls.set(attempt + 1);
+                let generation = server
+                    .documents
+                    .host()
+                    .get_diagnostics_generation(canonical);
+                if change == "repeated"
+                    || (attempt == 0 && matches!(change, "generation" | "retry_edit"))
+                {
+                    server
+                        .documents
+                        .host()
+                        .bump_diagnostics_generation(canonical);
+                } else if (attempt == 0 && change == "edit")
+                    || (attempt == 1 && change == "retry_edit")
+                {
+                    server.documents.did_change(&uri, 2, source);
+                } else if attempt == 0 && change == "reopen" {
+                    server.documents.did_close(&uri);
+                    open_test_vue(server, canonical, source);
+                } else if attempt == 0 && change == "workspace" {
+                    install_test_resolver(server);
+                }
+                std::future::ready(Ok(Some((attempt, generation))))
+            })
+            .await;
+        let retried = matches!(change, "generation" | "repeated" | "retry_edit");
+        assert_eq!(calls.get(), if retried { 2 } else { 1 }, "{change}");
+        if matches!(change, "steady" | "generation") {
+            assert_eq!(
+                response.unwrap(),
+                Some((
+                    usize::from(retried),
+                    server
+                        .documents
+                        .host()
+                        .get_diagnostics_generation(canonical)
+                )),
+                "{change}"
+            );
+        } else {
+            assert!(
+                matches!(response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                "{change}"
+            );
+        }
+    }
+}
+
+/// A closed carrier cannot enrich a completion with unqualified provider data.
+#[tokio::test]
+async fn completion_resolve_requires_an_open_document_for_provider_envelopes() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let service = make_hover_test_service(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
+    );
+    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    server.completion_resolve(item.clone()).await.unwrap();
+    assert!(provider
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::ResolveCompletion { .. })));
+    provider.clear_calls();
+    server.documents.did_close(&uri);
+
+    for explicit_uri in [false, true] {
+        let mut closed_item = item.clone();
+        if explicit_uri {
+            closed_item.data.as_mut().unwrap()["uri"] = serde_json::json!(uri.as_str());
+        }
+        let result = server.completion_resolve(closed_item).await;
+        assert!(
+            matches!(result, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified)
+        );
+    }
+    assert!(!provider
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::ResolveCompletion { .. })));
+    let native = CompletionItem {
+        label: "native".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        server.completion_resolve(native.clone()).await.unwrap(),
+        native
+    );
 }
 
 /// Dispatch reaches `resolve_completion` for the provider-NEUTRAL
@@ -34030,6 +34154,59 @@ async fn v_bind_hover_shows_provider_type_from_declaration() {
 
     drain_handle.abort();
     drop(service);
+}
+
+/// A provider await must not let a captured native fallback escape after
+/// document, dependency or ownership invalidation.
+#[tokio::test]
+async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
+    for change in ["edit", "reopen", "diagnostics", "workspace"] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let service = make_hover_test_service_tsgo(provider.clone());
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+        server.ensure_current_file_synced(&uri).await;
+        let position = find_document_position(server, &uri, "v-bind(width)", 8);
+        assert!(server
+            .hover(hover_params(&uri, position))
+            .await
+            .unwrap()
+            .is_some());
+
+        let documents = Arc::clone(&server.documents);
+        let raced_server = server.clone();
+        let raced_uri = uri.clone();
+        let path = server.active_ide_path_for_uri(&uri).unwrap();
+        provider.set_on_query(
+            &path,
+            Box::new(move || match change {
+                "reopen" => {
+                    documents.did_close(&raced_uri);
+                    documents.did_open(&TextDocumentItem {
+                        uri: raced_uri,
+                        language_id: "vue".into(),
+                        version: 1,
+                        text: source.into(),
+                    });
+                }
+                "edit" => {
+                    documents.did_change(&raced_uri, 2, &source.replace("width", "height"));
+                }
+                "diagnostics" => documents
+                    .host()
+                    .bump_diagnostics_generation("/workspace/src/App.vue"),
+                "workspace" => install_test_resolver(&raced_server),
+                _ => unreachable!(),
+            }),
+        );
+        let result = server.hover(hover_params(&uri, position)).await;
+        assert!(
+            matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+            "a superseded native fallback must return the typed stale-request outcome ({change})"
+        );
+    }
 }
 
 /// Without a provider answer the v-bind hover fails closed to the native
