@@ -592,10 +592,11 @@ fn check_replay_admissions<P: ?Sized>(
         super::admission::refresh_replay_request(shared, serving, path, request)
             .map_err(TypeProviderError::admission)?;
     }
-    // Refreshing a later unit may observe another edit. Every retained proof
-    // must still be current after the bounded pass; stale work cannot install.
+    // A later refresh can observe another content edit and evict an earlier
+    // warm binding. Installation needs unchanged membership of replayed bytes,
+    // not simultaneous content freshness across independent workspace reads.
     for (_, request) in admissions {
-        super::admission::check_witness_for_serving(shared, serving, &request.witness)
+        super::admission::check_replay_membership_for_serving(shared, serving, request)
             .map_err(TypeProviderError::admission)?;
     }
     Ok(())

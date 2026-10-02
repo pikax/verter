@@ -353,6 +353,27 @@ pub(super) fn membership_inputs_current(admission: &AdmittedRequest) -> bool {
     })
 }
 
+/// Validate membership of bytes already replayed into this incarnation. A
+/// content edit can evict the warm binding without excluding those units.
+/// This checkpoint never authorizes a live write, query or warm admission.
+pub(super) fn check_replay_membership_for_serving<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    request: &AdmittedRequest,
+) -> Result<(), AdmissionRefusal> {
+    let witness = &request.witness.0;
+    if witness.hub_identity != std::ptr::from_ref(shared) as usize
+        || serving.epoch != witness.epoch
+        || provider_identity(&serving.provider) != witness.provider_identity
+    {
+        return Err(AdmissionRefusal::StaleProvider);
+    }
+    if !membership_inputs_current(request) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    Ok(())
+}
+
 fn check_witness_current<P: ?Sized>(
     shared: &Shared<P>,
     witness: &ProjectWitness,

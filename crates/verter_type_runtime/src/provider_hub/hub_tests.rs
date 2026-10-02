@@ -4681,6 +4681,14 @@ fn replay_drift_resolver(
     engine: MockProvider,
     membership_drift: bool,
 ) -> Arc<super::GeneratedUnitResolver> {
+    replay_drift_resolver_with_final_edit(engine, membership_drift, None)
+}
+
+fn replay_drift_resolver_with_final_edit(
+    engine: MockProvider,
+    membership_drift: bool,
+    final_edit: Option<bool>,
+) -> Arc<super::GeneratedUnitResolver> {
     use super::{GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
@@ -4711,17 +4719,38 @@ fn replay_drift_resolver(
     )));
     // Every observed provider write advances the live host basis. No sleep or
     // test-only hub path decides when replay encounters the concurrent edit.
-    let live_publication = Arc::clone(&publication);
-    let reader = Arc::new(move || {
-        let writes = engine.calls().len() as u64;
-        Some(ProjectBasis::new(
-            Arc::clone(&live_publication),
-            writes + 1,
-            if membership_drift && writes > 0 { 2 } else { 1 },
-        ))
-    });
+    let final_edit_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let final_edit_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     Arc::new(move |path| {
         let source = path.strip_suffix(".tsx")?;
+        // Arm the edit only when A is refreshed after both file writes. B's
+        // next observation delivers it, after A's fresh witness was retained.
+        if final_edit.is_some() && source.ends_with("/A.vue") && engine.calls().len() == 2 {
+            final_edit_armed.store(true, Ordering::SeqCst);
+        }
+        let reader = {
+            let engine = engine.clone();
+            let publication = Arc::clone(&publication);
+            let armed = Arc::clone(&final_edit_armed);
+            let done = Arc::clone(&final_edit_done);
+            let is_b = source.ends_with("/B.vue");
+            Arc::new(move || {
+                if is_b && armed.swap(false, Ordering::SeqCst) {
+                    done.store(true, Ordering::SeqCst);
+                }
+                let edited = done.load(Ordering::SeqCst);
+                let writes = engine.calls().len() as u64;
+                Some(ProjectBasis::new(
+                    Arc::clone(&publication),
+                    writes + 1 + u64::from(edited),
+                    if (membership_drift && writes > 0) || (final_edit == Some(true) && edited) {
+                        2
+                    } else {
+                        1
+                    },
+                ))
+            })
+        };
         let basis = reader().unwrap();
         let units = vec![CanonicalPath::new(path)];
         let proof = verter_workspace::decide_generated_unit_admission(
@@ -4741,6 +4770,81 @@ fn replay_drift_resolver(
             proof,
         }))
     })
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_replay_final_check_tolerates_only_content_drift() {
+    for membership_edit in [false, true] {
+        let engine = MockProvider::new("tsgo");
+        let notifier = Arc::new(RecordingNotifier::default());
+        let hub = ProviderHub::new(
+            TestBackend {
+                initial: parking_lot::Mutex::new(Some(engine.clone())),
+                replacement: MockProvider::new("tsgo"),
+                spawn_gate: Arc::new(Semaphore::new(0)),
+                initial_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+                respawned_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+            },
+            notifier.clone(),
+            HubPolicy::explicit(3),
+        );
+        for name in ["A", "B"] {
+            hub.open_file(&format!("d:/ws/src/{name}.vue.tsx"), name)
+                .await
+                .unwrap();
+        }
+        hub.set_generated_unit_resolver(replay_drift_resolver_with_final_edit(
+            engine.clone(),
+            false,
+            Some(membership_edit),
+        ))
+        .unwrap();
+        let established = hub.establish().await;
+        let epoch = hub.serving_epoch();
+        let shutdowns = engine.inner.shutdowns.load(Ordering::SeqCst);
+        let calls = engine.calls();
+        let applied =
+            ["A", "B"].map(|name| hub.applied_content(&format!("d:/ws/src/{name}.vue.tsx")));
+        let warm_a = hub.bound_project("d:/ws/src/A.vue");
+        let starts = notifier.started();
+        hub.shutdown().await.unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                MockCall::OpenFile {
+                    path: "d:/ws/src/A.vue.tsx".into(),
+                    content: "A".into(),
+                },
+                MockCall::OpenFile {
+                    path: "d:/ws/src/B.vue.tsx".into(),
+                    content: "B".into(),
+                },
+            ],
+            "refresh preserves ordered bytes without repeating provider writes"
+        );
+        if membership_edit {
+            assert!(established.unwrap_err().message.contains("StaleBasis"));
+            assert!(epoch.is_none());
+            assert_eq!(shutdowns, 1);
+            assert!(starts.is_empty());
+            assert!(applied
+                .iter()
+                .all(|content| matches!(content, crate::traits::AppliedContent::NotApplied)));
+        } else {
+            established.expect("a later refresh's content edit must not reject installation");
+            assert!(epoch.is_some());
+            assert_eq!(shutdowns, 0);
+            assert_eq!(starts.len(), 1);
+            assert!(
+                warm_a.is_none(),
+                "replay cannot warm a stale content binding"
+            );
+            for (name, content) in ["A", "B"].into_iter().zip(applied) {
+                assert!(matches!(content,
+                    crate::traits::AppliedContent::Applied(bytes) if bytes.as_ref() == name));
+            }
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

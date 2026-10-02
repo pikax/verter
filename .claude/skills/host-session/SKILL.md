@@ -239,8 +239,11 @@ now hold an excluded unit — retires the epoch or arms its recovery. Restarting
 project engine on every concurrent edit is the failure this split prevents.
 Replay re-admits a content-only drift once at each validation checkpoint against
 the same provider and epoch, without repeating provider writes. Before carrier
-activation and installation, all replay admissions are refreshed and checked
-together. A changed membership basis or a still-stale proof fails installation.
+activation and installation, all replay admissions are refreshed in one bounded
+pass. The final checkpoint requires unchanged membership and the exact replay
+incarnation; a later refresh's content-only edit cannot reject installation.
+Live writes and queries still require a current full-basis witness, so replay
+does not warm an earlier content binding. Changed membership fails installation.
 Managed non-close mutations whose caller deadline elapses return the typed
 `DeadlineElapsed` refusal; work still queued before application is discarded.
 Closes and mutations without a generated-unit resolver retain ordered queued
