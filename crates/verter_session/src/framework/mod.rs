@@ -57,9 +57,9 @@ pub use public_contract::{
     PublicTypeReference,
 };
 pub use registry::{
-    CarrierGrammarCapability, CarrierLeg, FrameworkAdapterRegistry, FrameworkCapabilityCatalog,
-    FrameworkRegistration, HostServices, MissingRegisteredGrammar, SurfaceRegistration,
-    TagDisposition,
+    CarrierGrammarCapability, CarrierGrammarCompositionError, CarrierLeg, FrameworkAdapterRegistry,
+    FrameworkCapabilityCatalog, FrameworkRegistration, HostServices, MissingRegisteredGrammar,
+    SurfaceRegistration, TagDisposition,
 };
 pub use self_file::{
     rune_module_provider_content, self_file_provider_content, serves_self_file_provider_buffer,

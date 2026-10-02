@@ -258,12 +258,17 @@ pub(super) async fn handle_initialize(
         .as_ref()
         .is_some_and(|tp| tp.supports_completion_resolve());
 
+    // The capability surface reads the serving host's own classification
+    // authority for the watcher globs. The `HostRef` borrow (and the
+    // `SemanticActivityGuard` it owns) is scoped to that one call: it must
+    // never outlive the read it covers.
+    let capabilities = {
+        let host = server.documents.host();
+        server_capabilities(&encoding, resolve_provider, host.language_classifier())
+    };
+
     Ok(InitializeResult {
-        capabilities: server_capabilities(
-            &encoding,
-            resolve_provider,
-            server.documents.host().language_classifier(),
-        ),
+        capabilities,
         server_info: Some(ServerInfo {
             name: "verter-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -463,8 +468,21 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // Watcher globs are derived from the serving host's OWN composed
     // classification authority, so the files this server watches are exactly
     // the files its host classifies as framework carriers.
-    let host = server.documents.host();
-    let framework = host.language_classifier();
+    //
+    // `HostRef` owns a `SemanticActivityGuard`, which the guard contract
+    // requires to cover exactly ONE host call (see `documents::guarded_host`).
+    // Reading the classifier is that one call, so the borrow is scoped to the
+    // two glob reads below and the guard is released before the
+    // `client/registerCapability` round trip — holding it across a client
+    // request would park every queued close-time payload release for as long
+    // as the client takes to answer.
+    let (carrier_glob, adapter_module_glob) = {
+        let host = server.documents.host();
+        (
+            carrier_watch_glob(host.language_classifier()),
+            adapter_module_watch_glob(host.language_classifier()),
+        )
+    };
     let mut watchers = vec![FileSystemWatcher {
         // Carrier-file watcher glob, built from the host's registry carrier
         // rows. File-watching is a SERVER concern (the client manifest
@@ -473,14 +491,14 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
         // `.svelte`) — including carrier rows with no registered
         // implementation, whose events produce no provider sync state
         // until a carrier lands.
-        glob_pattern: GlobPattern::String(carrier_watch_glob(framework)),
+        glob_pattern: GlobPattern::String(carrier_glob),
         kind: watch_kind,
     }];
     // Dedicated ADAPTER-MODULE watcher glob (`**/*.{svelte.js,svelte.ts}`),
     // built from the same host-composed registry. A rune module is NOT a
     // carrier and its coverage is its OWN descriptor-derived glob — the
     // generic TS/JS glob below no longer carries rune-module responsibility.
-    if let Some(adapter_module_glob) = adapter_module_watch_glob(framework) {
+    if let Some(adapter_module_glob) = adapter_module_glob {
         watchers.push(FileSystemWatcher {
             glob_pattern: GlobPattern::String(adapter_module_glob),
             kind: watch_kind,

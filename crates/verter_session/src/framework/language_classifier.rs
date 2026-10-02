@@ -78,6 +78,27 @@ impl HostLanguageClassifier {
         self.registry.carrier_extensions()
     }
 
+    /// Every framework-carrier row THIS host's registry classifies, as
+    /// `(extension, FileLanguage)` pairs, in registry order.
+    ///
+    /// The identity-bearing half of [`Self::carrier_extensions`]: a consumer
+    /// that must know WHICH carrier an extension resolves to — not only which
+    /// extensions are carriers — reads the rows here, so the watch surface can
+    /// be checked against a composed framework catalog row by row.
+    #[must_use]
+    pub fn carrier_rows(&self) -> Vec<(&str, FileLanguage)> {
+        self.registry
+            .carrier_extensions()
+            .into_iter()
+            .filter_map(
+                |extension| match self.registry.classify_static(&format!(".{extension}")) {
+                    StaticClassification::Resolved(language) => Some((extension, language)),
+                    StaticClassification::Gated(_) | StaticClassification::Unknown => None,
+                },
+            )
+            .collect()
+    }
+
     /// The adapter-module extensions THIS host's registry classifies, across
     /// every adapter, in registry order.
     #[must_use]

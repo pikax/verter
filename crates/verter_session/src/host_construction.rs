@@ -391,6 +391,14 @@ impl VerterHost {
         let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
             crate::framework::ProjectCapabilitySnapshot::empty(),
         );
+        // The classifier is the host's watch surface and the language
+        // server's advertised framework surface, so it must classify exactly
+        // the carriers the composed services registered. Without this the two
+        // could drift: an extension classified as a carrier the catalog never
+        // registered would be watched but unservable, and a registered carrier
+        // the classifier never resolves would be served but unwatched. Both
+        // fail construction instead.
+        framework_services.assert_classifier_agrees(&language_classifier);
 
         // The platform-services profile this target requires. Bound
         // before the scheduler seam so the seam's compiled transport
@@ -1285,16 +1293,6 @@ impl VerterHost {
     /// construction and immutable thereafter.
     pub(crate) fn framework_registry(&self) -> &crate::framework::FrameworkAdapterRegistry {
         self.framework_services.framework_registry()
-    }
-
-    /// The host's composed framework services — the capability catalog that
-    /// names its carrier grammars together with the adapter registry those
-    /// grammars dispatch through. Both are composed in one construction step
-    /// and validated against each other, so the two framework authorities
-    /// cannot describe different framework sets.
-    #[must_use]
-    pub fn framework_capabilities(&self) -> &crate::framework::FrameworkCapabilityCatalog {
-        self.framework_services.capabilities()
     }
 
     /// The framework script-fact caches — the resolved-validation half's

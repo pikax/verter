@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -26,6 +26,7 @@ use verter_language::{CarrierParse, FileLanguage, FrameworkAdapterId, LanguageId
 use verter_protocol::typeinfo::graph::FrameworkTag;
 
 use crate::framework::api_projector::ComponentApiProjector;
+use crate::framework::language_classifier::HostLanguageClassifier;
 use crate::framework::surface_store::ErasedFrameworkSurfaceStore;
 use crate::framework::synth::ComponentDefaultSynth;
 use crate::typeinfo::framework_surface::FrameworkSurfaceAdapter;
@@ -451,26 +452,111 @@ impl FrameworkCapabilityCatalog {
 
     /// Register every composed row's carrier grammar into `authority`.
     ///
+    /// The composition is ALL-OR-NOTHING. Every row is first accepted against
+    /// a private authority, and only a composition every row survives is
+    /// published into `authority`:
+    ///
+    /// * two rows that resolve to the SAME [`FileLanguage`] are rejected. The
+    ///   catalog key is adapter × epoch × capability and does not carry the
+    ///   language, so two rows can be distinct catalog entries that share one
+    ///   carrier language — registering both would alias them and let the
+    ///   later grammar silently replace the earlier one.
+    /// * a row the authority rejects is rejected before any row is committed,
+    ///   so a failing composition never leaves a half-populated authority.
+    ///
     /// # Errors
     ///
-    /// The first [`GrammarRegistrationError`] a row raises — a duplicate or
-    /// identity-mismatched registration fails the whole composition rather
-    /// than leaving a half-populated authority.
+    /// [`CarrierGrammarCompositionError`] when a row aliases another row's
+    /// carrier language, or when the authority rejects a row. The published
+    /// `authority` is untouched by the rejected composition.
     pub fn register_all(
         &self,
         authority: &CarrierGrammarAuthority,
-    ) -> Result<(), GrammarRegistrationError> {
+    ) -> Result<(), CarrierGrammarCompositionError> {
+        // Private map first: a duplicate carrier language is an aliasing defect
+        // the authority cannot report, because its own insert replaces.
+        let mut staged: Vec<&CarrierGrammarCapability> = Vec::with_capacity(self.rows.len());
+        let mut carrier_languages: FxHashSet<FileLanguage> = FxHashSet::default();
         for row in &self.rows {
-            authority.register_carrier_grammar(
-                row.file_language.clone(),
-                row.adapter_semantic_version,
-                row.parser_grammar_version,
-                row.grammar.clone(),
-            )?;
+            if !carrier_languages.insert(row.file_language.clone()) {
+                return Err(CarrierGrammarCompositionError::DuplicateCarrierLanguage(
+                    row.file_language.clone(),
+                ));
+            }
+            staged.push(row);
+        }
+        // Accept every row against a throwaway authority carrying the SAME
+        // registration semantics, so a row the live authority would reject is
+        // rejected here — with `authority` still empty.
+        let probe = CarrierGrammarAuthority::new()
+            .map_err(|_| CarrierGrammarCompositionError::AuthorityUnavailable)?;
+        for row in &staged {
+            probe
+                .register_carrier_grammar(
+                    row.file_language.clone(),
+                    row.adapter_semantic_version,
+                    row.parser_grammar_version,
+                    row.grammar.clone(),
+                )
+                .map_err(CarrierGrammarCompositionError::Registration)?;
+        }
+        for row in staged {
+            authority
+                .register_carrier_grammar(
+                    row.file_language.clone(),
+                    row.adapter_semantic_version,
+                    row.parser_grammar_version,
+                    row.grammar.clone(),
+                )
+                .map_err(CarrierGrammarCompositionError::Registration)?;
         }
         Ok(())
     }
 }
+
+/// Why a composed catalog could not be published into a carrier-grammar
+/// authority.
+///
+/// Every variant is raised BEFORE the composition is published, so an
+/// authority that rejected a composition still holds exactly what it held
+/// before the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarrierGrammarCompositionError {
+    /// Two composed catalog rows resolve to the same [`FileLanguage`].
+    ///
+    /// The catalog distinguishes rows by adapter × epoch × capability and does
+    /// not carry the carrier language, so distinct rows can share one language
+    /// and would alias into a single authority entry — the second grammar
+    /// replacing the first, with no error.
+    DuplicateCarrierLanguage(FileLanguage),
+    /// The authority rejected a row: its grammar does not belong to its
+    /// carrier language, its config does not canonicalize, or the authority is
+    /// unavailable.
+    Registration(GrammarRegistrationError),
+    /// The staging authority could not be created, so the composition could
+    /// not be accepted before publication.
+    AuthorityUnavailable,
+}
+
+impl std::fmt::Display for CarrierGrammarCompositionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateCarrierLanguage(language) => write!(
+                f,
+                "two composed capability-catalog rows resolve to the same carrier language \
+                 '{language:?}' — the second registration would alias the first"
+            ),
+            Self::Registration(error) => {
+                write!(f, "carrier-grammar registration rejected: {error:?}")
+            }
+            Self::AuthorityUnavailable => {
+                write!(f, "carrier-grammar staging authority unavailable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CarrierGrammarCompositionError {}
 
 /// The host's explicitly composed framework services.
 ///
@@ -492,14 +578,20 @@ impl HostServices {
     /// # Panics
     ///
     /// When a frontend capability row publishes no grammar fact, or when the
-    /// adapter registry has no registration for a composed row. Both mean the
-    /// compiler catalog and the adapter legs disagree; a partially composed
-    /// host would serve a framework through one authority and not the other.
+    /// two authorities disagree about which frameworks exist. Both mean the
+    /// compiler catalog and the adapter legs describe different framework sets;
+    /// a partially composed host would serve a framework through one authority
+    /// and not the other.
     #[must_use]
     pub fn built_in() -> Self {
         let capabilities = FrameworkCapabilityCatalog::built_in()
             .expect("every built-in frontend capability row publishes a carrier grammar fact");
         let registry = FrameworkAdapterRegistry::built_in();
+        // BOTH directions, in production and not only in the unit test: the
+        // grammar authority and the dispatch authority must name the same
+        // framework set. Catalog-without-registration drops a framework the
+        // host claims to parse; registration-without-catalog dispatches a
+        // framework the host has no carrier grammar for.
         for adapter_id in capabilities.adapter_ids() {
             assert!(
                 registry.contains(adapter_id),
@@ -507,9 +599,62 @@ impl HostServices {
                  adapter '{adapter_id}' — the composed host would drop the framework"
             );
         }
+        for descriptor in registry.descriptors() {
+            assert!(
+                capabilities.contains(&descriptor.id),
+                "the framework adapter registry registers adapter '{}' that the composed \
+                 capability catalog does not name — the composed host would dispatch a \
+                 framework it has no carrier grammar for",
+                descriptor.id
+            );
+        }
         Self {
             capabilities,
             registry,
+        }
+    }
+
+    /// Fail unless `classifier` classifies exactly the framework-carrier
+    /// languages this composition registered.
+    ///
+    /// The classifier is what the host WATCHES and what the language server
+    /// ADVERTISES: the watcher globs and the file-operation filters are built
+    /// from `classifier.carrier_extensions()`. A classifier that recognises a
+    /// carrier this composition registers no grammar for would make the host
+    /// watch a framework it cannot serve; a catalog row the classifier never
+    /// resolves would make the host serve a framework it never watches. Both
+    /// are a disagreement between the host's classification authority and its
+    /// composed framework services, and neither is reachable while construction
+    /// refuses it.
+    ///
+    /// # Panics
+    ///
+    /// When the two disagree, naming the extension or the carrier language
+    /// that differs.
+    pub fn assert_classifier_agrees(&self, classifier: &HostLanguageClassifier) {
+        let carrier_rows = classifier.carrier_rows();
+        for (extension, language) in &carrier_rows {
+            assert!(
+                self.capabilities
+                    .rows()
+                    .iter()
+                    .any(|row| row.file_language() == language),
+                "the host classifies '.{extension}' as carrier '{language:?}', which the \
+                 composed framework capability catalog does not register — the watcher \
+                 would watch a framework the host cannot serve"
+            );
+        }
+        for row in self.capabilities.rows() {
+            let language = row.file_language();
+            assert!(
+                carrier_rows
+                    .iter()
+                    .any(|(_, classified)| classified == language),
+                "the composed framework capability catalog registers carrier \
+                 '{language:?}', \
+                 which the host's language classifier never resolves — the host would serve \
+                 a framework it does not watch"
+            );
         }
     }
 
@@ -783,6 +928,7 @@ fn svelte_registration() -> FrameworkRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_language::{LanguageRegistry, LanguageRow};
 
     fn built_in() -> FrameworkAdapterRegistry {
         FrameworkAdapterRegistry::built_in()
@@ -1151,5 +1297,139 @@ mod tests {
                 descriptor.id
             );
         }
+    }
+
+    /// Two catalog rows that resolve to ONE carrier language are an identity
+    /// alias, not a composition: the authority keys its registrations by
+    /// `FileLanguage`, so publishing both would silently let the second
+    /// grammar replace the first and still report success. The catalog key is
+    /// adapter × epoch × capability and carries no language, so two rows CAN
+    /// share one — which is exactly what must be rejected.
+    #[test]
+    fn register_all_rejects_two_rows_that_share_one_carrier_language() {
+        let vue_grammar = registered_vue_grammar();
+        let catalog = FrameworkCapabilityCatalog::compose([
+            (
+                FrameworkAdapterId::vue(),
+                LanguageId::new("vue"),
+                Some(vue_grammar),
+            ),
+            (
+                FrameworkAdapterId::vue(),
+                LanguageId::new("vue"),
+                Some(vue_grammar),
+            ),
+        ])
+        .expect("a well-formed row list composes");
+        let authority = CarrierGrammarAuthority::new().expect("carrier grammar authority");
+        let error = catalog
+            .register_all(&authority)
+            .expect_err("two rows aliasing one carrier language must not publish");
+        assert_eq!(
+            error,
+            CarrierGrammarCompositionError::DuplicateCarrierLanguage(FileLanguage::vue()),
+            "the aliasing row must be named exactly"
+        );
+    }
+
+    /// A row whose grammar does not belong to its carrier language is rejected
+    /// by the authority's own identity rule, and the composition reports it
+    /// before publishing. The Vue row ahead of the mismatched Svelte row is
+    /// the point: the composition is accepted or rejected as a whole, so the
+    /// leading row is never left behind on its own.
+    #[test]
+    fn register_all_rejects_a_mismatched_row() {
+        let catalog = FrameworkCapabilityCatalog::compose([
+            (
+                FrameworkAdapterId::vue(),
+                LanguageId::new("vue"),
+                Some(registered_vue_grammar()),
+            ),
+            // Svelte carrier language carrying the Vue grammar.
+            (
+                FrameworkAdapterId::svelte(),
+                LanguageId::new("svelte"),
+                Some(registered_vue_grammar()),
+            ),
+        ])
+        .expect("a well-formed row list composes");
+        let authority = CarrierGrammarAuthority::new().expect("carrier grammar authority");
+        let error = catalog
+            .register_all(&authority)
+            .expect_err("a grammar that does not belong to its carrier language must not publish");
+        assert_eq!(
+            error,
+            CarrierGrammarCompositionError::Registration(
+                GrammarRegistrationError::ConfigLanguageMismatch
+            )
+        );
+        // The same authority still accepts the composition the host publishes,
+        // so a rejected composition left nothing behind that blocks the next
+        // one.
+        FrameworkCapabilityCatalog::built_in()
+            .expect("built-in catalog")
+            .register_all(&authority)
+            .expect("the built-in composition publishes into a fresh authority");
+    }
+
+    /// The host's watch surface IS its classifier's carrier rows, so the
+    /// classifier and the composed catalog must name the same carriers. The
+    /// built-in host agrees; a classifier that recognises a carrier the
+    /// catalog never registered fails construction instead of producing a
+    /// watcher for a framework the host cannot serve.
+    #[test]
+    fn host_classifier_and_composed_catalog_agree_on_carriers() {
+        let services = HostServices::built_in();
+        services.assert_classifier_agrees(&HostLanguageClassifier::with_built_in_registry(
+            crate::framework::ProjectCapabilitySnapshot::empty(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "watch a framework the host cannot serve")]
+    fn a_classifier_row_the_catalog_never_registered_fails_the_host() {
+        let services = HostServices::built_in();
+        let mut rows = builtin_registry_rows();
+        rows.push(LanguageRow::fixed(
+            "rax",
+            FileLanguage::Framework {
+                adapter_id: FrameworkAdapterId::new("rax"),
+                language_id: LanguageId::new("rax"),
+            },
+        ));
+        services.assert_classifier_agrees(&classifier_over(rows));
+    }
+
+    #[test]
+    #[should_panic(expected = "a framework it does not watch")]
+    fn a_catalog_carrier_the_classifier_never_resolves_fails_the_host() {
+        let services = HostServices::built_in();
+        let mut rows = builtin_registry_rows();
+        rows.retain(|row| row.extension != "svelte");
+        services.assert_classifier_agrees(&classifier_over(rows));
+    }
+
+    /// The compiler catalog's own Vue grammar, so a test row spells the same
+    /// grammar the host registers rather than a hand-built stand-in.
+    fn registered_vue_grammar() -> &'static CarrierGrammarConfig {
+        verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+            &FrameworkAdapterId::vue(),
+            &LanguageId::new("vue"),
+        )
+        .expect("the frontend catalog publishes the Vue carrier grammar")
+    }
+
+    fn builtin_registry_rows() -> Vec<LanguageRow> {
+        vec![
+            LanguageRow::fixed("vue", FileLanguage::vue()),
+            LanguageRow::fixed("svelte", FileLanguage::svelte()),
+        ]
+    }
+
+    fn classifier_over(rows: Vec<LanguageRow>) -> HostLanguageClassifier {
+        HostLanguageClassifier::new(
+            std::sync::Arc::new(LanguageRegistry::new(rows)),
+            crate::framework::ProjectCapabilitySnapshot::empty(),
+        )
     }
 }
