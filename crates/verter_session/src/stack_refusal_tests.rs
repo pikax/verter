@@ -3,21 +3,37 @@
 //! publishes nothing for it, the upsert reports the typed refusal, and the
 //! host goes on serving. A retry once the stack can be had publishes the
 //! file. The refusals are injected at the reservation (`oxc_parse::faults`)
-//! for exactly the source's size, so nothing exhausts the machine.
+//! for exactly the source's size, so nothing exhausts the machine, and the
+//! sources are forced onto the region path
+//! (`oxc_parse::faults::force_reservations`) so a shallow source reserves
+//! a region like a deep one: a refusal below is the injected fault on a
+//! thread of any stack, never a source too deep for it. A forced purpose
+//! sizes its reservation from the syntax scan, so the size a test computes
+//! is the size the operation reserves whatever stack the thread has.
 
 use std::sync::Arc;
 
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::faults::{
-    fail_reservations_here, fail_reservations_needing, Reservation,
+    fail_reservations_here, fail_reservations_needing, force_reservations, ForcedRegions,
+    Reservation,
 };
 use verter_scheduler::job::SchedulerError;
 
 use crate::types::HostConfig;
 use crate::{FileLanguage, HostError, UpsertRequest, VerterHost};
 
-/// A module whose first constant nests `depth` parentheses deep: its parse
-/// and its walks need a stack region on a scheduler worker.
+/// Force `purposes` onto the region path for as long as the returned guard
+/// lives, so a reservation is made — and can be refused — wherever it is
+/// made, a scheduler worker's included.
+fn forcing(purposes: &[Reservation]) -> ForcedRegions {
+    force_reservations(purposes)
+}
+
+/// A module whose first constant nests `depth` parentheses deep. The depth
+/// no longer decides whether the source reserves: the forcing does. It is
+/// what makes each test's reservation a size no other test parses, so a
+/// fault armed for it finds this one alone.
 fn deep_module(depth: usize) -> String {
     format!(
         "const v = {}1{};\nconst w = 2;\n",
@@ -50,16 +66,22 @@ fn bindings(host: &VerterHost, id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Upsert a deep module whose `purpose` reservation is refused once: the
-/// upsert reports the typed refusal and the source stage publishes nothing;
-/// the same upsert again publishes the module's bindings.
+/// Upsert a module whose `purpose` reservation is refused once: the upsert
+/// reports the typed refusal and the source stage publishes nothing; the
+/// same upsert again publishes the module's bindings. The forcing is what
+/// makes the source's parse or the walks' lease reserve, so a shallow
+/// module proves the refusal on any thread's stack.
 fn refused_once_then_retried(id: &str, depth: usize, purpose: Reservation) {
+    let _forcing = forcing(&[purpose]);
     let host = VerterHost::new_standalone(HostConfig::default());
     let source = deep_module(depth);
     let needed = verter_parser::oxc_parse::parse_stack_bytes(&source, SourceType::ts());
+    let before = verter_parser::oxc_parse::faults::reservations_needing(purpose, needed);
     fail_reservations_needing(purpose, needed, 1);
     let refused = upsert(&host, id, &source);
     fail_reservations_needing(purpose, needed, 0);
+    let attempted =
+        verter_parser::oxc_parse::faults::reservations_needing(purpose, needed) - before;
     match refused {
         Err(HostError::Scheduler(SchedulerError::StackUnavailable {
             file_id,
@@ -70,6 +92,10 @@ fn refused_once_then_retried(id: &str, depth: usize, purpose: Reservation) {
         }
         other => panic!("expected the typed stack refusal, got {other:?}"),
     }
+    assert!(
+        attempted >= 1,
+        "the {purpose:?} reservation of {needed} bytes was attempted"
+    );
     assert!(
         host.scheduler.try_get_source(id).is_none(),
         "a refused source stage publishes no snapshot"
@@ -98,6 +124,7 @@ fn a_refused_walk_stack_lease_publishes_nothing_and_a_retry_publishes_the_module
 /// serves the overlay's module.
 #[test]
 fn a_refused_overlay_rebuild_serves_no_analysis() {
+    let _forcing = forcing(&[Reservation::Parse]);
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let id = "/src/refused_overlay.ts";
     upsert(&host, id, "const base = 1;\n").expect("the base module parses");
@@ -162,6 +189,7 @@ fn flow_return_of_pf(
 #[test]
 fn a_refused_evaluation_program_publishes_no_artifact() {
     use verter_parser::oxc_parse::faults::reservations_needing;
+    let _forcing = forcing(&[Reservation::Parse]);
     let host = VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
@@ -188,6 +216,7 @@ fn a_refused_evaluation_program_publishes_no_artifact() {
 #[test]
 fn a_refused_overlay_materialisation_publishes_no_artifact() {
     for (purpose, depth) in [(Reservation::Parse, 3_349), (Reservation::Lease, 3_353)] {
+        let _forcing = forcing(&[purpose]);
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let id = "/src/refused_materialisation.ts";
         upsert(&host, id, "const base = 1;\n").expect("the base module parses");
@@ -254,6 +283,7 @@ fn a_compile_request_whose_parse_is_refused_publishes_no_product() {
         CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
         VueBackendRequest, VueCompileRequest,
     };
+    let _forcing = forcing(&[Reservation::Parse]);
     let host = VerterHost::new_standalone(HostConfig::default());
     let id = "/src/RefusedRequest.vue";
     let (component, script) = deep_component(877);
@@ -298,6 +328,7 @@ fn a_compile_request_whose_parse_is_refused_publishes_no_product() {
 /// once the stack can be had serves the module.
 #[test]
 fn a_virtual_file_whose_parse_is_refused_serves_no_module() {
+    let _forcing = forcing(&[Reservation::Parse]);
     let host = VerterHost::new_standalone(HostConfig::default());
     let id = "/src/RefusedVirtual.vue";
     let (component, script) = deep_component(881);
@@ -336,6 +367,7 @@ fn every_parse_of_the_source_stage_refused(
     expression: &str,
 ) {
     use verter_parser::oxc_parse::faults::{fail_reservations_needing_after, reservations_needing};
+    let _forcing = forcing(&[Reservation::Parse]);
     let needed = verter_parser::oxc_parse::parse_stack_bytes(expression, SourceType::ts());
     let upsert_component = |host: &VerterHost, id: &str| {
         host.upsert(UpsertRequest {
@@ -406,6 +438,7 @@ fn a_refused_svelte_projection_publishes_nothing() {
 /// place, and the next read builds it.
 #[test]
 fn a_refused_vue_template_analysis_serves_no_template() {
+    let _forcing = forcing(&[Reservation::Parse]);
     let expression = deep_expression(911);
     let host = VerterHost::new_standalone(HostConfig::default());
     let id = "/src/RefusedTemplate.vue";
@@ -440,6 +473,7 @@ fn a_refused_vue_template_analysis_serves_no_template() {
 #[test]
 fn a_refused_public_api_projection_serves_no_wrong_projection() {
     use verter_parser::oxc_parse::faults::{fail_reservations_here_after, reservations_here};
+    let _forcing = forcing(&[Reservation::Parse]);
     let depth = 887;
     let script = format!(
         "const v = {}1{}\nconst w = 2\ndefineProps<{{ label: string }}>()",
@@ -680,19 +714,17 @@ fn deep_runes_component(depth: usize) -> String {
 /// compile once the stack can be had serves the module.
 #[test]
 fn every_refused_lease_of_a_compile_serves_no_module() {
-    // On a 1 MiB thread, where 151 levels need a region.
-    std::thread::Builder::new()
-        .stack_size(1 << 20)
-        .spawn(every_refused_lease_of_a_compile_serves_no_module_here)
-        .expect("spawn the thread")
-        .join()
-        .expect("the compiles return");
+    every_refused_lease_of_a_compile_serves_no_module_here();
 }
 
+/// Every refusal here is the injected fault: the forcing is what makes each
+/// of the compile's leases reserve, so the enumeration is the same on a
+/// thread of any stack.
 fn every_refused_lease_of_a_compile_serves_no_module_here() {
     use verter_parser::oxc_parse::faults::{
         fail_reservations_here_after, reservations_here_of, ANY_SIZE,
     };
+    let _forcing = forcing(&[Reservation::Lease]);
     let component = deep_runes_component(151);
     let id = "/src/Leased.svelte";
     let host_with_component = || {
@@ -753,51 +785,47 @@ fn every_refused_lease_of_a_compile_serves_no_module_here() {
 /// empty scan); the materialisation once the stack can be had publishes it.
 #[test]
 fn every_refused_lease_of_an_indexed_materialisation_publishes_nothing() {
-    std::thread::Builder::new()
-        .stack_size(1 << 20)
-        .spawn(|| {
-            use verter_parser::oxc_parse::faults::{
-                fail_reservations_here_after, reservations_here_of, ANY_SIZE,
-            };
-            let component = deep_runes_component(151);
-            let id = "/src/Indexed.svelte";
-            let host_with_component = || {
-                let host = VerterHost::new_standalone(HostConfig::default());
-                host.upsert(UpsertRequest {
-                    canonical_id: Some(id.to_string()),
-                    input_id: id.to_string(),
-                    source: Arc::from(component.as_str()),
-                    file_language: FileLanguage::svelte(),
-                    aliases: Vec::new(),
-                })
-                .map(drop)
-                .expect("the component parses");
-                host
-            };
-            let before = reservations_here_of(Reservation::Lease);
-            assert!(host_with_component()
-                .ensure_indexed_ready_serve(id)
-                .is_some());
-            let leases = reservations_here_of(Reservation::Lease) - before;
+    {
+        use verter_parser::oxc_parse::faults::{
+            fail_reservations_here_after, reservations_here_of, ANY_SIZE,
+        };
+        let _forcing = forcing(&[Reservation::Lease]);
+        let component = deep_runes_component(151);
+        let id = "/src/Indexed.svelte";
+        let host_with_component = || {
+            let host = VerterHost::new_standalone(HostConfig::default());
+            host.upsert(UpsertRequest {
+                canonical_id: Some(id.to_string()),
+                input_id: id.to_string(),
+                source: Arc::from(component.as_str()),
+                file_language: FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .map(drop)
+            .expect("the component parses");
+            host
+        };
+        let before = reservations_here_of(Reservation::Lease);
+        assert!(host_with_component()
+            .ensure_indexed_ready_serve(id)
+            .is_some());
+        let leases = reservations_here_of(Reservation::Lease) - before;
+        assert!(
+            leases >= 1,
+            "the materialisation leases a region on this thread"
+        );
+        for skip in 0..leases {
+            let host = host_with_component();
+            fail_reservations_here_after(Reservation::Lease, ANY_SIZE, skip, 1);
+            let refused = host.ensure_indexed_ready_serve(id);
+            fail_reservations_here(Reservation::Lease, ANY_SIZE, 0);
+            assert!(refused.is_none(), "lease {skip} of {leases}: published");
             assert!(
-                leases >= 1,
-                "the materialisation leases a region on this thread"
+                host.ensure_indexed_ready_serve(id).is_some(),
+                "lease {skip}: the retry publishes"
             );
-            for skip in 0..leases {
-                let host = host_with_component();
-                fail_reservations_here_after(Reservation::Lease, ANY_SIZE, skip, 1);
-                let refused = host.ensure_indexed_ready_serve(id);
-                fail_reservations_here(Reservation::Lease, ANY_SIZE, 0);
-                assert!(refused.is_none(), "lease {skip} of {leases}: published");
-                assert!(
-                    host.ensure_indexed_ready_serve(id).is_some(),
-                    "lease {skip}: the retry publishes"
-                );
-            }
-        })
-        .expect("spawn the thread")
-        .join()
-        .expect("the materialisations return");
+        }
+    }
 }
 
 /// The compiler's entries outside a host, over the guard's deep sources:

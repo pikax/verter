@@ -2316,58 +2316,36 @@ fn mixed_product_compile_publishes_primary_diagnostics_only() {
     );
 }
 
-/// Run `work` on a fresh thread asking for 1 MiB of stack. The thread may
-/// get more — glibc hands a thread a cached stack up to four times the size
-/// asked for — so a source whose parse must reserve a region is sized from
-/// the stack the thread actually has ([`levels_past_this_stack`]).
-fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 20)
-            .spawn_scoped(scope, work)
-            .expect("spawn the thread")
-            .join()
-            .expect("the work returns")
-    })
-}
-
-/// A nesting depth whose parse needs more stack than this thread has left,
-/// so the parse of a source nesting this deep reserves a region for it.
-fn levels_past_this_stack() -> usize {
-    let remaining = verter_parser::oxc_parse::faults::remaining_stack()
-        .expect("a native thread reports its remaining stack");
-    remaining / verter_parser::oxc_parse::PARSE_STACK_BYTES_PER_LEVEL + 1
-}
-
-/// A component whose script nests deeper than this thread's stack.
+/// A component whose script nests a few parentheses deep, forced onto the
+/// region path: the forcing, not the source's depth, is what makes the
+/// script's parse reserve a region, so these refusals hold on a thread of
+/// any stack — glibc may hand one asking for 1 MiB a cached stack up to
+/// four times the size.
 fn deep_vue_component() -> String {
-    let depth = levels_past_this_stack();
     format!(
         "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div>{{{{ w }}}}</div></template>\n",
-        "(".repeat(depth),
-        ")".repeat(depth)
+        "(".repeat(3),
+        ")".repeat(3)
     )
 }
 
 fn deep_svelte_component() -> String {
-    let depth = levels_past_this_stack();
     format!(
         "<script>let v = {}1{};\nlet count = $state(0);</script>\n<button>{{count}}</button>\n",
-        "(".repeat(depth),
-        ")".repeat(depth)
+        "(".repeat(3),
+        ")".repeat(3)
     )
 }
 
-/// A component whose markup expression nests deeper than this thread's
-/// stack: its preparation parses the expression.
+/// A component whose markup expression nests a few parentheses deep, forced
+/// onto the region path: its preparation parses the expression.
 fn deep_svelte_markup() -> String {
-    let depth = levels_past_this_stack();
     format!(
         "<script>let n = $state(0);</script>
 <p>{{{}n{}}}</p>
 ",
-        "(".repeat(depth),
-        ")".repeat(depth)
+        "(".repeat(3),
+        ")".repeat(3)
     )
 }
 
@@ -2382,8 +2360,12 @@ fn is_stack_refusal(outcome: &Result<DirectCompileOutput, DirectCompileError>) -
 fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
     let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
-    on_a_small_thread(|| {
-        // Sized on the thread itself: see `on_a_small_thread`.
+    {
+        // The forcing, not the source's depth, is what makes each parse
+        // reserve: the refusal is the injected fault on any thread's stack.
+        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[
+            verter_parser::oxc_parse::faults::Reservation::Parse,
+        ]);
         let vue_source = deep_vue_component();
         let svelte_source = deep_svelte_component();
         for (source, request, inputs) in [
@@ -2401,7 +2383,7 @@ fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
                 .compile(source, request, inputs())
                 .is_ok());
         }
-    });
+    }
 }
 
 /// A Svelte carrier whose preparation parse (of a markup expression) was
@@ -2414,8 +2396,12 @@ fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
 fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
     let vue = vue_request(vec![CompileProduct::RuntimeClient(Default::default())]);
     let svelte = svelte_request(vec![CompileProduct::RuntimeClient(Default::default())]);
-    on_a_small_thread(|| {
-        // Sized on the thread itself: see `on_a_small_thread`.
+    {
+        // The forcing, not the source's depth, is what makes each parse
+        // reserve: the refusal is the injected fault on any thread's stack.
+        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[
+            verter_parser::oxc_parse::faults::Reservation::Parse,
+        ]);
         let vue_source = deep_vue_component();
         let svelte_source = deep_svelte_markup();
         use verter_parser::oxc_parse::faults::fail_next_reservations;
@@ -2464,5 +2450,5 @@ fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
                 batch.results[0].as_ref().err()
             );
         }
-    });
+    }
 }

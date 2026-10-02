@@ -252,26 +252,21 @@ fn quoting_round_trips_through_the_decoded_value() {
 
 /// An inventory whose parse is refused its stack is the typed refusal: not
 /// `None` (a source that did not parse cleanly) and not an empty inventory;
-/// retried, it answers the specifiers.
+/// retried, it answers the specifiers. The forcing makes the small source's
+/// parse reserve a region on any thread's stack, so the refusal below is
+/// the injected fault and not a source too deep for the thread.
 #[test]
 fn an_inventory_whose_parse_is_refused_is_the_typed_refusal() {
+    use verter_parser::oxc_parse::faults::Reservation;
     let source = format!(
         "import Child from './Child.vue'\nconst v = {}1{};\n",
-        "(".repeat(157),
-        ")".repeat(157)
+        "(".repeat(3),
+        ")".repeat(3)
     );
-    let (refused, retried) = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 20)
-            .spawn_scoped(scope, || {
-                verter_parser::oxc_parse::faults::fail_next_reservations(1);
-                let refused = collect_module_specifier_spans(&source);
-                (refused.is_err(), collect_module_specifier_spans(&source))
-            })
-            .expect("spawn the thread")
-            .join()
-            .expect("the inventories return")
-    });
+    let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[Reservation::Parse]);
+    verter_parser::oxc_parse::faults::fail_next_reservations(1);
+    let refused = collect_module_specifier_spans(&source).is_err();
+    let retried = collect_module_specifier_spans(&source);
     assert!(refused, "the refused inventory is the typed refusal");
     let texts: Vec<String> = retried
         .expect("the stack is had")

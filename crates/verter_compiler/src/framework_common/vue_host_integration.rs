@@ -1990,9 +1990,10 @@ mod tests {
     #[test]
     fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
         use verter_parser::oxc_parse::faults::{self, Reservation};
-        // A depth no other test parses, so the fault finds this parse only,
-        // deep enough that the parse needs a region on a 1 MiB thread.
-        let depth = 157;
+        // A depth no other test parses, so the fault finds this parse only;
+        // the forcing is what makes the parse reserve a region, on whatever
+        // stack the thread running it has.
+        let depth = 5;
         let script = format!(
             "const v = {}1{}\nconst w = 2",
             "(".repeat(depth),
@@ -2002,8 +2003,6 @@ mod tests {
             "<script setup lang=\"ts\">{script}</script>\n<template><div>{{{{ w }}}}</div></template>"
         );
         let artifact = vue_artifact(&sfc);
-        let needed =
-            verter_parser::oxc_parse::parse_stack_bytes(&script, oxc_span::SourceType::ts());
         let compile = || {
             let alloc = oxc_allocator::Allocator::new();
             let backend = VueHostIntegrationBackend::new();
@@ -2024,33 +2023,25 @@ mod tests {
                 )
                 .map(|products| products.runtime_client_bundle().is_some())
         };
-        let parses = faults::reservations_needing(Reservation::Parse, needed);
-        faults::fail_reservations_needing(Reservation::Parse, needed, 1);
-        let refused = on_a_small_thread(compile);
-        faults::fail_reservations_needing(Reservation::Parse, needed, 0);
+        let _forcing = faults::force_reservations(&[Reservation::Parse]);
+        let parses = faults::reservations_here_of(Reservation::Parse);
+        // The execution parses the script on this thread, so the first
+        // reservation it makes is that parse's: the fault is armed on the
+        // thread rather than on a size, whose rule is the operation's own.
+        faults::fail_next_reservations(1);
+        let refused = compile();
+        let attempted = faults::reservations_here_of(Reservation::Parse) - parses;
         assert!(
-            faults::reservations_needing(Reservation::Parse, needed) > parses,
+            attempted >= 1,
             "the execution parses the script on a region of its own"
         );
         match refused {
             Err(VueHostCompileRefusal::StackUnavailable(unavailable)) => {
-                assert_eq!(unavailable.needed, needed);
+                assert!(unavailable.needed > 0);
             }
             other => panic!("expected the typed stack refusal, got {other:?}"),
         }
-        assert!(on_a_small_thread(compile).expect("the retry compiles"));
-    }
-
-    /// Run `work` on a fresh 1 MiB thread.
-    fn on_a_small_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(1 << 20)
-                .spawn_scoped(scope, work)
-                .expect("spawn the thread")
-                .join()
-                .expect("the work returns")
-        })
+        assert!(compile().expect("the retry compiles"));
     }
 
     #[test]

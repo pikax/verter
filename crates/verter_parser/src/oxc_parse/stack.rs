@@ -95,24 +95,35 @@ pub fn with_stack<R>(
     purpose: Reservation,
     work: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if remaining().is_some_and(|left| left >= needed) {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    let forced = faults::forcing(purpose);
+    #[cfg(not(any(test, feature = "stack-fault-injection")))]
+    let forced = false;
+    if !forced && remaining().is_some_and(|left| left >= needed) {
         return Ok(work());
     }
     match LEASE.with(Cell::get) {
-        Some(lease) if lease.bytes >= needed => match lease.region {
-            // On the lease's region already, or on the stack the lease found
-            // large enough: the lease's size covers the walk.
-            None => Ok(work()),
-            Some(region) if ON_REGION.with(Cell::get) == region => Ok(work()),
-            // SAFETY: a lease's region lives until the lease ends, and the
-            // lease is this thread's, active for the whole of this call.
-            Some(region) => match unsafe { &*region } {
-                region if !region.busy.get() => Ok(region.run(work)),
-                // Work on the region is suspended under a region reserved
-                // past the lease: this walk gets one of its own.
-                _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
-            },
-        },
+        // A forced purpose is never satisfied by a lease that found the
+        // thread's own stack large enough, for that lease's region is none:
+        // the work would run in place, on the stack the force excludes. A
+        // lease holding a region still covers the work, as it does in
+        // production: forcing names the region path, not the lease.
+        Some(lease) if lease.bytes >= needed && (!forced || lease.region.is_some()) => {
+            match lease.region {
+                // On the lease's region already, or on the stack the lease found
+                // large enough: the lease's size covers the walk.
+                None => Ok(work()),
+                Some(region) if ON_REGION.with(Cell::get) == region => Ok(work()),
+                // SAFETY: a lease's region lives until the lease ends, and the
+                // lease is this thread's, active for the whole of this call.
+                Some(region) => match unsafe { &*region } {
+                    region if !region.busy.get() => Ok(region.run(work)),
+                    // Work on the region is suspended under a region reserved
+                    // past the lease: this walk gets one of its own.
+                    _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
+                },
+            }
+        }
         _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
     }
 }
@@ -138,13 +149,18 @@ pub fn with_walk_stack_lease<R>(
     needed: usize,
     operation: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if LEASE
-        .with(Cell::get)
-        .is_some_and(|lease| lease.bytes >= needed)
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    let forced = faults::forcing(Reservation::Lease);
+    #[cfg(not(any(test, feature = "stack-fault-injection")))]
+    let forced = false;
+    if !forced
+        && LEASE
+            .with(Cell::get)
+            .is_some_and(|lease| lease.bytes >= needed)
     {
         return Ok(operation());
     }
-    let region = if remaining().is_some_and(|left| left >= needed) {
+    let region = if !forced && remaining().is_some_and(|left| left >= needed) {
         None
     } else {
         match Region::reserve(needed, Reservation::Lease) {
@@ -316,6 +332,52 @@ pub mod faults {
     /// Every reservation on any thread so far, by purpose and bytes.
     static MADE: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
 
+    /// The purposes whose reservations are forced onto a region, however
+    /// large the stack the thread runs on is: the guard
+    /// [`force_reservations`] returns, one entry per nested force.
+    static FORCED: Mutex<Vec<Reservation>> = Mutex::new(Vec::new());
+
+    /// Make every reservation of each purpose in `purposes` take the region
+    /// path, however much stack the thread that makes it runs on: the parse
+    /// length shortcut, the thread's own stack, and the walk-stack lease's
+    /// are all bypassed, so a fault injected at [`Region::reserve`] fires
+    /// wherever the reservation is made — a scheduler worker's included.
+    /// The force is scoped, like [`fail_reservations_needing`], to the
+    /// process and by purpose, so it cannot reach another test's work
+    /// under another purpose; the returned guard restores the forcings in
+    /// force when it was taken, on drop and on unwind alike.
+    pub fn force_reservations(purposes: &[Reservation]) -> ForcedRegions {
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend_from_slice(purposes);
+        ForcedRegions(purposes.to_vec())
+    }
+
+    /// Whether `purpose`'s reservations are forced onto a region.
+    pub(in crate::oxc_parse) fn forcing(purpose: Reservation) -> bool {
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&purpose)
+    }
+
+    /// The forcings [`force_reservations`] established, restored on drop.
+    pub struct ForcedRegions(Vec<Reservation>);
+
+    impl Drop for ForcedRegions {
+        fn drop(&mut self) {
+            let mut forced = FORCED
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for purpose in self.0.drain(..) {
+                if let Some(at) = forced.iter().position(|held| *held == purpose) {
+                    forced.remove(at);
+                }
+            }
+        }
+    }
+
     /// The call sites of the walks, on any thread, whose stack refusal no
     /// operation would report: a walk no walk-stack lease covered, which can
     /// reserve a region of its own, and a leased walk that could reserve
@@ -343,14 +405,6 @@ pub mod faults {
             .collect();
         sites.sort();
         sites
-    }
-
-    /// The stack this thread has left, as a parse measures it. A test that
-    /// needs a parse to reserve sizes its source from this, not from the
-    /// size it asked its thread for: glibc may hand a thread a cached stack
-    /// up to four times the size requested.
-    pub fn remaining_stack() -> Option<usize> {
-        super::remaining()
     }
 
     /// Make the next `count` reservations on this thread fail.

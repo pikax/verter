@@ -1453,12 +1453,13 @@ mod tests {
     /// A projection whose parse is refused its stack is refused as typed
     /// incompleteness, not read as a syntax error nor projected from the
     /// empty program the refused parse returned; the same projection
-    /// retried produces the artifact.
+    /// retried produces the artifact. The forcing makes the markup
+    /// expression's parse the projection's first reservation on any
+    /// thread's stack.
     #[test]
     fn a_projection_whose_parse_is_refused_its_stack_is_the_typed_refusal() {
-        // Deep enough that the markup expression's parse needs a region on
-        // a 1 MiB thread: it is the projection's first reservation.
-        let depth = 167;
+        use verter_parser::oxc_parse::faults::Reservation;
+        let depth = 3;
         let component = format!(
             "<script>let n = 1;</script>\n<p>{{{}n{}}}</p>\n",
             "(".repeat(depth),
@@ -1471,18 +1472,10 @@ mod tests {
                 &component,
             )
         };
-        let (refused, retried) = std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(1 << 20)
-                .spawn_scoped(scope, || {
-                    verter_parser::oxc_parse::faults::fail_next_reservations(1);
-                    let refused = project().err();
-                    (refused, project().is_ok())
-                })
-                .expect("spawn the thread")
-                .join()
-                .expect("the projection returns")
-        });
+        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[Reservation::Parse]);
+        verter_parser::oxc_parse::faults::fail_next_reservations(1);
+        let refused = project().err();
+        let retried = project().is_ok();
         assert!(
             matches!(
                 refused,
@@ -1499,9 +1492,10 @@ mod tests {
     #[test]
     fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
         use verter_parser::oxc_parse::faults::{self, Reservation};
-        // A depth no other test parses, so the fault finds this parse only,
-        // deep enough that the parse needs a region on a 1 MiB thread.
-        let depth = 163;
+        // A depth no other test parses, so the fault finds this parse only;
+        // the forcing is what makes the parse reserve a region, on whatever
+        // stack the thread running it has.
+        let depth = 5;
         let script = format!(
             "let v = {}1{};\nlet count = $state(0);",
             "(".repeat(depth),
@@ -1526,31 +1520,34 @@ mod tests {
                 )
                 .map(|products| products.runtime_client_bundle().is_some())
         };
-        let on_a_small_thread = |work: &(dyn Fn() -> _ + Sync)| {
-            std::thread::scope(|scope| {
-                std::thread::Builder::new()
-                    .stack_size(1 << 20)
-                    .spawn_scoped(scope, work)
-                    .expect("spawn the thread")
-                    .join()
-                    .expect("the work returns")
-            })
-        };
+        let on_this_thread = |work: &(dyn Fn() -> _ + Sync)| work();
+        let _forcing = faults::force_reservations(&[Reservation::Parse]);
         let parses = faults::reservations_needing(Reservation::Parse, needed);
-        faults::fail_reservations_needing(Reservation::Parse, needed, 1);
-        let refused = on_a_small_thread(&compile);
-        faults::fail_reservations_needing(Reservation::Parse, needed, 0);
-        assert!(
-            faults::reservations_needing(Reservation::Parse, needed) > parses,
-            "the execution parses the script on a region of its own"
-        );
-        match refused {
-            Err(SvelteHostCompileRefusal::StackUnavailable(unavailable)) => {
-                assert_eq!(unavailable.needed, needed);
+        let _ = on_this_thread(&compile);
+        let parses = faults::reservations_needing(Reservation::Parse, needed) - parses;
+        assert!(parses >= 1, "the execution parses the script on a region");
+        // Each parse of the script refused in turn: the execution's own
+        // walks' prerequisites parse the same bytes, so refusing one of them
+        // is not the execution's refusal, and the enumeration is what finds
+        // it whichever order the execution parses in.
+        let mut refusals = 0;
+        for skip in 0..parses {
+            faults::fail_reservations_here_after(Reservation::Parse, needed, skip, 1);
+            let outcome = on_this_thread(&compile);
+            faults::fail_reservations_here(Reservation::Parse, needed, 0);
+            match outcome {
+                Err(SvelteHostCompileRefusal::StackUnavailable(unavailable)) => {
+                    assert_eq!(unavailable.needed, needed);
+                    refusals += 1;
+                }
+                Ok(true) => {}
+                other => panic!(
+                    "parse {skip} of {parses}: expected the typed stack refusal, got {other:?}"
+                ),
             }
-            other => panic!("expected the typed stack refusal, got {other:?}"),
         }
-        assert!(on_a_small_thread(&compile).expect("the retry compiles"));
+        assert!(refusals >= 1, "the execution's own parse refused its stack");
+        assert!(on_this_thread(&compile).expect("the retry compiles"));
     }
 
     #[test]

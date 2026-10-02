@@ -187,6 +187,31 @@ fn covered_by_length(length: usize) -> bool {
     fits_by_length(length) || stack::lease_covers(stack_bytes(length))
 }
 
+/// [`fits_by_length`] for a reservation taken under `purpose`: a test that
+/// forces that purpose sizes its reservation from the syntax scan and never
+/// from the length, so the bytes a test computes with
+/// [`parse_stack_bytes`] are the bytes the operation reserves on a thread
+/// of any stack ([`faults::forcing`]).
+fn fits_by_length_for(purpose: stack::Reservation, length: usize) -> bool {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if stack::faults::forcing(purpose) {
+        return false;
+    }
+    let _ = purpose;
+    fits_by_length(length)
+}
+
+/// [`covered_by_length`] for a reservation taken under `purpose`, as
+/// [`fits_by_length_for`] is for [`fits_by_length`].
+fn covered_by_length_for(purpose: stack::Reservation, length: usize) -> bool {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    if stack::faults::forcing(purpose) {
+        return false;
+    }
+    let _ = purpose;
+    covered_by_length(length)
+}
+
 /// Run `parse`, a parse of `source_text`, with at least
 /// [`parse_stack_bytes`] of stack: in place when the thread has it, on the
 /// walk-stack lease's region when the thread holds one covering it, on a
@@ -207,7 +232,13 @@ fn parse_with_stack_under<R>(
     source_type: SourceType,
     parse: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if fits_by_length_under(profile, source_text.len()) {
+    // A test that forces the region path bypasses the length shortcut, so a
+    // small source reserves a region like a deep one ([`faults::forcing`]).
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    let forced = stack::faults::forcing(stack::Reservation::Parse);
+    #[cfg(not(any(test, feature = "stack-fault-injection")))]
+    let forced = false;
+    if !forced && fits_by_length_under(profile, source_text.len()) {
         return Ok(parse());
     }
     let depth = syntax_nesting(source_text, source_type).depth as usize;
@@ -263,7 +294,7 @@ pub fn leased_ast_walk<R>(
     source_type: SourceType,
     walk: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    let needed = if covered_by_length(source_text.len()) {
+    let needed = if covered_by_length_for(stack::Reservation::Lease, source_text.len()) {
         stack_bytes(source_text.len())
     } else {
         parse_stack_bytes(source_text, source_type)
@@ -292,7 +323,7 @@ pub fn leased_span_walk<R>(
     let text = source_text
         .get(span.start as usize..span.end as usize)
         .unwrap_or(source_text);
-    let needed = if covered_by_length(text.len()) {
+    let needed = if covered_by_length_for(stack::Reservation::Lease, text.len()) {
         stack_bytes(text.len())
     } else {
         stack_bytes(
@@ -328,7 +359,7 @@ pub fn with_program_walk_stack_lease<R>(
     // A program short enough that every byte could be a level fits the
     // thread's stack by its length, and leases it without the scan.
     let length = program.source_text.len();
-    let needed = if fits_by_length(length) {
+    let needed = if fits_by_length_for(stack::Reservation::Lease, length) {
         stack_bytes(length)
     } else {
         parse_stack_bytes(program.source_text, program.source_type)

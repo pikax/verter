@@ -8191,54 +8191,44 @@ fn testing_surface_reports_the_dialect_of_the_code_it_carries() {
 /// generated, whose parse of the script is refused its stack is the typed
 /// [`TscGenerationError::StackUnavailable`], never declarations read off the
 /// empty program; retried, it generates. Its subject is the whole source.
+/// The forcing, not the source's depth, is what makes the parse reserve a
+/// region, so the refusal is the injected fault on any thread's stack.
 #[test]
 fn a_tsc_generation_whose_parse_is_refused_is_the_typed_refusal() {
-    use verter_parser::oxc_parse::faults::{fail_next_reservations, remaining_stack};
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 20)
-            .spawn_scoped(scope, || {
-                use super::script::{extract_tsc_state, TscExtractOptions, TscGenerationError};
-                // Deeper than the stack this thread actually has, which glibc
-                // may make up to four times the 1 MiB asked for: the parse
-                // must reserve a region for the fault to refuse.
-                let depth = remaining_stack().expect("a native thread reports its stack")
-                    / verter_parser::oxc_parse::PARSE_STACK_BYTES_PER_LEVEL
-                    + 1;
-                let sfc = format!(
-                    "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
-                    "(".repeat(depth),
-                    ")".repeat(depth)
-                );
-                let refused = |error: &TscGenerationError| {
-                    matches!(error, TscGenerationError::StackUnavailable { .. })
-                        && error.subject() == super::script::TscFailureSubject::Source
-                        && error.code() == "stack-unavailable"
-                };
-                fail_next_reservations(1);
-                let generated = super::script::generate_tsc_output(&sfc, "Deep");
-                assert!(
-                    generated.as_ref().is_err_and(refused),
-                    "{:?}",
-                    generated.err()
-                );
-                let retried = super::script::generate_tsc_output(&sfc, "Deep");
-                assert!(retried.is_ok(), "{:?}", retried.err());
+    use super::script::{extract_tsc_state, TscExtractOptions, TscGenerationError};
+    use verter_parser::oxc_parse::faults::{
+        fail_next_reservations, force_reservations, Reservation,
+    };
+    let sfc = format!(
+        "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
+        "(".repeat(3),
+        ")".repeat(3)
+    );
+    let refused = |error: &TscGenerationError| {
+        matches!(error, TscGenerationError::StackUnavailable { .. })
+            && error.subject() == super::script::TscFailureSubject::Source
+            && error.code() == "stack-unavailable"
+    };
+    let _forcing = force_reservations(&[Reservation::Parse]);
+    fail_next_reservations(1);
+    let generated = super::script::generate_tsc_output(&sfc, "Deep");
+    assert!(
+        generated.as_ref().is_err_and(refused),
+        "{:?}",
+        generated.err()
+    );
+    let retried = super::script::generate_tsc_output(&sfc, "Deep");
+    assert!(retried.is_ok(), "{:?}", retried.err());
 
-                fail_next_reservations(1);
-                let extracted = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default());
-                assert!(
-                    extracted.as_ref().is_err_and(refused),
-                    "{:?}",
-                    extracted.err()
-                );
-                let state = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default())
-                    .expect("the stack is had")
-                    .expect("the component has a script setup");
-                let _ = state;
-            })
-            .expect("spawn the thread")
-            .join()
-            .expect("the generations return");
-    });
+    fail_next_reservations(1);
+    let extracted = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default());
+    assert!(
+        extracted.as_ref().is_err_and(refused),
+        "{:?}",
+        extracted.err()
+    );
+    let state = extract_tsc_state(&sfc, "Deep", &TscExtractOptions::default())
+        .expect("the stack is had")
+        .expect("the component has a script setup");
+    let _ = state;
 }
