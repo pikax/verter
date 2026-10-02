@@ -9,17 +9,118 @@ use super::{uri_to_canonical_id, DocumentRegistry, DocumentSnapshotIdentity};
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 
 #[derive(Clone)]
-pub(crate) struct DiagnosticPublication {
+pub(crate) struct ReadinessBasis {
     pub snapshot: DocumentSnapshotIdentity,
     generation: Option<u64>,
-    epoch: u64,
+    // Weak identity prevents address reuse without retaining a retired root's payload.
+    workspace: Option<std::sync::Weak<verter_workspace::PublishedRoot>>,
+}
+
+impl ReadinessBasis {
+    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Option<Self> {
+        let snapshot = documents.snapshot_identity(uri)?;
+        let host = documents.host();
+        Some(Self {
+            snapshot,
+            generation: host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
+            workspace: host
+                .workspace_read()
+                .published_root()
+                .as_ref()
+                .map(Arc::downgrade),
+        })
+    }
+
+    fn workspace_matches(
+        &self,
+        current: Option<&std::sync::Weak<verter_workspace::PublishedRoot>>,
+    ) -> bool {
+        match (self.workspace.as_ref(), current) {
+            (Some(before), Some(after)) => std::sync::Weak::ptr_eq(before, after),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        let host = documents.host();
+        let workspace = host.workspace_read().published_root();
+        host.get_diagnostics_generation(&uri_to_canonical_id(uri)) == self.generation
+            && self.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+    }
+
+    fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        documents.snapshot_identity_is_current(uri, &self.snapshot)
+            && self.environment_is_current(documents, uri)
+    }
+}
+
+pub(crate) struct ForegroundSettlement {
+    basis: Option<ReadinessBasis>,
+}
+
+impl ForegroundSettlement {
+    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Self {
+        Self {
+            basis: ReadinessBasis::capture(documents, uri),
+        }
+    }
+
+    pub(crate) fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        match &self.basis {
+            Some(basis) => basis.is_current(documents, uri),
+            None => documents.snapshot_identity(uri).is_none(),
+        }
+    }
+
+    pub(crate) fn version(&self) -> Option<i32> {
+        self.basis.as_ref().map(|basis| basis.snapshot.version)
+    }
+
+    /// Admission for recomputing a native result, never a publication check.
+    pub(crate) fn document_and_workspace_are_current(
+        &self,
+        documents: &DocumentRegistry,
+        uri: &Uri,
+    ) -> bool {
+        let Some(basis) = &self.basis else {
+            return documents.snapshot_identity(uri).is_none();
+        };
+        let workspace = documents.host().workspace_read().published_root();
+        documents.snapshot_identity_is_current(uri, &basis.snapshot)
+            && basis.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+    }
+
+    pub(crate) fn settle<T>(
+        &self,
+        documents: &DocumentRegistry,
+        uri: &Uri,
+        response: Option<T>,
+    ) -> tower_lsp_server::jsonrpc::Result<Option<T>> {
+        if response.is_none() || self.is_current(documents, uri) {
+            Ok(response)
+        } else {
+            Err(tower_lsp_server::jsonrpc::Error::new(
+                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationEpoch(u64);
+
+#[derive(Clone)]
+pub(crate) struct BackgroundPublication {
+    basis: ReadinessBasis,
+    epoch: PublicationEpoch,
 }
 
 #[derive(Clone)]
 pub(crate) struct DiagnosticsRefresh {
     pub uri: Uri,
     pub snapshot: DocumentSnapshotIdentity,
-    epoch: u64,
+    epoch: PublicationEpoch,
 }
 
 /// One registered outbound diagnostics send.
@@ -31,7 +132,7 @@ pub(crate) struct DiagnosticsRefresh {
 struct InFlightSend {
     /// The epoch of the publication that owns this send, so a late publisher only
     /// ever releases the slot it registered itself.
-    epoch: u64,
+    epoch: PublicationEpoch,
     /// Held by the state map; dropped on cancellation. The publisher's receiver
     /// resolving (by value or by sender drop) means CANCELLED.
     _cancel: tokio::sync::oneshot::Sender<()>,
@@ -48,7 +149,7 @@ struct InFlightSend {
 /// editor waiting on the receipt never sends.
 #[derive(Clone)]
 struct DiagnosticsReceipt {
-    publication: DiagnosticPublication,
+    publication: BackgroundPublication,
     surface: Option<Arc<ProviderSurfaceSnapshot>>,
     complete: bool,
 }
@@ -56,7 +157,7 @@ struct DiagnosticsReceipt {
 #[derive(Default)]
 pub(super) struct DiagnosticsState {
     next_epoch: u64,
-    epochs: HashMap<String, u64>,
+    epochs: HashMap<String, PublicationEpoch>,
     receipts: HashMap<String, DiagnosticsReceipt>,
     /// The outbound sends currently suspended on the client channel, one per URI.
     in_flight: HashMap<String, InFlightSend>,
@@ -78,7 +179,7 @@ impl DiagnosticsState {
     /// The previous design made the close AWAIT a global publisher mutex that the
     /// send held across the client enqueue, so one stalled client consumer could
     /// strand every close, open and change behind it.
-    fn take_uri(&mut self, uri: &str, epoch: Option<u64>) {
+    fn take_uri(&mut self, uri: &str, epoch: Option<PublicationEpoch>) {
         match epoch {
             Some(epoch) => {
                 self.epochs.insert(uri.to_string(), epoch);
@@ -108,7 +209,7 @@ impl DocumentRegistry {
             return false;
         }
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(refresh.uri.as_str(), Some(epoch));
         true
     }
@@ -117,12 +218,9 @@ impl DocumentRegistry {
     /// discarded computation through the normal coordinator, once per epoch.
     /// A newer document or publication already owns its own work and must not
     /// be displaced by this older writer.
-    fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &DiagnosticPublication) {
-        if !self.snapshot_identity_is_current(uri, &publication.snapshot)
-            || self
-                .host()
-                .get_diagnostics_generation(&uri_to_canonical_id(uri))
-                == publication.generation
+    fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &BackgroundPublication) {
+        if !self.snapshot_identity_is_current(uri, &publication.basis.snapshot)
+            || publication.basis.environment_is_current(self, uri)
         {
             return;
         }
@@ -131,11 +229,11 @@ impl DocumentRegistry {
             return;
         }
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(uri.as_str(), Some(epoch));
         let _ = self.diagnostics_refresh_tx.send(DiagnosticsRefresh {
             uri: uri.clone(),
-            snapshot: publication.snapshot.clone(),
+            snapshot: publication.basis.snapshot.clone(),
             epoch,
         });
     }
@@ -146,7 +244,7 @@ impl DocumentRegistry {
     /// is in flight to notice, and no editor signal follows. Every publication
     /// therefore settles the receipts its own computation may have outdated.
     fn refresh_outdated_receipts(&self) {
-        let receipts: Vec<(Uri, DiagnosticPublication)> = self
+        let receipts: Vec<(Uri, BackgroundPublication)> = self
             .diagnostics_state
             .lock()
             .receipts
@@ -179,12 +277,12 @@ impl DocumentRegistry {
 
     /// Pending work invalidates immediately, including same-version semantic
     /// enrichment. The epoch also fences publications already awaiting a provider.
-    pub(crate) fn invalidate_diagnostics(&self, uri: &str) -> u64 {
+    pub(crate) fn invalidate_diagnostics(&self, uri: &str) -> PublicationEpoch {
         let mut state = self.diagnostics_state.lock();
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(uri, Some(epoch));
-        tracing::debug!(uri, epoch, "diagnostics invalidated");
+        tracing::debug!(uri, epoch = epoch.0, "diagnostics invalidated");
         epoch
     }
 
@@ -226,7 +324,7 @@ impl DocumentRegistry {
     /// invalidation or reopen has already replaced the entry, so this rollback
     /// finds a different epoch and leaves it alone. It can only ever remove the
     /// reservation it wrote itself.
-    fn rollback_unowned_reservation(&self, uri: &str, epoch: u64) {
+    fn rollback_unowned_reservation(&self, uri: &str, epoch: PublicationEpoch) {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri) == Some(&epoch) {
             state.take_uri(uri, None);
@@ -244,7 +342,7 @@ impl DocumentRegistry {
     fn claim_outbound_send(
         &self,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
     ) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) != Some(&publication.epoch) {
@@ -263,7 +361,7 @@ impl DocumentRegistry {
 
     /// Release the send slot this publication registered, iff it is still ours,
     /// and report whether it was.
-    fn release_outbound_send(&self, uri: &Uri, epoch: u64) -> bool {
+    fn release_outbound_send(&self, uri: &Uri, epoch: PublicationEpoch) -> bool {
         let mut state = self.diagnostics_state.lock();
         if state
             .in_flight
@@ -296,47 +394,33 @@ impl DocumentRegistry {
         state.epochs.len().max(state.receipts.len())
     }
 
-    pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<DiagnosticPublication> {
-        self.admit_diagnostics_publication(uri, || {
-            Some((
-                self.snapshot_identity(uri)?,
-                self.host()
-                    .get_diagnostics_generation(&uri_to_canonical_id(uri)),
-            ))
-        })
+    pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<BackgroundPublication> {
+        self.admit_diagnostics_publication(uri, || ReadinessBasis::capture(self, uri))
     }
 
     fn admit_diagnostics_publication(
         &self,
         uri: &Uri,
-        capture: impl FnOnce() -> Option<(DocumentSnapshotIdentity, Option<u64>)>,
-    ) -> Option<DiagnosticPublication> {
+        capture: impl FnOnce() -> Option<ReadinessBasis>,
+    ) -> Option<BackgroundPublication> {
         // Reserve ownership before capture: a suspended old read must never
         // retire a newer publication when it resumes.
         let epoch = self.invalidate_diagnostics(uri.as_str());
-        let Some((snapshot, generation)) = capture() else {
+        let Some(basis) = capture() else {
             // No publication will carry this epoch, so nothing will ever settle
             // it. Give it back — but only if it is still ours (see the method).
             self.rollback_unowned_reservation(uri.as_str(), epoch);
             return None;
         };
-        Some(DiagnosticPublication {
-            snapshot,
-            generation,
-            epoch,
-        })
+        Some(BackgroundPublication { basis, epoch })
     }
 
     pub(crate) fn diagnostic_publication_is_current(
         &self,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
     ) -> bool {
-        self.snapshot_identity_is_current(uri, &publication.snapshot)
-            && self
-                .host()
-                .get_diagnostics_generation(&uri_to_canonical_id(uri))
-                == publication.generation
+        publication.basis.is_current(self, uri)
             && self.diagnostics_state.lock().epochs.get(uri.as_str()) == Some(&publication.epoch)
     }
 
@@ -354,7 +438,7 @@ impl DocumentRegistry {
         &self,
         client: &Client,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
         diagnostics: Vec<Diagnostic>,
         complete: bool,
         surface: Option<Arc<ProviderSurfaceSnapshot>>,
@@ -366,9 +450,9 @@ impl DocumentRegistry {
             .then(|| self.claim_outbound_send(uri, publication))
             .flatten();
         let Some(cancelled) = claimed else {
-            tracing::debug!(uri = uri.as_str(), epoch = publication.epoch,
+            tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0,
                 current_epoch = ?self.diagnostics_state.lock().epochs.get(uri.as_str()),
-                generation = ?publication.generation,
+                generation = ?publication.basis.generation,
                 current_generation = ?self.host().get_diagnostics_generation(&uri_to_canonical_id(uri)),
                 "diagnostics publication superseded");
             self.refresh_superseded_diagnostics(uri, publication);
@@ -384,7 +468,7 @@ impl DocumentRegistry {
             () = client.publish_diagnostics(
                 uri.clone(),
                 diagnostics,
-                Some(publication.snapshot.version),
+                Some(publication.basis.snapshot.version),
             ) => true,
         };
         // Releasing our own slot is also how a cancelled publisher reports that the
@@ -393,7 +477,7 @@ impl DocumentRegistry {
         if !sent || !still_ours {
             tracing::debug!(
                 uri = uri.as_str(),
-                epoch = publication.epoch,
+                epoch = publication.epoch.0,
                 "diagnostics send cancelled before it reached the client"
             );
             self.refresh_outdated_receipts();
@@ -403,9 +487,9 @@ impl DocumentRegistry {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) == Some(&publication.epoch) {
             if complete {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics complete");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.generation, "diagnostics complete");
             } else {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics incomplete; publication owed");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.generation, "diagnostics incomplete; publication owed");
             }
             // An incomplete publication is recorded as OWED rather than dropped:
             // the generation advance that settles its carrier must find it.
@@ -433,7 +517,7 @@ impl DocumentRegistry {
         receipt.is_some_and(|receipt| {
             receipt.complete
                 && self.diagnostic_publication_is_current(uri, &receipt.publication)
-                && self.semantic_diagnostics_ready(uri, receipt.publication.snapshot.revision)
+                && self.semantic_diagnostics_ready(uri, receipt.publication.basis.snapshot.revision)
                 && receipt.surface.is_none_or(|snapshot| {
                     self.provider_surfaces
                         .captured_snapshot_still_honored(&snapshot)
@@ -651,10 +735,7 @@ mod tests {
         let mut newer = None;
         let older = documents
             .admit_diagnostics_publication(&uri, || {
-                let snapshot = documents.snapshot_identity(&uri).unwrap();
-                let generation = documents
-                    .host()
-                    .get_diagnostics_generation(&uri_to_canonical_id(&uri));
+                let basis = ReadinessBasis::capture(&documents, &uri).unwrap();
                 // Suspend the old capture while a later edit and publication own the file.
                 assert!(
                     documents
@@ -662,7 +743,7 @@ mod tests {
                         .changed
                 );
                 newer = documents.begin_diagnostics_publication(&uri);
-                Some((snapshot, generation))
+                Some(basis)
             })
             .unwrap();
         assert!(!documents.diagnostic_publication_is_current(&uri, &older));

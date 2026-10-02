@@ -725,6 +725,66 @@ fn e2e_provider_only_completions_enabled() -> bool {
 }
 
 impl VerterLanguageServer {
+    /// Repair request-answering surfaces before capturing their response basis.
+    /// Passive decoration requests keep their existing cache-only policy.
+    async fn prepare_foreground(&self, uri: &Uri) -> Result<()> {
+        let before = self.documents.snapshot_identity(uri);
+        if self.type_provider.is_some() && self.current_file_needs_inline_type_provider_sync(uri) {
+            self.ensure_current_file_synced(uri).await;
+        }
+        let current = match before {
+            Some(before) => self.documents.snapshot_identity_is_current(uri, &before),
+            None => self.documents.snapshot_identity(uri).is_none(),
+        };
+        if current {
+            Ok(())
+        } else {
+            Err(tower_lsp_server::jsonrpc::Error::new(
+                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            ))
+        }
+    }
+
+    /// Settle the whole response, including native fallbacks, against its input basis.
+    fn settle_foreground<'a, T>(
+        &'a self,
+        uri: &'a Uri,
+        future: impl std::future::Future<Output = Result<Option<T>>> + 'a,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a {
+        let settlement = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
+        // Map in the finishing poll without another async frame around large handlers.
+        futures_util::FutureExt::map(future, move |response| {
+            settlement.settle(&self.documents, uri, response?)
+        })
+    }
+
+    /// Recompute once when background settlement advances only the diagnostics
+    /// generation. Never reuse the first payload or retry an edit/ownership race.
+    async fn settle_foreground_with_generation_retry<T, F>(
+        &self,
+        uri: &Uri,
+        mut compute: impl FnMut() -> F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        let first = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
+        let response = compute().await?;
+        if response.is_none()
+            || first.is_current(&self.documents, uri)
+            || !first.document_and_workspace_are_current(&self.documents, uri)
+        {
+            return first.settle(&self.documents, uri, response);
+        }
+        drop(response);
+        let retry = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
+        let response = compute().await?;
+        if !first.document_and_workspace_are_current(&self.documents, uri) {
+            return first.settle(&self.documents, uri, response);
+        }
+        retry.settle(&self.documents, uri, response)
+    }
+
     /// Select this request's production deadline from the configured budget
     /// table. `pick` names the row, so a handler without an audit tag still
     /// takes its bound from the same configured table as the audited ones
@@ -1625,10 +1685,48 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
-        crate::audit_harness::run_with_deadline(
-            self.request_deadline(|b| b.completion),
-            nav_features::handle_completion_resolve(self, item),
-        )
+        let uri = item.data.as_ref().and_then(|data| {
+            if let Some(uri) = data.get("uri").and_then(serde_json::Value::as_str) {
+                return uri.parse::<Uri>().ok();
+            }
+            let path = data.get("verter_resolve")?.get("provider_path")?.as_str()?;
+            self.documents
+                .canonical_id_to_uri(path)
+                .or_else(|| self.carrier_uri_from_ide_path(path))
+        });
+        let is_provider_resolve = item.data.as_ref().is_some_and(|data| {
+            data.get("verter_resolve")
+                .and_then(|envelope| envelope.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("type_provider")
+        });
+        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.completion), async {
+            let settlement = uri
+                .as_ref()
+                .map(|uri| crate::documents::ForegroundSettlement::capture(&self.documents, uri));
+            if is_provider_resolve
+                && settlement
+                    .as_ref()
+                    .and_then(|basis| basis.version())
+                    .is_none()
+            {
+                return Err(tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                ));
+            }
+            let response = nav_features::handle_completion_resolve(self, item).await?;
+            if uri
+                .as_ref()
+                .zip(settlement)
+                .is_some_and(|(uri, settlement)| !settlement.is_current(&self.documents, uri))
+            {
+                Err(tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                ))
+            } else {
+                Ok(response)
+            }
+        })
         .await
     }
 
@@ -1643,9 +1741,21 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
-            nav_features_navigation::handle_goto_type_definition(self, params),
+            async {
+                self.prepare_foreground(&uri).await?;
+                self.settle_foreground(
+                    &uri,
+                    nav_features_navigation::handle_goto_type_definition(self, params),
+                )
+                .await
+            },
         )
         .await
     }
@@ -1658,9 +1768,14 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri.clone();
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
-            rename_prepare::handle_prepare_rename(self, params),
+            async {
+                self.prepare_foreground(&uri).await?;
+                self.settle_foreground(&uri, rename_prepare::handle_prepare_rename(self, params))
+                    .await
+            },
         )
         .await
     }
@@ -1699,10 +1814,16 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        crate::audit_harness::run_with_deadline(
-            self.request_deadline(|b| b.code_action),
-            aux_features::handle_signature_help(self, params),
-        )
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
+            self.prepare_foreground(&uri).await?;
+            self.settle_foreground(&uri, aux_features::handle_signature_help(self, params))
+                .await
+        })
         .await
     }
 

@@ -1008,6 +1008,9 @@ impl RealProviderTestSession {
         uri: &Uri,
         position: Position,
     ) -> Option<GotoDefinitionResponse> {
+        // Earlier native lookups can advance this document's generation.
+        // Semantic fixtures observe the completed publication, not a warm label.
+        self.server().test_settle_open_document(uri).await;
         let params = GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
