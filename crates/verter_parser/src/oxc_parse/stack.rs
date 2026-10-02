@@ -102,13 +102,13 @@ pub fn with_stack<R>(
     if !forced && remaining().is_some_and(|left| left >= needed) {
         return Ok(work());
     }
-    match LEASE.with(Cell::get) {
-        // A forced purpose is never satisfied by a lease that found the
-        // thread's own stack large enough, for that lease's region is none:
-        // the work would run in place, on the stack the force excludes. A
-        // lease holding a region still covers the work, as it does in
-        // production: forcing names the region path, not the lease.
-        Some(lease) if lease.bytes >= needed && (!forced || lease.region.is_some()) => {
+    // A forced purpose takes no lease at all, one holding a region included:
+    // the lease's region would run the work with no reservation of its own,
+    // so a fault injected at [`Region::reserve`] would not be this call's to
+    // refuse, and the armed fault would reach the next reservation instead.
+    let lease = if forced { None } else { LEASE.with(Cell::get) };
+    match lease {
+        Some(lease) if lease.bytes >= needed => {
             match lease.region {
                 // On the lease's region already, or on the stack the lease found
                 // large enough: the lease's size covers the walk.
@@ -340,8 +340,10 @@ pub mod faults {
     /// Make every reservation of each purpose in `purposes` take the region
     /// path, however much stack the thread that makes it runs on: the parse
     /// length shortcut, the thread's own stack, and the walk-stack lease's
-    /// are all bypassed, so a fault injected at [`Region::reserve`] fires
-    /// wherever the reservation is made — a scheduler worker's included.
+    /// are all bypassed — a lease holding a region included, for the lease's
+    /// region would run the work with no reservation of its own to refuse —
+    /// so a fault injected at [`Region::reserve`] fires wherever the
+    /// reservation is made, a scheduler worker's included.
     /// The force is scoped, like [`fail_reservations_needing`], to the
     /// process and by purpose, so it cannot reach another test's work
     /// under another purpose; the returned guard restores the forcings in

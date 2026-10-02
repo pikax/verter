@@ -1690,6 +1690,78 @@ fn a_forced_refusal_holds_twenty_times_on_a_large_stack() {
     assert_eq!(retried, (1, 0, true), "the unarmed work runs");
 }
 
+/// A parse inside a walk-stack lease that holds a region runs on that region
+/// and reserves nothing, exactly as in production; a parse of a forced purpose
+/// reserves a region of its own and is the reservation an armed fault refuses.
+/// Were the lease to satisfy the forced parse, no reservation would be this
+/// call's to refuse and the fault would leak into the next one — the retry
+/// below would answer a parse nothing refused. Forcing `Lease` is what makes
+/// the lease hold a region on a thread of any stack, so the proof does not
+/// depend on the size of the stack it runs on.
+#[test]
+fn a_forced_parse_inside_a_region_lease_is_the_refused_reservation() {
+    use super::stack::Reservation;
+    let deep = deep_source();
+    let shallow = shallow_source();
+    let needed = super::parse_stack_bytes(shallow, SourceType::ts());
+    let allocator = Allocator::default();
+    let deep_program = Parser::new(&allocator, &deep, SourceType::ts())
+        .parse()
+        .program;
+    let _leases = forcing(&[Reservation::Lease]);
+    let leased = super::with_program_walk_stack_lease(&deep_program, || {
+        let _ = super::faults::take_reservations();
+        let parsed = Parser::new(&allocator, &deep, SourceType::ts()).parse();
+        (
+            parsed.program.body.len(),
+            parsed.diagnostics.len(),
+            super::faults::take_reservations(),
+        )
+    })
+    .expect("the lease");
+    assert_eq!(
+        leased,
+        (1, 0, 0),
+        "the lease's region ran the parse and reserved nothing"
+    );
+    let _parses = forcing(&[Reservation::Parse]);
+    let shallow_program = Parser::new(&allocator, shallow, SourceType::ts())
+        .parse()
+        .program;
+    let refused = super::with_program_walk_stack_lease(&shallow_program, || {
+        // The armed fault is this thread's next reservation, which is the
+        // forced parse's: nothing else reserves between the two statements.
+        super::faults::fail_next_reservations(1);
+        let _ = super::faults::take_reservations();
+        let refused = Parser::new(&allocator, shallow, SourceType::ts()).parse();
+        let refusal = super::parse_refusal(&refused);
+        let retried = Parser::new(&allocator, shallow, SourceType::ts()).parse();
+        (
+            refusal,
+            refused.program.body.len(),
+            retried.program.body.len(),
+            retried.diagnostics.len(),
+            super::faults::take_reservations(),
+        )
+    })
+    .expect("the lease");
+    assert_eq!(
+        refused.0,
+        Some(super::StackUnavailable { needed }),
+        "the forced parse is the refused reservation, sized from the syntax scan"
+    );
+    assert_eq!(refused.1, 0, "a refused parse publishes no program");
+    assert_eq!(
+        (refused.2, refused.3),
+        (1, 0),
+        "the retry parses, so the armed fault was this parse's and leaked to none"
+    );
+    assert_eq!(
+        refused.4, 2,
+        "the refused parse and its retry each reserved under the lease"
+    );
+}
+
 /// A parse and a walk that need a stack region run on one (a fiber on
 /// Windows, switched to and back through the region's handoff), many times
 /// over, and each answers what it would on an unbounded stack: one

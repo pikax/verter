@@ -212,15 +212,15 @@ to have is the same dependence wearing a different hat.
 test-only, scoped to the purposes it names, and restores itself on drop
 (and on unwind), like the cross-thread fault it sits beside; the work of
 a forced purpose skips the parse length shortcut, the thread's own stack,
-and a walk-stack lease that found that stack large enough, so a parse or
-a walk of that purpose reserves a region wherever it runs — a scheduler
-worker's included, which is why the forcing is process-wide and matched
-by purpose rather than by thread. A lease that holds a region still
-covers the work, as it does in production: forcing names the region path,
-not the lease. Nothing it does is reachable outside `cfg(test)` and the
-dev-only `stack-fault-injection` feature, so a shipped build carries none
-of it and the refusal semantics, `stack_bytes`, the wasm32 profile and
-the census are untouched.
+and the walk-stack lease — one holding a region included, for that
+lease's region would run the work with no reservation of its own for a
+fault to refuse — so a parse or a walk of that purpose reserves a region
+wherever it runs, a scheduler worker's included, which is why the forcing
+is process-wide and matched by purpose rather than by thread. Nothing it
+does is reachable outside `cfg(test)` and the dev-only
+`stack-fault-injection` feature, so a shipped build carries none of it and
+the refusal semantics, `stack_bytes`, the wasm32 profile and the census are
+untouched.
 
 Every refusal test then takes its proof from the fault, not from a
 source too deep for the machine: a small source, the forcing, the
