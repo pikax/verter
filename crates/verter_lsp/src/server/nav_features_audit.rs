@@ -244,8 +244,13 @@ pub(super) async fn handle_rename_with_audit(
             Some(position),
             async move {
                 server.prepare_foreground(&uri).await?;
+                // Rename re-runs its own current-file repair and frontier
+                // activation after this capture; a diagnostics-generation-only
+                // advance recomputes once instead of answering stale.
                 server
-                    .settle_foreground(&uri, handle_rename(server, params))
+                    .settle_foreground_with_generation_retry(&uri, || {
+                        handle_rename(server, params.clone())
+                    })
                     .await
             },
             |payload, value| {
