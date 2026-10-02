@@ -1990,9 +1990,10 @@ mod tests {
     #[test]
     fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
         use verter_parser::oxc_parse::faults::{self, Reservation};
-        // A depth no other test parses, so the fault finds this parse only;
-        // the forcing is what makes the parse reserve a region, on whatever
-        // stack the thread running it has.
+        // The execution parses the script on this thread, so its reservations
+        // of the script's bytes are this thread's and the fault refuses the
+        // execution's own among them: no other test's parse takes the armed
+        // fault, on any thread, whatever it reserves.
         let depth = 5;
         let script = format!(
             "const v = {}1{}\nconst w = 2",
@@ -2025,28 +2026,44 @@ mod tests {
                 )
                 .map(|products| products.runtime_client_bundle().is_some())
         };
-        let _forcing = faults::force_reservations(&[Reservation::Parse]);
-        let parses = faults::reservations_needing(Reservation::Parse, needed);
-        // The fault is keyed on the size the script's parse reserves — the
-        // bytes the syntax scan sizes it from, under the forcing — so it finds
-        // that parse and no other, on whichever thread the execution parses on.
-        faults::fail_reservations_needing(Reservation::Parse, needed, 1);
-        let refused = compile();
-        faults::fail_reservations_needing(Reservation::Parse, needed, 0);
-        let attempted = faults::reservations_needing(Reservation::Parse, needed) - parses;
+        let _forcing = faults::force_reservations_here(&[Reservation::Parse]);
+        let before = faults::reservations_here(Reservation::Parse, needed);
+        let _ = compile();
+        let parses = faults::reservations_here(Reservation::Parse, needed) - before;
         assert!(
-            attempted >= 1,
+            parses >= 1,
             "the execution parses the script on a region of its own"
         );
-        match refused {
-            Err(VueHostCompileRefusal::StackUnavailable(unavailable)) => {
-                assert_eq!(
-                    unavailable.needed, needed,
-                    "the refusal carries the bytes the refused parse needed"
-                );
+        // Each parse of the script refused in turn: the execution's own walks'
+        // prerequisites parse the same bytes, so refusing one of them is not
+        // the execution's refusal, and the enumeration is what finds it
+        // whichever order the execution parses in. The refusal carries the
+        // bytes the refused parse reserved, the syntax scan's, so it pins
+        // which parse was refused.
+        let mut refusals = 0;
+        for skip in 0..parses {
+            faults::fail_reservations_here_after(Reservation::Parse, needed, skip, 1);
+            let outcome = compile();
+            faults::fail_reservations_here(Reservation::Parse, needed, 0);
+            match outcome {
+                Err(VueHostCompileRefusal::StackUnavailable(unavailable)) => {
+                    assert_eq!(
+                        unavailable.needed, needed,
+                        "parse {skip} of {parses}: the refusal carries the bytes \
+                         the refused parse needed"
+                    );
+                    refusals += 1;
+                }
+                Ok(true) => {}
+                other => panic!(
+                    "parse {skip} of {parses}: expected the typed stack refusal, got {other:?}"
+                ),
             }
-            other => panic!("expected the typed stack refusal, got {other:?}"),
         }
+        assert!(
+            refusals >= 1,
+            "the execution's own parse refused its stack: {refusals} of {parses}"
+        );
         assert!(compile().expect("the retry compiles"));
     }
 

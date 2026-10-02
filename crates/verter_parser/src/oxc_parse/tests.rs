@@ -1633,16 +1633,19 @@ fn deep_source() -> String {
 /// A source shallow enough that its parse and walks fit any thread's stack
 /// in place: only a forced region path makes either of them reserve, so
 /// what a refusal test proves is the fault and the region, never the depth
-/// ([`super::faults::force_reservations`]).
+/// ([`super::faults::force_reservations_here`]).
 fn shallow_source() -> &'static str {
     "export const v = (1);\n"
 }
 
 /// Force `purposes` onto the region path for as long as the returned guard
 /// lives, so the refusals below come from the injected fault and not from a
-/// source too deep for the thread that parses it.
+/// source too deep for the thread that parses it. The force is this thread's
+/// ([`super::faults::force_reservations_here`]): every test here runs its work
+/// on the thread it established, so no other test's walk or parse is on it,
+/// whatever stack either runs on.
 fn forcing(purposes: &[super::stack::Reservation]) -> super::faults::ForcedRegions {
-    super::faults::force_reservations(purposes)
+    super::faults::force_reservations_here(purposes)
 }
 
 /// A parse and a walk refused their region, twenty times over, on a thread

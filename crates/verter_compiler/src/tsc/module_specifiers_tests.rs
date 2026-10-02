@@ -263,7 +263,7 @@ fn an_inventory_whose_parse_is_refused_is_the_typed_refusal() {
         "(".repeat(3),
         ")".repeat(3)
     );
-    let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[Reservation::Parse]);
+    let _forcing = verter_parser::oxc_parse::faults::force_reservations_here(&[Reservation::Parse]);
     verter_parser::oxc_parse::faults::fail_next_reservations(1);
     let refused = collect_module_specifier_spans(&source).is_err();
     let retried = collect_module_specifier_spans(&source);

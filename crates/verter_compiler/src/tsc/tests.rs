@@ -8197,7 +8197,7 @@ fn testing_surface_reports_the_dialect_of_the_code_it_carries() {
 fn a_tsc_generation_whose_parse_is_refused_is_the_typed_refusal() {
     use super::script::{extract_tsc_state, TscExtractOptions, TscGenerationError};
     use verter_parser::oxc_parse::faults::{
-        fail_next_reservations, force_reservations, Reservation,
+        fail_next_reservations, force_reservations_here, Reservation,
     };
     let sfc = format!(
         "<script setup lang=\"ts\">const v = {}1{}\nconst w = 2</script>\n<template><div /></template>\n",
@@ -8209,7 +8209,7 @@ fn a_tsc_generation_whose_parse_is_refused_is_the_typed_refusal() {
             && error.subject() == super::script::TscFailureSubject::Source
             && error.code() == "stack-unavailable"
     };
-    let _forcing = force_reservations(&[Reservation::Parse]);
+    let _forcing = force_reservations_here(&[Reservation::Parse]);
     fail_next_reservations(1);
     let generated = super::script::generate_tsc_output(&sfc, "Deep");
     assert!(

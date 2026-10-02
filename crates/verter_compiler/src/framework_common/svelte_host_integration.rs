@@ -1472,7 +1472,8 @@ mod tests {
                 &component,
             )
         };
-        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[Reservation::Parse]);
+        let _forcing =
+            verter_parser::oxc_parse::faults::force_reservations_here(&[Reservation::Parse]);
         verter_parser::oxc_parse::faults::fail_next_reservations(1);
         let refused = project().err();
         let retried = project().is_ok();
@@ -1492,9 +1493,10 @@ mod tests {
     #[test]
     fn an_execution_whose_parse_is_refused_its_stack_publishes_nothing() {
         use verter_parser::oxc_parse::faults::{self, Reservation};
-        // A depth no other test parses, so the fault finds this parse only;
-        // the forcing is what makes the parse reserve a region, on whatever
-        // stack the thread running it has.
+        // The execution parses the script on this thread, so its reservations
+        // of the script's bytes are this thread's and the fault refuses the
+        // execution's own among them: no other test's parse takes the armed
+        // fault, on any thread, whatever it reserves.
         let depth = 5;
         let script = format!(
             "let v = {}1{};\nlet count = $state(0);",
@@ -1521,10 +1523,10 @@ mod tests {
                 .map(|products| products.runtime_client_bundle().is_some())
         };
         let on_this_thread = |work: &(dyn Fn() -> _ + Sync)| work();
-        let _forcing = faults::force_reservations(&[Reservation::Parse]);
-        let parses = faults::reservations_needing(Reservation::Parse, needed);
+        let _forcing = faults::force_reservations_here(&[Reservation::Parse]);
+        let parses = faults::reservations_here(Reservation::Parse, needed);
         let _ = on_this_thread(&compile);
-        let parses = faults::reservations_needing(Reservation::Parse, needed) - parses;
+        let parses = faults::reservations_here(Reservation::Parse, needed) - parses;
         assert!(parses >= 1, "the execution parses the script on a region");
         // Each parse of the script refused in turn: the execution's own
         // walks' prerequisites parse the same bytes, so refusing one of them

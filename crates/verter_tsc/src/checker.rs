@@ -7601,7 +7601,8 @@ mod authored_literal_survival_tests {
             "(".repeat(3),
             ")".repeat(3)
         );
-        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[Reservation::Parse]);
+        let _forcing =
+            verter_parser::oxc_parse::faults::force_reservations_here(&[Reservation::Parse]);
         verter_parser::oxc_parse::faults::fail_next_reservations(1);
         let refused = rewrite_relative_imports(&code, Path::new("/project/src"));
         let retried = rewrite_relative_imports(&code, Path::new("/project/src"));

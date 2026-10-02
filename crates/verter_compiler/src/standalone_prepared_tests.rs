@@ -2363,7 +2363,7 @@ fn a_standalone_compile_whose_parse_is_refused_is_the_typed_refusal() {
     {
         // The forcing, not the source's depth, is what makes each parse
         // reserve: the refusal is the injected fault on any thread's stack.
-        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[
+        let _forcing = verter_parser::oxc_parse::faults::force_reservations_here(&[
             verter_parser::oxc_parse::faults::Reservation::Parse,
         ]);
         let vue_source = deep_vue_component();
@@ -2399,7 +2399,7 @@ fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
     {
         // The forcing, not the source's depth, is what makes each parse
         // reserve: the refusal is the injected fault on any thread's stack.
-        let _forcing = verter_parser::oxc_parse::faults::force_reservations(&[
+        let _forcing = verter_parser::oxc_parse::faults::force_reservations_here(&[
             verter_parser::oxc_parse::faults::Reservation::Parse,
         ]);
         let vue_source = deep_vue_component();

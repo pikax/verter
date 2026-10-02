@@ -191,10 +191,10 @@ fn covered_by_length(length: usize) -> bool {
 /// forces that purpose sizes its reservation from the syntax scan and never
 /// from the length, so the bytes a test computes with
 /// [`parse_stack_bytes`] are the bytes the operation reserves on a thread
-/// of any stack ([`faults::forcing`]).
+/// of any stack ([`faults::forcing_any`]).
 fn fits_by_length_for(purpose: stack::Reservation, length: usize) -> bool {
     #[cfg(any(test, feature = "stack-fault-injection"))]
-    if stack::faults::forcing(purpose) {
+    if stack::faults::forcing_any(purpose) {
         return false;
     }
     let _ = purpose;
@@ -202,10 +202,14 @@ fn fits_by_length_for(purpose: stack::Reservation, length: usize) -> bool {
 }
 
 /// [`covered_by_length`] for a reservation taken under `purpose`, as
-/// [`fits_by_length_for`] is for [`fits_by_length`].
+/// [`fits_by_length_for`] is for [`fits_by_length`]. A forced purpose takes
+/// the region path, so the entry point sizes its reservation from the scan —
+/// [`stack_bytes`] of the nesting, never of the length — which is the size
+/// [`stack::with_stack`] then admits a forcing of
+/// ([`faults::forcing`](stack::faults::forcing)).
 fn covered_by_length_for(purpose: stack::Reservation, length: usize) -> bool {
     #[cfg(any(test, feature = "stack-fault-injection"))]
-    if stack::faults::forcing(purpose) {
+    if stack::faults::forcing_any(purpose) {
         return false;
     }
     let _ = purpose;
@@ -233,9 +237,9 @@ fn parse_with_stack_under<R>(
     parse: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
     // A test that forces the region path bypasses the length shortcut, so a
-    // small source reserves a region like a deep one ([`faults::forcing`]).
+    // small source reserves a region like a deep one ([`faults::forcing_any`]).
     #[cfg(any(test, feature = "stack-fault-injection"))]
-    let forced = stack::faults::forcing(stack::Reservation::Parse);
+    let forced = stack::faults::forcing_any(stack::Reservation::Parse);
     #[cfg(not(any(test, feature = "stack-fault-injection")))]
     let forced = false;
     if !forced && fits_by_length_under(profile, source_text.len()) {
@@ -422,7 +426,7 @@ pub fn with_ast_stack<R>(
     source_type: SourceType,
     walk: impl FnOnce() -> R,
 ) -> R {
-    if covered_by_length(source_text.len()) {
+    if covered_by_length_for(stack::Reservation::Walk, source_text.len()) {
         return walk_with_stack(stack_bytes(source_text.len()), walk);
     }
     scanned_walk(parse_stack_bytes(source_text, source_type), walk)
@@ -453,7 +457,7 @@ pub fn with_node_stack<R>(program: &Program<'_>, span: Span, walk: impl FnOnce()
 /// TSX scan of it, whichever it is.
 #[track_caller]
 pub fn with_source_stack<R>(source_text: &str, walk: impl FnOnce() -> R) -> R {
-    if covered_by_length(source_text.len()) {
+    if covered_by_length_for(stack::Reservation::Walk, source_text.len()) {
         return walk_with_stack(stack_bytes(source_text.len()), walk);
     }
     let nesting = Nesting {
@@ -564,7 +568,7 @@ impl<'p> ProgramWalkStack<'p> {
         if self.inside.get() {
             return walk();
         }
-        if covered_by_length(span.size() as usize) {
+        if covered_by_length_for(stack::Reservation::Walk, span.size() as usize) {
             return walk_with_stack(stack_bytes(span.size() as usize), walk);
         }
         with_nesting_stack(self.program_nesting(), walk)
