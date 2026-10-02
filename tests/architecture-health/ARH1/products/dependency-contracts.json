@@ -174,12 +174,10 @@
           "dedupe_hook",
           "driver",
           "edges",
-          "executor",
+          "execution",
           "job",
           "node",
           "overlay",
-          "owner_command",
-          "pool",
           "request_context",
           "source_loader",
           "source_root",
@@ -649,7 +647,7 @@
           ]
         },
         {
-          "module": "crates/verter_scheduler/src/pool.rs",
+          "module": "crates/verter_scheduler/src/execution/pool.rs",
           "responsibility": "pool submission and admission control",
           "stateOwnership": [],
           "note": "host-constructed pools injected as Arc into every Scheduler constructor; the scheduler owns no pool construction"

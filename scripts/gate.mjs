@@ -348,7 +348,6 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
   "crates/verter_protocol/src/component_meta.rs",
   "crates/verter_scheduler/src/scheduler.rs",
-  "crates/verter_scheduler/src/scheduler/driver.rs",
   "crates/verter_scheduler/src/dag.rs",
   "crates/verter_semantic/src/analysis/build.rs",
   "crates/verter_semantic/src/analysis/component_meta.rs",
@@ -2133,13 +2132,20 @@ async function runHarnessSmokeChecks(ctx) {
 // on the candidate and on its baseline alike). That is a MISSING BUILD PREREQUISITE (exit 127), never a
 // Surface 1 verdict.
 function checkNodeOnTestPath(ctx) {
-  const probe = spawnSync("node", ["--version"], { env: ctx.cargoEnv, encoding: "utf8", timeout: 60_000, windowsHide: true });
+  const probe = spawnSync("node", ["--version"], {
+    env: ctx.cargoEnv,
+    encoding: "utf8",
+    timeout: 60_000,
+    windowsHide: true,
+  });
   const version = String(probe.stdout ?? "").trim();
   if (probe.status === 0 && /^v\d+/u.test(version)) {
     log(`node prerequisite: ${version} starts from the test PATH`);
     return true;
   }
-  const why = probe.error ? probe.error.code ?? probe.error.message : `exit ${probe.status ?? probe.signal}`;
+  const why = probe.error
+    ? (probe.error.code ?? probe.error.message)
+    : `exit ${probe.status ?? probe.signal}`;
   err(
     `MISSING BUILD PREREQUISITE: \`node\` cannot be started from the PATH the tests inherit (${why}); ` +
       "tests that run TypeScript through node_modules/.bin would fail for this host, not for the commit. " +

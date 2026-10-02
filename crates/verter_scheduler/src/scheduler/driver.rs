@@ -767,7 +767,7 @@ impl Scheduler {
             // Snapshot the identity for the submit-failure release path before
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+            let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_for_cache);
                 let cancellation = job.cancellation.clone();
                 let completion = dispatch_ready_job_to_executor(
@@ -785,7 +785,7 @@ impl Scheduler {
                 Self::deliver_stage_completion_from_pool(&inbox_for_cache, completion);
             });
             return match self.try_submit_cpu(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                Ok(crate::execution::pool::SchedulerPoolSubmitResult::Submitted) => {
                     DispatchOutcome::SubmittedToPool
                 }
                 // A failed cache-node submit releases the parked reservation by
@@ -1019,7 +1019,7 @@ impl Scheduler {
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+            let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
@@ -1062,7 +1062,7 @@ impl Scheduler {
                 }
             });
             match self.try_submit_io(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                Ok(crate::execution::pool::SchedulerPoolSubmitResult::Submitted) => {
                     DispatchOutcome::SubmittedToPool
                 }
                 Err(err) => self.terminalize_pool_submit_violation(
@@ -1079,7 +1079,7 @@ impl Scheduler {
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+            let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
@@ -1122,7 +1122,7 @@ impl Scheduler {
                 }
             });
             match self.try_submit_cpu(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                Ok(crate::execution::pool::SchedulerPoolSubmitResult::Submitted) => {
                     DispatchOutcome::SubmittedToPool
                 }
                 Err(err) => self.terminalize_pool_submit_violation(
@@ -1146,8 +1146,11 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn try_submit_io(
         &self,
-        task: crate::pool::SchedulerPoolTask,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+        task: crate::execution::pool::SchedulerPoolTask,
+    ) -> Result<
+        crate::execution::pool::SchedulerPoolSubmitResult,
+        crate::execution::pool::SchedulerPoolSubmitError,
+    > {
         // Record the submit ATTEMPT before doing anything else: a test
         // that parks the single I/O worker asserts the driver reaches
         // every admitted submit attempt while the worker is stuck. The
@@ -1171,8 +1174,11 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn try_submit_cpu(
         &self,
-        task: crate::pool::SchedulerPoolTask,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+        task: crate::execution::pool::SchedulerPoolTask,
+    ) -> Result<
+        crate::execution::pool::SchedulerPoolSubmitResult,
+        crate::execution::pool::SchedulerPoolSubmitError,
+    > {
         #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             drop(task);
@@ -1192,10 +1198,10 @@ impl Scheduler {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(super) fn injected_pool_submit_fault(
         &self,
-    ) -> Option<crate::pool::SchedulerPoolSubmitError> {
+    ) -> Option<crate::execution::pool::SchedulerPoolSubmitError> {
         let err = match self.pool_submit_fault.swap(0, Ordering::AcqRel) {
-            1 => Some(crate::pool::SchedulerPoolSubmitError::Full),
-            2 => Some(crate::pool::SchedulerPoolSubmitError::Closed),
+            1 => Some(crate::execution::pool::SchedulerPoolSubmitError::Full),
+            2 => Some(crate::execution::pool::SchedulerPoolSubmitError::Closed),
             _ => None,
         };
         if err.is_some() {
@@ -1251,7 +1257,7 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn terminalize_pool_submit_violation(
         self: &Arc<Self>,
-        err: crate::pool::SchedulerPoolSubmitError,
+        err: crate::execution::pool::SchedulerPoolSubmitError,
         dag: &DagMutex,
         canonical: &Arc<str>,
         generation: u64,
@@ -1637,23 +1643,25 @@ impl Scheduler {
                 // as the typed `UnsupportedLanguage` error, everything
                 // else as `StageFailed`.
                 let error = match e.kind {
-                    crate::executor::StageErrorKind::UnsupportedLanguage { adapter_id } => {
-                        SchedulerError::UnsupportedLanguage {
-                            file_id: node.canonical_id.clone(),
-                            adapter_id,
-                        }
-                    }
-                    crate::executor::StageErrorKind::StackUnavailable { needed } => {
+                    crate::execution::executor::StageErrorKind::UnsupportedLanguage {
+                        adapter_id,
+                    } => SchedulerError::UnsupportedLanguage {
+                        file_id: node.canonical_id.clone(),
+                        adapter_id,
+                    },
+                    crate::execution::executor::StageErrorKind::StackUnavailable { needed } => {
                         SchedulerError::StackUnavailable {
                             file_id: node.canonical_id.clone(),
                             needed,
                         }
                     }
-                    crate::executor::StageErrorKind::Generic => SchedulerError::StageFailed {
-                        file_id: node.canonical_id.clone(),
-                        stage: "Source".to_string(),
-                        message: e.message,
-                    },
+                    crate::execution::executor::StageErrorKind::Generic => {
+                        SchedulerError::StageFailed {
+                            file_id: node.canonical_id.clone(),
+                            stage: "Source".to_string(),
+                            message: e.message,
+                        }
+                    }
                 };
                 let stranded =
                     Self::terminalize_failure(&dag, &canonical, generation, &TaskKind::Load, error);

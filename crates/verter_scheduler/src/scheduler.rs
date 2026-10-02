@@ -51,7 +51,7 @@ use crate::dag::{
 };
 use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
-use crate::executor::{DefaultExecutor, StageExecutor};
+use crate::execution::executor::{DefaultExecutor, StageExecutor};
 use crate::job::{
     completion_pair, CompletionHandle, CompletionSender, CompletionState, RequestResult,
 };
@@ -89,7 +89,7 @@ use lifecycle::*;
 pub(crate) use crate::audit_publish;
 pub(crate) use crate::caller_kind;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use crate::owner_command;
+pub(crate) use crate::execution::owner_command;
 #[cfg(feature = "hotpath")]
 pub(crate) use hotpath;
 pub(crate) use verter_audit;
@@ -345,12 +345,12 @@ pub struct Scheduler {
     /// Distinct from the host coordinator pool (`HostCpuPool`, tagged
     /// `External`) — host fan-out work never runs here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+    pub(crate) cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
     /// Host-constructed, injected scheduler I/O pool for file reads.
     /// Separate from the CPU pool so blocking disk reads don't starve
     /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) io_pool: Arc<crate::pool::SchedulerIoPool>,
+    pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     /// Tombstones for removed files. Value is a monotonic removal counter.
     /// A `source: Some(...)` submission only clears the tombstone if it was
     /// submitted AFTER the removal (checked via an atomic counter on the
@@ -534,8 +534,8 @@ impl Scheduler {
     pub fn new(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
-        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::SchedulerIoPool>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Self::with_executor(
             config,
@@ -552,14 +552,14 @@ impl Scheduler {
     /// `Arc` allows `Drop` to run (sets shutdown, joins driver, drains pending).
     ///
     /// `cpu_pool` / `io_pool` are host-constructed and injected — see
-    /// [`crate::pool`]. The scheduler owns no pool construction.
+    /// [`crate::execution::pool`]. The scheduler owns no pool construction.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
-        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::SchedulerIoPool>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
             nodes: DashMap::new(),
@@ -628,13 +628,13 @@ impl Scheduler {
     /// Use `drive_one()` / `drive_all()` to process manually.
     ///
     /// On native, the host injects the scheduler's CPU and I/O pools
-    /// (see [`crate::pool`]); on WASM there are no pools (stages run
+    /// (see [`crate::execution::pool`]); on WASM there are no pools (stages run
     /// inline on the calling thread).
     pub fn new_sync(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
-        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Self::new_sync_with_executor(
             config,
@@ -650,13 +650,13 @@ impl Scheduler {
     /// Create a sync scheduler with a custom stage executor.
     ///
     /// On native, the host injects the scheduler's CPU and I/O pools
-    /// (see [`crate::pool`]); on WASM there are no pools.
+    /// (see [`crate::execution::pool`]); on WASM there are no pools.
     pub fn new_sync_with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
-        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Arc::new(Self {
             nodes: DashMap::new(),
@@ -2848,11 +2848,11 @@ mod tests {
             file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             let inbox = self.inbox.get().expect("inbox installed before driving");
             while inbox.try_send(Submission::Wake).is_ok() {}
             assert!(inbox.is_full());
-            crate::executor::DefaultExecutor.execute_source(
+            crate::execution::executor::DefaultExecutor.execute_source(
                 canonical_id,
                 file_language,
                 content,
@@ -3102,7 +3102,7 @@ mod tests {
             view_epoch: u64,
             snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             *self.last.lock() = Some((cache_id.0, key_hash, view_epoch, snapshot_pin_id.0));
             Ok(())
@@ -3273,10 +3273,10 @@ mod tests {
             _view_epoch: u64,
             _snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic cache-node materialisation failure".to_string(),
             })
         }
@@ -3300,7 +3300,7 @@ mod tests {
             _view_epoch: u64,
             _snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             panic!("synthetic cache-node materialisation panic");
         }
@@ -3917,10 +3917,10 @@ mod tests {
             &self,
             canonical_id: &str,
             _source: &SourceSnapshot,
-        ) -> crate::executor::ExtractedDeps {
+        ) -> crate::execution::executor::ExtractedDeps {
             let blocker_ids = self.blockers.get(canonical_id).cloned().unwrap_or_default();
             let forward_deps = blocker_ids.clone();
-            crate::executor::ExtractedDeps {
+            crate::execution::executor::ExtractedDeps {
                 forward_deps,
                 blocker_ids,
             }
@@ -4063,9 +4063,9 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic source failure".to_string(),
             })
         }
@@ -4082,9 +4082,9 @@ mod tests {
             _canonical_id: &str,
             _source: &SourceSnapshot,
             _generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic analysis failure".to_string(),
             })
         }
@@ -4104,9 +4104,9 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             _profile_hash: u64,
             _generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic artifact failure".to_string(),
             })
         }
@@ -4124,7 +4124,7 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             panic!("synthetic source panic");
         }
     }
@@ -5494,7 +5494,7 @@ mod tests {
         gates: dashmap::DashMap<String, AnalysisGate>,
     }
 
-    impl crate::executor::StageExecutor for GatedAnalysisExecutor {
+    impl crate::execution::executor::StageExecutor for GatedAnalysisExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -5503,7 +5503,7 @@ mod tests {
             canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 // Signal that the worker has entered Analysis. The
                 // send is best-effort: if the test thread has already
@@ -5674,7 +5674,7 @@ mod tests {
         dep_id: String,
     }
 
-    impl crate::executor::StageExecutor for DepAnalysisFailExecutor {
+    impl crate::execution::executor::StageExecutor for DepAnalysisFailExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -5682,14 +5682,14 @@ mod tests {
             &self,
             canonical_id: &str,
             _source: &SourceSnapshot,
-        ) -> crate::executor::ExtractedDeps {
+        ) -> crate::execution::executor::ExtractedDeps {
             if canonical_id == self.owner_id {
-                crate::executor::ExtractedDeps {
+                crate::execution::executor::ExtractedDeps {
                     forward_deps: vec![self.dep_id.clone()],
                     blocker_ids: vec![self.dep_id.clone()],
                 }
             } else {
-                crate::executor::ExtractedDeps::default()
+                crate::execution::executor::ExtractedDeps::default()
             }
         }
 
@@ -5698,10 +5698,10 @@ mod tests {
             canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
             if canonical_id == self.dep_id {
-                Err(crate::executor::StageError {
-                    kind: crate::executor::StageErrorKind::Generic,
+                Err(crate::execution::executor::StageError {
+                    kind: crate::execution::executor::StageErrorKind::Generic,
                     message: "synthetic dep Analysis failure".to_string(),
                 })
             } else {
@@ -5790,7 +5790,7 @@ mod tests {
         >,
     }
 
-    impl crate::executor::StageExecutor for GatedPanickingSourceExecutor {
+    impl crate::execution::executor::StageExecutor for GatedPanickingSourceExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -5800,7 +5800,7 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(entry) = self.gates.get(canonical_id) {
                 let (entered_tx, release_rx) = entry.value();
                 let _ = entered_tx.send(());
@@ -5931,7 +5931,7 @@ mod tests {
         worker_tag: &'static str,
     }
 
-    impl crate::executor::StageExecutor for GatedArtifactExecutor {
+    impl crate::execution::executor::StageExecutor for GatedArtifactExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -5942,7 +5942,7 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             profile_hash: u64,
             generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 let _ = gate.entered_tx.send(());
                 let _ = gate.release_rx.recv();
@@ -6176,7 +6176,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             let id = crate::request_context::current_request_id().unwrap_or(0);
             self.source_observed.store(id, AtomicOrdering::SeqCst);
             Ok(SourceSnapshot::new_empty(content, generation))
@@ -6186,7 +6186,7 @@ mod tests {
             _canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
             let id = crate::request_context::current_request_id().unwrap_or(0);
             self.analysis_observed.store(id, AtomicOrdering::SeqCst);
             if self.panic_on_analysis.load(AtomicOrdering::SeqCst) {
@@ -6201,7 +6201,7 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             profile_hash: u64,
             generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
             let id = crate::request_context::current_request_id().unwrap_or(0);
             self.artifact_observed.store(id, AtomicOrdering::SeqCst);
             Ok(ArtifactSnapshot {
@@ -6560,7 +6560,7 @@ mod tests {
     /// wait() returns. No timing/sleep is involved.
     #[test]
     fn auto_ingested_dep_source_job_inherits_parent_request_context_as_tls() {
-        use crate::executor::ExtractedDeps;
+        use crate::execution::executor::ExtractedDeps;
 
         const PARENT: &str = "/parent.vue";
         const DEP: &str = "/dep.ts";
@@ -6590,7 +6590,7 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
                 let id = crate::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == DEP {
                     self.dep_source_observed.store(id, AtomicOrdering::SeqCst);
@@ -6602,7 +6602,7 @@ mod tests {
                 canonical_id: &str,
                 _source: &SourceSnapshot,
                 generation: u64,
-            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
                 let id = crate::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == PARENT {
                     self.parent_analysis_observed
@@ -6695,7 +6695,7 @@ mod tests {
                 canonical_id: &str,
                 _source: &SourceSnapshot,
                 generation: u64,
-            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
                 // Extract file index from canonical_id like "/f{N}.vue".
                 let idx = canonical_id
                     .trim_start_matches("/f")
@@ -8298,7 +8298,7 @@ mod tests {
         gates: dashmap::DashMap<String, SourceGate>,
     }
 
-    impl crate::executor::StageExecutor for GatedFailingSourceExecutor {
+    impl crate::execution::executor::StageExecutor for GatedFailingSourceExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -8308,7 +8308,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 // Signal entry to the test thread. Best-effort —
                 // if the test dropped the receiver the executor
@@ -8318,8 +8318,8 @@ mod tests {
                 // to signal release; recv returns Disconnected,
                 // which we treat as release.
                 let _ = gate.release_rx.recv();
-                return Err(crate::executor::StageError {
-                    kind: crate::executor::StageErrorKind::Generic,
+                return Err(crate::execution::executor::StageError {
+                    kind: crate::execution::executor::StageErrorKind::Generic,
                     message: format!("gated source failure for {canonical_id}"),
                 });
             }
@@ -8830,7 +8830,7 @@ mod tests {
     #[test]
     fn source_completion_superseded_mid_flight_publishes_nothing() {
         use crate::dag::{FileStageKey, WorkNodeIdentity};
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -9119,7 +9119,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn refused_source_completion_consumes_no_deferred_blockers() {
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -9621,7 +9621,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn host_classifier_is_never_called_while_the_dag_lock_is_held() {
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -10607,7 +10607,7 @@ mod tests {
         struct CountingAnalysisExecutor {
             analysis_hits: AtomicU64,
         }
-        impl crate::executor::StageExecutor for CountingAnalysisExecutor {
+        impl crate::execution::executor::StageExecutor for CountingAnalysisExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -10616,7 +10616,8 @@ mod tests {
                 _canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
                 generation: u64,
-            ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError>
+            {
                 self.analysis_hits.fetch_add(1, Ordering::AcqRel);
                 Ok(crate::node::AnalysisSnapshot::new_empty(generation))
             }
@@ -10630,7 +10631,7 @@ mod tests {
         let sched = Scheduler::test_new_sync_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::clone(&executor) as Arc<dyn crate::executor::StageExecutor>,
+            Arc::clone(&executor) as Arc<dyn crate::execution::executor::StageExecutor>,
         );
 
         // Submit /owner.vue Analysis. Drive Source only — handle
@@ -10792,7 +10793,7 @@ mod tests {
         /// Custom executor: `/a.vue` extracts `/dep.ts` as a blocker.
         /// `/dep.ts` itself extracts nothing.
         struct OwnerWithDepExtractor;
-        impl crate::executor::StageExecutor for OwnerWithDepExtractor {
+        impl crate::execution::executor::StageExecutor for OwnerWithDepExtractor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -10800,14 +10801,14 @@ mod tests {
                 &self,
                 canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
-            ) -> crate::executor::ExtractedDeps {
+            ) -> crate::execution::executor::ExtractedDeps {
                 if canonical_id == "/a.vue" {
-                    crate::executor::ExtractedDeps {
+                    crate::execution::executor::ExtractedDeps {
                         forward_deps: vec!["/dep.ts".to_string()],
                         blocker_ids: vec!["/dep.ts".to_string()],
                     }
                 } else {
-                    crate::executor::ExtractedDeps::default()
+                    crate::execution::executor::ExtractedDeps::default()
                 }
             }
         }
@@ -10818,7 +10819,8 @@ mod tests {
         // execute_source_stage routes through terminalize_failure
         // with FileNotFound, populating terminal_dep_failures.
 
-        let executor: Arc<dyn crate::executor::StageExecutor> = Arc::new(OwnerWithDepExtractor);
+        let executor: Arc<dyn crate::execution::executor::StageExecutor> =
+            Arc::new(OwnerWithDepExtractor);
         let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Step 1: submit /dep.ts directly and drive to terminal
@@ -11277,7 +11279,7 @@ mod tests {
             gates: dashmap::DashMap<String, AnalysisGate>,
         }
 
-        impl crate::executor::StageExecutor for GatedFailingAnalysisExecutor {
+        impl crate::execution::executor::StageExecutor for GatedFailingAnalysisExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -11286,12 +11288,13 @@ mod tests {
                 canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
                 generation: u64,
-            ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError>
+            {
                 if let Some(gate) = self.gates.get(canonical_id) {
                     let _ = gate.entered_tx.send(());
                     let _ = gate.release_rx.recv();
-                    return Err(crate::executor::StageError {
-                        kind: crate::executor::StageErrorKind::Generic,
+                    return Err(crate::execution::executor::StageError {
+                        kind: crate::execution::executor::StageErrorKind::Generic,
                         message: format!("gated analysis failure for {canonical_id}"),
                     });
                 }
@@ -12479,7 +12482,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    impl crate::executor::StageExecutor for HookExecutor {
+    impl crate::execution::executor::StageExecutor for HookExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -12489,7 +12492,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+        ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             Ok(crate::node::SourceSnapshot::new_empty(content, generation))
         }
         fn execute_analysis(
@@ -12497,7 +12500,7 @@ mod tests {
             canonical_id: &str,
             _source: &crate::node::SourceSnapshot,
             generation: u64,
-        ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError> {
             (self.analysis_hook)(canonical_id);
             Ok(crate::node::AnalysisSnapshot::new_empty(generation))
         }
@@ -12743,7 +12746,7 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         );
 
         let identity = WorkNodeIdentity::FileStage {
@@ -12818,7 +12821,7 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         );
 
         // A handle that resolves only when the test explicitly
@@ -13323,7 +13326,7 @@ mod tests {
         let sched = StdArc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            StdArc::new(crate::executor::DefaultExecutor),
+            StdArc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Drive both files' Source to completion FIRST so the
@@ -13500,7 +13503,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Run the waiter on its own thread so a PARK is observable as a
@@ -13591,7 +13594,7 @@ mod tests {
         struct SourceHookExecutor {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
-        impl crate::executor::StageExecutor for SourceHookExecutor {
+        impl crate::execution::executor::StageExecutor for SourceHookExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -13601,7 +13604,8 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 (self.source_hook)(canonical_id);
                 Ok(crate::node::SourceSnapshot::new_empty(content, generation))
             }
@@ -13715,7 +13719,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Submit a request and wait for it to be admitted. Once
@@ -13935,7 +13939,7 @@ mod tests {
         struct SourceHookExecutorIo {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
-        impl crate::executor::StageExecutor for SourceHookExecutorIo {
+        impl crate::execution::executor::StageExecutor for SourceHookExecutorIo {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -13945,7 +13949,8 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 (self.source_hook)(canonical_id);
                 Ok(crate::node::SourceSnapshot::new_empty(content, generation))
             }
@@ -14338,7 +14343,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Build a handle, stamp it with a Work target that
@@ -14405,7 +14410,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Manually construct a handle with the pre-admission
@@ -14466,7 +14471,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Hand-constructed handle with the pre-admission
@@ -14521,7 +14526,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         let profile = 0x42u64;
@@ -14654,7 +14659,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Active frame: /x.vue Analysis. Handle target: Request{
@@ -14753,7 +14758,7 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Active-path frame is /y.vue Analysis. The handle's
@@ -15590,7 +15595,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
             let cap = sched.io_pool.transport_capacity();
             assert!(
@@ -15614,7 +15619,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
             let cap = sched.cpu_pool.transport_capacity();
             assert!(
@@ -15648,8 +15653,8 @@ mod tests {
         /// inside each stage.
         #[test]
         fn scheduler_stages_run_on_scheduler_pools_never_external() {
+            use crate::execution::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
             use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
-            use crate::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
 
             struct CallerKindProbe {
                 source_kind: Arc<AtomicU64>,
@@ -15668,7 +15673,7 @@ mod tests {
                     crate::caller_kind::CallerKind::Inline => 5,
                 }
             }
-            impl crate::executor::StageExecutor for CallerKindProbe {
+            impl crate::execution::executor::StageExecutor for CallerKindProbe {
                 fn as_any(&self) -> &dyn std::any::Any {
                     self
                 }
@@ -15678,7 +15683,8 @@ mod tests {
                     _k: FileLanguage,
                     content: Arc<str>,
                     generation: u64,
-                ) -> Result<SourceSnapshot, crate::executor::StageError> {
+                ) -> Result<SourceSnapshot, crate::execution::executor::StageError>
+                {
                     self.source_kind.store(
                         kind_code(crate::caller_kind::CallerKind::current()),
                         AtomOrd::SeqCst,
@@ -15695,7 +15701,8 @@ mod tests {
                     _c: &str,
                     _s: &SourceSnapshot,
                     generation: u64,
-                ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+                ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError>
+                {
                     self.analysis_kind.store(
                         kind_code(crate::caller_kind::CallerKind::current()),
                         AtomOrd::SeqCst,
@@ -15713,7 +15720,8 @@ mod tests {
                     _a: &AnalysisSnapshot,
                     profile_hash: u64,
                     generation: u64,
-                ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+                ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError>
+                {
                     Ok(ArtifactSnapshot {
                         generation,
                         profile_hash,
@@ -15744,7 +15752,7 @@ mod tests {
                     dag_budget: None,
                 },
                 Arc::clone(&loader) as Arc<dyn crate::source_loader::SourceLoader>,
-                probe as Arc<dyn crate::executor::StageExecutor>,
+                probe as Arc<dyn crate::execution::executor::StageExecutor>,
             );
 
             let handle = sched.submit_request(Request {
@@ -15800,7 +15808,7 @@ mod tests {
         struct GatedSourceExecutor {
             gates: dashmap::DashMap<String, SourceGate>,
         }
-        impl crate::executor::StageExecutor for GatedSourceExecutor {
+        impl crate::execution::executor::StageExecutor for GatedSourceExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -15810,7 +15818,8 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 if let Some(gate) = self.gates.get(canonical_id) {
                     let _ = gate.entered_tx.send(());
                     let _ = gate.release_rx.recv();
@@ -15889,7 +15898,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader as Arc<dyn crate::source_loader::SourceLoader>,
-                executor as Arc<dyn crate::executor::StageExecutor>,
+                executor as Arc<dyn crate::execution::executor::StageExecutor>,
             );
 
             // Submit all N Source requests. The single IO worker picks up
@@ -16036,7 +16045,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader as Arc<dyn crate::source_loader::SourceLoader>,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
 
             // Arm a one-shot Full fault: the NEXT non-inline pool submit

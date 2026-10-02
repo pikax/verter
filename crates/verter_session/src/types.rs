@@ -3010,7 +3010,7 @@ pub(crate) struct ParseSnapshot {
     /// The source's script parse, or the walk-stack lease of its walks, was
     /// refused: nothing in this snapshot was read from the script, and the
     /// source stage reports the refusal in its place
-    /// ([`verter_scheduler::executor::StageErrorKind::StackUnavailable`]).
+    /// ([`verter_scheduler::execution::executor::StageErrorKind::StackUnavailable`]).
     pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 

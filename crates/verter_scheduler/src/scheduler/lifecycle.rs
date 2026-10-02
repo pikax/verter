@@ -53,13 +53,13 @@ impl Scheduler {
     pub(super) fn default_test_pools(
         config: &SchedulerConfig,
     ) -> (
-        Arc<crate::pool::SchedulerCpuPool>,
-        Arc<crate::pool::SchedulerIoPool>,
+        Arc<crate::execution::pool::SchedulerCpuPool>,
+        Arc<crate::execution::pool::SchedulerIoPool>,
     ) {
         let budget = config.resolved_dag_budget();
         (
-            crate::pool::SchedulerCpuPool::new(config.cpu_threads, budget.cpu as usize),
-            crate::pool::SchedulerIoPool::new(config.io_threads, budget.io as usize),
+            crate::execution::pool::SchedulerCpuPool::new(config.cpu_threads, budget.cpu as usize),
+            crate::execution::pool::SchedulerIoPool::new(config.io_threads, budget.io as usize),
         )
     }
 
