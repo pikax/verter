@@ -4620,11 +4620,35 @@ async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
         MockCall::OpenFile { path, .. } if path == unit.as_str())
     });
     assert!(physically_landed, "the first injection reached the engine");
-    assert!(
-        matches!(result, Err(AdmissionRefusal::StaleProvider)),
-        "failed compensation must retire before synchronization settles"
+    // The failed compensation arms the lifecycle owner instead of running the
+    // transition on the settlement task, so the retirement races this check.
+    // Either way the sweep must not certify the failed injection.
+    match &result {
+        Err(AdmissionRefusal::StaleProvider) => {}
+        Err(other) => panic!("unexpected synchronization refusal: {other:?}"),
+        Ok(receipt) => {
+            assert!(
+                !receipt
+                    .members()
+                    .iter()
+                    .any(|member| member.path() == unit.as_str()),
+                "a failed compensation must not report the injected unit as applied"
+            );
+        }
+    }
+    // Deterministically wait for the armed crash monitor to retire the epoch
+    // (yield_now lets the monitor and actor make progress; no wall clock).
+    for _ in 0..100_000 {
+        if hub.serving_epoch().is_none() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        hub.serving_epoch(),
+        None,
+        "the lifecycle owner must retire the incarnation whose compensating close failed"
     );
-    assert_eq!(hub.serving_epoch(), None);
     assert_eq!(
         engine.inner.shutdowns.load(Ordering::SeqCst),
         1,
@@ -4663,6 +4687,299 @@ async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
     assert_eq!(healthy_engine.inner.shutdowns.load(Ordering::SeqCst), 0);
     assert!(healthy_engine.calls().iter().any(|call| matches!(call,
         MockCall::Hover { path, .. } if path == unit.as_str())));
+}
+
+/// Failed compensation on an EXPLICIT hub must not run the recovery on the
+/// settlement task: that task carries the issuer's request deadline
+/// ([`super::detach_application`]), and a bounded task absorbing the
+/// recovery's retire/backoff/respawn would settle past its deadline — or
+/// worse, a bound firing mid-recovery would strand the lifecycle phase. The
+/// settlement reports the provider failure immediately; the crash monitor
+/// owns the transition on its own unbounded task.
+#[tokio::test(start_paused = true)]
+async fn failed_compensation_settles_inside_the_request_deadline_and_leaves_recovery_to_the_monitor(
+) {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    engine.set_failing_closes();
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let hub = Arc::clone(&harness.provider);
+    let epoch = hub.serving_epoch().unwrap();
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    // The basis drifts once the write has LANDED on the engine — every check
+    // before the write still sees the original basis.
+    let drifted = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    let reader = {
+        let live_basis = basis.clone();
+        let unit_for_reader = unit.clone();
+        let engine_reader = engine.clone();
+        Arc::new(move || {
+            let written = engine_reader.calls().iter().any(|call| {
+                matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
+            });
+            if written {
+                Some(drifted.clone())
+            } else {
+                Some(live_basis.clone())
+            }
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+    let (refusal, settled_at) = {
+        let hub = Arc::clone(&hub);
+        let unit = unit.clone();
+        crate::deadline::with_deadline_at(deadline, async move {
+            let refusal = hub
+                .forward_admitted_file(
+                    &admission,
+                    unit.as_str(),
+                    "export const v = 0;",
+                    OverlayFileKind::Open,
+                    OverlayPriority::Foreground,
+                )
+                .await
+                .expect_err("the failed compensating close must refuse the settlement");
+            (refusal, tokio::time::Instant::now())
+        })
+        .await
+    };
+    assert!(
+        matches!(refusal, AdmissionRefusal::ProviderWriteFailed),
+        "a settlement whose compensating close failed and retired the incarnation \
+         is a provider failure, not a healthy basis drift: {refusal:?}"
+    );
+    assert!(
+        settled_at < deadline,
+        "the settlement must not absorb the recovery's retire/backoff/respawn \
+         under the issuer's request deadline"
+    );
+
+    // The lifecycle owner completes the transition on its own task. The spawn
+    // gate is released only now: the settlement above never waited on it.
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_ne!(
+        hub.serving_epoch(),
+        Some(epoch),
+        "the crash monitor must respawn a replacement generation"
+    );
+    assert!(hub.get_hover(unit.as_str(), 0).await.is_ok());
+    assert_eq!(
+        engine.inner.shutdowns.load(Ordering::SeqCst),
+        1,
+        "the failed incarnation was torn down exactly once"
+    );
+    assert!(matches!(
+        hub.applied_content(unit.as_str()),
+        crate::traits::AppliedContent::NotApplied
+    ));
+    assert!(
+        replacement.calls().iter().any(|call| matches!(call,
+            MockCall::Hover { path, .. } if path == unit.as_str())),
+        "the respawned generation serves the query"
+    );
+}
+
+/// The compensating receipt release must be ONE critical section with its
+/// serving-epoch check: while the release is parked on the applied-map lock,
+/// the serving cell is fenced, so an incarnation installed concurrently can
+/// never publish its own receipt for the path before the release lands.
+// Deliberately parks the compensating release on the applied map by holding
+// its std guard across awaits (the scenario under test); the two-worker
+// runtime keeps the probe task running while the parked release blocks one
+// worker.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compensating_release_holds_the_serving_fence_through_the_receipt_removal() {
+    use super::{
+        AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
+    };
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::decide_generated_unit_admission;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+
+    let engine = MockProvider::new("tsgo");
+    // The compensating close parks on the gate after signalling, then succeeds.
+    let close_gate = Arc::new(Semaphore::new(0));
+    *engine.inner.close_gate.lock() = Some(Arc::clone(&close_gate));
+    let hub = Arc::new(ProviderHub::new(
+        ScriptedLazyAttach::failing_until(0, engine.clone()),
+        Arc::new(TracingNotifier) as Arc<dyn ProviderNotifier>,
+        HubPolicy::lazy_attach(std::time::Duration::from_secs(5)),
+    ));
+    hub.establish()
+        .await
+        .expect("the lazy attach establishes without the door");
+
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let drifted = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    let reader = {
+        let live_basis = basis.clone();
+        let unit_for_reader = unit.clone();
+        let engine_reader = engine.clone();
+        Arc::new(move || {
+            let written = engine_reader.calls().iter().any(|call| {
+                matches!(call, MockCall::OpenFile { path, .. } if *path == unit_for_reader.as_str())
+            });
+            if written {
+                Some(drifted.clone())
+            } else {
+                Some(live_basis.clone())
+            }
+        }) as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let witness = hub.bind_project(input).unwrap();
+    let admission = hub
+        .admit_request(&witness, std::slice::from_ref(&unit), Some(&proof))
+        .unwrap();
+
+    let settlement = tokio::spawn({
+        let hub = Arc::clone(&hub);
+        let admission = admission.clone();
+        let unit = unit.clone();
+        async move {
+            hub.forward_admitted_file(
+                &admission,
+                unit.as_str(),
+                "export const v = 0;",
+                OverlayFileKind::Open,
+                OverlayPriority::Foreground,
+            )
+            .await
+        }
+    });
+    engine.inner.close_started.notified().await;
+
+    // Hold the applied map while the compensating release is between its
+    // epoch check and its removal: the parked release must keep the serving
+    // cell fenced for the whole window.
+    let applied = hub
+        .state
+        .shared
+        .applied_files
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    close_gate.add_permits(1);
+    // Wait until the compensating release has parked on the applied map: from
+    // that instant the serving cell must be fenced — the epoch check and the
+    // receipt removal are one critical section. (The bound only fails loudly
+    // if a release parked WITHOUT the fence ever appearing.)
+    let mut fenced = false;
+    for _ in 0..100_000 {
+        if hub.state.shared.serving.try_write().is_err() {
+            fenced = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(applied);
+    let refusal = settlement
+        .await
+        .expect("the settlement task must not panic")
+        .expect_err("the confirmed compensation still refuses the drifted settlement");
+    assert!(
+        matches!(refusal, AdmissionRefusal::StaleBasis),
+        "a confirmed compensation is still a basis-only drift: {refusal:?}"
+    );
+    assert!(
+        fenced,
+        "a compensating release parked on the applied map must keep the serving \
+         cell fenced until its receipt removal lands"
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::CloseFile { path } if path == unit.as_str()))
+            .count(),
+        1,
+        "the drifted admission's written path is compensated with exactly one close"
+    );
+    assert!(
+        hub.is_serving(),
+        "a confirmed compensation must not disturb the serving incarnation"
+    );
 }
 
 /// A CONTENT-ONLY basis drift observed after a successful actor-applied

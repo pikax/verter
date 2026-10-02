@@ -987,20 +987,30 @@ where
                     // admission can then reapply on the same incarnation.
                     if serving.provider.close_file(path).await.is_err() {
                         // The write landed but removal is unconfirmed. Retire
-                        // this incarnation through the lifecycle owner before
-                        // returning: a first overlay has no marker from which
-                        // a later sweep could recover withdrawal ownership.
-                        if self.state.policy.on_demand.is_none() {
-                            self.recover(serving.epoch).await;
-                        }
-                        // Another recovery may already own the transition.
-                        // Its control message can still be queued: fail this
-                        // exact epoch closed before settling either way.
-                        super::retire(&self.state.shared, serving.epoch).await;
+                        // this incarnation through the lifecycle owner: a
+                        // first overlay has no marker from which a later sweep
+                        // could recover withdrawal ownership. The transition
+                        // itself must not run on this task — it travels under
+                        // the issuer's request deadline (see
+                        // [`super::detach_application`]), and recovery that
+                        // outlives that bound belongs to the crash monitor's
+                        // own task, exactly like a failed forward.
+                        self.disposition_after_admitted_write_failure(&serving)
+                            .await;
+                        // The incarnation no longer serves (or is being
+                        // retired fail-closed): reporting a healthy basis
+                        // drift here would invite an immediate reapply
+                        // against an engine that is going away.
+                        Err(AdmissionRefusal::ProviderWriteFailed)
                     } else {
-                        // Keep the epoch check and receipt release atomic with
-                        // replacement. Compensation must not erase a new
-                        // incarnation's receipt for the same path.
+                        // Keep the epoch check and receipt release atomic
+                        // with replacement: the serving read guard stays held
+                        // across the removal (a named binding drops at the
+                        // end of this block, not at the check), so an
+                        // incarnation installed later cannot publish its own
+                        // receipt for the path before this release lands.
+                        // Compensation must not erase a new incarnation's
+                        // receipt for the same path.
                         let current = self
                             .state
                             .shared
@@ -1013,8 +1023,8 @@ where
                         {
                             super::applied_map(&self.state.shared).remove(path);
                         }
+                        Err(AdmissionRefusal::StaleBasis)
                     }
-                    Err(AdmissionRefusal::StaleBasis)
                 }
                 Err(_) => {
                     // The engine was replaced mid-write (or no longer serves):
