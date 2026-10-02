@@ -623,7 +623,16 @@ where
             if result.is_err() {
                 serving.crash_signal.notify_one();
             }
-            let current = shared.serving_epoch() == Some(epoch);
+            // Fence the epoch check and receipt removal together, just as for
+            // compensating closes. A replacement cannot install while this
+            // settlement still has authority to remove an applied receipt.
+            let serving = shared
+                .serving
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current = serving
+                .as_ref()
+                .is_some_and(|serving| serving.epoch == epoch);
             if current && result.is_ok() {
                 applied_map(&shared).remove(&path);
             }
