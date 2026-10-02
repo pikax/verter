@@ -314,6 +314,16 @@ pub struct ReadyStructureStamp {
     pub markup_opening_ranges: Vec<[u32; 2]>,
 }
 
+/// The carrier-store wire contract version this publisher writes and the plugin
+/// reads: the manifest `schema_version` every published `ReadyStructureStamp`
+/// carries, as one named source of truth.
+///
+/// It is a FORMAT pin, not an assumed capability — the two sides read the pin
+/// out of the manifest itself, which is why it is a legitimate dimension of an
+/// observed engine profile (see `TsserverEngineBackend::serving_identity`) and
+/// not a value anyone filled in as a placeholder.
+pub const CARRIER_STORE_WIRE_PIN: u64 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyFile {
     pub content_hash: String,

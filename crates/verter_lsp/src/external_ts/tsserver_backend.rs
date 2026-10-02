@@ -23,12 +23,14 @@ use std::sync::Arc;
 
 use verter_session::external_ts::{
     BoundProject, Diagnostics, DiagnosticsOutcome, EngineBackend, EngineCapabilities, EngineError,
-    EnsureProject, PublishSnapshot, Query, QueryOutcome,
+    EngineIdentity, EngineSessionFacts, EnsureProject, PublishSnapshot, Query, QueryOutcome,
+    ServeMode,
 };
+use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 
 use crate::external_ts::carrier_publish_store::{
     carrier_store_dir_for, default_carrier_store_host_version, CarrierPublishStore, OwnedSetScope,
-    OwnedSource, PublishBatch,
+    OwnedSource, PublishBatch, CARRIER_STORE_WIRE_PIN,
 };
 use crate::external_ts::membership_ledger::{MembershipLedger, ProjectUri};
 
@@ -108,6 +110,28 @@ impl TsserverEngineBackend {
         &self.membership_ledger
     }
 
+    /// The serving identity a [`CertifiedTypeEngineBinding`] is certified over.
+    ///
+    /// Composed ONLY from facts this backend observed, never assumed: the
+    /// negotiated host version it was constructed with (the same string its
+    /// handshake reported as `EngineCapabilities::reported_version`), the
+    /// carrier-store wire contract this publisher writes and the plugin reads
+    /// ([`CARRIER_STORE_WIRE_PIN`]), and the membership session generation the
+    /// ledger is advertising under right now. A different serving session — a
+    /// new generation, a different wire contract — composes a different observed
+    /// profile, so one session's facts cannot launder into another session's
+    /// certified identities.
+    pub(in crate::external_ts) fn serving_identity(&self) -> EngineIdentity {
+        EngineIdentity::for_mode(
+            ServeMode::Owned,
+            &EngineSessionFacts {
+                observed_version: Arc::clone(&self.host_version),
+                wire_pin: CARRIER_STORE_WIRE_PIN,
+                editor_session_generation: self.membership_ledger.current_session().value(),
+            },
+        )
+    }
+
     /// The carrier-companion provider paths recorded under `project` in the in-process
     /// ledger — a TEST-SIDE / diagnostic view of the reconciler's membership
     /// bookkeeping, NOT the production `getExternalFiles` path. Live `getExternalFiles`
@@ -161,12 +185,18 @@ impl TsserverEngineBackend {
         self.stores.entry(root).or_insert(ws).value().clone()
     }
 
-    /// The workspace store the bound `project` was ensured under: the one whose
-    /// ensured-project set contains the project URI. `None` when the project was
-    /// never ensured (fail closed — a publish for an un-ensured project is refused).
-    fn workspace_store_for_project(&self, project: &BoundProject) -> Option<Arc<WorkspaceStore>> {
+    /// The workspace store `project_uri` was ensured under: the one whose
+    /// ensured-project set contains that project URI. `None` when the project was
+    /// never ensured (fail closed — an op for an un-ensured project is refused).
+    ///
+    /// Keyed on the URI rather than on a witness type because it is reached by
+    /// ownership bookkeeping (`register_owned` / `retract_source`, which change
+    /// what the store advertises) as well as by the certified publish. Only the
+    /// publish is an engine ANSWER and therefore needs the certification; an
+    /// ownership row is not one.
+    fn workspace_store_for_project_uri(&self, project_uri: &str) -> Option<Arc<WorkspaceStore>> {
         for entry in self.stores.iter() {
-            if entry.value().projects.lock().contains(project.project()) {
+            if entry.value().projects.lock().contains(project_uri) {
                 return Some(Arc::clone(entry.value()));
             }
         }
@@ -183,7 +213,7 @@ impl TsserverEngineBackend {
         owned: Vec<OwnedSource>,
     ) -> Result<u64, EngineError> {
         let ws = self
-            .workspace_store_for_project(project)
+            .workspace_store_for_project_uri(project.project())
             .ok_or_else(|| ensure_failed("register_owned for an un-ensured project"))?;
         let empty = PublishSnapshot {
             project: Arc::from(project.project()),
@@ -216,7 +246,7 @@ impl TsserverEngineBackend {
         source_uri: &str,
     ) -> Result<u64, EngineError> {
         let ws = self
-            .workspace_store_for_project(project)
+            .workspace_store_for_project_uri(project.project())
             .ok_or_else(|| ensure_failed("retract_source for an un-ensured project"))?;
         ws.store
             .retract_sources(project.project(), &[source_uri])
@@ -333,19 +363,29 @@ impl EngineBackend for TsserverEngineBackend {
     /// write succeeds (the two-phase guarantee). The owned set is derived from the
     /// snapshot's own files (the published delta is the owned set for this publish);
     /// a larger owned set is registered separately via [`Self::register_owned`].
+    ///
+    /// The certification is re-checked against the snapshot here rather than
+    /// trusted from the caller: the store write is the warm, so the publication
+    /// rule runs where the warm happens.
     fn publish_snapshot(
         &self,
-        project: &BoundProject,
+        project: &CertifiedTypeEngineBinding,
         snapshot: PublishSnapshot,
     ) -> Result<(), EngineError> {
-        // The snapshot's project must match the witness it is published under.
+        if !project.publish_admitted(&snapshot) {
+            return Err(ensure_failed(
+                "publish_snapshot: the certified binding does not admit this snapshot's basis \
+                 (superseded before the store write)",
+            ));
+        }
+        // The snapshot's project must match the certified project it is published under.
         if &*snapshot.project != project.project() {
             return Err(ensure_failed(
-                "publish_snapshot project does not match the bound project",
+                "publish_snapshot project does not match the certified project",
             ));
         }
         let ws = self
-            .workspace_store_for_project(project)
+            .workspace_store_for_project_uri(project.project())
             .ok_or_else(|| ensure_failed("publish_snapshot for an un-ensured project"))?;
         // A live publish carries ONLY the touched carrier's companions — a per-source
         // DELTA, not the project's full owned set. It must UNION its own rows and
@@ -367,7 +407,11 @@ impl EngineBackend for TsserverEngineBackend {
     /// map back) is wired separately from this publish authority. NOT a silent stub:
     /// `unimplemented!()` fails loudly so a premature call is caught, never a
     /// forbidden always-`NoResult` nop.
-    fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
+    fn query(
+        &self,
+        _project: &CertifiedTypeEngineBinding,
+        _query: Query,
+    ) -> Result<QueryOutcome, EngineError> {
         unimplemented!(
             "TsserverEngineBackend::query is answered by the live tsserver transport \
              (open the ready companion blob, issue the feature query, map the result \
@@ -379,7 +423,7 @@ impl EngineBackend for TsserverEngineBackend {
     /// Answered by the live tsserver transport, wired separately. See [`Self::query`].
     fn diagnostics(
         &self,
-        _project: &BoundProject,
+        _project: &CertifiedTypeEngineBinding,
         _request: Diagnostics,
     ) -> Result<DiagnosticsOutcome, EngineError> {
         unimplemented!(

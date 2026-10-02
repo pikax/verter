@@ -28,6 +28,7 @@ use verter_session::external_ts::{
     BoundProject, Diagnostics, DiagnosticsOutcome, EngineBackend, EngineCapabilities, EngineError,
     EnsureProject, PublishSnapshot, Query, QueryOutcome,
 };
+use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 
 /// The OWNED tsgo engine backend: the project-association witness authority for the
 /// one-instance dual-surface provider.
@@ -80,7 +81,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// call here is a wiring error — fail LOUDLY rather than silently no-op.
     fn publish_snapshot(
         &self,
-        _project: &BoundProject,
+        _project: &CertifiedTypeEngineBinding,
         _snapshot: PublishSnapshot,
     ) -> Result<(), EngineError> {
         unimplemented!(
@@ -93,7 +94,11 @@ impl EngineBackend for TsgoEngineBackend {
 
     /// Answered by the live `TsgoOwnedProvider` (`--api` checker over the attached
     /// pipe), wired separately from this project-association witness.
-    fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
+    fn query(
+        &self,
+        _project: &CertifiedTypeEngineBinding,
+        _query: Query,
+    ) -> Result<QueryOutcome, EngineError> {
         unimplemented!(
             "TsgoEngineBackend::query is answered by the live TsgoOwnedProvider's --api \
              checker over the attached pipe, wired separately from this witness authority."
@@ -104,7 +109,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// wired separately. See [`Self::query`].
     fn diagnostics(
         &self,
-        _project: &BoundProject,
+        _project: &CertifiedTypeEngineBinding,
         _request: Diagnostics,
     ) -> Result<DiagnosticsOutcome, EngineError> {
         unimplemented!(

@@ -5,13 +5,15 @@
 //! it). This module defines the TRAIT and its data-transfer objects only — no
 //! concrete engine lives here; the first real backend is a separate concern.
 //!
-//! ## The bound-project witness type-state
+//! ## The certified engine binding — the sole route to a production result
 //!
 //! A config-less / inferred-project operation for a production carrier source is
 //! **not representable**. The ops that PRODUCE external-TS results
 //! (`publish_snapshot` / `query` / `diagnostics`) are reachable only through a
-//! [`BoundProject`] witness, and a `BoundProject` is obtainable ONLY by calling
-//! [`EngineBackend::ensure_project`] with an [`EnsureProject`] request — which in
+//! [`CertifiedTypeEngineBinding`](crate::semantic_capability::CertifiedTypeEngineBinding),
+//! and that binding is obtainable ONLY by [`certify`]-ing a [`BoundProject`]
+//! witness — which is itself obtainable ONLY by calling
+//! [`EngineBackend::ensure_project`] with an [`EnsureProject`] request, which in
 //! turn can be minted ONLY from a resolved
 //! [`ProjectBinding`](super::ProjectBinding) (its fields are private and it is
 //! constructed only inside the contract module). `NoProject` / `Ambiguous`
@@ -20,12 +22,26 @@
 //! ONLY for non-cross-file features (it never warms a project cache). Therefore
 //! constructing a production provider op without a `ProjectBinding` is a COMPILE
 //! error, not a runtime fallthrough.
+//!
+//! The [`BoundProject`] alone is NOT that route. It proves a project was
+//! ensured; it says nothing about whether the engine's capability
+//! interpretation was OBSERVED (an unobserved engine composes a default,
+//! assumed profile), which serving session the answer belongs to, or which
+//! input basis it is attributed to. Certification is what composes those three,
+//! so a production-result op taking a bare `&BoundProject` would be a second,
+//! uncertified route to an engine answer — the route this plane replaces. The
+//! op signature is the enforcement: `&BoundProject` does not coerce to
+//! `&CertifiedTypeEngineBinding`.
 
 use std::sync::Arc;
 
+use verter_identity::canonical::Canonical;
+use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+use verter_identity::identity::InputBasisId;
 use verter_semantic::analysis::types::Hash16;
 
 use crate::file_artifact_store::ProjectIdentity;
+use crate::semantic_capability::CertifiedTypeEngineBinding;
 
 /// The orthogonal environment dimensions a cache value actually depends on.
 ///
@@ -205,6 +221,101 @@ pub struct PublishSnapshot {
     pub files: Vec<SnapshotFile>,
     pub resolution_map_version: u64,
     pub fs_generation: u64,
+}
+
+/// The role discriminant a snapshot file's carrier role hashes through.
+/// Exhaustive over [`SnapshotRole`], so a new role cannot alias an old one's
+/// basis.
+const fn snapshot_role_discriminant(role: SnapshotRole) -> u32 {
+    match role {
+        SnapshotRole::CarrierIde => 1,
+        SnapshotRole::CarrierApi => 2,
+        SnapshotRole::Shadow => 3,
+        SnapshotRole::Real => 4,
+    }
+}
+
+/// The script-kind discriminant a snapshot file hashes through. Exhaustive over
+/// [`ScriptKind`].
+const fn script_kind_discriminant(kind: ScriptKind) -> u32 {
+    match kind {
+        ScriptKind::Ts => 1,
+        ScriptKind::Tsx => 2,
+        ScriptKind::Js => 3,
+        ScriptKind::Jsx => 4,
+    }
+}
+
+/// The open-state discriminant a snapshot file hashes through. Exhaustive over
+/// [`OpenState`].
+const fn open_state_discriminant(state: OpenState) -> u32 {
+    match state {
+        OpenState::Open => 1,
+        OpenState::Closed => 2,
+    }
+}
+
+/// One published file's contribution to the snapshot basis.
+struct SnapshotFileBasis<'a> {
+    file: &'a SnapshotFile,
+}
+
+impl CanonicalEncode for SnapshotFileBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.external_ts.snapshot_file_basis.v1";
+
+    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+        encoder.field_str(1, &self.file.source_uri);
+        encoder.field_str(2, &self.file.provider_uri);
+        encoder.field_enum_discriminant(3, snapshot_role_discriminant(self.file.role));
+        encoder.field_enum_discriminant(4, script_kind_discriminant(self.file.script_kind));
+        encoder.field_bytes(5, &self.file.content_hash);
+        encoder.field_bytes(6, &self.file.map_hash);
+        encoder.field_u64(7, self.file.version);
+        encoder.field_enum_discriminant(8, open_state_discriminant(self.file.open_state));
+        encoder.field_option(9, self.file.map_json.as_ref().map(|json| json.as_bytes()));
+    }
+}
+
+/// Descriptor a [`PublishSnapshot`]'s basis hashes through: the identity the
+/// store keys its own rows on — project, resolution-map version, FS generation,
+/// and each published file's carrier identity and mapped bytes. Content and
+/// geometry are covered by identity, never re-hashed.
+struct PublishSnapshotBasis<'a> {
+    snapshot: &'a PublishSnapshot,
+}
+
+impl CanonicalEncode for PublishSnapshotBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.external_ts.publish_snapshot_basis.v1";
+
+    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+        encoder.field_str(1, &self.snapshot.project);
+        encoder.field_u64(2, self.snapshot.resolution_map_version);
+        encoder.field_u64(3, self.snapshot.fs_generation);
+        // Each file enters as its own canonical digest, so the set is sorted by
+        // identity and a repeated file collapses to one observation.
+        let files = self
+            .snapshot
+            .files
+            .iter()
+            .map(|file| Canonical::from_encodable(&SnapshotFileBasis { file }).digest())
+            .collect::<Vec<_>>();
+        encoder.field_sorted_set(4, files.iter().map(|digest| digest.as_bytes()));
+    }
+}
+
+impl PublishSnapshot {
+    /// The basis a result published from THIS snapshot is attributed to.
+    ///
+    /// Derived from the snapshot's own identity, never supplied beside it: a
+    /// caller cannot name one snapshot's basis and publish another's. The
+    /// certification the production-result ops take is minted over exactly this
+    /// value, and [`CertifiedTypeEngineBinding::publish_admitted`] admits
+    /// exactly the snapshot it names — so a result from a superseded basis is
+    /// refused before it can warm, never discovered afterwards.
+    #[must_use]
+    pub fn input_basis(&self) -> InputBasisId {
+        InputBasisId::from_canonical(&PublishSnapshotBasis { snapshot: self })
+    }
 }
 
 /// `query` request: a single carrier-offset feature query that fails closed on
@@ -413,8 +524,11 @@ impl ScratchProject {
 ///
 /// No concrete backend exists in this module — it is the trait + its DTOs. The
 /// production-result ops (`publish_snapshot` / `query` / `diagnostics`) take a
-/// [`BoundProject`] witness, so they are unreachable without a resolved
-/// [`ProjectBinding`]. `ensure_project` is the sole witness factory.
+/// [`CertifiedTypeEngineBinding`], so they are unreachable without a resolved
+/// [`ProjectBinding`] AND an observed capability profile, serving session and
+/// input basis. `ensure_project` is the sole witness factory, and
+/// [`CertifiedTypeEngineBinding::certify`] the sole route from that witness to
+/// the binding these ops accept.
 pub trait EngineBackend {
     /// Ensure the configured project's Program exists on the backend and return
     /// the [`BoundProject`] witness. This is the SOLE way to obtain the witness;
@@ -422,22 +536,30 @@ pub trait EngineBackend {
     /// [`ProjectBinding`].
     fn ensure_project(&self, request: EnsureProject) -> Result<BoundProject, EngineError>;
 
-    /// Publish a per-project atomic snapshot delta. Requires the witness.
+    /// Publish a per-project atomic snapshot delta. Requires the certified
+    /// binding over the snapshot's own [`PublishSnapshot::input_basis`] —
+    /// [`CertifiedTypeEngineBinding::publish_admitted`] is the publication rule
+    /// this op is reached through, so a stale basis fails closed instead of
+    /// warming a superseded result.
     fn publish_snapshot(
         &self,
-        project: &BoundProject,
+        project: &CertifiedTypeEngineBinding,
         snapshot: PublishSnapshot,
     ) -> Result<(), EngineError>;
 
     /// Answer a single feature query against a carrier offset. Requires the
-    /// witness; fails closed on a version mismatch.
-    fn query(&self, project: &BoundProject, query: Query) -> Result<QueryOutcome, EngineError>;
+    /// certified binding; fails closed on a version mismatch.
+    fn query(
+        &self,
+        project: &CertifiedTypeEngineBinding,
+        query: Query,
+    ) -> Result<QueryOutcome, EngineError>;
 
     /// Compute diagnostics for a file set or the whole project. Requires the
-    /// witness.
+    /// certified binding.
     fn diagnostics(
         &self,
-        project: &BoundProject,
+        project: &CertifiedTypeEngineBinding,
         request: Diagnostics,
     ) -> Result<DiagnosticsOutcome, EngineError>;
 

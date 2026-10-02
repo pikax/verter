@@ -57,7 +57,7 @@ use verter_identity::identity::{
     InputBasisId, ProviderContractId, QueryIdentity, ResultContractId, SemanticFlightKey,
 };
 
-use crate::external_ts::{BoundProject, EngineIdentity, QueryFeature, ServeMode};
+use crate::external_ts::{BoundProject, EngineIdentity, PublishSnapshot, QueryFeature, ServeMode};
 
 /// One closed capability row: the capability, and the canonical query-kind
 /// domain tag that composes its [`QueryIdentity`]. The row IS the closure
@@ -426,6 +426,21 @@ impl CertifiedTypeEngineBinding {
             query_identity: self.query_identity(feature, semantic_arguments),
             input_basis: self.input_basis.clone(),
         }
+    }
+
+    /// The publication rule this plane enforces at the engine seam: a binding
+    /// admits exactly ONE published snapshot — the one whose
+    /// [`PublishSnapshot::input_basis`] is the basis the binding was certified
+    /// over, recomputed here rather than read back from the binding's own field.
+    ///
+    /// So a caller cannot certify over one snapshot and publish another, and a
+    /// snapshot whose basis was superseded between certification and the store
+    /// write is REFUSED before it can warm. The disposition is a refusal, not a
+    /// degraded publish: there is no result from a superseded basis to return,
+    /// let alone to warm.
+    #[must_use]
+    pub fn publish_admitted(&self, snapshot: &PublishSnapshot) -> bool {
+        snapshot.input_basis() == self.input_basis
     }
 }
 

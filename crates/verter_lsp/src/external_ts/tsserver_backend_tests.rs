@@ -51,6 +51,19 @@ fn ensure(
         .expect("ensure_project")
 }
 
+/// Certify the way the publish coordinator does: over the backend's OWN observed
+/// serving identity and the snapshot's own basis. The snapshot is taken by value
+/// so the caller certifies the exact snapshot it then publishes — a
+/// certify-here/publish-there pair could otherwise drift apart unnoticed.
+fn certified_for(
+    backend: &TsserverEngineBackend,
+    bound: &BoundProject,
+    snap: &PublishSnapshot,
+) -> CertifiedTypeEngineBinding {
+    CertifiedTypeEngineBinding::certify(bound, &backend.serving_identity(), snap.input_basis())
+        .expect("an observed handshake certifies")
+}
+
 fn h16(s: &str) -> [u8; 16] {
     let d = blake3::hash(s.as_bytes());
     let mut out = [0u8; 16];
@@ -120,7 +133,8 @@ fn publish_snapshot_runs_two_phase_publish_through_the_store() {
         resolution_map_version: 1,
         fs_generation: 1,
     };
-    backend.publish_snapshot(&witness, snap).expect("publish");
+    let certified = certified_for(&backend, &witness, &snap);
+    backend.publish_snapshot(&certified, snap).expect("publish");
 
     // The store the backend opened for this workspace knows the project + ready set.
     let store = CarrierPublishStore::open(HOST_VERSION, &ws);
@@ -150,9 +164,10 @@ fn publish_for_an_unensured_project_fails_closed() {
         resolution_map_version: 1,
         fs_generation: 1,
     };
+    let certified = certified_for(&backend, &witness, &snap);
     assert!(
-        backend.publish_snapshot(&witness, snap).is_err(),
-        "a publish whose project does not match the witness must fail closed"
+        backend.publish_snapshot(&certified, snap).is_err(),
+        "a publish whose project does not match the certified project must fail closed"
     );
 }
 
@@ -194,8 +209,9 @@ fn register_owned_then_publish_content_is_the_owned_vs_ready_split() {
         resolution_map_version: 1,
         fs_generation: 1,
     };
+    let certified = certified_for(&backend, &witness, &snap);
     backend
-        .publish_snapshot(&witness, snap)
+        .publish_snapshot(&certified, snap)
         .expect("publish content");
     let m2 = store.current_manifest();
     let p2 = m2.projects.get("d:/ws/tsconfig.json").expect("project");
@@ -216,16 +232,21 @@ fn query_is_unimplemented_until_live_transport_wired() {
     let ws = user_tree.path().to_string_lossy().to_string();
     let witness = ensure(&backend, &ws, "d:/ws/tsconfig.json");
     use verter_session::external_ts::{Query, QueryFeature};
-    let _ = backend.query(
-        &witness,
-        Query {
-            project: Arc::from("d:/ws/tsconfig.json"),
-            provider_uri: Arc::from("d:/ws/src/A.vue.tsx"),
-            carrier_offset: 0,
-            feature: QueryFeature::Hover,
-            content_hash: [0u8; 16],
-            map_hash: [0u8; 16],
-            required_version: 1,
-        },
-    );
+    let snap = PublishSnapshot {
+        project: Arc::from("d:/ws/tsconfig.json"),
+        files: vec![file("d:/ws/src/A.vue.tsx", "d:/ws/src/A.vue", "x", 1)],
+        resolution_map_version: 1,
+        fs_generation: 1,
+    };
+    let query = Query {
+        project: Arc::from("d:/ws/tsconfig.json"),
+        provider_uri: Arc::from("d:/ws/src/A.vue.tsx"),
+        carrier_offset: 0,
+        feature: QueryFeature::Hover,
+        content_hash: [0u8; 16],
+        map_hash: [0u8; 16],
+        required_version: 1,
+    };
+    let certified = certified_for(&backend, &witness, &snap);
+    let _ = backend.query(&certified, query);
 }

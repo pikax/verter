@@ -93,9 +93,31 @@ fn query_is_not_a_silent_stub() {
     let backend = TsgoEngineBackend::new(ENGINE_VERSION);
     let witness = ensure(&backend, "file:///ws", "file:///ws/tsconfig.json");
     // query() must fail LOUDLY (the live transport is the provider, wired
-    // separately) — never a silent always-NoResult stub.
-    let _ = backend.query(
+    // separately) — never a silent always-NoResult stub. Reaching it needs the
+    // certified binding: the op no longer answers for a bare bound-project
+    // witness.
+    let serving = verter_session::external_ts::EngineIdentity::for_mode(
+        verter_session::external_ts::ServeMode::Owned,
+        &verter_session::external_ts::EngineSessionFacts {
+            observed_version: std::sync::Arc::from(ENGINE_VERSION),
+            wire_pin: 7,
+            editor_session_generation: 3,
+        },
+    );
+    let certified = verter_session::semantic_capability::CertifiedTypeEngineBinding::certify(
         &witness,
+        &serving,
+        verter_session::external_ts::PublishSnapshot {
+            project: std::sync::Arc::from("file:///ws/tsconfig.json"),
+            files: Vec::new(),
+            resolution_map_version: 0,
+            fs_generation: 0,
+        }
+        .input_basis(),
+    )
+    .expect("an observed handshake certifies");
+    let _ = backend.query(
+        &certified,
         verter_session::external_ts::Query {
             project: std::sync::Arc::from("file:///ws/tsconfig.json"),
             provider_uri: std::sync::Arc::from("file:///ws/src/A.vue.tsx"),
