@@ -77,6 +77,20 @@ impl ForegroundSettlement {
         self.basis.as_ref().map(|basis| basis.snapshot.version)
     }
 
+    /// Admission for recomputing a native result, never a publication check.
+    pub(crate) fn document_and_workspace_are_current(
+        &self,
+        documents: &DocumentRegistry,
+        uri: &Uri,
+    ) -> bool {
+        let Some(basis) = &self.basis else {
+            return documents.snapshot_identity(uri).is_none();
+        };
+        let workspace = documents.host().workspace_read().published_root();
+        documents.snapshot_identity_is_current(uri, &basis.snapshot)
+            && basis.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+    }
+
     pub(crate) fn settle<T>(
         &self,
         documents: &DocumentRegistry,

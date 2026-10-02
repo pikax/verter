@@ -70,9 +70,7 @@ pub(super) async fn handle_hover_with_audit(
             Some(position),
             async move {
                 server.prepare_foreground(&uri).await?;
-                server
-                    .settle_foreground(&uri, handle_hover(server, params))
-                    .await
+                handle_hover(server, params).await
             },
             |payload, value| {
                 payload.response_size_bytes = hover_response_size(value.as_ref());
