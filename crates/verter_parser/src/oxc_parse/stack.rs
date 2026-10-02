@@ -345,6 +345,14 @@ pub mod faults {
         sites
     }
 
+    /// The stack this thread has left, as a parse measures it. A test that
+    /// needs a parse to reserve sizes its source from this, not from the
+    /// size it asked its thread for: glibc may hand a thread a cached stack
+    /// up to four times the size requested.
+    pub fn remaining_stack() -> Option<usize> {
+        super::remaining()
+    }
+
     /// Make the next `count` reservations on this thread fail.
     pub fn fail_next_reservations(count: usize) {
         FAILING.with(|failing| failing.set(count));

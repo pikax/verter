@@ -19,6 +19,7 @@ import {
   settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
+import { sequenceParent } from "../../../lib/timeouts";
 
 function onlySvelteParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "svelte-parity")
@@ -27,7 +28,7 @@ function onlySvelteParity(ctx: Mocha.Context): void {
 
 suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
-    this.timeout(60_000);
+    this.timeout(sequenceParent("restartedSuiteSetup"));
     onlySvelteParity(this);
     await restartParityReady("src/App.svelte");
   });
@@ -111,7 +112,7 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
 
   test("svelte.diagnostics.unused-snippet-prop-provider-owned", async function () {
     onlySvelteParity(this);
-    this.timeout(90_000);
+    this.timeout(sequenceParent("restartedProviderOwnedWitnesses"));
     // An unused snippet-typed $props() member is natively TS6133-eligible
     // (the projector keeps script chunks original): the PROVIDER owns the
     // hint, `{@render body?.()}` keeps the rendered member live, and the
