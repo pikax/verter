@@ -1,7 +1,7 @@
 # Determinism matrix status — Verter Semantic Signature Kernel
 
 The §5.9 mandatory determinism matrix of
-[`docs/arch/signature-kernel.md`](../../arch/signature-kernel.md), as it is
+[`docs/arch/signature-kernel.md`](https://github.com/pikax/verter/blob/main/docs/arch/signature-kernel.md), as it is
 actually driven by the tree.
 
 **Registration is executable, not prose.** The row table lives in
@@ -305,7 +305,7 @@ shallow carrier, `ImportType` included, so a flow-return value that holds one
 is not refused as unresolved. The raise classifier treats a raised
 `ImportType` as a materialized leaf
 (`raised_shape_tests::parity_carriers_with_type_args_and_raise_miss`:
-"an ImportType<number> raises to an ImportType leaf ⇒ NOT a miss"), and the
+"an ImportType\<number\> raises to an ImportType leaf ⇒ NOT a miss"), and the
 query-free macro hot mirror returns a macro payload's carrier verbatim, which
 the projector resolves only one Navigate hop at the payload's head. A
 published observation can therefore contain an unresolved import type, and a
