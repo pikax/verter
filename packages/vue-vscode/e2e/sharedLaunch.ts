@@ -12,7 +12,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 
 export { readE2eEnv } from "../src/e2eEnv";
 
@@ -173,6 +173,85 @@ export function applyWindowsCliPathFix(
   return existsSync(cliPath) ? cliPath : execPath;
 }
 
+/**
+ * Where the e2e runners keep VS Code hosts: the extension package's own
+ * `.vscode-test`, resolved from this module's location, not from the cwd.
+ * Compiled, this module sits in `out-test/e2e/`, so `../..` is
+ * `packages/vue-vscode`. test-electron's cwd-relative default put it in the same
+ * place under `pnpm --filter verter-vscode`, so existing local caches keep
+ * working. Making it explicit lets CI cache exactly this directory and
+ * pre-download into it from any cwd.
+ */
+export const VSCODE_TEST_CACHE_PATH = path.resolve(__dirname, "../..", ".vscode-test");
+
+/** The stdout line prefix `acquireVscode.js` prints its resolved executable after. */
+export const VSCODE_EXECUTABLE_MARKER = "VERTER_VSCODE_EXECUTABLE=";
+
+export interface AcquireVscodeProcessOptions {
+  /** The acquisition entry point (defaults to the compiled `acquireVscode.js` next to this module). */
+  scriptPath?: string;
+  /** Hard cap on one acquisition process (defaults to 15 minutes). */
+  timeoutMs?: number;
+}
+
+/**
+ * Run ONE VS Code acquisition (`acquireVscode.js`) in a child Node process and
+ * return the executable path it reports.
+ *
+ * Why a child process: `@vscode/test-electron` 2.5.x leaks a rejected promise
+ * when the archive stream dies mid-download (its checksum promise is never
+ * awaited once the extractor has rejected). Node turns that into an uncaught
+ * exception, which killed the whole runner inside test-electron's own retry, so
+ * the retry around it never got control. Out of process, the worst a broken
+ * download can do is end that child with a non-zero exit, which is an ordinary
+ * failed attempt the caller retries.
+ */
+export function acquireVscodeInChildProcess(
+  version: string,
+  opts: AcquireVscodeProcessOptions = {},
+): Promise<string> {
+  const scriptPath = opts.scriptPath ?? path.join(__dirname, "acquireVscode.js");
+  const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, version], {
+      stdio: ["ignore", "pipe", "inherit"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      process.stdout.write(chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const reported = stdout
+        .split(/\r?\n/)
+        .reverse()
+        .find((line) => line.startsWith(VSCODE_EXECUTABLE_MARKER));
+      if (code === 0 && reported) {
+        resolve(reported.slice(VSCODE_EXECUTABLE_MARKER.length));
+        return;
+      }
+      const how = timedOut
+        ? `timed out after ${timeoutMs}ms`
+        : code === 0
+          ? "exited without reporting an executable"
+          : `exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
+      reject(new Error(`VS Code ${version} acquisition process ${how}`));
+    });
+  });
+}
+
 /** Injectable dependencies for {@link resolveVscodeExecutablePath} (for tests). */
 export interface ResolveVscodeOptions {
   /** Pre-existing host executable to use instead of downloading (validated before use). */
@@ -199,24 +278,27 @@ export interface VscodeAcquisitionRetry {
 }
 
 /**
- * Acquiring the VS Code host is a network download, and a transient timeout there
- * is infrastructure, not a product regression. The download is retried a bounded
- * number of times so a runner that lost one connection does not fail every route
- * it owns; nothing downstream of acquisition (launch, suites, assertions) is
- * retried, so a real failure stays visible.
+ * Acquiring the VS Code host is a network download, and a transient timeout or
+ * reset there is infrastructure, not a product regression. The download is
+ * retried a bounded number of times (waiting 5s, 10s, 20s) so a runner that lost
+ * one connection does not fail every route it owns; nothing downstream of
+ * acquisition (launch, suites, assertions) is retried, so a real failure stays
+ * visible. CI pre-downloads the host into a cache before the test step, so there
+ * this is the second line of defence, not the first.
  */
 export const VSCODE_ACQUISITION_RETRY: Readonly<VscodeAcquisitionRetry> = {
-  attempts: 3,
+  attempts: 4,
   delayMs: 5_000,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   warn: (message) => console.warn(message),
 };
 
 /**
- * Resolve the VS Code host executable for extension tests. The downloader is lazily
- * imported so unit tests can inject a fake and never touch the network or
- * `@vscode/test-electron`. Do not substitute `bin/code.cmd` here: that CLI can attach
- * to an existing window and exit zero without executing `--extensionTestsPath`.
+ * Resolve the VS Code host executable for extension tests. The real downloader runs
+ * out of process ({@link acquireVscodeInChildProcess}); unit tests inject a fake and
+ * never touch the network or `@vscode/test-electron`. Do not substitute `bin/code.cmd`
+ * here: that CLI can attach to an existing window and exit zero without executing
+ * `--extensionTestsPath`.
  */
 export async function resolveVscodeExecutablePath(
   version: string,
@@ -232,9 +314,7 @@ export async function resolveVscodeExecutablePath(
     return opts.explicitExecutablePath;
   }
 
-  const download =
-    opts.download ??
-    (async (v: string) => (await import("@vscode/test-electron")).downloadAndUnzipVSCode(v));
+  const download = opts.download ?? ((v: string) => acquireVscodeInChildProcess(v));
   const retry: VscodeAcquisitionRetry = { ...VSCODE_ACQUISITION_RETRY, ...opts.retry };
   // Bounded means finite: a non-finite or non-numeric count falls back to the
   // default policy rather than retrying forever.
@@ -252,14 +332,24 @@ export async function resolveVscodeExecutablePath(
       if (attempt === attempts) break;
       const delay = retry.delayMs * 2 ** (attempt - 1);
       retry.warn(
-        `VS Code ${version} acquisition attempt ${attempt}/${attempts} failed (${String(
-          error instanceof Error ? error.message : error,
+        `VS Code ${version} acquisition attempt ${attempt}/${attempts} failed (${describeError(
+          error,
         )}); retrying in ${delay}ms`,
       );
       await retry.sleep(delay);
     }
   }
-  throw lastError;
+  throw Object.assign(
+    new Error(
+      `Could not acquire VS Code ${version} after ${attempts} attempt(s). This is a host ` +
+        `download failure, not a test failure. Last error: ${describeError(lastError)}`,
+    ),
+    { cause: lastError },
+  );
+}
+
+function describeError(error: unknown): string {
+  return String(error instanceof Error ? error.message : error);
 }
 
 export interface SynchronousCommandResult {
