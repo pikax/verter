@@ -190,8 +190,6 @@ pub(super) async fn handle_hover(
     let _hg = HandlerGuard::new("hover");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
-    let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, uri);
-    let settle = |response| settlement.settle(&server.documents, uri, response);
     tracing::info!(
         "hover ENTER {} at {}:{}",
         uri.as_str(),
@@ -201,6 +199,24 @@ pub(super) async fn handle_hover(
     let _timer = server
         .statistics
         .timer("hover", Some(uri.as_str().to_string()));
+    // The whole response settles against a basis captured after the route's
+    // current-file repair. A diagnostics-generation-only advance during the
+    // provider await (this request's own repair, a cold native hydration, or a
+    // background sync) repeats the repair and recomputes once against a fresh
+    // basis captured after it; an edit,
+    // close/reopen or workspace change still answers `ContentModified`.
+    server
+        .settle_request_with_generation_retry(uri, || handle_hover_attempt(server, &params))
+        .await
+}
+
+/// One unsettled hover computation; [`handle_hover`] owns its settlement.
+async fn handle_hover_attempt(
+    server: &VerterLanguageServer,
+    params: &HoverParams,
+) -> Result<Option<Hover>> {
+    let uri = &params.text_document_position_params.text_document.uri;
+    let position = &params.text_document_position_params.position;
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = &server.type_provider {
@@ -210,9 +226,9 @@ pub(super) async fn handle_hover(
                     // Post-await validation (fail closed): a hover produced
                     // against a superseded surface must be dropped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
-                        return settle(None);
+                        return Ok(None);
                     }
-                    return settle(Some(Hover {
+                    return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
                             value: info.contents,
@@ -221,7 +237,7 @@ pub(super) async fn handle_hover(
                     }));
                 }
             }
-            return settle(None);
+            return Ok(None);
         }
     }
 
@@ -301,29 +317,11 @@ pub(super) async fn handle_hover(
         )?;
         match child_hover {
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
-                if !settlement.is_current(&server.documents, uri)
-                    && settlement.document_and_workspace_are_current(&server.documents, uri)
-                {
-                    // A cold native projection can hydrate an imported declaration.
-                    // Recompute once; never carry the old payload into a new basis.
-                    let retry =
-                        crate::documents::ForegroundSettlement::capture(&server.documents, uri);
-                    let child_hover = transport_child_hover_result(
-                        &crate::documents::uri_to_canonical_id(uri),
-                        server.child_hover_for_target(uri, target),
-                    )?;
-                    return retry.settle(
-                        &server.documents,
-                        uri,
-                        match child_hover {
-                            super::component_resolve::ChildHoverOutcome::Hover(hover) => {
-                                Some(hover)
-                            }
-                            _ => None,
-                        },
-                    );
-                }
-                return settle(Some(child_hover));
+                // A cold native projection can hydrate an imported declaration
+                // and advance the diagnostics generation; `handle_hover`'s
+                // settlement recomputes once and never carries this payload
+                // into the new basis.
+                return Ok(Some(child_hover));
             }
             super::component_resolve::ChildHoverOutcome::SurfaceUnavailable
                 if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
@@ -332,7 +330,7 @@ pub(super) async fn handle_hover(
                 // answer. Missing child data must not suppress it; the fallback
                 // describes authored syntax and does not claim that the child
                 // declared a matching slot.
-                return settle(verter_result);
+                return Ok(verter_result);
             }
             super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
                 if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
@@ -340,7 +338,7 @@ pub(super) async fn handle_hover(
                 // A resolved child slot surface is authoritative. An absent name
                 // fails closed instead of turning authored parent syntax into
                 // an affirmative declaration claim.
-                return settle(None);
+                return Ok(None);
             }
             super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
             | super::component_resolve::ChildHoverOutcome::SurfaceUnavailable => {}
@@ -374,7 +372,7 @@ pub(super) async fn handle_hover(
                         // Post-await validation (fail closed): drop a provider
                         // result produced against a superseded surface.
                         if server.provider_context_still_valid(uri, &ctx) {
-                            return settle(Some(Hover {
+                            return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                     kind: MarkupKind::Markdown,
                                     value: format!("**v-bind({expr})**\n\n{}", info.contents),
@@ -387,7 +385,7 @@ pub(super) async fn handle_hover(
             }
         }
         // No provider / unmappable declaration — native v-bind hover only.
-        return settle(verter_result);
+        return Ok(verter_result);
     }
 
     // Slot syntax: verter provides rich hover; type provider returns unhelpful
@@ -397,7 +395,7 @@ pub(super) async fn handle_hover(
             if let Some(doc) = server.documents.get(uri) {
                 if let Some(carrier_offset) = doc.line_index.position_to_offset(position) {
                     if hover::is_on_slot_syntax(carrier_offset, &analysis) {
-                        return settle(verter_result);
+                        return Ok(verter_result);
                     }
                 }
             }
@@ -488,7 +486,7 @@ pub(super) async fn handle_hover(
 
             // If TSGO returned a result, merge and return.
             if type_hover.is_some() {
-                return settle(merge::merge_hover(
+                return Ok(merge::merge_hover(
                     verter_result,
                     type_hover,
                     &ctx.mapper,
@@ -534,7 +532,7 @@ pub(super) async fn handle_hover(
                                         let redirect_hover = redirect_hover.filter(|_| {
                                             server.provider_context_still_valid(uri, &ctx)
                                         });
-                                        return settle(merge::merge_hover(
+                                        return Ok(merge::merge_hover(
                                             verter_result,
                                             redirect_hover,
                                             &ctx.mapper,
@@ -551,7 +549,7 @@ pub(super) async fn handle_hover(
                 }
             }
 
-            return settle(merge::merge_hover(
+            return Ok(merge::merge_hover(
                 verter_result,
                 None,
                 &ctx.mapper,
@@ -571,7 +569,7 @@ pub(super) async fn handle_hover(
     // Early returns (virtual file, child-hover, type-provider merge)
     // intentionally skip enrichment for now; the opt-in feature
     // targets the common "verter-only hover on a Vue binding" case.
-    settle(enrich_hover_with_provenance(
+    Ok(enrich_hover_with_provenance(
         server,
         uri,
         position,
