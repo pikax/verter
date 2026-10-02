@@ -112,11 +112,14 @@ impl TsserverEngineBackend {
 
     /// The serving identity a [`CertifiedTypeEngineBinding`] is certified over.
     ///
-    /// Composed ONLY from facts this backend observed, never assumed: the
-    /// negotiated host version it was constructed with (the same string its
-    /// handshake reported as `EngineCapabilities::reported_version`), the
-    /// carrier-store wire contract this publisher writes and the plugin reads
-    /// ([`CARRIER_STORE_WIRE_PIN`]), and the membership session generation the
+    /// Composed ONLY from facts this backend observed or contracts this
+    /// backend itself declares, never from a placeholder: the negotiated host
+    /// version it was constructed with (the same string its handshake reported
+    /// as `EngineCapabilities::reported_version`), the carrier-store wire
+    /// contract this publisher writes ([`CARRIER_STORE_WIRE_PIN`]) — a locally
+    /// authored FORMAT pin whose TypeScript readers mirror the number as a
+    /// literal and fail closed on a mismatch, so it is a declared contract and
+    /// not a negotiated observation — and the membership session generation the
     /// ledger is advertising under right now. A different serving session — a
     /// new generation, a different wire contract — composes a different observed
     /// profile, so one session's facts cannot launder into another session's

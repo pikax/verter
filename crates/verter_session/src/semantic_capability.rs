@@ -41,14 +41,17 @@
 //! independent, so it is the only cross-snapshot cache-candidate key. The
 //! flight is [`SemanticFlightKey`] = (`QueryIdentity`, `InputBasisId`): the
 //! basis the answer will be attributed to, never a cache key. A result whose
-//! basis is superseded before publication is returned to its caller and
-//! discarded, never warmed; degraded outcomes never warm. The dormant closure
-//! states this boundary; the activation block (TCM4) implements it.
+//! basis is superseded before publication is REFUSED at the seam
+//! ([`CertifiedTypeEngineBinding::publish_admitted`]) rather than returned to
+//! its caller and dropped; degraded outcomes never warm.
 //!
-//! # Dormant
+//! # What is still dormant
 //!
-//! No production route reaches this module. Activation is a separate, atomic
-//! step that replaces the route it displaces rather than answering beside it.
+//! This module is live: the carrier publish path certifies a
+//! [`CertifiedTypeEngineBinding`] before any snapshot reaches a store. The
+//! MAPPING half ([`crate::content_mapper`]) is the dormant one — no production
+//! route reaches it, and its activation is a separate, atomic step that
+//! replaces the route it displaces rather than answering beside it.
 
 use std::sync::Arc;
 
@@ -262,11 +265,17 @@ const fn serve_mode_discriminant(mode: ServeMode) -> u32 {
 
 /// Descriptor the observed engine profile hashes through. Every input is a
 /// fact the backend negotiated or the serving session reported — never a
-/// default someone assumed. The serving identity (mode, wire pin, session
-/// generation) is a first-class dimension: an OWNED and a SHARED identity
-/// over the same project and version never compose the same profile, so one
-/// engine's facts cannot launder into the other's question identities. The
-/// bound project and its env dimensions pin whose facts these are.
+/// default someone assumed — with one named exception: `wire_pin` is the local
+/// publisher's carrier-store FORMAT pin, not something the peer reported (see
+/// `carrier_publish_store::CARRIER_STORE_WIRE_PIN`). It stays an honest
+/// dimension because it records WHICH wire contract this publisher writes, so
+/// a differently pinned publisher can never compose the same profile; it is
+/// not evidence of what the peer currently speaks. The serving identity (mode,
+/// wire pin, session generation) is a first-class dimension: an OWNED and a
+/// SHARED identity over the same project and version never compose the same
+/// profile, so one engine's facts cannot launder into the other's question
+/// identities. The bound project and its env dimensions pin whose facts these
+/// are.
 struct ObservedEngineProfile<'a> {
     reported_version: &'a str,
     static_module_resolution_map: bool,
@@ -316,10 +325,11 @@ pub enum CertificationRefusal {
 /// The sole route by which a TypeScript engine's answer enters the semantic
 /// plane. A witness, not a handle: holding one means a project binding was
 /// resolved (the [`BoundProject`] it was certified over), the engine's
-/// capability interpretation was observed, the serving session (mode, wire
-/// pin, generation) was identified and recorded in the profile that composes
-/// every [`QueryIdentity`] minted under it, and the basis the answer will be
-/// attributed to is the one named at certification.
+/// capability interpretation was observed, the serving session was identified
+/// (mode, session generation) and its wire contract declared (wire pin),
+/// recorded in the profile that composes every [`QueryIdentity`] minted under
+/// it, and the basis the answer will be attributed to is the one named at
+/// certification.
 ///
 /// It mints no engine, holds no callback, and reaches no backend: a caller
 /// cannot ask it a question, only compose the identities a certified flight
@@ -383,9 +393,11 @@ impl CertifiedTypeEngineBinding {
     }
 
     /// The basis answers will be attributed to. Supersession after
-    /// certification is the flight runtime's publication rule to enforce, not
-    /// this witness's: results from a superseded basis are returned and
-    /// discarded, never warmed.
+    /// certification is refused AT this witness, not left to the flight
+    /// runtime downstream: [`Self::publish_admitted`] admits only a snapshot
+    /// carrying this exact basis, and the engine seam refuses before the store
+    /// write, so a superseded result is never produced to be returned, let
+    /// alone warmed.
     #[must_use]
     pub fn input_basis(&self) -> &InputBasisId {
         &self.input_basis
