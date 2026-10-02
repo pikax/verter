@@ -201,10 +201,11 @@ pub(super) async fn handle_hover(
         .timer("hover", Some(uri.as_str().to_string()));
     // The whole response settles against a basis captured after the route's
     // current-file repair. A diagnostics-generation-only advance during the
-    // provider await (this request's own repair, a cold native hydration, or a
-    // background sync) repeats the repair and recomputes once against a fresh
-    // basis captured after it; an edit,
-    // close/reopen or workspace change still answers `ContentModified`.
+    // provider await (this request's own repair, a cold native hydration, a
+    // background sync, or an importer re-armed by a dependency's settled edit)
+    // repeats the repair and recomputes against a fresh basis captured after
+    // it, until one attempt observes no move; an edit, close/reopen or
+    // workspace change still answers `ContentModified`.
     server
         .settle_request_with_generation_retry(uri, || handle_hover_attempt(server, &params))
         .await
@@ -319,7 +320,7 @@ async fn handle_hover_attempt(
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
                 // A cold native projection can hydrate an imported declaration
                 // and advance the diagnostics generation; `handle_hover`'s
-                // settlement recomputes once and never carries this payload
+                // settlement recomputes and never carries this payload
                 // into the new basis.
                 return Ok(Some(child_hover));
             }

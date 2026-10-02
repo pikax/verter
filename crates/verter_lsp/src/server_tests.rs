@@ -24319,8 +24319,9 @@ fn tsgo_resolve_envelope_item(
     }
 }
 
-/// Generation-only drift permits one recomputation; document and ownership races
-/// cannot rebase the original request, including during that recomputation.
+/// Generation-only drift recomputes until an attempt observes no move (bounded
+/// against unending churn); document and ownership races cannot rebase the
+/// original request, including during a recomputation.
 #[tokio::test]
 async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_document_races() {
     let source =
@@ -24328,6 +24329,7 @@ async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_docum
     for change in [
         "steady",
         "generation",
+        "twice",
         "edit",
         "reopen",
         "workspace",
@@ -24350,6 +24352,7 @@ async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_docum
                     .get_diagnostics_generation(canonical);
                 if change == "repeated"
                     || (attempt == 0 && matches!(change, "generation" | "retry_edit"))
+                    || (attempt < 2 && change == "twice")
                 {
                     server
                         .documents
@@ -24368,13 +24371,18 @@ async fn auxiliary_settlement_recomputes_generation_drift_without_rebasing_docum
                 std::future::ready(Ok(Some((attempt, generation))))
             })
             .await;
-        let retried = matches!(change, "generation" | "repeated" | "retry_edit");
-        assert_eq!(calls.get(), if retried { 2 } else { 1 }, "{change}");
-        if matches!(change, "steady" | "generation") {
+        let expected_calls = match change {
+            "generation" | "retry_edit" => 2,
+            "twice" => 3,
+            "repeated" => super::GENERATION_ONLY_RECOMPUTE_LIMIT + 1,
+            _ => 1,
+        };
+        assert_eq!(calls.get(), expected_calls, "{change}");
+        if matches!(change, "steady" | "generation" | "twice") {
             assert_eq!(
                 response.unwrap(),
                 Some((
-                    usize::from(retried),
+                    expected_calls - 1,
                     server
                         .documents
                         .host()
@@ -34206,20 +34214,63 @@ async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
     }
 }
 
+/// Arm `moves` diagnostics-generation advances on `path`, one per provider
+/// query: each advance re-arms the one-shot seam for the next query, so every
+/// recomputation observes a fresh generation-only move until `moves` run out.
+fn arm_generation_moves(
+    provider: &Arc<MockTypeProvider>,
+    documents: &Arc<crate::documents::DocumentRegistry>,
+    path: &str,
+    canonical: &'static str,
+    moves: usize,
+) {
+    if moves == 0 {
+        return;
+    }
+    let rearm_provider = Arc::clone(provider);
+    let rearm_documents = Arc::clone(documents);
+    let rearm_path = path.to_string();
+    provider.set_on_query(
+        path,
+        Box::new(move || {
+            rearm_documents
+                .host()
+                .bump_diagnostics_generation(canonical);
+            arm_generation_moves(
+                &rearm_provider,
+                &rearm_documents,
+                &rearm_path,
+                canonical,
+                moves - 1,
+            );
+        }),
+    );
+}
+
 /// A diagnostics-generation-only advance during the provider await (its own
-/// repair, a native hydration or a background sync) is not a content change:
-/// hover recomputes once against a fresh basis and answers the recomputed
-/// provider result instead of `ContentModified`. A second advance during the
-/// recomputation still fails closed.
+/// repair, a native hydration, a background sync, or an open importer re-armed
+/// by a dependency's settled edit) is not a content change: hover recomputes
+/// against a fresh basis and answers the recomputed provider result instead of
+/// `ContentModified`. Opening several imported files back to back re-arms the
+/// importer once per file, so the recomputation itself can observe the next
+/// move; hover keeps recomputing until one attempt observes none. Only churn
+/// that outlasts the recompute bound fails closed.
 #[tokio::test]
-async fn hover_recomputes_once_when_only_the_diagnostics_generation_moves() {
+async fn hover_recomputes_until_the_diagnostics_generation_stops_moving() {
     let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>{{ width }}</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
     let canonical = "/workspace/src/App.vue";
+    let limit = super::GENERATION_ONLY_RECOMPUTE_LIMIT;
     for (route, needle, offset) in [
         ("provider merge", "{{ width }}", 3),
         ("v-bind", "v-bind(width)", 8),
     ] {
-        for repeated in [false, true] {
+        for (moves, answers) in [
+            (1, true),
+            (2, true),
+            (3, true),
+            (limit, true),
+            (limit + 1, false),
+        ] {
             let provider = Arc::new(MockTypeProvider::new());
             let service = make_hover_test_service_tsgo(provider.clone());
             let server = service.inner();
@@ -34246,44 +34297,25 @@ async fn hover_recomputes_once_when_only_the_diagnostics_generation_moves() {
                     .count()
             };
 
-            if !repeated {
-                let documents = Arc::clone(&server.documents);
-                provider.set_on_query(
-                    &path,
-                    Box::new(move || documents.host().bump_diagnostics_generation(canonical)),
-                );
-            } else {
-                // Re-arm the one-shot seam from inside the first query so the
-                // recomputation observes a second generation advance.
-                let rearm_provider = Arc::clone(&provider);
-                let documents = Arc::clone(&server.documents);
-                let rearm_path = path.clone();
-                provider.set_on_query(
-                    &path,
-                    Box::new(move || {
-                        documents.host().bump_diagnostics_generation(canonical);
-                        let documents = Arc::clone(&documents);
-                        rearm_provider.set_on_query(
-                            &rearm_path,
-                            Box::new(move || {
-                                documents.host().bump_diagnostics_generation(canonical)
-                            }),
-                        );
-                    }),
-                );
-            }
+            arm_generation_moves(&provider, &server.documents, &path, canonical, moves);
             provider.clear_calls();
             let result = server.hover(hover_params(&uri, position)).await;
-            if repeated {
+            if !answers {
                 assert!(
                     matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
-                    "{route}: a second generation advance must fail closed, got {result:?}"
+                    "{route}: churn past the recompute bound must fail closed, got {result:?}"
                 );
+                assert_eq!(
+                    hover_calls(&provider),
+                    limit + 1,
+                    "{route}: the bound caps the recomputations"
+                );
+                drop(service);
                 continue;
             }
             let hover = result
                 .unwrap_or_else(|error| {
-                    panic!("{route}: a generation-only move must recompute, got {error:?}")
+                    panic!("{route}: {moves} generation-only moves must recompute, got {error:?}")
                 })
                 .unwrap_or_else(|| panic!("{route}: the recomputed hover must answer"));
             let HoverContents::Markup(contents) = hover.contents else {
@@ -34296,11 +34328,103 @@ async fn hover_recomputes_once_when_only_the_diagnostics_generation_moves() {
             );
             assert_eq!(
                 hover_calls(&provider),
-                2,
-                "{route}: exactly one recomputation re-queries the provider"
+                moves + 1,
+                "{route}: one recomputation per generation-only move, then a settled answer"
             );
             drop(service);
         }
+    }
+}
+
+/// Definition settles its provider leg against a basis captured after its
+/// repair. Generation-only moves during the provider await (several, as when
+/// imported files open back to back) recompute that leg instead of answering
+/// `ContentModified`; churn past the recompute bound still fails closed.
+#[tokio::test]
+async fn definition_recomputes_until_the_diagnostics_generation_stops_moving() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>{{ width }}</div></template>\n";
+    let canonical = "/workspace/src/App.vue";
+    let limit = super::GENERATION_ONLY_RECOMPUTE_LIMIT;
+    for (moves, answers) in [(0, true), (2, true), (limit + 1, false)] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let service = make_hover_test_service_tsgo(provider.clone());
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, canonical, source);
+        server.ensure_current_file_synced(&uri).await;
+        let position = find_document_position(server, &uri, "{{ width }}", 3);
+        let ctx = synced_type_provider_context(server, &uri).await;
+        let query_offset = merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("the template token maps into the IDE surface");
+        let target_range = range_for_authored_snippet(server, &uri, "width");
+        let target_start = merge::carrier_position_to_tsx_offset_validated(
+            &target_range.start,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("the declaration maps into the IDE surface");
+        provider.set_definitions(
+            &ctx.tsx_path,
+            query_offset,
+            vec![TypeLocation {
+                path: ctx.tsx_path.clone(),
+                start: target_start,
+                end: target_start + "width".len() as u32,
+            }],
+        );
+        let definition_calls = |provider: &MockTypeProvider| {
+            provider
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MockCall::GetDefinition { .. }))
+                .count()
+        };
+
+        arm_generation_moves(
+            &provider,
+            &server.documents,
+            &ctx.tsx_path,
+            canonical,
+            moves,
+        );
+        provider.clear_calls();
+        let result = server
+            .goto_definition(goto_definition_params(&uri, position))
+            .await;
+        if !answers {
+            assert!(
+                matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                "churn past the recompute bound must fail closed, got {result:?}"
+            );
+            assert_eq!(definition_calls(&provider), limit + 1);
+            drop(service);
+            continue;
+        }
+        let locations = definition_locations(
+            result
+                .unwrap_or_else(|error| {
+                    panic!("{moves} generation-only moves must recompute, got {error:?}")
+                })
+                .expect("the recomputed definition must answer"),
+        );
+        assert!(
+            locations
+                .iter()
+                .any(|loc| loc.uri == uri && loc.range == target_range),
+            "definition lands on the authored declaration after {moves} moves: {locations:?}"
+        );
+        assert_eq!(
+            definition_calls(&provider),
+            moves + 1,
+            "one provider recomputation per generation-only move"
+        );
+        drop(service);
     }
 }
 
