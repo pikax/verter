@@ -202,10 +202,11 @@ pub(super) async fn handle_hover(
     // The whole response settles against a basis captured after the route's
     // current-file repair. A diagnostics-generation-only advance during the
     // provider await (this request's own repair, a cold native hydration, or a
-    // background sync) recomputes once against a fresh basis; an edit,
+    // background sync) repeats the repair and recomputes once against a fresh
+    // basis captured after it; an edit,
     // close/reopen or workspace change still answers `ContentModified`.
     server
-        .settle_foreground_with_generation_retry(uri, || handle_hover_attempt(server, &params))
+        .settle_request_with_generation_retry(uri, || handle_hover_attempt(server, &params))
         .await
 }
 
