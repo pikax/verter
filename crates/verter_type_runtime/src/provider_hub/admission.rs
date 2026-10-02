@@ -982,16 +982,49 @@ where
                     }
                 }
                 Err(AdmissionRefusal::StaleBasis) => {
-                    // A BASIS-ONLY drift (a content-generation bump while the
-                    // write was awaited): the engine itself is healthy, so
-                    // retiring it — or arming the crash monitor a lazy attach
-                    // answers to — would take a shared provider down for a
-                    // condition its own recovery cannot repair. Compensate the
-                    // ONE written path instead: the engine must not keep
-                    // serving this admission's state, and a fresh admission
-                    // re-writes it through the ordinary sync path.
-                    let _ = serving.provider.close_file(path).await;
-                    Err(AdmissionRefusal::StaleBasis)
+                    // Basis drift alone does not make the engine unhealthy.
+                    // Withdraw this write instead of restarting it: a fresh
+                    // admission can then reapply on the same incarnation.
+                    if serving.provider.close_file(path).await.is_err() {
+                        // The write landed but removal is unconfirmed. Retire
+                        // this incarnation through the lifecycle owner: a
+                        // first overlay has no marker from which a later sweep
+                        // could recover withdrawal ownership. The transition
+                        // itself must not run on this task — it travels under
+                        // the issuer's request deadline (see
+                        // [`super::detach_application`]), and recovery that
+                        // outlives that bound belongs to the crash monitor's
+                        // own task, exactly like a failed forward.
+                        self.disposition_after_admitted_write_failure(&serving)
+                            .await;
+                        // The incarnation no longer serves (or is being
+                        // retired fail-closed): reporting a healthy basis
+                        // drift here would invite an immediate reapply
+                        // against an engine that is going away.
+                        Err(AdmissionRefusal::ProviderWriteFailed)
+                    } else {
+                        // Keep the epoch check and receipt release atomic
+                        // with replacement: the serving read guard stays held
+                        // across the removal (a named binding drops at the
+                        // end of this block, not at the check), so an
+                        // incarnation installed later cannot publish its own
+                        // receipt for the path before this release lands.
+                        // Compensation must not erase a new incarnation's
+                        // receipt for the same path.
+                        let current = self
+                            .state
+                            .shared
+                            .serving
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if current
+                            .as_ref()
+                            .is_some_and(|current| current.epoch == serving.epoch)
+                        {
+                            super::applied_map(&self.state.shared).remove(path);
+                        }
+                        Err(AdmissionRefusal::StaleBasis)
+                    }
                 }
                 Err(_) => {
                     // The engine was replaced mid-write (or no longer serves):
