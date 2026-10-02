@@ -1,7 +1,7 @@
 # Performance gates — Verter Semantic Signature Kernel
 
 The §12 work-accounting and performance gates of
-[`docs/arch/signature-kernel.md`](../../arch/signature-kernel.md), mapped to
+[`docs/arch/signature-kernel.md`](https://github.com/pikax/verter/blob/main/docs/arch/signature-kernel.md), mapped to
 the executable evidence that holds each one.
 
 **This document records structure, not numbers.** Latency distributions,
