@@ -5880,6 +5880,62 @@ async fn cancelling_the_issuer_of_an_inflight_actor_overlay_lets_it_settle() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn retired_withdrawal_settlement_preserves_replacement_receipt() {
+    use crate::traits::AppliedContent;
+
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let hub = &harness.provider;
+    let path = "/w/overlay.ts";
+    hub.open_file(path, "old bytes").await.unwrap();
+    let epoch = hub.serving_epoch().unwrap();
+    let gate = hub
+        .state
+        .shared
+        .withdrawal_settlement_gate
+        .get_or_init(|| (Notify::new(), Semaphore::new(0)));
+    // Release the detached settlement even if a preceding assertion panics.
+    struct ResumeOnDrop<'a>(&'a Semaphore);
+    impl Drop for ResumeOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.add_permits(1);
+        }
+    }
+    let resume = ResumeOnDrop(&gate.1);
+    let withdrawing = Arc::clone(hub);
+    let withdrawal = tokio::spawn(async move { withdrawing.retract_overlay(epoch, path).await });
+    gate.0.notified().await;
+    assert!(matches!(
+        initial.applied_content(path),
+        AppliedContent::NotApplied
+    ));
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    let fresh_epoch = hub.serving_epoch().unwrap();
+    assert!(fresh_epoch > epoch);
+    hub.update_file(path, "replacement bytes").await.unwrap();
+    assert!(
+        matches!(hub.applied_content(path), AppliedContent::Applied(bytes)
+        if bytes.as_ref() == "replacement bytes")
+    );
+
+    drop(resume);
+    let result = withdrawal.await.unwrap();
+    assert!(
+        matches!(hub.applied_content(path), AppliedContent::Applied(bytes)
+        if bytes.as_ref() == "replacement bytes"),
+        "a retired close erased the replacement receipt"
+    );
+    assert!(result.is_err(), "a retired close must settle as stale");
+    assert_eq!(hub.serving_epoch(), Some(fresh_epoch));
+    assert!(!replacement.calls().iter().any(|call| matches!(call,
+        MockCall::CloseFile { path: closed } if closed == path)));
+}
+
 /// A withdrawal owns its whole settlement, not just the physical close: an
 /// issuer that stops waiting while the engine closes the path must still
 /// leave no applied receipt behind once the close succeeds.
