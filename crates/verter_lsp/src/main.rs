@@ -106,7 +106,7 @@ async fn serve() {
     };
 
     // Deferred client cell — populated inside LspService::build, used by
-    // ResilientTypeProvider's crash monitor to send user notifications.
+    // ProviderHub's crash monitor to send user notifications.
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
 
     // Provider selection: identity-based serving order (editor tsgo → editor
@@ -991,7 +991,10 @@ fn editor_tsserver_topology(
 async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
-) -> Result<Arc<dyn TypeProvider>, String> {
+) -> Result<
+    Arc<verter_type_runtime::provider_hub::ProviderHub<verter_lsp::tsgo::ipc::TsgoOwnedProvider>>,
+    String,
+> {
     try_spawn_tsgo_with_request(
         workspace_root,
         client_cell,
@@ -1029,7 +1032,10 @@ async fn try_spawn_tsgo_with_request(
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     request: Option<verter_tsgo_api::toolchain::discovery::ResolutionRequest>,
     announcements: tsgo_resilient::OwnedStartAnnouncements,
-) -> Result<Arc<dyn TypeProvider>, String> {
+) -> Result<
+    Arc<verter_type_runtime::provider_hub::ProviderHub<verter_lsp::tsgo::ipc::TsgoOwnedProvider>>,
+    String,
+> {
     // The SPAWN PRECONDITION, checked FIRST: owned tsgo is project-bound, so
     // require AT LEAST ONE configured project ANYWHERE under the workspace
     // (bounded — prunes node_modules; accepts `packages/*/tsconfig.json`
@@ -1105,7 +1111,9 @@ async fn try_spawn_tsgo_with_request(
 /// under the rendezvous evidence, additive + fail-closed (it never displaces OWNED and
 /// never bypasses the OWNED gate).
 fn wrap_owned_admission(
-    owned: Arc<dyn TypeProvider>,
+    owned: Arc<
+        verter_type_runtime::provider_hub::ProviderHub<verter_lsp::tsgo::ipc::TsgoOwnedProvider>,
+    >,
     host: &Arc<VerterHost>,
 ) -> Arc<dyn TypeProvider> {
     Arc::new(TsgoCompositeProvider::new(owned, Arc::clone(host), None)) as Arc<dyn TypeProvider>
@@ -1167,7 +1175,7 @@ fn wrap_shared_first_admission(
                 try_spawn_tsgo_with_request(&workspace_root, &client_cell, None, announcements)
                     .await;
             match spawned {
-                Ok(provider) => Ok(provider),
+                Ok(provider) => Ok(provider as Arc<dyn TypeProvider>),
                 Err(tsgo_reason) => {
                     tracing::warn!(
                         "managed tsgo activation failed ({tsgo_reason}); \
@@ -1192,7 +1200,7 @@ fn wrap_shared_first_admission(
                 }
             }
         }
-    })) as Arc<dyn TypeProvider>;
+    }));
     let shared = try_attach_shared_tsgo(args, host, workspace_root);
     Arc::new(TsgoCompositeProvider::new(
         fallback,

@@ -183,6 +183,15 @@ pub fn disposition_for_applied_bytes(
 }
 
 pub trait TypeProvider: Send + Sync {
+    /// Supply workspace facts to nested hub owners. Raw protocol adapters have
+    /// no admission authority and do not consume the resolver. A composite's
+    /// managed slot must be a typed hub, not a raw adapter.
+    fn set_generated_unit_resolver(
+        &self,
+        _resolver: Arc<crate::provider_hub::GeneratedUnitResolver>,
+    ) -> Result<(), crate::provider_hub::AdmissionRefusal> {
+        Ok(())
+    }
     /// Preserve the load's disposition across router/wrapper boundaries.
     fn load_file_with_disposition<'a>(
         &'a self,

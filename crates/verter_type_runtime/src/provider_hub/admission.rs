@@ -57,6 +57,20 @@ pub struct ProjectBindingInput {
     current_basis: Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>,
 }
 
+/// Workspace facts for a generated unit. This is input to hub admission, never
+/// authorization to write to an engine. Cold desired state retains bytes only;
+/// the resolver is called again before replay into a new incarnation.
+pub struct GeneratedUnitInput {
+    pub binding: ProjectBindingInput,
+    pub units: Vec<CanonicalPath>,
+    pub proof: GeneratedUnitAdmission,
+}
+
+/// `None` identifies an ordinary authored file; generated paths return facts or
+/// a typed refusal. The resolver owns workspace observation, not admission.
+pub type GeneratedUnitResolver =
+    dyn Fn(&str) -> Option<Result<GeneratedUnitInput, AdmissionRefusal>> + Send + Sync;
+
 impl ProjectBindingInput {
     #[must_use]
     pub fn new(
@@ -151,7 +165,7 @@ impl ProjectWitness {
 /// Hub-issued capability covering one complete, nonempty generated write set.
 #[derive(Clone)]
 pub struct AdmittedRequest {
-    witness: ProjectWitness,
+    pub(super) witness: ProjectWitness,
     units: Vec<CanonicalPath>,
 }
 
@@ -312,6 +326,7 @@ impl AdmittedRequest {
 pub(super) struct AdmissionState {
     bindings: HashMap<String, ProjectWitness>,
     requests: HashMap<(String, String, Vec<CanonicalPath>), AdmittedRequest>,
+    managed_requests: HashMap<String, AdmittedRequest>,
 }
 
 fn provider_identity<P: ?Sized>(provider: &Arc<P>) -> usize {
@@ -338,8 +353,40 @@ pub(super) fn membership_inputs_current(admission: &AdmittedRequest) -> bool {
     })
 }
 
+/// Validate membership of bytes already replayed into this incarnation. A
+/// content edit can evict the warm binding without excluding those units.
+/// This checkpoint never authorizes a live write, query or warm admission.
+pub(super) fn check_replay_membership_for_serving<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    request: &AdmittedRequest,
+) -> Result<(), AdmissionRefusal> {
+    let witness = &request.witness.0;
+    if witness.hub_identity != std::ptr::from_ref(shared) as usize
+        || serving.epoch != witness.epoch
+        || provider_identity(&serving.provider) != witness.provider_identity
+    {
+        return Err(AdmissionRefusal::StaleProvider);
+    }
+    if !membership_inputs_current(request) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    Ok(())
+}
+
 fn check_witness_current<P: ?Sized>(
     shared: &Shared<P>,
+    witness: &ProjectWitness,
+) -> Result<(), AdmissionRefusal> {
+    let serving = shared
+        .serving()
+        .ok_or(AdmissionRefusal::NoServingProvider)?;
+    check_witness_for_serving(shared, &serving, witness)
+}
+
+pub(super) fn check_witness_for_serving<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
     witness: &ProjectWitness,
 ) -> Result<(), AdmissionRefusal> {
     let witness = &witness.0;
@@ -349,9 +396,6 @@ fn check_witness_current<P: ?Sized>(
     if (witness.input.current_basis)().as_ref() != Some(&witness.input.basis) {
         return Err(AdmissionRefusal::StaleBasis);
     }
-    let serving = shared
-        .serving()
-        .ok_or(AdmissionRefusal::NoServingProvider)?;
     if serving.epoch != witness.epoch
         || provider_identity(&serving.provider) != witness.provider_identity
     {
@@ -366,6 +410,224 @@ fn check_witness_current<P: ?Sized>(
         return Err(AdmissionRefusal::StaleBasis);
     }
     Ok(())
+}
+
+fn validate_generated_input(input: &GeneratedUnitInput) -> Result<(), AdmissionRefusal> {
+    let binding = &input.binding;
+    if binding.source.is_empty() || binding.project.is_empty() {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if (binding.current_basis)().as_ref() != Some(&binding.basis) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    let GeneratedUnitAdmission::Admitted(proof) = &input.proof else {
+        return Err(AdmissionRefusal::GeneratedUnitExcluded);
+    };
+    if proof.tsconfig_path() != &CanonicalPath::new(&binding.project) {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if proof.snapshot_identity() != Arc::as_ptr(&binding.basis.publication.snapshot) as usize {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    let mut units = input.units.clone();
+    units.sort();
+    units.dedup();
+    if units.is_empty() || proof.units() != units {
+        return Err(AdmissionRefusal::IncompleteGeneratedProof);
+    }
+    Ok(())
+}
+
+/// Validate cold intent, or bind it to this exact serving/replay incarnation.
+/// The warm request lives in the same hub admission store as explicit requests.
+pub(super) fn generated_request<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: Option<&Serving<P>>,
+    path: &str,
+    expected_source: Option<&str>,
+    expected_project: Option<&str>,
+) -> Result<Option<AdmittedRequest>, AdmissionRefusal> {
+    let Some(resolve) = shared.generated_unit_resolver.get() else {
+        return Ok(None);
+    };
+    if let Some(serving) = serving {
+        let cached = shared
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .managed_requests
+            .get(path)
+            .cloned();
+        if let Some(request) = cached {
+            if check_witness_for_serving(shared, serving, &request.witness).is_ok() {
+                if expected_source.is_some_and(|s| s != request.witness.source())
+                    || expected_project.is_some_and(|p| p != request.witness.project())
+                {
+                    return Err(AdmissionRefusal::WrongProject);
+                }
+                return Ok(Some(request));
+            }
+        }
+    }
+    let Some(input) = resolve(path) else {
+        return Ok(None);
+    };
+    let input = input?;
+    validate_generated_input(&input)?;
+    if expected_source.is_some_and(|s| s != input.binding.source)
+        || expected_project.is_some_and(|p| p != input.binding.project)
+    {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if !input.units.contains(&CanonicalPath::new(path)) {
+        return Err(AdmissionRefusal::IncompleteGeneratedProof);
+    }
+    let Some(serving) = serving else {
+        // No provider epoch exists. This permits holding desired bytes, never
+        // speculative writes, applied receipts, or a reusable admission.
+        return Ok(None);
+    };
+    let witness = bind_project_for_serving(shared, serving, input.binding)?;
+    let mut units = input.units;
+    units.sort();
+    units.dedup();
+    let request = AdmittedRequest { witness, units };
+    check_witness_for_serving(shared, serving, &request.witness)?;
+    let mut state = shared.admission.lock().unwrap_or_else(|e| e.into_inner());
+    if state.managed_requests.len() >= 4096 {
+        state.managed_requests.clear();
+    }
+    state
+        .managed_requests
+        .insert(path.to_string(), request.clone());
+    Ok(Some(request))
+}
+
+/// Rebind a replayed unit after a content-only edit without repeating its
+/// provider write. A changed membership basis still invalidates the install.
+pub(super) fn refresh_replay_request<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    path: &str,
+    request: &mut AdmittedRequest,
+) -> Result<(), AdmissionRefusal> {
+    match check_witness_for_serving(shared, serving, &request.witness) {
+        Ok(()) => return Ok(()),
+        Err(AdmissionRefusal::StaleBasis) if membership_inputs_current(request) => {}
+        Err(reason) => return Err(reason),
+    }
+    let refreshed = generated_request(
+        shared,
+        Some(serving),
+        path,
+        Some(request.witness.source()),
+        Some(request.witness.project()),
+    )?
+    .ok_or(AdmissionRefusal::MissingGeneratedProof)?;
+    // The resolver observes the workspace independently of the actor. Do not
+    // let a publication change during re-admission certify earlier writes.
+    if !membership_inputs_current(request) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    *request = refreshed;
+    check_witness_for_serving(shared, serving, &request.witness)
+}
+
+pub(super) fn managed_settlement_required<P: ?Sized>(
+    shared: &Shared<P>,
+    mutation: &super::DesiredMutation,
+) -> bool {
+    shared.generated_unit_resolver.get().is_some() && mutation.closed_path().is_none()
+}
+
+pub(super) fn generated_mutation_requests<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: Option<&Serving<P>>,
+    mutation: &super::DesiredMutation,
+) -> Result<Vec<AdmittedRequest>, AdmissionRefusal> {
+    if !managed_settlement_required(shared, mutation) {
+        return Ok(Vec::new());
+    }
+    let mut requests = Vec::new();
+    for (ordinal, path) in mutation.touched_paths().into_iter().enumerate() {
+        use super::DesiredMutation;
+        let expected = match mutation {
+            DesiredMutation::RegisterCarrier {
+                source_path,
+                project_file_name,
+                ..
+            }
+            | DesiredMutation::RegisterCarrierMetadata {
+                source_path,
+                project_file_name,
+                ..
+            }
+            | DesiredMutation::ActivateCarrier {
+                source_path,
+                project_file_name,
+                ..
+            } => Some((source_path.as_str(), project_file_name.as_str())),
+            DesiredMutation::ActivateCarriers { members } => members
+                .get(ordinal)
+                .map(|m| (m.source_path.as_str(), m.project_file_name.as_str())),
+            _ => None,
+        };
+        if let Some(request) = generated_request(
+            shared,
+            serving,
+            &path,
+            expected.map(|(source, _)| source),
+            expected.map(|(_, project)| project),
+        )? {
+            requests.push(request);
+        }
+    }
+    Ok(requests)
+}
+
+fn bind_project_for_serving<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    input: ProjectBindingInput,
+) -> Result<ProjectWitness, AdmissionRefusal> {
+    if input.source.is_empty() || input.project.is_empty() {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if (input.current_basis)().as_ref() != Some(&input.basis) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    let key = input.source.clone();
+    let mut state = shared.admission.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(witness) = state.bindings.get(&key) {
+        let old = &witness.0;
+        if old.epoch == serving.epoch
+            && old.hub_identity == std::ptr::from_ref(shared) as usize
+            && old.provider_identity == provider_identity(&serving.provider)
+            && old.input.basis == input.basis
+            && old.input.project == input.project
+            && old.input.references == input.references
+        {
+            return Ok(witness.clone());
+        }
+    }
+    state.bindings.retain(|_, w| w.0.input.basis == input.basis);
+    state
+        .requests
+        .retain(|_, r| r.witness.0.input.basis == input.basis);
+    state
+        .managed_requests
+        .retain(|_, r| r.witness.0.input.basis == input.basis);
+    if state.bindings.len() >= 4096 {
+        state.bindings.clear();
+    }
+    let witness = ProjectWitness(Arc::new(WitnessInner {
+        input,
+        epoch: serving.epoch,
+        hub_identity: std::ptr::from_ref(shared) as usize,
+        provider_identity: provider_identity(&serving.provider),
+    }));
+    state.bindings.insert(key, witness.clone());
+    Ok(witness)
 }
 
 impl<P> ProviderHub<P>
@@ -388,58 +650,15 @@ where
         &self,
         input: ProjectBindingInput,
     ) -> Result<ProjectWitness, AdmissionRefusal> {
-        if input.source.is_empty() || input.project.is_empty() {
-            return Err(AdmissionRefusal::WrongProject);
-        }
-        if (input.current_basis)().as_ref() != Some(&input.basis) {
-            return Err(AdmissionRefusal::StaleBasis);
-        }
         let serving = self
             .state
             .shared
             .serving()
             .ok_or(AdmissionRefusal::NoServingProvider)?;
-        let key = input.source.clone();
-        let mut state = self
-            .state
-            .shared
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(witness) = state.bindings.get(&key) {
-            let old = &witness.0;
-            if old.epoch == serving.epoch
-                && old.hub_identity == Arc::as_ptr(&self.state.shared) as usize
-                && old.provider_identity == provider_identity(&serving.provider)
-                && old.input.basis == input.basis
-                && old.input.project == input.project
-                && old.input.references == input.references
-            {
-                return Ok(witness.clone());
-            }
-        }
-        // Each witness retains its published workspace. Once a new basis is
-        // observed, old bindings and warm requests cannot authorize work and
-        // must not keep their snapshots alive.
-        state
-            .bindings
-            .retain(|_, witness| witness.0.input.basis == input.basis);
-        state
-            .requests
-            .retain(|_, request| request.witness.0.input.basis == input.basis);
-        if state.bindings.len() >= 4096 {
-            state.bindings.clear();
-        }
-        let witness = ProjectWitness(Arc::new(WitnessInner {
-            input,
-            epoch: serving.epoch,
-            hub_identity: Arc::as_ptr(&self.state.shared) as usize,
-            provider_identity: provider_identity(&serving.provider),
-        }));
-        state.bindings.insert(key, witness.clone());
+        let witness = bind_project_for_serving(&self.state.shared, &serving, input)?;
+        check_witness_current(&self.state.shared, &witness)?;
         Ok(witness)
     }
-
     /// The CURRENT hub-issued witness for `source`, if one still binds the
     /// serving provider and its basis — the warm path of
     /// [`Self::bind_project`] without re-running the caller's resolver. A

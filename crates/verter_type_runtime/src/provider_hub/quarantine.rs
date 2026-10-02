@@ -39,7 +39,7 @@ pub(super) const QUARANTINE_STRIKE_THRESHOLD: u32 = 2;
 pub(super) struct QueryFingerprint {
     pub(super) method: &'static str,
     pub(super) path: String,
-    scope: Option<String>,
+    pub(super) scope: Option<String>,
     pub(super) offset: u64,
     extra: u64,
 }

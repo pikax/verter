@@ -144,6 +144,21 @@ that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
 `exclude` removes the unit's own form still refuses it. Warm same-basis requests reuse the hub admission, while an excluded,
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
+The managed composite also requires a typed `Arc<ProviderHub<P>>`; a raw
+`TypeProvider` cannot fill that slot. It installs one `GeneratedUnitResolver`
+which supplies resolver-produced binding inputs and complete workspace proofs,
+never serving authority. The hub checks these facts before recording cold
+generated state, binds them to its actual provider/epoch before live writes and
+queries, and re-resolves them before replay into each fresh incarnation. Nested
+hubs receive the same fact source and bind to their own incarnation; the
+tsserver router keeps its existing per-project hub admission. Warm managed
+requests reuse only the hub's current capability. Cold state carries no applied
+receipt, and queued writes honor cancellation and expiry before recording or
+forwarding. Closes retain their cleanup semantics. An
+excluded unit's desired editor bytes remain held but cannot replay or appear
+applied; a later admissible incarnation can restore them. Discovery loads
+continue to preserve open editor overlays. `TypeProviderError.admission_refusal`
+is a typed internal refusal and is omitted from serialization.
 The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
 authority: the composite holds a `ProviderHub<TsgoSharedProvider>` that establishes
 the attach through the re-arm door. The hub owns shared overlay content, per-carrier
@@ -206,8 +221,13 @@ does not block another project's group. An A/B/A activation across two project
 hubs keeps aliases in one ordered bulk call per delivery and sends nothing
 after withdrawal. That router seam counts hub bulk calls; live tsserver/tsgo
 process rebuild counters belong to the real-provider lane.
-Dropping a direct overlay write or withdrawal signals that incarnation's
-recovery monitor because its physical outcome is unknown.
+Cancellation before a queued overlay reaches application prevents both the
+write and retained state. Once a direct or actor overlay write, or a withdrawal,
+has reached the engine, the hub owns its acknowledgement and settlement even if
+the issuer stops waiting. Issuer cancellation alone never restarts a healthy
+engine. A failed withdrawal still signals recovery, and a successful withdrawal
+still releases its applied receipt. The original absolute request deadline
+travels with detached application; dropping the issuer does not renew it.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
@@ -217,6 +237,17 @@ re-applies idempotently (the direct shared write additionally closes its one
 path). Only a replaced publication or project generation — where the engine may
 now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
 project engine on every concurrent edit is the failure this split prevents.
+Replay re-admits a content-only drift once at each validation checkpoint against
+the same provider and epoch, without repeating provider writes. Before carrier
+activation and installation, all replay admissions are refreshed in one bounded
+pass. The final checkpoint requires unchanged membership and the exact replay
+incarnation; a later refresh's content-only edit cannot reject installation.
+Live writes and queries still require a current full-basis witness, so replay
+does not warm an earlier content binding. Changed membership fails installation.
+Managed non-close mutations whose caller deadline elapses return the typed
+`DeadlineElapsed` refusal; work still queued before application is discarded.
+Closes and mutations without a generated-unit resolver retain ordered queued
+delivery after the caller stops waiting.
 The tsserver router is the issuer that answers a basis drift with a fresh
 admission, bounded to two re-issues per operation: a query whose route expired
 `StaleBasis` while the engine answered discards that answer and is re-run under
@@ -243,7 +274,7 @@ completion unannounced forever.
 
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 
-- **Engine identity** is `(owning tsconfig, real canonical `tsserver.js`)`. Two projects that resolve the same install share one process; two projects on different TypeScript versions never do.
+- **Engine identity** is `(owning tsconfig, real canonical tsserver.js)`. Alias routes to the same project and install share one process; distinct configured projects retain separate hubs even when they resolve the same install. Projects on different TypeScript versions never share a process.
 - **Every operation is project-bound.** A provider path maps to its authored carrier source (`classify_carrier_companion`, or the publish path's registered route), then through `resolve_carrier` (`PresentSnapshotAuthoritative`) → `ProjectBinding` → `TsserverEngineBackend::ensure_project` → `BoundProject`. Discovery runs from the OWNING project's directory (`resolve_tsserver(tsdk, Some(project_dir))`), so the pnpm `node_modules/typescript` symlink canonicalizes to the real `.pnpm/typescript@<v>` install (load-bearing: tsserver finds `lib.*.d.ts` relative to its own script path).
 - **Fail-closed per project.** `NotReady` / `NoProject` / `Ambiguous` / an unresolvable or TS7+ TypeScript is a DISTINCT refusal for THAT project carrying discovery's actionable install message. It never poisons a sibling project and never borrows a sibling's engine.
 - **Lazy + singleflight.** Construction starts no process. ONE `ProviderHub` per engine identity (`tsserver/resilient.rs::hub`, `HubPolicy::explicit`) collapses concurrent cold demands onto one establishment and owns that engine's crash recovery. A failed first spawn fails that demand closed and the NEXT demand retries through the same hub; a hub whose engine has already served keeps the project through recovery — it records lifecycle updates for the replacement and fails queries closed until one serves. `shutdown` / `resync_open_files` / `update_workspace_folders` fan out to every ALLOCATED hub, including one still establishing.

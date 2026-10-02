@@ -4677,6 +4677,526 @@ async fn admitted_overlay_fixture() -> (ResilientHarness, MockProvider, super::A
     (harness, engine, admitted)
 }
 
+fn replay_drift_resolver(
+    engine: MockProvider,
+    membership_drift: bool,
+) -> Arc<super::GeneratedUnitResolver> {
+    replay_drift_resolver_with_final_edit(engine, membership_drift, None)
+}
+
+fn replay_drift_resolver_with_final_edit(
+    engine: MockProvider,
+    membership_drift: bool,
+    final_edit: Option<bool>,
+) -> Arc<super::GeneratedUnitResolver> {
+    use super::{GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.into()],
+        default_resolve_extensions: None,
+    });
+    for source in ["d:/ws/src/A.vue", "d:/ws/src/B.vue"] {
+        workspace.inject_file(source.into(), Arc::<str>::from("<template/>"));
+    }
+    workspace.inject_file(project.into(), Arc::<str>::from(r#"{"include":["src"]}"#));
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::new(
+        build_workspace_snapshot_simple(
+            vec![configured_project(
+                &workspace,
+                project,
+                root,
+                &CanonicalPath::new(root),
+                ProjectId(0),
+            )],
+            SnapshotGeneration(1),
+        ),
+    )));
+    // Every observed provider write advances the live host basis. No sleep or
+    // test-only hub path decides when replay encounters the concurrent edit.
+    let final_edit_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let final_edit_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Arc::new(move |path| {
+        let source = path.strip_suffix(".tsx")?;
+        // Arm the edit only when A is refreshed after both file writes. B's
+        // next observation delivers it, after A's fresh witness was retained.
+        if final_edit.is_some() && source.ends_with("/A.vue") && engine.calls().len() == 2 {
+            final_edit_armed.store(true, Ordering::SeqCst);
+        }
+        let reader = {
+            let engine = engine.clone();
+            let publication = Arc::clone(&publication);
+            let armed = Arc::clone(&final_edit_armed);
+            let done = Arc::clone(&final_edit_done);
+            let is_b = source.ends_with("/B.vue");
+            Arc::new(move || {
+                if is_b && armed.swap(false, Ordering::SeqCst) {
+                    done.store(true, Ordering::SeqCst);
+                }
+                let edited = done.load(Ordering::SeqCst);
+                let writes = engine.calls().len() as u64;
+                Some(ProjectBasis::new(
+                    Arc::clone(&publication),
+                    writes + 1 + u64::from(edited),
+                    if (membership_drift && writes > 0) || (final_edit == Some(true) && edited) {
+                        2
+                    } else {
+                        1
+                    },
+                ))
+            })
+        };
+        let basis = reader().unwrap();
+        let units = vec![CanonicalPath::new(path)];
+        let proof = verter_workspace::decide_generated_unit_admission(
+            &publication.snapshot,
+            &CanonicalPath::new(project),
+            &units,
+        );
+        Some(Ok(GeneratedUnitInput {
+            binding: ProjectBindingInput::new(
+                source.into(),
+                project.into(),
+                Vec::new(),
+                basis,
+                reader.clone(),
+            ),
+            units,
+            proof,
+        }))
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_replay_final_check_tolerates_only_content_drift() {
+    for membership_edit in [false, true] {
+        let engine = MockProvider::new("tsgo");
+        let notifier = Arc::new(RecordingNotifier::default());
+        let hub = ProviderHub::new(
+            TestBackend {
+                initial: parking_lot::Mutex::new(Some(engine.clone())),
+                replacement: MockProvider::new("tsgo"),
+                spawn_gate: Arc::new(Semaphore::new(0)),
+                initial_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+                respawned_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+            },
+            notifier.clone(),
+            HubPolicy::explicit(3),
+        );
+        for name in ["A", "B"] {
+            hub.open_file(&format!("d:/ws/src/{name}.vue.tsx"), name)
+                .await
+                .unwrap();
+        }
+        hub.set_generated_unit_resolver(replay_drift_resolver_with_final_edit(
+            engine.clone(),
+            false,
+            Some(membership_edit),
+        ))
+        .unwrap();
+        let established = hub.establish().await;
+        let epoch = hub.serving_epoch();
+        let shutdowns = engine.inner.shutdowns.load(Ordering::SeqCst);
+        let calls = engine.calls();
+        let applied =
+            ["A", "B"].map(|name| hub.applied_content(&format!("d:/ws/src/{name}.vue.tsx")));
+        let warm_a = hub.bound_project("d:/ws/src/A.vue");
+        let starts = notifier.started();
+        hub.shutdown().await.unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                MockCall::OpenFile {
+                    path: "d:/ws/src/A.vue.tsx".into(),
+                    content: "A".into(),
+                },
+                MockCall::OpenFile {
+                    path: "d:/ws/src/B.vue.tsx".into(),
+                    content: "B".into(),
+                },
+            ],
+            "refresh preserves ordered bytes without repeating provider writes"
+        );
+        if membership_edit {
+            assert!(established.unwrap_err().message.contains("StaleBasis"));
+            assert!(epoch.is_none());
+            assert_eq!(shutdowns, 1);
+            assert!(starts.is_empty());
+            assert!(applied
+                .iter()
+                .all(|content| matches!(content, crate::traits::AppliedContent::NotApplied)));
+        } else {
+            established.expect("a later refresh's content edit must not reject installation");
+            assert!(epoch.is_some());
+            assert_eq!(shutdowns, 0);
+            assert_eq!(starts.len(), 1);
+            assert!(
+                warm_a.is_none(),
+                "replay cannot warm a stale content binding"
+            );
+            for (name, content) in ["A", "B"].into_iter().zip(applied) {
+                assert!(matches!(content,
+                    crate::traits::AppliedContent::Applied(bytes) if bytes.as_ref() == name));
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_replay_refreshes_content_basis_but_refuses_membership_drift() {
+    for membership_drift in [false, true] {
+        let engine = MockProvider::new("tsgo");
+        let notifier = Arc::new(RecordingNotifier::default());
+        let hub = ProviderHub::new(
+            TestBackend {
+                initial: parking_lot::Mutex::new(Some(engine.clone())),
+                replacement: MockProvider::new("tsgo"),
+                spawn_gate: Arc::new(Semaphore::new(0)),
+                initial_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+                respawned_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
+            },
+            notifier.clone(),
+            HubPolicy::explicit(3),
+        );
+        for name in ["A", "B"] {
+            hub.open_file(&format!("d:/ws/src/{name}.vue.tsx"), name)
+                .await
+                .unwrap();
+        }
+        hub.register_carrier_metadata(
+            "d:/ws/src/A.vue",
+            "d:/ws/src/A.vue.tsx",
+            "A",
+            "d:/ws/tsconfig.json",
+        )
+        .await
+        .unwrap();
+        hub.register_carrier_member(
+            "d:/ws/src/B.vue",
+            "d:/ws/src/B.vue.tsx",
+            "B",
+            "d:/ws/tsconfig.json",
+        )
+        .await
+        .unwrap();
+        hub.activate_carrier_member(
+            "d:/ws/src/A.vue",
+            "d:/ws/src/A.vue.tsx",
+            "d:/ws/tsconfig.json",
+            crate::traits::CarrierScriptKind::Js,
+        )
+        .await
+        .unwrap();
+        hub.set_generated_unit_resolver(replay_drift_resolver(engine.clone(), membership_drift))
+            .unwrap();
+        let established = hub.establish().await;
+        let serving_epoch = hub.serving_epoch();
+        let calls = engine.calls();
+        let shutdowns = engine.inner.shutdowns.load(Ordering::SeqCst);
+        let starts = notifier.started();
+        let applied =
+            ["A", "B"].map(|name| hub.applied_content(&format!("d:/ws/src/{name}.vue.tsx")));
+        hub.shutdown().await.unwrap();
+        if membership_drift {
+            assert!(
+                established.is_err(),
+                "changed membership must fail replay closed"
+            );
+            assert!(serving_epoch.is_none());
+            assert_eq!(calls.len(), 1, "no later replay writes are authorized");
+            assert_eq!(shutdowns, 1);
+            assert!(starts.is_empty());
+            assert!(matches!(
+                applied[0],
+                crate::traits::AppliedContent::NotApplied
+            ));
+        } else {
+            established.expect("content-only edits must not fail engine installation");
+            assert_eq!(starts.len(), 1);
+            assert_eq!(shutdowns, 0);
+            assert_eq!(
+                calls,
+                vec![
+                    MockCall::OpenFile {
+                        path: "d:/ws/src/A.vue.tsx".into(),
+                        content: "A".into()
+                    },
+                    MockCall::OpenFile {
+                        path: "d:/ws/src/B.vue.tsx".into(),
+                        content: "B".into()
+                    },
+                    MockCall::RegisterCarrierMetadata {
+                        source_path: "d:/ws/src/A.vue".into(),
+                        companion_path: "d:/ws/src/A.vue.tsx".into(),
+                        content: "A".into(),
+                        project_file_name: "d:/ws/tsconfig.json".into()
+                    },
+                    MockCall::RegisterCarrierMember {
+                        source_path: "d:/ws/src/B.vue".into(),
+                        companion_path: "d:/ws/src/B.vue.tsx".into(),
+                        content: "B".into(),
+                        project_file_name: "d:/ws/tsconfig.json".into()
+                    },
+                    MockCall::ActivateCarrier {
+                        companion_path: "d:/ws/src/A.vue.tsx".into(),
+                        script_kind: crate::traits::CarrierScriptKind::Js
+                    },
+                ],
+                "re-admission must preserve order and parsing mode without duplicate provider work"
+            );
+            for (name, content) in ["A", "B"].into_iter().zip(applied) {
+                assert!(
+                    matches!(content, crate::traits::AppliedContent::Applied(bytes) if bytes.as_ref() == name)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_queued_mutation_deadline_is_typed_and_never_replays() {
+    use super::AdmissionRefusal;
+
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    harness
+        .provider
+        .open_file("/w/close.ts", "close me")
+        .await
+        .unwrap();
+    harness
+        .provider
+        .set_generated_unit_resolver(replay_drift_resolver(engine.clone(), false))
+        .unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *engine.inner.update_gate.lock() = Some(Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let held = tokio::spawn(async move { hub.update_file("/w/held.ts", "held").await });
+    engine.inner.update_started.notified().await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+    let unit = "d:/ws/src/A.vue.tsx";
+    let timed_out =
+        crate::deadline::with_deadline_at(deadline, harness.provider.update_file(unit, "expired"))
+            .await
+            .unwrap_err();
+    let close_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+    let close_error = crate::deadline::with_deadline_at(
+        close_deadline,
+        harness.provider.close_file("/w/close.ts"),
+    )
+    .await
+    .unwrap_err();
+    gate.add_permits(1);
+    held.await.unwrap().unwrap();
+    harness
+        .provider
+        .configure_paths("/w", serde_json::json!({}))
+        .await
+        .unwrap();
+    let calls = engine.calls();
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    let replay = replacement.calls();
+    let applied = harness.provider.applied_content(unit);
+    harness.provider.shutdown().await.unwrap();
+    assert_eq!(
+        timed_out.admission_refusal,
+        Some(AdmissionRefusal::DeadlineElapsed)
+    );
+    assert_eq!(
+        close_error.admission_refusal, None,
+        "close cleanup retains queued semantics"
+    );
+    assert!(close_error
+        .message
+        .contains("stays queued and applies in order"));
+    assert!(!calls.iter().any(|call| call_path(call) == unit));
+    assert!(calls
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/w/close.ts")));
+    assert!(!replay
+        .iter()
+        .any(|call| call_path(call) == unit || call_path(call) == "/w/close.ts"));
+    assert!(matches!(applied, crate::traits::AppliedContent::NotApplied));
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_recovery_rebinds_proof_and_interrupts_a_held_generated_write() {
+    use super::{AdmissionRefusal, GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
+    use std::future::Future;
+    use std::task::Poll;
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = "d:/ws/src/Foo.vue.tsx";
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.into()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.into(), Arc::<str>::from("<template/>"));
+    let publish = |config: &str| {
+        workspace.inject_file(project.into(), Arc::<str>::from(config));
+        Arc::new(PublishedRoot::new_vfs_only(Arc::new(
+            build_workspace_snapshot_simple(
+                vec![configured_project(
+                    &workspace,
+                    project,
+                    root,
+                    &CanonicalPath::new(root),
+                    ProjectId(0),
+                )],
+                SnapshotGeneration(1),
+            ),
+        )))
+    };
+    let publication = Arc::new(parking_lot::RwLock::new(publish(r#"{"include":["src"]}"#)));
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let engine = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), replacement.clone()).await;
+    let original_epoch = harness.provider.serving_epoch();
+    harness
+        .provider
+        .set_generated_unit_resolver(Arc::new({
+            let publication = Arc::clone(&publication);
+            let resolutions = Arc::clone(&resolutions);
+            let replacement = replacement.clone();
+            move |path| {
+                if path != unit {
+                    return None;
+                }
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                let published = Arc::clone(&publication.read());
+                let units = vec![CanonicalPath::new(unit)];
+                let proof = verter_workspace::decide_generated_unit_admission(
+                    &published.snapshot,
+                    &CanonicalPath::new(project),
+                    &units,
+                );
+                let reader = {
+                    let publication = Arc::clone(&publication);
+                    let replacement = replacement.clone();
+                    Arc::new(move || {
+                        Some(ProjectBasis::new(
+                            Arc::clone(&publication.read()),
+                            replacement.calls().len() as u64 + 1,
+                            1,
+                        ))
+                    })
+                };
+                Some(Ok(GeneratedUnitInput {
+                    binding: ProjectBindingInput::new(
+                        source.into(),
+                        project.into(),
+                        Vec::new(),
+                        ProjectBasis::new(published, replacement.calls().len() as u64 + 1, 1),
+                        reader,
+                    ),
+                    units,
+                    proof,
+                }))
+            }
+        }))
+        .unwrap();
+    harness
+        .provider
+        .open_file(unit, "unsaved initial")
+        .await
+        .unwrap();
+    harness
+        .provider
+        .load_file_background(unit, "disk")
+        .await
+        .unwrap();
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        1,
+        "warm admission must not resolve twice"
+    );
+    let wrong_project = harness
+        .provider
+        .register_carrier_metadata(source, unit, "wrong", "d:/other/tsconfig.json")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        wrong_project.admission_refusal,
+        Some(AdmissionRefusal::WrongProject)
+    );
+    *engine.inner.update_gate.lock() = Some(Arc::new(Semaphore::new(0)));
+    let hub = Arc::clone(&harness.provider);
+    let held = tokio::spawn(async move { hub.update_file(unit, "unsaved current").await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        engine.inner.update_started.notified(),
+    )
+    .await
+    .unwrap();
+    let mut cancelled = Box::pin(harness.provider.update_file(unit, "cancelled bytes"));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(cancelled.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    drop(cancelled);
+    harness.crash_current_generation();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(30), held)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err(),
+        "crash control must interrupt the suspended mutation"
+    );
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_ne!(harness.provider.serving_epoch(), original_epoch);
+    assert!(
+        matches!(harness.provider.applied_content(unit), crate::traits::AppliedContent::Applied(bytes) if bytes.as_ref() == "unsaved current")
+    );
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        3,
+        "replacement needs a fresh admission and one content-only refresh"
+    );
+    let writes_before = replacement.calls().len();
+    *publication.write() = publish(r#"{"include":["src"],"exclude":["src/**/*.vue.tsx"]}"#);
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(3).await;
+    assert_eq!(
+        replacement.calls().len(),
+        writes_before,
+        "excluded replay must write nothing"
+    );
+    assert!(matches!(
+        harness.provider.applied_content(unit),
+        crate::traits::AppliedContent::NotApplied
+    ));
+    let denied = harness.provider.get_hover(unit, 0).await.unwrap_err();
+    assert_eq!(
+        denied.admission_refusal,
+        Some(AdmissionRefusal::GeneratedUnitExcluded)
+    );
+    harness
+        .provider
+        .get_hover("d:/ws/healthy.ts", 0)
+        .await
+        .unwrap();
+    harness.provider.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_queued_overlay_never_reaches_the_engine_or_replay() {
     use super::{OverlayFileKind, OverlayMutation, OverlayPriority};
