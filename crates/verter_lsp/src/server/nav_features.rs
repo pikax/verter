@@ -627,12 +627,33 @@ pub(super) async fn handle_completion(
     // final native-only attempt keeps the commit fence through native calculation,
     // so it returns the coherent post-fence snapshot even if the pre-wait identity
     // sampled here was older.
-    for _attempt in 0..2 {
+    //
+    // Only edit, reopen and workspace races spend those two retries. A move of
+    // the diagnostics generation alone is background settlement (an imported
+    // carrier settling right after open, a resync or compile of this file), not
+    // a content change: recompute against a fresh basis, bounded as every
+    // request route is, so a cold provider answer is not demoted to the
+    // native-only list while that work drains.
+    let mut edit_races = 0;
+    let mut generation_recomputations = 0;
+    while edit_races < 2 {
         let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
         let response = handle_completion_attempt(server, &params, false).await?;
         if settlement.is_current(&server.documents, &uri) {
             return Ok(response);
         }
+        if settlement.document_and_workspace_are_current(&server.documents, &uri) {
+            if generation_recomputations == super::GENERATION_ONLY_RECOMPUTE_LIMIT {
+                break;
+            }
+            generation_recomputations += 1;
+            tracing::debug!(
+                "completion: recomputing {} after a diagnostics-generation-only move ({generation_recomputations})",
+                uri.as_str()
+            );
+            continue;
+        }
+        edit_races += 1;
         tracing::debug!(
             "completion: retrying {} after readiness basis advanced (version {:?} -> {:?})",
             uri.as_str(),

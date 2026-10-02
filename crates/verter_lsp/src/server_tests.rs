@@ -34428,6 +34428,126 @@ async fn definition_recomputes_until_the_diagnostics_generation_stops_moving() {
     }
 }
 
+/// Completion's two retries exist for edit races. Generation-only moves during
+/// the provider await (several, as when the imported carriers settle right
+/// after open) recompute the provider leg instead of spending those retries,
+/// so a typed member list is not demoted to the native-only scope list. Churn
+/// past the recompute bound still ends in the native-only attempt.
+#[tokio::test]
+async fn completion_recomputes_until_the_diagnostics_generation_stops_moving() {
+    let source = r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+
+<template>
+  <button v-for="action in actions" :disabled="action.disabled">x</button>
+</template>
+"#;
+    let canonical = "/workspace/src/App.vue";
+    let limit = super::GENERATION_ONLY_RECOMPUTE_LIMIT;
+    for (moves, answers) in [
+        (0, true),
+        (2, true),
+        (3, true),
+        (limit, true),
+        (limit + 1, false),
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let service = make_hover_test_service_tsgo(provider.clone());
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, canonical, source);
+        server.ensure_current_file_synced(&uri).await;
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let ctx = synced_type_provider_context(server, &uri).await;
+        let query_offset = merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("the member access maps into the IDE surface");
+        let member = |label: &str| crate::type_provider::protocol::Completion {
+            label: label.to_string(),
+            kind: Some(crate::type_provider::protocol::CompletionKind::Property),
+            detail: None,
+            documentation: None,
+            edit_range_start: None,
+            edit_range_end: None,
+            text_edit_new_text: None,
+            insert_text: None,
+            sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
+            data: None,
+        };
+        provider.set_completions(
+            &ctx.tsx_path,
+            query_offset,
+            vec![member("label"), member("disabled")],
+        );
+        let completion_calls = |provider: &MockTypeProvider| {
+            provider
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, MockCall::GetCompletions { path, .. } if *path == ctx.tsx_path))
+                .count()
+        };
+
+        arm_generation_moves(
+            &provider,
+            &server.documents,
+            &ctx.tsx_path,
+            canonical,
+            moves,
+        );
+        provider.clear_calls();
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{moves} generation-only moves must not fail completion: {error:?}")
+                }),
+        );
+        if !answers {
+            assert!(
+                !labels.contains(&"disabled".to_string()),
+                "churn past the recompute bound ends in the native-only attempt, got: {labels:?}"
+            );
+            assert_eq!(
+                completion_calls(&provider),
+                limit + 1,
+                "the bound caps the recomputations"
+            );
+            drop(service);
+            continue;
+        }
+        assert!(
+            labels.contains(&"disabled".to_string()) && labels.contains(&"label".to_string()),
+            "{moves} generation-only moves must answer the recomputed provider members, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"actions".to_string()),
+            "the provider member list is not the native scope list, got: {labels:?}"
+        );
+        assert_eq!(
+            completion_calls(&provider),
+            moves + 1,
+            "one provider recomputation per generation-only move"
+        );
+        drop(service);
+    }
+}
+
 /// Without a provider answer the v-bind hover fails closed to the native
 /// description — never a fabricated type.
 #[tokio::test]
