@@ -741,7 +741,12 @@ pub(super) async fn handle_code_action_with_audit(
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
         target_identity,
         None,
-        async move { handle_code_action(server, params).await },
+        async move {
+            server.prepare_foreground(&uri).await?;
+            server
+                .settle_foreground(&uri, handle_code_action(server, params))
+                .await
+        },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
             payload.response_size_bytes =
@@ -811,7 +816,11 @@ pub(super) async fn handle_semantic_tokens_full_with_audit(
         verter_audit::payloads::tags::LspMethodTag::SemanticTokens,
         target_identity,
         None,
-        async move { handle_semantic_tokens_full(server, params).await },
+        async move {
+            server
+                .settle_foreground(&uri, handle_semantic_tokens_full(server, params))
+                .await
+        },
         |payload, value| {
             let count = match value {
                 Some(SemanticTokensResult::Tokens(t)) => t.data.len(),
@@ -1026,7 +1035,11 @@ pub(super) async fn handle_inlay_hint_with_audit(
         verter_audit::payloads::tags::LspMethodTag::InlayHints,
         target_identity,
         None,
-        async move { handle_inlay_hint(server, params).await },
+        async move {
+            server
+                .settle_foreground(&uri, handle_inlay_hint(server, params))
+                .await
+        },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
             payload.response_size_bytes =

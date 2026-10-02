@@ -68,7 +68,12 @@ pub(super) async fn handle_hover_with_audit(
             verter_audit::payloads::tags::LspMethodTag::Hover,
             target_identity,
             Some(position),
-            async move { handle_hover(server, params).await },
+            async move {
+                server.prepare_foreground(&uri).await?;
+                server
+                    .settle_foreground(&uri, handle_hover(server, params))
+                    .await
+            },
             |payload, value| {
                 payload.response_size_bytes = hover_response_size(value.as_ref());
             },
@@ -198,7 +203,12 @@ pub(super) async fn handle_references_with_audit(
             verter_audit::payloads::tags::LspMethodTag::References,
             target_identity,
             Some(position),
-            async move { handle_references(server, params).await },
+            async move {
+                server.prepare_foreground(&uri).await?;
+                server
+                    .settle_foreground(&uri, handle_references(server, params))
+                    .await
+            },
             |payload, value| {
                 let count = value.as_ref().map(Vec::len).unwrap_or(0);
                 payload.num_references = Some(u32::try_from(count).unwrap_or(u32::MAX));
@@ -234,7 +244,12 @@ pub(super) async fn handle_rename_with_audit(
             verter_audit::payloads::tags::LspMethodTag::Rename,
             target_identity,
             Some(position),
-            async move { handle_rename(server, params).await },
+            async move {
+                server.prepare_foreground(&uri).await?;
+                server
+                    .settle_foreground(&uri, handle_rename(server, params))
+                    .await
+            },
             |payload, value| {
                 let edit_count = value
                     .as_ref()

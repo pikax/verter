@@ -21482,7 +21482,7 @@ const msg = 'hello'
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn completion_reopens_current_file_when_open_buffer_provider_loses_virtual_file_content() {
     let provider = Arc::new(LostContentCompletionProvider::default());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -21521,6 +21521,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     provider.drop_open_path(&ctx.tsx_path);
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
+    let recovery_started = tokio::time::Instant::now();
     let labels = completion_labels(
         server
             .completion(completion_params(&uri, position, None))
@@ -21528,6 +21529,11 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             .expect("completion request should succeed"),
     );
     let calls = provider.calls();
+    assert_eq!(
+        tokio::time::Instant::now(),
+        recovery_started,
+        "successful content repair must settle completion without a readiness timer"
+    );
     let open_count = calls
         .iter()
         .filter(|call| {
@@ -34030,6 +34036,59 @@ async fn v_bind_hover_shows_provider_type_from_declaration() {
 
     drain_handle.abort();
     drop(service);
+}
+
+/// A provider await must not let a captured native fallback escape after
+/// document, dependency or ownership invalidation.
+#[tokio::test]
+async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
+    for change in ["edit", "reopen", "diagnostics", "workspace"] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let service = make_hover_test_service_tsgo(provider.clone());
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+        server.ensure_current_file_synced(&uri).await;
+        let position = find_document_position(server, &uri, "v-bind(width)", 8);
+        assert!(server
+            .hover(hover_params(&uri, position))
+            .await
+            .unwrap()
+            .is_some());
+
+        let documents = Arc::clone(&server.documents);
+        let raced_server = server.clone();
+        let raced_uri = uri.clone();
+        let path = server.active_ide_path_for_uri(&uri).unwrap();
+        provider.set_on_query(
+            &path,
+            Box::new(move || match change {
+                "reopen" => {
+                    documents.did_close(&raced_uri);
+                    documents.did_open(&TextDocumentItem {
+                        uri: raced_uri,
+                        language_id: "vue".into(),
+                        version: 1,
+                        text: source.into(),
+                    });
+                }
+                "edit" => {
+                    documents.did_change(&raced_uri, 2, &source.replace("width", "height"));
+                }
+                "diagnostics" => documents
+                    .host()
+                    .bump_diagnostics_generation("/workspace/src/App.vue"),
+                "workspace" => install_test_resolver(&raced_server),
+                _ => unreachable!(),
+            }),
+        );
+        let result = server.hover(hover_params(&uri, position)).await;
+        assert!(
+            matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+            "a superseded native fallback must return the typed stale-request outcome ({change})"
+        );
+    }
 }
 
 /// Without a provider answer the v-bind hover fails closed to the native

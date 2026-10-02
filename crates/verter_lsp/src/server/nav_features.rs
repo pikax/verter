@@ -589,38 +589,6 @@ impl CompletionSourceContext {
     }
 }
 
-#[derive(Clone)]
-struct CompletionDocumentIdentity {
-    version: i32,
-    document_revision: crate::documents::DocumentRevisionId,
-}
-
-fn completion_document_identity(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-) -> Option<CompletionDocumentIdentity> {
-    server
-        .documents
-        .get(uri)
-        .map(|document| CompletionDocumentIdentity {
-            version: document.version,
-            document_revision: document.document_revision,
-        })
-}
-
-fn completion_document_identity_matches(
-    before: Option<&CompletionDocumentIdentity>,
-    after: Option<&CompletionDocumentIdentity>,
-) -> bool {
-    match (before, after) {
-        (Some(before), Some(after)) => {
-            before.version == after.version && before.document_revision == after.document_revision
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 pub(super) async fn handle_completion(
     server: &VerterLanguageServer,
     params: CompletionParams,
@@ -637,17 +605,19 @@ pub(super) async fn handle_completion(
     // so it returns the coherent post-fence snapshot even if the pre-wait identity
     // sampled here was older.
     for _attempt in 0..2 {
-        let identity_before = completion_document_identity(server, &uri);
+        let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
         let response = handle_completion_attempt(server, &params, false).await?;
-        let identity_after = completion_document_identity(server, &uri);
-        if completion_document_identity_matches(identity_before.as_ref(), identity_after.as_ref()) {
+        if settlement.is_current(&server.documents, &uri) {
             return Ok(response);
         }
         tracing::debug!(
-            "completion: retrying {} after document identity advanced {:?} -> {:?}",
+            "completion: retrying {} after readiness basis advanced (version {:?} -> {:?})",
             uri.as_str(),
-            identity_before.as_ref().map(|identity| identity.version),
-            identity_after.as_ref().map(|identity| identity.version)
+            settlement.version(),
+            server
+                .documents
+                .snapshot_identity(&uri)
+                .map(|identity| identity.version)
         );
     }
     #[cfg(test)]
@@ -769,6 +739,8 @@ async fn handle_completion_attempt(
         edit_fence = server.did_change_mutex.lock().await;
     }
 
+    let final_settlement = native_only
+        .then(|| crate::documents::ForegroundSettlement::capture(&server.documents, uri));
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -1095,6 +1067,14 @@ async fn handle_completion_attempt(
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
     if native_only || (recognized_authored_component_contract_miss.get() && !provider_only) {
+        if final_settlement
+            .as_ref()
+            .is_some_and(|settlement| !settlement.is_current(&server.documents, uri))
+        {
+            return Err(tower_lsp_server::jsonrpc::Error::new(
+                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            ));
+        }
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
@@ -1328,55 +1308,38 @@ async fn handle_completion_attempt(
                             ))
                         .then_some(".")
                     });
-                let mut type_completion_result = tp
-                    .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                    .await;
-                // Recover a "No content available" completion: the carrier surface
-                // the provider needs is not currently materialised. The recovery
-                // mechanism is engine-specific:
-                //   * tsserver — the carrier is served from the publish store via
-                //     the plugin (NOT an open buffer), so re-PUBLISH the carrier
-                //     companions (the change notification fires inside
-                //     `publish_carrier`) to refresh the store + evict the stale
-                //     resolution; the carrier-companion open verbs are no-ops here.
-                //   * tsgo — the carrier is an open buffer, so reopen it (close +
-                //     open) and re-sync the API to re-establish the lost content.
-                if matches!(
-                    server.type_provider_kind,
-                    crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::Tsgo
-                ) {
-                    for retry_delay_ms in [50u64, 150, 300] {
-                        let needs_retry = matches!(
-                            type_completion_result,
-                            Err(ref error) if error.message.contains("No content available")
-                        );
-                        if !needs_retry {
-                            break;
-                        }
-                        tracing::debug!(
-                            "completion: retrying completion after no-content error for {} (delay={}ms)",
-                            ctx.tsx_path,
-                            retry_delay_ms
-                        );
-                        if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-                            if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-                                server.publish_carrier_to_external_ts(&canonical_id).await;
+                // Repair once, then recapture the exact surface and remap the
+                // requested position. Provider writes supply their own ordering
+                // barrier; elapsed time cannot certify content availability.
+                let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+                    "completion",
+                    position,
+                    ctx,
+                    tsx_offset,
+                    |path: String, offset: u32| async move {
+                        tp.get_completions(&path, offset, tp_trigger).await
+                    },
+                    || async {
+                        match server.type_provider_kind {
+                            crate::TypeProviderKind::Tsserver => {
+                                if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
+                                    server.publish_carrier_to_external_ts(&canonical_id).await;
+                                }
                             }
-                        } else {
-                            server.force_reopen_current_file_in_type_provider(uri).await;
-                            server.sync_api_to_provider(uri).await;
+                            crate::TypeProviderKind::Tsgo => {
+                                server.force_reopen_current_file_in_type_provider(uri).await;
+                                server.sync_api_to_provider(uri).await;
+                            }
+                            _ => server.ensure_current_file_synced(uri).await,
                         }
-                        // Capture-only: a no-content recovery may re-enqueue the
-                        // background dependency publication, never await it.
                         let _ = server.dependency_readiness_capture(uri);
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-                        type_completion_result = tp
-                            .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                            .await;
-                    }
-                }
-                match type_completion_result {
-                    Ok(mut type_result) => {
+                    },
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                match outcome.value {
+                    Some(mut type_result) => {
                         tracing::debug!(
                             "completion: type provider returned {} items (incomplete={})",
                             type_result.items.len(),
@@ -1403,9 +1366,18 @@ async fn handle_completion_attempt(
                             tracing::debug!(
                                 "completion: retrying member access without dot trigger after empty backend result"
                             );
-                            if let Ok(mut retry_result) =
-                                tp.get_completions(&ctx.tsx_path, tsx_offset, None).await
-                            {
+                            let retry_result = match merge::carrier_position_to_tsx_offset_validated(
+                                position,
+                                &ctx.carrier_line_index,
+                                &ctx.mapper,
+                                &ctx.tsx_line_index,
+                            ) {
+                                Some(offset) => {
+                                    tp.get_completions(&ctx.tsx_path, offset, None).await.ok()
+                                }
+                                None => None,
+                            };
+                            if let Some(mut retry_result) = retry_result {
                                 filter_type_provider_completion_result(
                                     &mut retry_result,
                                     expr_context.as_ref(),
@@ -1476,8 +1448,10 @@ async fn handle_completion_attempt(
                             }))
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("completion: type provider error: {e}");
+                    None => {
+                        tracing::warn!(
+                            "completion: provider recovery did not settle a current result"
+                        );
                     }
                 }
             }
