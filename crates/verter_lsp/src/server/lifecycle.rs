@@ -724,7 +724,14 @@ pub(super) async fn handle_did_open(
     // This ensures re-opening a file after external modifications publishes
     // up-to-date merged diagnostics (Verter lint + type provider).
     if let Some(canonical_id) = current_canonical_id.as_ref() {
-        server.needs_ide_sync.insert(canonical_id.clone());
+        // The interactive repair is re-armed only when the eager sync above
+        // left the IDE leg owed: re-arming a leg it already delivered would make
+        // the next request apply the same revision a second time. The debounced
+        // work bit stays armed — its tick publishes the open's diagnostics and
+        // re-checks every leg against its own basis.
+        if server.ide_leg_owed_for_open_document(uri) {
+            server.needs_ide_sync.insert(canonical_id.clone());
+        }
         server.needs_deferred_sync.insert(canonical_id.clone());
         // Deliberately stamped `now` rather than at handler entry. An open is
         // not a keystroke: this handler has already synced the file eagerly
@@ -986,9 +993,14 @@ pub(super) async fn handle_did_close(
     let close_canonical_id = (!is_virtual)
         .then(|| server.documents.get_canonical_id(uri))
         .flatten();
-    let close_generation = close_canonical_id.as_ref().and_then(|canonical_id| {
-        server.current_or_init_ide_sync_open_generation(uri, canonical_id)
-    });
+    let close_generation = match close_canonical_id.as_ref() {
+        Some(canonical_id) => {
+            server
+                .current_or_init_ide_sync_open_generation(uri, canonical_id)
+                .await
+        }
+        None => None,
+    };
     let close_repair_lease = close_canonical_id
         .as_ref()
         .zip(close_generation)

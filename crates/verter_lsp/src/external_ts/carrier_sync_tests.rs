@@ -648,11 +648,11 @@ async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface(
         crate::ProjectSyncMode::FullProject,
         crate::TypeProviderKind::Tsgo,
     );
-    sync.open_tsx(&ide_path, compiler_surface)
-        .await
-        .expect("provider open succeeds");
     let exact_surface = sync
-        .synced_tsx_surface(&ide_path)
+        .open_tsx_fenced(&ide_path, compiler_surface, &|| true)
+        .await
+        .expect("provider open succeeds")
+        .ide_surface()
         .expect("successful open mints exact surface evidence");
     assert_ne!(
         exact_surface.content().as_ref(),
@@ -3472,4 +3472,84 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
         AdmitOutcome::Superseded,
         "a late owned token captured before the owned→unresolved conversion is refused"
     );
+}
+
+#[test]
+fn api_only_admission_merges_the_live_ide_and_declaration_legs() {
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let states = DashMap::new();
+    let coordinator = CarrierTransactionCoordinator::new();
+    let mut live = owned_carrier_state();
+    live.ide_path = Some("/workspace/src/App.vue.jsx".into());
+    live.decl_path = Some("/workspace/src/App.vue.d.ts".into());
+    live.decl_background_loaded = true;
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierIdeSurface {
+        content_hash: [1; 16],
+        map_hash: [2; 16],
+    });
+    states.insert(source.into(), live.clone());
+    let captured = owned_carrier_state();
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        None,
+    );
+    let companions =
+        build_carrier_companions(&host, &captured, None, Some(&api), None, source, None).unwrap();
+    let receipt = PendingProviderReady::authorize(
+        &test_binding_gen("/workspace/tsconfig.json", 1),
+        2,
+        0,
+        "tsgo",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Api]);
+    assert_eq!(
+        coordinator.admit_api_owned(&host, &states, source, captured, &receipt),
+        AdmitOutcome::Admitted
+    );
+    let committed = states.get(source).unwrap();
+    assert_eq!(committed.ide_path, live.ide_path);
+    assert_eq!(committed.decl_path, live.decl_path);
+    assert_eq!(committed.committed_ide_surface, live.committed_ide_surface);
+    assert!(committed.decl_background_loaded);
+}
+
+#[test]
+fn api_only_owner_change_cannot_reauthorize_the_old_ide_surface() {
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let states = DashMap::new();
+    let coordinator = CarrierTransactionCoordinator::new();
+    let mut live = owned_carrier_state();
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierIdeSurface {
+        content_hash: [1; 16],
+        map_hash: [2; 16],
+    });
+    states.insert(source.into(), live);
+    let mut next = owned_carrier_state();
+    next.owner_binding = ProviderOwnerBinding::Owned("/workspace/tsconfig.next.json".into());
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        None,
+    );
+    let companions =
+        build_carrier_companions(&host, &next, None, Some(&api), None, source, None).unwrap();
+    let receipt = PendingProviderReady::authorize(
+        &test_binding_gen("/workspace/tsconfig.next.json", 2),
+        2,
+        0,
+        "tsgo",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Api]);
+    assert_eq!(
+        coordinator.admit_api_owned(&host, &states, source, next, &receipt),
+        AdmitOutcome::Admitted
+    );
+    assert!(states.get(source).unwrap().committed_ide_surface.is_none());
 }

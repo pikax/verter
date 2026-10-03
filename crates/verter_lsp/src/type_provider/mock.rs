@@ -656,6 +656,12 @@ mod inner {
             self.state.lock().unwrap().applied.remove(path);
         }
 
+        /// Model an engine restart: the new incarnation holds none of the bytes
+        /// the previous one accepted, so no earlier delivery is still applied.
+        pub fn forget_applied_content(&self) {
+            self.state.lock().unwrap().applied.clear();
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()
@@ -1143,12 +1149,23 @@ mod inner {
                 content: content.to_string(),
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            let block = match &state.open_block {
+                Some((armed_path, _, _)) if armed_path.is_empty() || armed_path == path => state
+                    .open_block
+                    .take()
+                    .map(|(_, arrived, release)| (arrived, release)),
+                _ => None,
+            };
             drop(state);
             self.note_recorded();
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
             Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 fail_or_ok(fail, "open_file_background")?;
                 this.accept_applied(&path_owned, &content_owned);
                 Ok(())

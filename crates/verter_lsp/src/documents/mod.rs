@@ -60,6 +60,14 @@ pub struct DocumentRegistry {
     /// captures the current snapshot set under a fence and maps a returned offset
     /// only against the exact generation it captured.
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
+    /// The ONE per-document provider-sync lane registry. Owned here for the
+    /// same reason [`Self::provider_surfaces`] is: the registry already reaches
+    /// every writer — the server, the debounced coordinator, the background
+    /// drain free functions and the workspace scanner all hold this same
+    /// `Arc<DocumentRegistry>` — so every transaction that delivers or commits
+    /// an open document's provider surface serializes on ONE lane per document.
+    /// See [`crate::document_sync_lane`] for the lock order.
+    document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
     /// Full Verter semantic enrichment is deliberately isolated from the
@@ -537,6 +545,7 @@ impl DocumentRegistry {
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
+            document_lanes: Arc::new(crate::document_sync_lane::DocumentSyncLanes::default()),
             registration: registration_signal::RegistrationSignal::default(),
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
@@ -676,6 +685,79 @@ impl DocumentRegistry {
     /// fail-closed cross-file rename mapping).
     pub fn provider_surfaces(&self) -> &crate::provider_surface_store::ProviderSurfaceStore {
         &self.provider_surfaces
+    }
+
+    /// The shared per-document sync-lane registry — the single owner of the
+    /// lane every provider-sync transaction of an open document takes.
+    pub(crate) fn document_lanes(&self) -> &Arc<crate::document_sync_lane::DocumentSyncLanes> {
+        &self.document_lanes
+    }
+
+    /// Join the registered document's generation, including a document opened
+    /// before its first interactive repair established the lane.
+    pub(crate) fn try_delivery_lane(
+        &self,
+        canonical_id: &str,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        if self
+            .document_lanes
+            .try_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            == crate::document_sync_lane::EstablishedGeneration::Busy
+        {
+            return crate::document_sync_lane::DeliveryLane::Busy;
+        }
+        self.document_lanes.try_delivery_lane(canonical_id)
+    }
+
+    /// Ask for the delivery lane in `mode`; see
+    /// [`crate::document_sync_lane::LaneAcquire`].
+    pub(crate) async fn delivery_lane(
+        &self,
+        canonical_id: &str,
+        mode: crate::document_sync_lane::LaneAcquire,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        match mode {
+            crate::document_sync_lane::LaneAcquire::Try => self.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::LaneAcquire::Wait => {
+                self.document_lanes
+                    .wait_establish_open_generation(canonical_id, || {
+                        self.is_registered(canonical_id)
+                    })
+                    .await;
+                self.document_lanes.wait_delivery_lane(canonical_id).await
+            }
+        }
+    }
+
+    /// The open generation of a registered document, established under its
+    /// lifecycle lane when no open minted one yet (a document registered
+    /// directly through this registry). Waits for an open or close in flight.
+    pub(crate) async fn establish_open_generation(&self, canonical_id: &str) -> Option<u64> {
+        self.document_lanes
+            .wait_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            .await
+    }
+
+    fn is_registered(&self, canonical_id: &str) -> bool {
+        self.canonical_id_to_uri(canonical_id).is_some()
+    }
+
+    /// Whether the open-document revision a transaction pinned before it
+    /// compiled is still the live one — evaluated at the point of delivery.
+    ///
+    /// A transaction with no pin started while its document was closed. It is
+    /// current only while the document STAYS closed: an open that lands before
+    /// delivery belongs to the open document's own lane, so the closed-start
+    /// writer must yield rather than write disk-compiled bytes beneath it.
+    pub(crate) fn compile_pin_is_current(
+        &self,
+        canonical_id: &str,
+        open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
+    ) -> bool {
+        match open_pin {
+            Some((uri, identity)) => self.snapshot_identity_is_current(uri, identity),
+            None => !self.is_registered(canonical_id),
+        }
     }
 
     /// Set the negotiated position encoding. Called once during `initialize()`,

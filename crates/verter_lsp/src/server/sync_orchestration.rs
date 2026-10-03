@@ -23,9 +23,11 @@ use crate::type_provider::auto_import::{
     resolve_script_import_anchor_from_structure, ScriptImportInsertionAnchor,
 };
 use crate::type_provider::merge;
+use crate::type_provider::project_sync::CarrierDelivery;
 
 use super::background_init::{background_init, BackgroundInitArgs};
 use super::handler_guard::block_in_place_if_available;
+use super::provider_state::CarrierSyncCommit;
 use super::server_utils::*;
 use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguageServer};
 
@@ -718,7 +720,12 @@ impl VerterLanguageServer {
                 committed_state,
                 receipt,
             } => {
-                self.commit_carrier_provider_state(&canonical_id, committed_state, &receipt);
+                self.commit_carrier_provider_state(
+                    &canonical_id,
+                    committed_state,
+                    &receipt,
+                    open_pin,
+                );
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
@@ -735,30 +742,62 @@ impl VerterLanguageServer {
                 };
                 tracing::info!("sync_ide: {} ({} bytes)", ide_path, ide.code.len());
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
-                if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
+                let mut ide_delivery = None;
+                if crate::provider_sync::open_ide_leg_is_current(
+                    sync,
+                    &self.documents,
+                    previous_state.as_ref(),
+                    &canonical_id,
+                    &ide_path,
+                    &ide.code,
+                    &committed_state.owner_binding,
+                ) {
+                    return;
+                }
+                let still_current = || self.open_pin_is_current(&canonical_id, open_pin);
+                let delivery = sync
+                    .sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                    .await;
+                let delivery = sync
+                    .settle_uncertified_tsx(&ide_path, &ide.code, delivery, &still_current)
+                    .await;
+                if let Err(e) = &delivery {
                     tracing::warn!("sync_ide: failed for {ide_path}: {e}");
-                } else {
+                } else if let Ok(delivery) = delivery {
+                    ide_delivery = delivery.ide_surface();
+                    if ide_delivery.is_none() {
+                        // No certified receipt: nothing commits, so the source
+                        // stays owed and the drain redelivers it.
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
+                        return;
+                    }
                     committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                     synced_kinds.push(ProviderPathKind::Ide);
                     // Record a fresh generation pinning the EXACT IDE bytes just
                     // synced (interactive queries capture this surface), fenced
                     // by the SAME pin captured before the compile above.
-                    self.record_carrier_ide_snapshot_with_pin(
-                        open_pin,
-                        &canonical_id,
-                        &ide_path,
-                        &ide.code,
-                        ide.source_map.as_deref(),
-                    );
+                    if let Some(delivery) = ide_delivery.as_ref() {
+                        self.record_delivered_carrier_ide_snapshot(
+                            open_pin,
+                            &canonical_id,
+                            &ide.code,
+                            delivery,
+                            ide.source_map.as_deref(),
+                        );
+                    }
                     tracing::info!("sync_ide: ok for {}", ide_path);
                 }
                 self.commit_and_close_after_sync(
                     &canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                    pending,
+                    CarrierSyncCommit {
+                        previous_state: previous_state.as_ref(),
+                        state: committed_state,
+                        stale_paths: &stale_paths,
+                        synced_kinds: &synced_kinds,
+                        ide_delivery,
+                        pending,
+                        open_pin,
+                    },
                 )
                 .await;
             }
@@ -798,6 +837,24 @@ impl VerterLanguageServer {
             .as_ref()
             .map(|ide| ide.is_jsx)
             .unwrap_or_else(|| self.documents.is_jsx(uri));
+        // ONE lane per open document. The API leg is a provider-surface commit
+        // like any other, so it serializes on the SAME lane as the IDE leg: two
+        // transactions of one revision can no longer interleave a commit with a
+        // delivery. Asked immediately before the gateway (the delivery point).
+        // `did_open` has already released its lifecycle lease by here, so this
+        // never re-acquires what the caller holds.
+        let _document_lane = match self.documents.try_delivery_lane(&canonical_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                // The holder is delivering this document's own surface right now.
+                // Park the source instead of queueing behind it; a later drain
+                // pass redrives the API leg, and an interactive caller still gets
+                // the IDE leg it asked for.
+                self.queue_snapshot_provider_sync(canonical_id.clone());
+                return;
+            }
+        };
         // Route through the SINGLE carrier-sync gateway: membership fused with the
         // provider-state commit. tsserver ⇒ `Published` (the plugin serves both
         // companions); tsgo ⇒ `DirectOpen` (open the API companion buffer directly).
@@ -809,65 +866,34 @@ impl VerterLanguageServer {
                 committed_state,
                 receipt,
             } => {
-                self.commit_carrier_provider_state(&canonical_id, committed_state, &receipt);
+                self.commit_carrier_provider_state(
+                    &canonical_id,
+                    committed_state,
+                    &receipt,
+                    open_pin,
+                );
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
                 pending,
             } => {
-                // Close-AFTER-sync: capture stale + prior state, sync, then commit +
-                // close only genuinely-stale paths (this path can touch an open Vue
-                // file, so a failed replacement must not close the live path). The
-                // receipt is minted from `pending` inside `commit_and_close_after_sync`,
-                // after a kind opened.
-                let previous_state = self.provider_sync_state_for_source(&canonical_id);
-                let stale_paths = transition.stale_paths;
-                let mut committed_state = transition.next;
-                let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
-                if let Some(dts_path) = committed_state.api_path.clone() {
-                    let api = match self.documents.host().get_public_api(&canonical_id) {
-                        Ok(api) => api,
-                        Err(error) => {
-                            crate::report_public_api_projection_error(
-                                "sync_api_to_provider",
-                                &canonical_id,
-                                &error,
-                            );
-                            return;
-                        }
-                    };
-                    if let Some(api) = api {
-                        // Destination-keyed rendering; stamp/record the SAME
-                        // bytes that were delivered.
-                        let api_code = api.code_for_companion_path(&dts_path);
-                        let result = if committed_state.api_background_loaded {
-                            sync.sync_dts(&dts_path, api_code).await
-                        } else {
-                            sync.open_dts(&dts_path, api_code).await
-                        };
-                        if let Err(e) = result {
-                            tracing::warn!("sync_api: failed for {dts_path}: {e}");
-                        } else {
-                            committed_state.mark_api_delivered(api_code);
-                            synced_kinds.push(ProviderPathKind::Api);
-                            // Record a fresh generation pinning the synced content +
-                            // its same-content source map under this virtual path.
-                            self.record_carrier_api_snapshot(
-                                &canonical_id,
-                                &dts_path,
-                                api_code,
-                                api.source_map.as_deref(),
-                            );
-                        }
-                    }
-                }
-                self.commit_and_close_after_sync(
+                let workspace = self.vfs_workspace.read().clone();
+                super::background_drain::deliver_api_transaction(
+                    sync,
+                    &self.documents,
+                    workspace.as_deref(),
+                    &self.provider_sync_states,
                     &canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
+                    transition,
                     pending,
+                    &self.carrier_transaction_coordinator,
+                    &self.pending_snapshot_provider_sync,
+                    _document_lane,
+                    crate::document_sync_lane::LaneAcquire::Try,
+                    crate::type_provider::project_sync::ProviderLane::Foreground,
+                    self.published_resolver()
+                        .is_some_and(|snapshot| snapshot.ownership_ready),
+                    open_pin,
                 )
                 .await;
             }
@@ -963,6 +989,32 @@ impl VerterLanguageServer {
             }
         }
         true
+    }
+
+    /// [`Self::publish_carrier_to_external_ts`] for an OPEN document, run on the
+    /// document's sync lane. The publish records and versions the document's
+    /// companion surfaces, so it must not supersede a lane holder's recorded
+    /// surface mid-transaction; like every interactive path it waits its turn.
+    pub(super) async fn publish_open_carrier_to_external_ts(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
+        else {
+            return;
+        };
+        let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        let _repair_guard = repair_lease.lock().await;
+        if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
+            // Same revived-lane guard as `ensure_current_file_synced`.
+            if repair_lease.generation() == open_generation {
+                repair_lease.retire();
+            }
+            return;
+        }
+        self.publish_carrier_to_external_ts(&canonical_id).await;
     }
 
     pub(super) async fn notify_editor_carrier_store_changed(&self) {
@@ -1352,24 +1404,22 @@ impl VerterLanguageServer {
         // close-after-successful-sync discipline: it manages ONLY the API kind,
         // reverts the IDE kind to its prior live path, and must never close or
         // rebind the live IDE `.tsx`.
-        let host = self.documents.host_arc();
         let vfs = self.vfs_workspace.read().clone();
         let provider_sync_states = Arc::clone(&self.provider_sync_states);
-        let provider_surfaces = self.documents.provider_surfaces().clone();
         let carrier_coordinator = Arc::clone(&self.carrier_transaction_coordinator);
         let pending_snapshot_provider_sync = Arc::clone(&self.pending_snapshot_provider_sync);
+        let api_task_documents = Arc::clone(&self.documents);
         tokio::spawn(
             super::background_drain::sync_api_to_provider_background_task(
                 sync,
                 snapshot,
-                host,
                 vfs,
                 provider_sync_states,
-                provider_surfaces,
                 canonical_id,
                 is_jsx,
                 carrier_coordinator,
                 pending_snapshot_provider_sync,
+                api_task_documents,
             ),
         );
     }
@@ -1413,8 +1463,9 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
-        let Some(open_generation) =
-            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
         else {
             return;
         };
@@ -1446,12 +1497,7 @@ impl VerterLanguageServer {
             // generation is only reassigned under the lane mutex this repair now
             // holds (did_open's `begin_ide_sync_open_generation`), so the check is
             // exact.
-            if repair_lease
-                .lane()
-                .generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                == open_generation
-            {
+            if repair_lease.generation() == open_generation {
                 repair_lease.retire();
             }
             return;
@@ -1602,6 +1648,26 @@ impl VerterLanguageServer {
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(&canonical_id);
+
+        // FRESHNESS (membership-only engine): there the gateway's publication IS
+        // the IDE-leg application — it records and versions every companion — so
+        // the leg's basis is checked BEFORE it. A publication another transaction
+        // already made for this revision, owner and projection is not repeated.
+        if !needs_owner_reconcile
+            && ide.as_ref().is_some_and(|ide| {
+                self.published_carrier_is_current(
+                    &canonical_id,
+                    is_jsx,
+                    &ide.code,
+                    ide.source_map.as_deref(),
+                )
+            })
+        {
+            tracing::debug!(
+                "ensure_current_file_synced: {canonical_id}'s published companions are already current"
+            );
+            return;
+        }
 
         // Route the carrier MEMBERSHIP decision through the SINGLE carrier-sync
         // gateway and capture the POST-open commit authorization that GATES the
@@ -1763,6 +1829,37 @@ impl VerterLanguageServer {
             self.needs_ide_sync.insert(canonical_id);
             return;
         }
+        // FRESHNESS (the IDE leg's own basis, under the document lane): another
+        // transaction — typically the debounced tick — already delivered,
+        // recorded and committed exactly these bytes for this revision under the
+        // live owner, and the serving engine still holds them. Nothing is owed,
+        // so the repair applies nothing rather than a second copy of the
+        // revision.
+        // The committed binding is the live owner when no reconcile is owed and
+        // the commit this repair would make keeps the same resolved/unresolved
+        // arm.
+        let binding_is_live = !needs_owner_reconcile
+            && current_state
+                .as_ref()
+                .is_some_and(|state| state.is_unresolved() == unresolved);
+        if binding_is_live
+            && self.ide_leg_is_current(
+                uri,
+                &canonical_id,
+                current_state.as_ref(),
+                &ide_path,
+                &ide.code,
+            )
+        {
+            tracing::debug!(
+                "ensure_current_file_synced: {canonical_id}'s IDE leg is already current"
+            );
+            if unresolved {
+                self.pending_snapshot_provider_sync
+                    .insert(canonical_id.clone());
+            }
+            return;
+        }
 
         // Choose open_file vs update_file based on existing state. The same
         // revision fence runs once more UNDER the provider's per-path delivery
@@ -1783,12 +1880,20 @@ impl VerterLanguageServer {
         };
 
         match result {
-            Ok(false) => {
+            Ok(CarrierDelivery::Refused) => {
                 // The document moved while this repair waited for the delivery
-                // lock: the newer revision's own repair delivers its bytes.
-                self.needs_ide_sync.insert(canonical_id);
+                // lock, or the engine is holding a newer copy of the path: the
+                // newer revision's own repair delivers its bytes. Every
+                // remaining leg of THIS transaction is cancelled with it.
+                self.cancel_legs_after_moved_revision(&canonical_id);
             }
-            Ok(true) => {
+            Ok(delivery) => {
+                // The receipt this transaction's own delivery produced. It is
+                // carried into the commit below rather than re-read from the
+                // provider path's ledger afterwards, so the commit can only
+                // ever seal bytes THIS transaction delivered.
+                let prepared_surface = delivery.prepared_surface().cloned();
+                let ide_delivery = delivery.ide_surface();
                 // FENCE (pre-record): the provider sync awaited. The record
                 // resolves the carrier source from the LIVE open document, so an
                 // edit landing across that await would pin these bytes and this
@@ -1798,7 +1903,7 @@ impl VerterLanguageServer {
                 // mis-mapping, not a stale read: fail closed and let the newer
                 // revision's own repair record its own surface.
                 if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
-                    self.needs_ide_sync.insert(canonical_id);
+                    self.cancel_legs_after_moved_revision(&canonical_id);
                     return;
                 }
                 #[cfg(test)]
@@ -1810,15 +1915,32 @@ impl VerterLanguageServer {
                     self.needs_ide_sync.insert(canonical_id);
                     return;
                 };
-                if !self.record_carrier_ide_snapshot_if_current(
-                    uri,
-                    compiled_revision,
-                    &canonical_id,
-                    &ide_path,
-                    &ide.code,
-                    ide.source_map.as_deref(),
-                ) {
-                    self.needs_ide_sync.insert(canonical_id);
+                if !prepared_surface.as_ref().is_some_and(|prepared| {
+                    self.record_prepared_carrier_ide_snapshot(
+                        Some((uri, compiled_revision)),
+                        &canonical_id,
+                        &ide_path,
+                        &ide.code,
+                        prepared,
+                        ide.source_map.as_deref(),
+                    )
+                }) {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                    return;
+                }
+                #[cfg(test)]
+                self.maybe_pause_ide_sync_after_surface_record(&canonical_id)
+                    .await;
+                // FENCE (pre-commit — the last leg's own basis check).
+                // Every earlier fence guards a DELIVERY; this one guards the
+                // commit, which is the leg that would otherwise publish a
+                // superseded revision's whole state over the live one. The
+                // record above awaited the provider surface store, so an edit
+                // can land between it and here; the commit is then cancelled
+                // outright instead of being attempted and refused at the
+                // admission gate, and the stale-path close below never runs.
+                if !self.retained_ide_response_is_current(uri, Some(compiled_revision)) {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
                     return;
                 }
                 // Commit state. An UNRESOLVED open-document liveness state is
@@ -1851,10 +1973,9 @@ impl VerterLanguageServer {
                     // API companion is opened by the dedicated background API-sync task /
                     // served by the tsserver store), so the receipt attests ONLY the IDE
                     // kind — a partial open never stamps a companion this pass did not open.
-                    let ide_surface = self
-                        .project_sync
-                        .as_ref()
-                        .and_then(|sync| sync.synced_tsx_surface(&ide_path));
+                    // The evidence is THIS transaction's own delivery receipt, carried out
+                    // of the delivery above; nothing is read back from the provider path.
+                    let ide_surface = ide_delivery;
                     let receipt = authorization
                         .confirm_with_ide_surface(&[ProviderPathKind::Ide], ide_surface);
                     // The owner is the receipt's bound tsconfig (the gateway's resolved
@@ -1903,12 +2024,14 @@ impl VerterLanguageServer {
                     // gated on ADMISSION: a `Superseded` commit (a newer transaction reclaimed
                     // the source, or an owner-loss advanced the barrier) requeues and closes
                     // NOTHING — the prior IDE path may be that newer transaction's live buffer.
-                    if self.carrier_transaction_coordinator.admit_owned(
+                    if self.carrier_transaction_coordinator.admit_owned_fenced(
                         &self.documents.host(),
                         &self.provider_sync_states,
                         &canonical_id,
                         state,
                         &receipt,
+                        Some(&self.documents),
+                        Some((uri, compiled_revision)),
                     ) == crate::external_ts::AdmitOutcome::Superseded
                     {
                         self.queue_snapshot_provider_sync(canonical_id.clone());
@@ -1961,8 +2084,9 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
-        let Some(open_generation) =
-            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
         else {
             return;
         };
@@ -1976,12 +2100,7 @@ impl VerterLanguageServer {
         if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
             // Same revived-lane guard as `ensure_current_file_synced`: never
             // retire a lane a close→reopen revived for a newer generation.
-            if repair_lease
-                .lane()
-                .generation
-                .load(std::sync::atomic::Ordering::Acquire)
-                == open_generation
-            {
+            if repair_lease.generation() == open_generation {
                 repair_lease.retire();
             }
             return;
@@ -2029,8 +2148,21 @@ impl VerterLanguageServer {
             self.needs_ide_sync.insert(canonical_id);
             return;
         }
-        match sync.open_tsx(&ide_path, &ide.code).await {
-            Ok(()) => {
+        let still_current =
+            || self.retained_ide_response_is_current(uri, compiled_revision.as_ref());
+        let reopened = sync
+            .open_tsx_fenced(&ide_path, &ide.code, &still_current)
+            .await;
+        match sync
+            .settle_uncertified_tsx(&ide_path, &ide.code, reopened, &still_current)
+            .await
+        {
+            Ok(delivery) => {
+                let Some(delivery) = delivery.ide_surface() else {
+                    // No certified receipt: the repair is still owed.
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                };
                 // FENCE (pre-record): the close and the reopen both awaited. The
                 // record pairs these bytes with the LIVE carrier source, so an
                 // edit across either await would record a pair that describes no
@@ -2046,12 +2178,11 @@ impl VerterLanguageServer {
                     self.needs_ide_sync.insert(canonical_id);
                     return;
                 };
-                if !self.record_carrier_ide_snapshot_if_current(
-                    uri,
-                    compiled_revision,
+                if !self.record_delivered_carrier_ide_snapshot(
+                    Some((uri, compiled_revision)),
                     &canonical_id,
-                    &ide_path,
                     &ide.code,
+                    &delivery,
                     ide.source_map.as_deref(),
                 ) {
                     self.needs_ide_sync.insert(canonical_id);
@@ -2582,6 +2713,19 @@ impl VerterLanguageServer {
                 owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
                 ..Default::default()
             });
+        if state.owner_binding.is_unresolved()
+            && crate::provider_sync::open_ide_leg_is_current(
+                sync,
+                &self.documents,
+                Some(&state),
+                canonical_id,
+                &ide_path,
+                ide_code,
+                &state.owner_binding,
+            )
+        {
+            return true;
+        }
         // This is a bootstrap "unresolved" sync — unresolved BY DEFINITION. A reused prior
         // state may be a previously-committed OWNED carrier; route the owned→unresolved
         // conversion through the coordinator so it advances the owner-loss barrier BEFORE
@@ -2595,25 +2739,37 @@ impl VerterLanguageServer {
         let needs_open =
             state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
         let result = if needs_open {
-            sync.open_tsx(&ide_path, ide_code).await
+            sync.open_tsx_fenced(&ide_path, ide_code, &|| {
+                self.open_pin_is_current(canonical_id, open_pin)
+            })
+            .await
         } else {
-            sync.sync_tsx(&ide_path, ide_code).await
+            sync.sync_tsx_fenced(&ide_path, ide_code, &|| {
+                self.open_pin_is_current(canonical_id, open_pin)
+            })
+            .await
         };
 
         match result {
-            Ok(()) => {
+            Ok(delivery) => {
+                let Some(prepared) = delivery.prepared_surface() else {
+                    return false;
+                };
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (before `ide_path` is moved), fenced by the pin the
                 // caller captured before compiling `ide_code`. No source map
                 // in scope here → the choke attaches the live IDE artifact's
                 // map only if it still byte-matches `ide_code`.
-                self.record_carrier_ide_snapshot_with_pin(
+                if !self.record_prepared_carrier_ide_snapshot(
                     open_pin,
                     canonical_id,
                     &ide_path,
                     ide_code,
+                    prepared,
                     None,
-                );
+                ) {
+                    return false;
+                }
                 state.ide_path = Some(ide_path);
                 state.ide_background_loaded = true;
                 self.commit_provider_sync_state(canonical_id, state);
@@ -2636,51 +2792,162 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return false;
         };
-        let Some(dts_path) = self.unresolved_api_path_for_canonical_id(canonical_id) else {
+        let Some(path) = self.unresolved_api_path_for_canonical_id(canonical_id) else {
             return false;
         };
-
-        let mut state = self
-            .provider_sync_state_for_source(canonical_id)
-            .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
-                owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
-                ..Default::default()
-            });
-        // Bootstrap "unresolved" sync — unresolved BY DEFINITION. Route a possibly-reused
-        // OWNED carrier state's owned→unresolved conversion through the coordinator so it
-        // advances the owner-loss barrier BEFORE clearing the receipt-attested admission
-        // token and forces the binding to `Unresolved` (a stale `Owned` binding / stamp from
-        // a prior committed state is never re-committed here).
-        self.carrier_transaction_coordinator
-            .convert_to_unresolved(canonical_id, &mut state);
-
-        let needs_open =
-            state.api_path.as_deref() != Some(dts_path.as_str()) && !state.api_background_loaded;
-        let result = if needs_open {
-            sync.open_dts(&dts_path, api_code).await
-        } else {
-            sync.sync_dts(&dts_path, api_code).await
+        let lanes = self.documents.document_lanes();
+        // The imported-carrier caller is ordered on this child's lifecycle lane
+        // and released it only between its legs, so it WAITS for its turn, as the
+        // resolved arm does; every refusal below requeues the source, because
+        // the callers' retry outcome has nothing to redrive it.
+        let lane = match self
+            .documents
+            .delivery_lane(canonical_id, crate::document_sync_lane::LaneAcquire::Wait)
+            .await
+        {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            }
         };
-
-        match result {
-            Ok(()) => {
-                // Record a fresh generation pinning the EXACT content just synced
-                // under this virtual path (before `dts_path` is moved). No source
-                // map in scope here → the choke uses the live map only if it still
-                // byte-matches `api_code`.
-                self.record_carrier_api_snapshot(canonical_id, &dts_path, api_code, None);
-                state.api_path = Some(dts_path);
-                state.api_background_loaded = true;
-                self.commit_provider_sync_state(canonical_id, state);
-                self.queue_snapshot_provider_sync(canonical_id.to_string());
-                true
-            }
-            Err(error) => {
-                tracing::warn!("sync_carrier_api_unresolved: failed for {canonical_id}: {error}");
-                self.queue_snapshot_provider_sync(canonical_id.to_string());
-                false
-            }
+        let generation = lanes.open_generation(canonical_id);
+        let host = self.documents.host();
+        let revision = host.last_content_transition_generation(canonical_id);
+        let carrier_source = crate::provider_surface_store::resolve_carrier_source(
+            Some(&self.documents),
+            &host,
+            canonical_id,
+        );
+        let (uri, identity) = self.documents.open_compile_pin(canonical_id);
+        let pin = uri.as_ref().zip(identity.as_ref());
+        let workspace = self.vfs_workspace.read().clone();
+        let publication = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.load_published());
+        let current = || {
+            self.open_pin_is_current(canonical_id, pin)
+                && lanes.open_generation(canonical_id) == generation
+                && host.last_content_transition_generation(canonical_id) == revision
+                && match (
+                    publication.as_ref(),
+                    self.vfs_workspace
+                        .read()
+                        .as_ref()
+                        .and_then(|workspace| workspace.load_published()),
+                ) {
+                    (Some(before), Some(after)) => Arc::ptr_eq(before, &after),
+                    (None, None) => true,
+                    _ => false,
+                }
+        };
+        let previous = self.provider_sync_state_for_source(canonical_id);
+        let api_map = host
+            .get_public_api(canonical_id)
+            .ok()
+            .flatten()
+            .filter(|api| api.code_for_companion_path(&path).as_ref() == api_code)
+            .and_then(|api| api.source_map);
+        if crate::provider_sync::api_leg_is_current(
+            sync,
+            previous.as_ref(),
+            &crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            &path,
+            api_code,
+            api_map.as_deref(),
+            canonical_id,
+            &self.documents,
+        ) {
+            return true;
         }
+        let update = previous.as_ref().is_some_and(|state| {
+            state.api_path.as_deref() == Some(path.as_str()) && state.api_background_loaded
+        });
+        drop(lane);
+        let delivery = if sync.carrier_companion_open_suppressed() {
+            None
+        } else {
+            let Ok(Some(delivery)) = sync
+                .deliver_api_fenced(
+                    &path,
+                    api_code,
+                    update,
+                    crate::type_provider::project_sync::ProviderLane::Foreground,
+                    &current,
+                )
+                .await
+            else {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            };
+            Some(delivery)
+        };
+        let _lane = match self
+            .documents
+            .delivery_lane(canonical_id, crate::document_sync_lane::LaneAcquire::Wait)
+            .await
+        {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            }
+        };
+        if !current()
+            || delivery
+                .as_ref()
+                .is_some_and(|delivery| !delivery.is_current(sync))
+        {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return false;
+        }
+        let install = |source: Option<Arc<str>>| {
+            self.carrier_transaction_coordinator
+                .convert_live_to_unresolved(&self.provider_sync_states, canonical_id, |live| {
+                    live.api_path = Some(path.clone());
+                    live.mark_api_delivered(api_code);
+                });
+            // Bootstrap binding conversion needs no coordinate model. Record
+            // one only when this transaction actually captured its source.
+            let Some(source) = source else {
+                return;
+            };
+            let map = host
+                .get_public_api(canonical_id)
+                .ok()
+                .flatten()
+                .filter(|api| api.code_for_companion_path(&path).as_ref() == api_code)
+                .and_then(|api| api.source_map);
+            let _ = crate::provider_surface_store::record_carrier_companion_surface_with_source(
+                self.documents.provider_surfaces(),
+                canonical_id,
+                &path,
+                crate::provider_surface_store::RecordedProviderSurface::Verbatim {
+                    kind: crate::provider_surface_store::ProviderSurfaceKind::CarrierApi,
+                    code: api_code,
+                },
+                map.as_deref(),
+                source,
+            );
+        };
+        if let Some((uri, identity)) = pin {
+            if self
+                .documents
+                .with_current_snapshot_identity(uri, identity, |document| {
+                    install(Some(Arc::clone(&document.source)))
+                })
+                .is_none()
+            {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            }
+        } else {
+            install(carrier_source);
+        }
+        self.queue_snapshot_provider_sync(canonical_id.to_string());
+        true
     }
 
     /// Get the active IDE file path (.tsx or .jsx) currently materialized in the
@@ -2929,11 +3196,12 @@ impl VerterLanguageServer {
                         .await;
                     outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
+                outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
+                drop(_lifecycle_guard);
                 let delivered = self
                     .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                     .await;
-                let provider_outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
-                return provider_outcome.and(self.publish_loaded_child_contract(canonical_id));
+                return outcome.and(ImportSyncOutcome::from_ok(delivered));
             }
 
             let mut outcome = if ide_missing_for_tsgo {
@@ -2957,7 +3225,12 @@ impl VerterLanguageServer {
                         committed_state,
                         receipt,
                     } => {
-                        self.commit_carrier_provider_state(canonical_id, committed_state, &receipt);
+                        self.commit_carrier_provider_state(
+                            canonical_id,
+                            committed_state,
+                            &receipt,
+                            open_pin,
+                        );
                     }
                     crate::external_ts::CarrierSyncDecision::DirectOpen {
                         transition,
@@ -2972,77 +3245,108 @@ impl VerterLanguageServer {
                         let stale_paths = transition.stale_paths;
                         let mut committed_state = transition.next;
                         let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                        let mut ide_delivery = None;
 
                         if let Some(ide) = ide.as_ref() {
                             if let Some(ide_path) = committed_state.ide_path.clone() {
-                                let result = if committed_state.ide_background_loaded {
-                                    sync.sync_tsx(&ide_path, &ide.code).await
-                                } else {
-                                    sync.open_tsx(&ide_path, &ide.code).await
-                                };
-                                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
-                                if result.is_ok() {
-                                    committed_state
-                                        .set_background_loaded(ProviderPathKind::Ide, true);
-                                    synced_kinds.push(ProviderPathKind::Ide);
-                                    // Record a fresh generation pinning the EXACT IDE
-                                    // bytes just synced (interactive queries capture
-                                    // this surface), fenced by the SAME pin captured
-                                    // before the compile above.
-                                    self.record_carrier_ide_snapshot_with_pin(
-                                        open_pin,
-                                        canonical_id,
-                                        &ide_path,
-                                        &ide.code,
-                                        ide.source_map.as_deref(),
-                                    );
-                                } else if let Err(error) = result {
-                                    tracing::warn!(
+                                if !crate::provider_sync::open_ide_leg_is_current(
+                                    sync,
+                                    &self.documents,
+                                    previous_state.as_ref(),
+                                    canonical_id,
+                                    &ide_path,
+                                    &ide.code,
+                                    &committed_state.owner_binding,
+                                ) {
+                                    let still_current =
+                                        || self.open_pin_is_current(canonical_id, open_pin);
+                                    let result = if committed_state.ide_background_loaded {
+                                        sync.sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                            .await
+                                    } else {
+                                        sync.open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                            .await
+                                    };
+                                    let result = sync
+                                        .settle_uncertified_tsx(
+                                            &ide_path,
+                                            &ide.code,
+                                            result,
+                                            &still_current,
+                                        )
+                                        .await;
+                                    outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
+                                    if let Ok(delivery) = result {
+                                        ide_delivery = delivery.ide_surface();
+                                        if ide_delivery.is_none() {
+                                            self.queue_snapshot_provider_sync(
+                                                canonical_id.to_string(),
+                                            );
+                                            return ImportSyncOutcome::Retry;
+                                        }
+                                        committed_state
+                                            .set_background_loaded(ProviderPathKind::Ide, true);
+                                        synced_kinds.push(ProviderPathKind::Ide);
+                                        // Record a fresh generation pinning the EXACT IDE
+                                        // bytes just synced (interactive queries capture
+                                        // this surface), fenced by the SAME pin captured
+                                        // before the compile above.
+                                        if let Some(delivery) = ide_delivery.as_ref() {
+                                            self.record_delivered_carrier_ide_snapshot(
+                                                open_pin,
+                                                canonical_id,
+                                                &ide.code,
+                                                delivery,
+                                                ide.source_map.as_deref(),
+                                            );
+                                        }
+                                    } else if let Err(error) = result {
+                                        tracing::warn!(
                                         "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
                                     );
-                                    self.queue_snapshot_provider_sync(canonical_id.to_string());
+                                        self.queue_snapshot_provider_sync(canonical_id.to_string());
+                                    }
                                 }
                             }
                         }
-
-                        if let Some(dts_path) = committed_state.api_path.clone() {
-                            // Destination-keyed rendering; delivered/stamped/
-                            // recorded consistently.
-                            let api_code = api.code_for_companion_path(&dts_path);
-                            let result = if committed_state.api_background_loaded {
-                                sync.sync_dts(&dts_path, api_code).await
-                            } else {
-                                sync.open_dts(&dts_path, api_code).await
-                            };
-                            outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
-                            if result.is_ok() {
-                                committed_state.mark_api_delivered(api_code);
-                                synced_kinds.push(ProviderPathKind::Api);
-                                // Record a fresh generation pinning the EXACT content +
-                                // its same-content source map under this virtual path.
-                                self.record_carrier_api_snapshot(
-                                    canonical_id,
-                                    &dts_path,
-                                    api_code,
-                                    api.source_map.as_deref(),
-                                );
-                            } else if let Err(e) = result {
-                                tracing::warn!(
-                                    "sync_imported_carrier_api_lightweight: failed for {dts_path}: {e}"
-                                );
-                                self.queue_snapshot_provider_sync(canonical_id.to_string());
-                            }
-                        }
-
                         self.commit_and_close_after_sync(
                             canonical_id,
-                            previous_state.as_ref(),
-                            committed_state,
-                            &stale_paths,
-                            &synced_kinds,
-                            pending,
+                            CarrierSyncCommit {
+                                previous_state: previous_state.as_ref(),
+                                state: committed_state,
+                                stale_paths: &stale_paths,
+                                synced_kinds: &synced_kinds,
+                                ide_delivery,
+                                pending,
+                                open_pin,
+                            },
                         )
                         .await;
+                        outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
+                        drop(_lifecycle_guard);
+                        if let Some(snapshot) = snapshot.as_ref() {
+                            let workspace = self.vfs_workspace.read().clone();
+                            outcome = outcome.and(ImportSyncOutcome::from_ok(
+                                super::background_drain::sync_carrier_api_transaction(
+                                    sync,
+                                    snapshot,
+                                    &self.documents,
+                                    workspace.as_deref(),
+                                    &self.provider_sync_states,
+                                    canonical_id,
+                                    is_jsx,
+                                    &self.carrier_transaction_coordinator,
+                                    &self.pending_snapshot_provider_sync,
+                                    // This writer waited for the child's lifecycle lane above and only
+                                    // released it between legs; it keeps its turn for the API leg.
+                                    crate::document_sync_lane::LaneAcquire::Wait,
+                                    crate::type_provider::project_sync::ProviderLane::Foreground,
+                                )
+                                .await
+                                .is_current(),
+                            ));
+                        }
+                        return outcome;
                     }
                     crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
                         // Settle the non-owned disposition through the coordinator (requeue
@@ -3192,11 +3496,12 @@ impl VerterLanguageServer {
                     }
                 };
                 if let Some(api) = api {
+                    outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
+                    drop(_lifecycle_guard);
                     let delivered = self
                         .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                         .await;
-                    let provider_outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
-                    return provider_outcome.and(self.publish_loaded_child_contract(canonical_id));
+                    return outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
             }
 
@@ -3207,6 +3512,7 @@ impl VerterLanguageServer {
         }
 
         // Slow path: file not in host yet — full disk read + upsert + compile + sync.
+        drop(_lifecycle_guard);
         self.resync_background_carrier_file(canonical_id).await;
         let provider_outcome =
             ImportSyncOutcome::from_ok(self.imported_carrier_already_delivered(canonical_id));
@@ -3364,6 +3670,37 @@ impl VerterLanguageServer {
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
+        // ONE lane per open document. Taken HERE — after the caller's destructive
+        // reload + compile, and deliberately AFTER every `did_change_mutex` scope
+        // in `resync_background_carrier_file`; that commit-only scope takes no
+        // document lane. Nested acquisitions follow lane, lifecycle commit,
+        // path delivery, then provider actor. A busy lane YIELDS the resync and queues the canonical for
+        // a later pass instead of delivering a transaction that could interleave
+        // with an interactive repair of the same open document.
+        let _document_lane = match self.documents.try_delivery_lane(canonical_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "resync_background: yielding {canonical_id}, its document sync lane is held"
+                );
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return;
+            }
+        };
+        // With no compiled bytes, owner-loss reconciliation can capture its
+        // own current pin under the lane. A supplied IDE output still requires
+        // the caller's pre-compile pin; never relabel old bytes with a new pin.
+        let (cleanup_uri, cleanup_identity) = if ide.is_none() && open_pin.is_none() {
+            self.documents.open_compile_pin(canonical_id)
+        } else {
+            (None, None)
+        };
+        let open_pin = open_pin.or(cleanup_uri.as_ref().zip(cleanup_identity.as_ref()));
+        if open_pin.is_none() && self.documents.canonical_id_to_uri(canonical_id).is_some() {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return;
+        }
         // Route the owner-resolved sync through the SINGLE carrier-sync gateway: the
         // membership decision is FUSED with the provider-state transition + the
         // sealed receipt that gates the commit. tsserver advertised ⇒ `Published`
@@ -3379,7 +3716,12 @@ impl VerterLanguageServer {
                 committed_state,
                 receipt,
             } => {
-                self.commit_carrier_provider_state(canonical_id, committed_state, &receipt);
+                self.commit_carrier_provider_state(
+                    canonical_id,
+                    committed_state,
+                    &receipt,
+                    open_pin,
+                );
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
@@ -3393,6 +3735,7 @@ impl VerterLanguageServer {
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                let mut ide_delivery = None;
 
                 // Owner-resolved IDE sync runs only when fresh IDE code is available.
                 // On a transient IDE compile miss (`ide == None`) the owner binding is
@@ -3400,83 +3743,86 @@ impl VerterLanguageServer {
                 // pass — the API kind below may still sync, and no stale binding is
                 // left behind.
                 if let (Some(ide), Some(tsx_path)) = (ide, committed_state.ide_path.clone()) {
-                    let is_bg = self
-                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
-                    let result = if is_bg {
-                        sync.sync_tsx(&tsx_path, &ide.code).await
-                    } else {
-                        sync.open_tsx(&tsx_path, &ide.code).await
-                    };
-                    if result.is_ok() {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                        synced_kinds.push(ProviderPathKind::Ide);
-                        // Record a fresh generation pinning the EXACT IDE bytes just
-                        // synced (interactive queries capture this surface), fenced
-                        // by the SAME pin the caller captured before compiling `ide`.
-                        self.record_carrier_ide_snapshot_with_pin(
-                            open_pin,
-                            canonical_id,
-                            &tsx_path,
-                            &ide.code,
-                            ide.source_map.as_deref(),
-                        );
-                    } else if let Err(e) = result {
-                        tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
-                    }
-                }
-
-                // Sync .vue.ts as secondary provider support output.
-                let api = match self.documents.host().get_public_api(canonical_id) {
-                    Ok(api) => api,
-                    Err(error) => {
-                        crate::report_public_api_projection_error(
-                            "sync_compiled_carrier_to_provider",
-                            canonical_id,
-                            &error,
-                        );
-                        return;
-                    }
-                };
-                if let Some(api) = api {
-                    if let Some(dts_path) = committed_state.api_path.clone() {
+                    if !crate::provider_sync::open_ide_leg_is_current(
+                        sync,
+                        &self.documents,
+                        previous_state.as_ref(),
+                        canonical_id,
+                        &tsx_path,
+                        &ide.code,
+                        &committed_state.owner_binding,
+                    ) {
                         let is_bg = self.is_background_loaded_for_source_kind(
                             canonical_id,
-                            ProviderPathKind::Api,
+                            ProviderPathKind::Ide,
                         );
-                        // Destination-keyed rendering; delivered/stamped/
-                        // recorded consistently.
-                        let api_code = api.code_for_companion_path(&dts_path);
+                        let still_current = || self.open_pin_is_current(canonical_id, open_pin);
                         let result = if is_bg {
-                            sync.sync_dts(&dts_path, api_code).await
+                            sync.sync_tsx_fenced(&tsx_path, &ide.code, &still_current)
+                                .await
                         } else {
-                            // First-time DTS sync: open_dts sends it to the provider
-                            // (load_dts only caches locally, breaking cross-file ops).
-                            sync.open_dts(&dts_path, api_code).await
+                            sync.open_tsx_fenced(&tsx_path, &ide.code, &still_current)
+                                .await
                         };
-                        if result.is_ok() {
-                            committed_state.mark_api_delivered(api_code);
-                            synced_kinds.push(ProviderPathKind::Api);
-                            // Record a fresh generation pinning the synced content +
-                            // its same-content source map under this virtual path.
-                            self.record_carrier_api_snapshot(
-                                canonical_id,
-                                &dts_path,
-                                api_code,
-                                api.source_map.as_deref(),
-                            );
+                        let result = sync
+                            .settle_uncertified_tsx(&tsx_path, &ide.code, result, &still_current)
+                            .await;
+                        if let Ok(delivery) = result {
+                            ide_delivery = delivery.ide_surface();
+                            if ide_delivery.is_none() {
+                                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                                return;
+                            }
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced_kinds.push(ProviderPathKind::Ide);
+                            // Record a fresh generation pinning the EXACT IDE bytes just
+                            // synced (interactive queries capture this surface), fenced
+                            // by the SAME pin the caller captured before compiling `ide`.
+                            if let Some(delivery) = ide_delivery.as_ref() {
+                                self.record_delivered_carrier_ide_snapshot(
+                                    open_pin,
+                                    canonical_id,
+                                    &ide.code,
+                                    delivery,
+                                    ide.source_map.as_deref(),
+                                );
+                            }
+                        } else if let Err(e) = result {
+                            tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                         }
                     }
                 }
-
                 self.commit_and_close_after_sync(
                     canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                    pending,
+                    CarrierSyncCommit {
+                        previous_state: previous_state.as_ref(),
+                        state: committed_state,
+                        stale_paths: &stale_paths,
+                        synced_kinds: &synced_kinds,
+                        ide_delivery,
+                        pending,
+                        open_pin,
+                    },
                 )
                 .await;
+                drop(_document_lane);
+                if let Some(snapshot) = self.published_resolver() {
+                    let workspace = self.vfs_workspace.read().clone();
+                    super::background_drain::sync_carrier_api_transaction(
+                        sync,
+                        &snapshot,
+                        &self.documents,
+                        workspace.as_deref(),
+                        &self.provider_sync_states,
+                        canonical_id,
+                        is_jsx,
+                        &self.carrier_transaction_coordinator,
+                        &self.pending_snapshot_provider_sync,
+                        crate::document_sync_lane::LaneAcquire::Try,
+                        crate::type_provider::project_sync::ProviderLane::Foreground,
+                    )
+                    .await;
+                }
             }
             crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
                 // Settle the non-owned disposition through the coordinator (requeue the

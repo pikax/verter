@@ -768,6 +768,36 @@ Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue
 - **Partial sync stays queued for retry.** A drain pass that syncs one kind but fails another returns `SyncOutcome::Partial`; the drain dequeues only on `FullyReconciled`, so a failed kind is retried rather than permanently suppressed.
 - **`active_ide_path_for_uri` is state-backed only.** Interactive routing reads the committed `ProviderSyncState`, never re-derives a path from ownership at request time.
 
+**Document delivery ownership.** `DocumentSyncLanes` owns one lane per canonical
+and open generation. Interactive repair and close wait for that lane; coordinator,
+scanner, and drain writers try it once and requeue on contention without consuming
+retry budget. Nested locks follow document lane → lifecycle mutex → provider-path
+lock → provider actor. A writer already holding the document lane calls the shared
+transaction body directly; it must release the lane before entering another lane-owning
+writer. Edits can advance the source while a provider call is pending, so each writer
+also pins the document snapshot and refuses stale recording/admission.
+
+IDE delivery completes and commits before API delivery starts. API transactions
+capture source revision, open generation, projection, owner and workspace publication,
+release the document lane for background provider I/O, then try to reacquire it and
+revalidate the captured basis. API-only admission patches the current state under the
+coordinator's entry lock, preserving IDE/declaration work committed during that I/O.
+API surface recording uses the pinned document's source inside the same identity
+closure; it must never fetch a second live source to pair with older delivered bytes.
+
+Each successful write returns its own typed delivery receipt. IDE recording and
+readiness consume that receipt's exact projected bytes and mapper; reading the path's
+latest delivery ledger cannot attest an earlier operation. Already-current legs skip
+provider writes independently, using committed owner/path, the provider's exact applied
+bytes, and recorded source/map identity. A current IDE leg therefore does not suppress
+an owed API leg, and a provider restart makes its missing bytes owed again.
+
+Tsserver membership-only delivery retains its own prepared coordinate model for
+fenced recording. Preparation never becomes an engine application receipt; the
+gateway's membership authorization remains the commit authority. Superseded
+unresolved IDE work applies and records nothing, requeues, and releases the lane
+before a separate transaction compiles the new revision.
+
 **Guards**: `sync_file_retains_stale_paths_when_owner_change_sync_fails` (`sync_coordinator_tests.rs`) + `scanner_sync_retains_stale_paths_when_owner_change_sync_fails` (`workspace_scanner.rs`) — the close-AFTER-successful-sync ordering proofs: on an owner change whose replacement sync FAILS, the prior path is NOT closed. The per-kind close-after-sync helpers (`revert_unsynced_kinds`, `genuinely_stale_after_sync`, `dropped_api_path_on_unowned_conversion`, `committed_binding_matches_current`) and their integration paths are pinned by the discriminating drain / aliased-resync / barrel / foreground regression tests in `provider_sync.rs` + `server_tests.rs`.
 
 ## Multi-Root Workspace & Per-Project Configuration

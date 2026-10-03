@@ -13484,7 +13484,7 @@ const extra = 42
 /// record cannot pair A's provider bytes/map with B's live source.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_change_after_the_check_prevents_the_surface_record() {
-    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let (service, provider, uri) = make_request_surface_carrier().await;
     let server = service.inner();
     let canonical_id = "/workspace/src/App.vue";
     const SOURCE_B: &str = r#"<script setup lang="ts">
@@ -13503,6 +13503,9 @@ const extra = 42
         .current_snapshot(&ide_path)
         .expect("baseline CarrierIde surface");
 
+    // A restarted engine no longer holds the delivered bytes, so the repair
+    // owes the IDE leg and runs it through to the record.
+    provider.forget_applied_content();
     server.needs_ide_sync.insert(canonical_id.to_string());
     let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
     let repair = server.ensure_current_file_synced(&uri);
@@ -13532,6 +13535,99 @@ const extra = 42
     assert!(
         server.capture_provider_request_surface(&uri).is_none(),
         "revision B has no synced surface yet and must fail closed"
+    );
+}
+
+/// The commit is a write point of its own. Every earlier fence in
+/// the interactive repair guards a DELIVERY; the surface record pins a
+/// generation and the commit then publishes the document's whole provider
+/// state. An edit landing across the record's await must CANCEL the transaction
+/// — the commit and the stale-path close never run, and the document is left in
+/// the owed state a fresh edit leaves it in — rather than completing the
+/// remaining legs and letting the admission gate refuse at the very end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_surface_record_cancels_the_remaining_legs() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'commit-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    // A restarted engine no longer holds the delivered bytes, so the repair
+    // owes the IDE leg and runs it through to the record.
+    provider.forget_applied_content();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_after_surface_record(canonical_id);
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    assert!(
+        server.needs_ide_sync.contains(canonical_id),
+        "a repair that observed its revision move must hand the IDE leg back \
+         owed, exactly as a fresh edit does — never finish its commit for \
+         superseded bytes"
+    );
+    assert!(
+        server.needs_deferred_sync.contains(canonical_id),
+        "the cancelled transaction's API leg is owed to the live revision's own \
+         transaction; the cancellation re-arms it rather than dropping it"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "revision B committed but no surface for B was ever synced, so the \
+         capture must still fail closed: the cancelled repair published nothing \
+         for the live revision"
+    );
+}
+
+/// The per-leg basis re-check the API and commit fences call must see an edit
+/// that lands after the pin was captured. A pin-less transaction started while
+/// its document was closed and is current only while it stays closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_leg_pin_recheck_follows_the_live_revision() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'api-leg-pin'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let (pin_uri, pin_revision) = server.documents.open_compile_pin(canonical_id);
+    let pin_uri = pin_uri.expect("the fixture's document is open");
+    let pin_revision = pin_revision.expect("the open document has a revision");
+    assert!(
+        server.open_pin_is_current(canonical_id, Some((&pin_uri, &pin_revision))),
+        "a pin captured for the live revision is current"
+    );
+
+    let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+    assert!(
+        !server.open_pin_is_current(canonical_id, Some((&pin_uri, &pin_revision))),
+        "the API leg's fence must see the edit that landed after its pin — \
+         without it a `.d.ts` built from the previous revision would be \
+         delivered and committed as this document's public API"
+    );
+    assert!(
+        server.open_pin_is_current("/workspace/src/Closed.vue", None),
+        "a closed source has no pin that can have moved, so its leg proceeds"
+    );
+    assert!(
+        !server.open_pin_is_current(canonical_id, None),
+        "a transaction that started while its document was closed is refused \
+         at delivery once the document is open — its disk-compiled bytes must \
+         not land beneath the open document's own transaction"
     );
 }
 
@@ -16372,6 +16468,7 @@ export const direct = Comp;
         None,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
         false,
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -16610,14 +16707,19 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
 
     // New work stays live while an old cohort holds its budget: a freshly
     // queued entry (here: the same source re-queued after a superseded
-    // commit) is NOT in the exhausted cohort and arms on a plain wake.
+    // commit) is NOT in the exhausted cohort and arms on a plain wake. The
+    // armed pass either attempts a leg still owed or, finding every leg
+    // already current, settles the entry without a provider round trip; an
+    // unarmed entry does neither.
     let settled_calls = provider.file_sync_calls().len();
     provider.set_fail_file_ops(true);
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
     arm_pending_sync_redrive_once(&drain, redrive);
     let attempted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if provider.file_sync_calls().len() > settled_calls {
+            if provider.file_sync_calls().len() > settled_calls
+                || !pending_snapshot_provider_sync.contains("/workspace/src/App.vue")
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -17640,10 +17742,10 @@ async fn did_close_sweeps_only_the_closed_documents_ide_sync_repair_lock() {
     assert!(
         server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closed.vue")
+            .has_lane("/workspace/src/Closed.vue")
             && server
                 .ide_sync_repair_locks
-                .contains_key("/workspace/src/Retained.vue"),
+                .has_lane("/workspace/src/Retained.vue"),
         "precondition: each touched document owns a repair lock"
     );
 
@@ -17660,13 +17762,13 @@ async fn did_close_sweeps_only_the_closed_documents_ide_sync_repair_lock() {
     assert!(
         !server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closed.vue"),
+            .has_lane("/workspace/src/Closed.vue"),
         "did_close must sweep the closed document's repair lock"
     );
     assert!(
         server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Retained.vue"),
+            .has_lane("/workspace/src/Retained.vue"),
         "did_close must not sweep another open document's repair lock"
     );
 }
@@ -17686,7 +17788,7 @@ async fn did_close_does_not_accumulate_repair_locks_across_distinct_documents() 
         );
         server.ensure_current_file_synced(&uri).await;
         assert!(
-            server.ide_sync_repair_locks.contains_key(&canonical_id),
+            server.ide_sync_repair_locks.has_lane(&canonical_id),
             "precondition: transient document {index} owns a repair lock"
         );
 
@@ -17698,7 +17800,7 @@ async fn did_close_does_not_accumulate_repair_locks_across_distinct_documents() 
         )
         .await;
         assert!(
-            !server.ide_sync_repair_locks.contains_key(&canonical_id),
+            !server.ide_sync_repair_locks.has_lane(&canonical_id),
             "closed transient document {index} must not retain a repair lock"
         );
     }
@@ -17720,9 +17822,9 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
         "<script setup lang=\"ts\">const value = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let generation = *server
-        .ide_sync_open_generations
-        .get("/workspace/src/Closing.vue")
+    let generation = server
+        .ide_sync_repair_locks
+        .open_generation("/workspace/src/Closing.vue")
         .expect("open generation");
     let retained_lease = server.ide_sync_repair_lease("/workspace/src/Closing.vue", generation);
 
@@ -17736,17 +17838,14 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
 
     let mapped_lane = server
         .ide_sync_repair_locks
-        .get("/workspace/src/Closing.vue")
+        .lane("/workspace/src/Closing.vue")
         .expect("a retained waiter prevents unsafe lane removal");
     assert!(
         Arc::ptr_eq(&mapped_lane, retained_lease.lane()),
         "did_close must not split a retained repair lane into a second mutex"
     );
     assert!(
-        retained_lease
-            .lane()
-            .retired
-            .load(std::sync::atomic::Ordering::Acquire),
+        retained_lease.is_retired(),
         "close must retire the exact retained lane object"
     );
     drop(mapped_lane);
@@ -17755,7 +17854,7 @@ async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling()
     assert!(
         !server
             .ide_sync_repair_locks
-            .contains_key("/workspace/src/Closing.vue"),
+            .has_lane("/workspace/src/Closing.vue"),
         "the final lease drop must synchronously retire the lane"
     );
 }
@@ -17792,14 +17891,10 @@ async fn encoded_virtual_uri_open_close_leaves_no_repair_generation_or_lane() {
     assert!(
         server.ide_sync_repair_locks.is_empty(),
         "virtual documents never own carrier repair lanes: {:?}",
-        server
-            .ide_sync_repair_locks
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>()
+        server.ide_sync_repair_locks.mapped_canonical_ids()
     );
     assert!(
-        server.ide_sync_open_generations.is_empty(),
+        server.ide_sync_repair_locks.has_no_open_generations(),
         "virtual documents never own carrier open generations"
     );
 }
@@ -17830,7 +17925,7 @@ async fn stale_repair_paused_before_lease_cannot_recreate_lane_after_close() {
         )
         .await;
         assert!(
-            !server.ide_sync_repair_locks.contains_key(canonical_id),
+            !server.ide_sync_repair_locks.has_lane(canonical_id),
             "close must retire its lane before the stale repair resumes"
         );
         release.notify_one();
@@ -17842,11 +17937,13 @@ async fn stale_repair_paused_before_lease_cannot_recreate_lane_after_close() {
         "document must stay closed"
     );
     assert!(
-        !server.ide_sync_open_generations.contains_key(canonical_id),
+        !server
+            .ide_sync_repair_locks
+            .has_open_generation(canonical_id),
         "close must retire the exact open generation"
     );
     assert!(
-        !server.ide_sync_repair_locks.contains_key(canonical_id),
+        !server.ide_sync_repair_locks.has_lane(canonical_id),
         "a stale post-close lease acquisition must not recreate a mapped lane"
     );
 }
@@ -17863,9 +17960,9 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
         "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let old_generation = *server
-        .ide_sync_open_generations
-        .get(canonical_id)
+    let old_generation = server
+        .ide_sync_repair_locks
+        .open_generation(canonical_id)
         .expect("old open generation");
     server.needs_ide_sync.insert(canonical_id.to_string());
 
@@ -17893,9 +17990,9 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
             },
         )
         .await;
-        let new_generation = *server
-            .ide_sync_open_generations
-            .get(canonical_id)
+        let new_generation = server
+            .ide_sync_repair_locks
+            .open_generation(canonical_id)
             .expect("reopened generation");
         assert_ne!(
             new_generation, old_generation,
@@ -17908,15 +18005,15 @@ async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
 
     let lane = server
         .ide_sync_repair_locks
-        .get(canonical_id)
+        .lane(canonical_id)
         .expect("reopened document must retain its live lane");
     assert_eq!(
-        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        lane.generation(),
         new_generation,
         "mapped lane must belong to the reopened generation"
     );
     assert!(
-        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        !lane.is_retired(),
         "the stale prior-generation repair must not retire the reopened lane"
     );
     drop(lane);
@@ -17954,9 +18051,9 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
         "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
     );
     server.ensure_current_file_synced(&uri).await;
-    let old_generation = *server
-        .ide_sync_open_generations
-        .get(canonical_id)
+    let old_generation = server
+        .ide_sync_repair_locks
+        .open_generation(canonical_id)
         .expect("old open generation");
     server.needs_ide_sync.insert(canonical_id.to_string());
 
@@ -18010,9 +18107,9 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
         close_release.notify_one();
         close.as_mut().await;
         reopen.as_mut().await;
-        let new_generation = *server
-            .ide_sync_open_generations
-            .get(canonical_id)
+        let new_generation = server
+            .ide_sync_repair_locks
+            .open_generation(canonical_id)
             .expect("reopened generation");
         assert_ne!(
             new_generation, old_generation,
@@ -18028,15 +18125,15 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
 
     let lane = server
         .ide_sync_repair_locks
-        .get(canonical_id)
+        .lane(canonical_id)
         .expect("reopened document must retain its live lane");
     assert_eq!(
-        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        lane.generation(),
         new_generation,
         "mapped lane must belong to the reopened generation"
     );
     assert!(
-        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        !lane.is_retired(),
         "a stale repair holding a pre-close lease must not retire the revived lane"
     );
     drop(lane);
@@ -18233,12 +18330,16 @@ const msg = 'hello'
     // Fail the in-place update of the live `.tsx`.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
 
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { updated: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -18555,12 +18656,16 @@ const msg = 'hello'
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -18663,12 +18768,16 @@ const msg = 'hello'
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -19675,6 +19784,14 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
         "bootstrap sync_carrier_api_unresolved must force an Unresolved binding, got {:?}",
         state.owner_binding
     );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(state.api_path.as_deref().expect("bootstrap API path"))
+            .is_none(),
+        "without captured source bytes, binding conversion must not invent a surface"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -19701,7 +19818,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -19788,14 +19905,16 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
+        // The task's lane probe is answered by a standalone registry that holds no
+        // open generation for this canonical, so it takes the same unserialized
+        // path the task took before the shared per-document lane existed.
+        Arc::clone(&documents),
     )
     .await;
 
@@ -19849,7 +19968,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -19910,14 +20029,16 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         Arc::clone(&requeue),
+        // No open generation for this canonical in a registry that never opened
+        // it, so the lane probe reports Closed and the task runs unserialized —
+        // the same path it took before the shared lane existed.
+        Arc::clone(&documents),
     )
     .await;
 
@@ -19966,7 +20087,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -20026,14 +20147,16 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
+        // The task's lane probe is answered by a standalone registry that holds no
+        // open generation for this canonical, so it takes the same unserialized
+        // path the task took before the shared per-document lane existed.
+        Arc::clone(&documents),
     )
     .await;
 
@@ -23507,6 +23630,7 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     assert_eq!(synced, SyncOutcome::FullyReconciled);
@@ -23611,6 +23735,7 @@ defineProps<{ msg: string }>()
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26319,6 +26444,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26522,6 +26648,7 @@ async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26666,6 +26793,7 @@ async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26810,6 +26938,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         &decl_overlay_owner,
         5,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_stale = provider.file_sync_calls();
@@ -26839,6 +26968,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         &decl_overlay_owner,
         101,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -26950,6 +27080,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
     // older open passes any pre-seam state and is only gated by the atomic re-read.
     let interleave = decl_overlay_owner.arm_add_gate_interleave_for_test(&root_canonical);
     let carrier_coordinator = crate::external_ts::CarrierTransactionCoordinator::new();
+    let pending = dashmap::DashSet::new();
     let pass = resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
@@ -26960,6 +27091,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         &decl_overlay_owner,
         5,
         &carrier_coordinator,
+        &pending,
     );
     let advance_between_gate_and_record = async {
         // Wait until the older open reaches the add-gate seam (after its path-lock +
@@ -27003,6 +27135,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         &decl_overlay_owner,
         101,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -27245,6 +27378,7 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28033,6 +28167,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28067,6 +28202,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28564,6 +28700,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28686,6 +28823,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28802,6 +28940,7 @@ import { Overlay } from './components'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28983,6 +29122,7 @@ defineProps<{ msg: string }>()
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -29176,6 +29316,7 @@ defineProps<{ show: boolean }>()
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -37598,6 +37739,7 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -37667,4 +37809,846 @@ async fn an_incomplete_publication_is_re_armed_when_the_drain_settles_the_carrie
             || panic!("the re-armed publication completes into a current receipt"),
         )
         .await;
+}
+
+/// A request repair re-armed for a revision whose IDE leg is already delivered,
+/// recorded and committed — the debounced tick got there first — applies
+/// nothing: one IDE-companion application per revision. A restarted engine no
+/// longer holds those bytes, so the same re-armed repair then delivers again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rearmed_repair_of_a_current_ide_leg_applies_nothing_until_the_engine_restarts() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the fixture's direct IDE sync commits a live IDE path");
+    let ide_writes = || {
+        provider
+            .file_sync_calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                        if path == &ide_path
+                )
+            })
+            .count()
+    };
+    let delivered = ide_writes();
+    assert!(delivered >= 1, "the fixture delivered the IDE companion");
+
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_writes(),
+        delivered,
+        "a re-armed repair of an already-current revision must not apply it again"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "skipping a current leg leaves the committed surface serving requests"
+    );
+
+    provider.forget_applied_content();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_writes(),
+        delivered + 1,
+        "a restarted engine no longer holds the bytes, so the repair delivers again"
+    );
+}
+
+/// An open whose eager sync already delivered, recorded and committed the IDE
+/// leg re-arms only what is still owed: the interactive repair is not re-armed,
+/// so the first request after the open does not apply the revision a second
+/// time. Once the engine no longer holds the bytes, the leg reads as owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let canonical_id = "/workspace/src/App.vue";
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: REQUEST_SURFACE_APP.to_string(),
+            },
+        })
+        .await;
+
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "the open's eager sync committed the IDE surface"
+    );
+    assert!(
+        !server.needs_ide_sync.contains(canonical_id),
+        "an open whose IDE leg is already current must not re-arm the repair"
+    );
+    assert!(!server.ide_leg_owed_for_open_document(&uri));
+    provider.forget_applied_content();
+    assert!(
+        server.ide_leg_owed_for_open_document(&uri),
+        "once the engine no longer holds the bytes the leg is owed again"
+    );
+}
+
+/// tsserver serves carriers from the publish store, so the gateway's
+/// publication is its IDE-leg application. Once a revision is published,
+/// committed and advertised, an open owes nothing and a repair re-armed for the
+/// same revision publishes nothing; an edit owes the leg again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tsserver_revision_already_published_is_not_published_again() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/PublishedOnce.vue";
+    install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    server.ensure_current_file_synced(&uri).await;
+    let ide_path = server
+        .provider_sync_state_for_source(canonical_id)
+        .and_then(|state| state.ide_path)
+        .expect("the repair committed the published carrier");
+    let published = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the publication recorded the IDE companion")
+        .stamp
+        .generation;
+
+    assert!(
+        !server.ide_leg_owed_for_open_document(&uri),
+        "a published, committed and advertised revision owes no IDE leg"
+    );
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .expect("the IDE companion stays recorded")
+            .stamp
+            .generation,
+        published,
+        "a repair of an already-published revision must not publish it a second time"
+    );
+
+    let _ = server
+        .documents
+        .did_change(&uri, 2, &MEMBERSHIP_TEST_VUE.replace("'hi'", "'edited'"));
+    assert!(
+        server.ide_leg_owed_for_open_document(&uri),
+        "an edit owes the leg again"
+    );
+}
+
+/// The completion recovery republishes an OPEN document's companions, which
+/// records and versions its surfaces. It must take the document's lane, so it
+/// cannot supersede a lane holder's recorded surface mid-transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_open_carrier_republish_waits_for_the_document_lane() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/RepublishOnLane.vue";
+    install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    let held = match server.documents.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the open document's lane is free, got {other:?}"),
+    };
+    let republish = server.publish_open_carrier_to_external_ts(&uri);
+    tokio::pin!(republish);
+    assert!(
+        futures_util::poll!(republish.as_mut()).is_pending(),
+        "the republish waits for the lane holder"
+    );
+    assert!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .record_snapshot(&crate::external_ts::CanonicalSource::from(canonical_id))
+            .is_none(),
+        "nothing was published while the lane was held"
+    );
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(10), republish)
+        .await
+        .expect("the republish runs once the lane is released");
+    assert!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(canonical_id)),
+        "the republish ran on its turn"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_provider_round_trip_does_not_block_interactive_ide_repair() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    server.sync_api_to_provider(&uri).await;
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let generation = server
+        .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .await
+        .expect("open generation");
+    let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
+    let api_path = server
+        .provider_sync_state_for_source(&canonical_id)
+        .expect("owned fixture")
+        .api_path
+        .expect("API companion");
+    provider.forget_applied_content();
+    let (arrived, release) = provider.block_open_file(&api_path);
+    let (updated, release_update) = provider.block_update_file(&api_path);
+    let repair = async {
+        tokio::select! { _ = arrived.notified() => {}, _ = updated.notified() => {} }
+        server.needs_ide_sync.insert(canonical_id.clone());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.ensure_current_file_synced(&uri),
+        )
+        .await;
+        release.notify_one();
+        release_update.notify_one();
+        result
+    };
+    let (_, result) = tokio::join!(server.sync_api_to_provider(&uri), repair);
+    assert!(
+        result.is_ok(),
+        "IDE repair must finish while the API write is parked"
+    );
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+fn lane_interleaving_deps(
+    server: &VerterLanguageServer,
+) -> crate::sync_coordinator::SyncCoordinatorDeps {
+    crate::sync_coordinator::SyncCoordinatorDeps {
+        documents: Arc::clone(&server.documents),
+        project_sync: server.project_sync.clone(),
+        needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
+        pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),
+        client: server.client.clone(),
+        type_provider: server.type_provider.clone(),
+        cached_verter_diags: Arc::clone(&server.cached_verter_diags),
+        position_encoding: Arc::clone(&server.position_encoding),
+        provider_sync_states: Arc::clone(&server.provider_sync_states),
+        vfs_workspace: Arc::clone(&server.vfs_workspace),
+        type_provider_kind: server.type_provider_kind,
+        carrier_publish_coordinator: server.carrier_publish_coordinator.clone(),
+        carrier_transaction_coordinator: Arc::clone(&server.carrier_transaction_coordinator),
+    }
+}
+
+async fn lane_interleaving_fixture(
+    name: &str,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        &format!("/workspace/src/{name}.vue"),
+        REQUEST_SURFACE_APP,
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let generation = server
+        .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .await
+        .unwrap();
+    let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
+    server.sync_ide_to_provider(&uri).await;
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "const msg: string // provider lane answer",
+    );
+    provider.clear_calls();
+    (service, provider, uri)
+}
+
+fn ide_application_count(provider: &MockTypeProvider, canonical_id: &str) -> usize {
+    let path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(call,
+        MockCall::OpenFile { path: p, .. } | MockCall::OpenFileBackground { path: p, .. }
+        | MockCall::UpdateFile { path: p, .. } | MockCall::LoadFile { path: p, .. } if p == &path)
+        })
+        .count()
+}
+
+fn edit_interleaving_document(server: &VerterLanguageServer, uri: &Uri, version: i32, value: &str) {
+    let source = REQUEST_SURFACE_APP.replace("'hello'", &format!("'{value}'"));
+    assert!(server.documents.did_change(uri, version, &source).changed);
+    let canonical_id = crate::documents::uri_to_canonical_id(uri);
+    server.needs_ide_sync.insert(canonical_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_joins_a_coordinator_parked_after_compile_without_an_extra_ide_application() {
+    let (service, provider, uri) = lane_interleaving_fixture("HoverJoinsCompile").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let (waiting, resume) = server.pause_next_ide_sync_after_lease(&id);
+    let request = async {
+        arrived.notified().await;
+        let control = async {
+            waiting.notified().await;
+            let writes = ide_application_count(&provider, &id);
+            resume.notify_one();
+            release.notify_one();
+            writes
+        };
+        tokio::join!(server.hover(hover_params(&uri, position)), control)
+    };
+    let (settled, (hover, before)) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        request
+    );
+    if !settled {
+        assert!(
+            server.pending_snapshot_provider_sync.contains(&id),
+            "an API leg yielding to the waiting hover stays owed"
+        );
+    }
+    assert_eq!(
+        before, 0,
+        "the hover reached the held lane before any IDE write"
+    );
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+    drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        true,
+        None,
+        server.carrier_publish_coordinator.as_ref(),
+        &server.carrier_transaction_coordinator,
+    )
+    .await;
+    assert_eq!(ide_application_count(&provider, &id), 1);
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&id),
+        "neither commit was superseded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tick_yields_to_hover_parked_before_write_and_skips_after_its_commit() {
+    let (service, provider, uri) = lane_interleaving_fixture("TickJoinsHover").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(&id);
+    let ticking = async {
+        arrived.notified().await;
+        let settled =
+            crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()).await;
+        let writes = ide_application_count(&provider, &id);
+        release.notify_one();
+        (settled, writes)
+    };
+    let (hover, (settled, before)) =
+        tokio::join!(server.hover(hover_params(&uri, position)), ticking);
+    assert!(!settled, "the contended tick requeues instead of waiting");
+    assert_eq!(before, 0);
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert!(crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()).await);
+    assert_eq!(ide_application_count(&provider, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_fences_the_parked_coordinator_and_hover_repairs_the_new_revision() {
+    let (service, provider, uri) = lane_interleaving_fixture("EditFencesCompile").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let editing = async {
+        arrived.notified().await;
+        edit_interleaving_document(server, &uri, 3, "again");
+        release.notify_one();
+        server.hover(hover_params(&uri, position)).await
+    };
+    let (settled, hover) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        editing
+    );
+    assert!(
+        !settled,
+        "the coordinator's obsolete transaction is refused"
+    );
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert_eq!(ide_application_count(&provider, &id), 1);
+    let surface = server.capture_provider_request_surface(&uri).unwrap();
+    assert_eq!(
+        surface.source_hash,
+        crate::provider_surface_store::ContentHash::of(
+            &REQUEST_SURFACE_APP.replace("'hello'", "'again'")
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_orders_after_the_holder_and_an_old_waiter_cannot_commit_into_reopen() {
+    let (service, provider, uri) = lane_interleaving_fixture("CloseOrdersRepair").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(&id);
+    let closing = async {
+        arrived.notified().await;
+        let close = server.did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        });
+        tokio::pin!(close);
+        let close_waited = futures_util::poll!(close.as_mut()).is_pending();
+        let old_waiter = server.ensure_current_file_synced(&uri);
+        tokio::pin!(old_waiter);
+        let waiter_waited = futures_util::poll!(old_waiter.as_mut()).is_pending();
+        release.notify_one();
+        close.await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 3,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'again'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, &id);
+        old_waiter.await;
+        (close_waited, waiter_waited, before)
+    };
+    let (_, (close_waited, waiter_waited, before)) =
+        tokio::join!(server.ensure_current_file_synced(&uri), closing);
+    assert!(close_waited && waiter_waited);
+    assert_eq!(
+        before, 2,
+        "the prior holder and the reopened generation each deliver once"
+    );
+    assert_eq!(
+        ide_application_count(&provider, &id),
+        before,
+        "the old waiter delivered and committed nothing"
+    );
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scanner_started_closed_yields_when_the_document_opens_after_compile() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/ScannerMeetsOpen.vue";
+    let uri: Uri = "file:///workspace/src/ScannerMeetsOpen.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let profile = server.documents.tsx_profile.read().clone();
+    let host = server.documents.host();
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.to_string(),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (_, before) = tokio::join!(
+        crate::workspace_scanner::sync_file_to_provider(
+            id,
+            &host,
+            Some(&server.documents),
+            &profile,
+            server.project_sync.as_ref(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            true,
+            &server.provider_sync_states,
+            server.carrier_publish_coordinator.as_ref(),
+            &server.carrier_transaction_coordinator,
+            Some(&server.pending_snapshot_provider_sync),
+            None
+        ),
+        opening
+    );
+    assert_eq!(before, 1);
+    assert_eq!(ide_application_count(&provider, id), before);
+    assert!(server.pending_snapshot_provider_sync.contains(id));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+/// The document is still closed when the scanner probes its lane, and opens
+/// with an edited buffer — the open's own eager repair delivering it — before
+/// the scanner delivers. The scanner's delivery fence must see the open and
+/// refuse its disk-compiled bytes, so the open buffer's surface is the only one
+/// applied and is never clobbered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scanner_started_closed_is_refused_when_the_document_opens_after_its_lane_probe() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/ScannerMeetsOpenAtDelivery.vue";
+    let uri: Uri = "file:///workspace/src/ScannerMeetsOpenAtDelivery.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let profile = server.documents.tsx_profile.read().clone();
+    let host = server.documents.host();
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_before_delivery(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'opened'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (_, before) = tokio::join!(
+        crate::workspace_scanner::sync_file_to_provider(
+            id,
+            &host,
+            Some(&server.documents),
+            &profile,
+            server.project_sync.as_ref(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            true,
+            &server.provider_sync_states,
+            server.carrier_publish_coordinator.as_ref(),
+            &server.carrier_transaction_coordinator,
+            Some(&server.pending_snapshot_provider_sync),
+            None
+        ),
+        opening
+    );
+    assert_eq!(before, 1, "the open's own repair delivered the document");
+    assert_eq!(
+        ide_application_count(&provider, id),
+        before,
+        "the closed-start scanner delivered nothing beneath the open document"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(id));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+/// The document is closed when the coordinator probes its lane and opens before
+/// the coordinator pins its revision. The pinned open revision belongs to the
+/// open document's own lane, so the lane-less coordinator yields instead of
+/// delivering that revision unserialized beside the open's own repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coordinator_started_closed_yields_when_the_document_opens_before_its_pin() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/CoordinatorMeetsOpenAtPin.vue";
+    let uri: Uri = "file:///workspace/src/CoordinatorMeetsOpenAtPin.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_lane_probe(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'opened'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (outcome, before) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, id, uri.as_str()),
+        opening
+    );
+    assert_eq!(
+        outcome,
+        crate::sync_coordinator::SyncFileOutcome::LaneBusy,
+        "a coordinator holding no lane must yield the open document's revision"
+    );
+    assert_eq!(
+        ide_application_count(&provider, id),
+        before,
+        "the lane-less coordinator delivered nothing beside the open document"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(id));
+}
+
+/// The coordinator releases the lane after its IDE leg and an interactive
+/// request takes it before the API leg asks again. Yielding to that request is
+/// contention, not a failed attempt: the transaction reports a lane yield, which
+/// the serial loop requeues without spending the document's retry budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_leg_yielding_to_an_interactive_request_is_a_lane_yield_not_a_retry() {
+    let (service, _provider, uri) = lane_interleaving_fixture("ApiLegYields").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_before_delivery(&id);
+    let interactive = async {
+        arrived.notified().await;
+        let held = match server.documents.try_delivery_lane(&id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+            other => panic!("the IDE leg released the lane, got {other:?}"),
+        };
+        release.notify_one();
+        held
+    };
+    let (outcome, held) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, &id, uri.as_str()),
+        interactive
+    );
+    drop(held);
+    assert_eq!(
+        outcome,
+        crate::sync_coordinator::SyncFileOutcome::LaneBusy,
+        "an API leg that yields the lane must not read as a failed transaction"
+    );
+    assert!(
+        server.pending_snapshot_provider_sync.contains(&id),
+        "the yielded API leg stays owed"
+    );
+}
+
+/// The imported-carrier writer releases the child's lane between its legs. Its
+/// unresolved API leg must then wait its turn behind a lane holder, exactly as
+/// the resolved arm does, rather than return a retry its callers discard —
+/// leaving the leg undelivered with nothing to redrive it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unresolved_api_leg_waits_its_turn_behind_the_lane_holder() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let api_code = server
+        .documents
+        .host()
+        .get_public_api(&id)
+        .expect("public API projection")
+        .expect("the carrier has a public API")
+        .ts_labeled_code()
+        .to_string();
+    let held = match server.documents.try_delivery_lane(&id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the open document's lane is free, got {other:?}"),
+    };
+    let leg = server.sync_carrier_api_unresolved(&id, &api_code);
+    tokio::pin!(leg);
+    assert!(
+        futures_util::poll!(leg.as_mut()).is_pending(),
+        "the leg waits for the holder instead of giving up"
+    );
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(10), leg)
+        .await
+        .expect("the leg runs once the holder releases the lane");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_parked_document_leaves_another_documents_hover_unaffected() {
+    let (service, provider, uri) = lane_interleaving_fixture("HeldWhileOtherHovers").await;
+    let server = service.inner();
+    let other = open_test_vue(
+        server,
+        "/workspace/src/UnaffectedHover.vue",
+        REQUEST_SURFACE_APP,
+    );
+    server.ensure_current_file_synced(&other).await;
+    let position = find_document_position(server, &other, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &other,
+        position,
+        "const msg: string // provider lane answer",
+    );
+    provider.clear_calls();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let other_id = crate::documents::uri_to_canonical_id(&other);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let requesting = async {
+        arrived.notified().await;
+        let result = server.hover(hover_params(&other, position)).await;
+        let held_writes = ide_application_count(&provider, &id);
+        release.notify_one();
+        (result, held_writes)
+    };
+    let (settled, (hover, before)) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        requesting
+    );
+    assert!(settled);
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert_eq!(
+        before, 0,
+        "the other request completed before the holder was released"
+    );
+    assert_eq!(ide_application_count(&provider, &other_id), 0);
+    assert_eq!(ide_application_count(&provider, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_api_open_yields_to_hover_and_refuses_a_changed_revision() {
+    let (service, provider, uri) = lane_interleaving_fixture("BackgroundApiYields").await;
+    let server = service.inner();
+    let canonical = crate::documents::uri_to_canonical_id(&uri);
+    let path = verter_semantic::resolver_core::carrier_api_provider_path(&canonical);
+    let (arrived, release) = provider.block_open_file(&path);
+    let snapshot = server.published_resolver().unwrap();
+    let vfs = server.vfs_workspace.read().clone();
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let task = super::background_drain::sync_api_to_provider_background_task(
+        server.project_sync.clone().unwrap(),
+        snapshot,
+        vfs,
+        Arc::clone(&server.provider_sync_states),
+        canonical.clone(),
+        false,
+        Arc::clone(&server.carrier_transaction_coordinator),
+        Arc::clone(&server.pending_snapshot_provider_sync),
+        Arc::clone(&server.documents),
+    );
+    let request = async {
+        arrived.notified().await;
+        edit_interleaving_document(server, &uri, 2, "world");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.hover(hover_params(&uri, position)),
+        )
+        .await;
+        let before_resume = server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&path)
+            .map(|surface| surface.stamp.clone());
+        release.notify_one();
+        (result, before_resume)
+    };
+    let (_, (hover, before_resume)) = tokio::join!(task, request);
+    assert!(
+        hover.is_ok(),
+        "hover must finish before the background API open resumes"
+    );
+    assert!(
+        hover_text(hover.unwrap().unwrap()).contains("const msg: string // provider lane answer")
+    );
+    assert_eq!(ide_application_count(&provider, &canonical), 1);
+    assert_eq!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&path)
+            .map(|surface| surface.stamp.clone()),
+        before_resume,
+        "the refused API transaction must leave the hover's current coordinate record untouched"
+    );
+    assert!(
+        !server
+            .provider_sync_state_for_source(&canonical)
+            .unwrap()
+            .api_background_loaded,
+        "refused API delivery cannot mark the owed API leg applied"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(&canonical));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
 }
