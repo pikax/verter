@@ -7591,29 +7591,21 @@ mod authored_literal_survival_tests {
     /// the typed refusal, never the code served un-rewritten as if it held
     /// no specifier; the public-API file it belongs to fails with the typed
     /// projection failure, whose subject is the whole source. Retried, the
-    /// rewrite answers.
+    /// rewrite answers. The forcing makes the small source's parse reserve
+    /// a region on any thread's stack.
     #[test]
     fn a_specifier_rewrite_whose_parse_is_refused_is_the_typed_refusal() {
+        use verter_parser::oxc_parse::faults::Reservation;
         let code = format!(
             "import Child from './Child.vue'\nconst v = {}1{};\n",
-            "(".repeat(157),
-            ")".repeat(157)
+            "(".repeat(3),
+            ")".repeat(3)
         );
-        let (refused, retried) = std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(1 << 20)
-                .spawn_scoped(scope, || {
-                    verter_parser::oxc_parse::faults::fail_next_reservations(1);
-                    let refused = rewrite_relative_imports(&code, Path::new("/project/src"));
-                    (
-                        refused,
-                        rewrite_relative_imports(&code, Path::new("/project/src")),
-                    )
-                })
-                .expect("spawn the thread")
-                .join()
-                .expect("the rewrites return")
-        });
+        let _forcing =
+            verter_parser::oxc_parse::faults::force_reservations_here(&[Reservation::Parse]);
+        verter_parser::oxc_parse::faults::fail_next_reservations(1);
+        let refused = rewrite_relative_imports(&code, Path::new("/project/src"));
+        let retried = rewrite_relative_imports(&code, Path::new("/project/src"));
         let unavailable = refused.expect_err("the refused rewrite is the typed refusal");
         let failure = stack_refusal_failure(Path::new("/project/src/Deep.vue"), unavailable);
         assert_eq!(failure.detail_code, "stack-unavailable");
