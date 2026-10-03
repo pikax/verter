@@ -581,8 +581,11 @@ impl DocumentRegistry {
                 Some(feature.projection_host_revision)
             }
             Some(_) => return None,
-            None if crate::server::server_utils::carrier_language_for(&document.canonical_id)
-                .is_some() =>
+            None if crate::server::server_utils::carrier_language_for(
+                self.language_classifier(),
+                &document.canonical_id,
+            )
+            .is_some() =>
             {
                 return None;
             }

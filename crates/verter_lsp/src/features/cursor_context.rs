@@ -154,10 +154,14 @@ pub enum CarrierTemplateLanguage {
 }
 
 impl CarrierTemplateLanguage {
-    pub fn from_uri(uri: &str) -> Option<Self> {
-        let language = verter_session::LanguageRegistry::global()
-            .classify_static(uri)
-            .static_resolution();
+    /// The markup language of `uri` under the serving host's classifier;
+    /// `None` for a non-carrier or a carrier whose vertical the host does not
+    /// admit.
+    pub fn from_uri(
+        classifier: &verter_session::framework::HostLanguageClassifier,
+        uri: &str,
+    ) -> Option<Self> {
+        let language = classifier.classify(uri);
         if language.is_svelte() {
             Some(Self::Svelte)
         } else if language.is_framework_carrier() {

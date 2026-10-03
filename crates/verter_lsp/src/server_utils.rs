@@ -41,63 +41,63 @@ pub(super) fn is_config_file(path: &str) -> bool {
 mod debug;
 pub(super) use debug::debug_snippet;
 
-/// Registry-backed carrier classification for a canonical ID (or URI
-/// string): `Some(language)` when the path classifies as a framework
-/// CARRIER row (`.vue`, `.svelte`, …), `None` for plain scripts and
-/// unknown extensions. A carrier row without a registered carrier
-/// implementation still classifies here — its requests surface the
-/// typed unsupported-language error and produce no provider sync state.
-pub(crate) fn carrier_language_for(path: &str) -> Option<verter_session::FileLanguage> {
-    let language = verter_session::LanguageRegistry::global()
-        .classify_static(path)
-        .static_resolution();
+/// Carrier classification for a canonical ID (or URI string) under the
+/// serving host's classifier: `Some(language)` when the path classifies as
+/// an ADMITTED framework CARRIER row (`.vue`, `.svelte`, …), `None` for plain
+/// scripts, unknown extensions, and carriers whose vertical the host does not
+/// admit. A carrier row without a registered carrier implementation still
+/// classifies here — its requests surface the typed unsupported-language
+/// error and produce no provider sync state.
+pub(crate) fn carrier_language_for(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    path: &str,
+) -> Option<verter_session::FileLanguage> {
+    let language = classifier.classify(path);
     language.is_framework_carrier().then_some(language)
 }
 
-/// Registry-backed adapter-MODULE classification for a canonical ID (or URI
-/// string): `Some(language)` when the path classifies as a standalone non-
-/// component adapter module (`.svelte.ts` / `.svelte.js` rune module), `None`
-/// otherwise (carriers, plain scripts, unknown extensions). An adapter module
-/// is NOT a carrier — it serves its OWN-path provider buffer with a synthetic
-/// rune prelude, not an IDE TSX projection.
-pub(crate) fn adapter_module_language_for(path: &str) -> Option<verter_session::FileLanguage> {
-    let language = verter_session::LanguageRegistry::global()
-        .classify_static(path)
-        .static_resolution();
+/// Adapter-MODULE classification for a canonical ID (or URI string) under
+/// the serving host's classifier: `Some(language)` when the path classifies
+/// as a standalone non-component module of an ADMITTED adapter (`.svelte.ts`
+/// / `.svelte.js` rune module), `None` otherwise (carriers, plain scripts,
+/// unknown extensions). An adapter module is NOT a carrier — it serves its
+/// OWN-path provider buffer with a synthetic rune prelude, not an IDE TSX
+/// projection.
+pub(crate) fn adapter_module_language_for(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    path: &str,
+) -> Option<verter_session::FileLanguage> {
+    let language = classifier.classify(path);
     verter_session::framework::svelte_rune_module_source_type(&language).map(|_| language)
 }
 
-/// Registry-backed SELF-FILE classification for a canonical ID (or URI
-/// string): `Some(language)` when the path serves an OWN-path provider
-/// buffer — a Svelte rune module (`<rune prelude> + <bytes>`) OR a plain
-/// TS-family script (bytes verbatim, zero-line prelude). `None` for
-/// framework carriers (they project a generated IDE companion) and for
-/// unknown extensions (no registered language row — never serve a
-/// `.md`/`.css`/extensionless document to the TypeScript provider).
-pub(crate) fn self_file_language_for(path: &str) -> Option<verter_session::FileLanguage> {
-    let classification = verter_session::LanguageRegistry::global().classify_static(path);
-    if matches!(
-        classification,
-        verter_session::StaticClassification::Unknown
-    ) {
-        return None;
-    }
-    let language = classification.static_resolution();
+/// SELF-FILE classification for a canonical ID (or URI string) under the
+/// serving host's classifier: `Some(language)` when the path serves an
+/// OWN-path provider buffer — an admitted Svelte rune module
+/// (`<rune prelude> + <bytes>`) OR a plain TS-family script (bytes verbatim,
+/// zero-line prelude). `None` for admitted framework carriers (they project a
+/// generated IDE companion) and for unknown extensions (no registered
+/// language row — never serve a `.md`/`.css`/extensionless document to the
+/// TypeScript provider).
+pub(crate) fn self_file_language_for(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    path: &str,
+) -> Option<verter_session::FileLanguage> {
+    let language = classifier.classify_registered(path)?;
     verter_session::framework::serves_self_file_provider_buffer(&language).then_some(language)
 }
 
-/// Whether `path` is a framework CARRIER whose default export IS the
-/// component value (`.vue`, `.svelte`, …). Every framework carrier shares
-/// default-export component semantics: a default import of the carrier binds
-/// the component, so the "name won't match script bindings, retry with
-/// `default`" navigation fallback and the component-target resolution gates
-/// apply to ANY carrier — none of it is Vue-intrinsic.
-///
-/// This is the registry-backed replacement for the hardcoded
-/// `ends_with(".vue")` default-export / component-target gates across the
-/// definition / navigation / component-resolution feature layer.
-pub(crate) fn is_default_export_component_carrier(path: &str) -> bool {
-    carrier_language_for(path).is_some()
+/// Whether `path` is an admitted framework CARRIER whose default export IS
+/// the component value (`.vue`, `.svelte`, …). Every framework carrier
+/// shares default-export component semantics: a default import of the
+/// carrier binds the component, so the "name won't match script bindings,
+/// retry with `default`" navigation fallback and the component-target
+/// resolution gates apply to ANY carrier — none of it is Vue-intrinsic.
+pub(crate) fn is_default_export_component_carrier(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    path: &str,
+) -> bool {
+    carrier_language_for(classifier, path).is_some()
 }
 
 /// When `only` is `None` (no filter), all kinds are wanted.
@@ -877,6 +877,7 @@ pub(crate) fn rewrite_non_carrier_source_with_resolver(
 }
 
 pub(crate) fn prepare_non_carrier_provider_sync(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     snapshot: Option<&super::PublishedResolverSnapshot>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -899,9 +900,7 @@ pub(crate) fn prepare_non_carrier_provider_sync(
     // rune-derived exported types. The prelude is module-local (`export {};`),
     // so it does NOT leak the runes into a plain `.ts`/`.js` (which is fed its
     // bytes verbatim — `rune_module_provider_content` returns `None` for it).
-    let language = verter_session::LanguageRegistry::global()
-        .classify_static(importer_id)
-        .static_resolution();
+    let language = classifier.classify(importer_id);
     let rewritten =
         match verter_session::framework::rune_module_provider_content(&language, &rewritten) {
             Some(built) => built.content,
@@ -1069,10 +1068,15 @@ pub(super) fn analyzed_module_reference_request_kind(
 /// Check if a resolved import path matches a target file path.
 ///
 /// Handles cases where the import source omits the framework CARRIER
-/// extension. For every registry carrier extension (`vue`, `svelte`, …):
+/// extension. For every carrier extension the serving host admits (`vue`,
+/// `svelte`, …):
 /// - `./Popup` → matches `./Popup.{ext}`
 /// - `./Popover` → matches `./Popover/index.{ext}` or `./Popover/Popover.{ext}`
-pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bool {
+pub(super) fn import_resolved_matches_target(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    resolved: &str,
+    target: &str,
+) -> bool {
     if resolved == target {
         return true;
     }
@@ -1082,7 +1086,7 @@ pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bo
         return false;
     }
     let last_segment = resolved.rsplit('/').next().filter(|s| !s.is_empty());
-    for ext in verter_session::LanguageRegistry::global().carrier_extensions() {
+    for ext in classifier.carrier_extensions() {
         // Try: resolved + ".{ext}"
         if target == format!("{resolved}.{ext}") {
             return true;
@@ -1143,7 +1147,7 @@ pub(crate) fn resolve_component_for(
             analysis = host.get_analysis(canonical_id);
         }
 
-        if carrier_language_for(canonical_id).is_some()
+        if carrier_language_for(host.language_classifier(), canonical_id).is_some()
             && analysis
                 .as_ref()
                 .is_some_and(|analysis| analysis.template.is_none())
@@ -1499,19 +1503,21 @@ pub(super) fn resolve_import_specifier_standalone(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn collect_imported_carrier_priority_ids(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
 ) -> Vec<String> {
-    collect_imported_carrier_priority_ids_from_imports(&analysis.imports)
+    collect_imported_carrier_priority_ids_from_imports(classifier, &analysis.imports)
 }
 
 pub(super) fn collect_imported_carrier_priority_ids_from_imports(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     imports: &[verter_semantic::analysis::AnalyzedImport],
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     imports
         .iter()
         .filter_map(|import| import.resolved_canonical_id.as_ref())
-        .filter(|canonical_id| carrier_language_for(canonical_id).is_some())
+        .filter(|canonical_id| carrier_language_for(classifier, canonical_id).is_some())
         .filter(|canonical_id| seen.insert((*canonical_id).clone()))
         .cloned()
         .collect()
@@ -1519,6 +1525,7 @@ pub(super) fn collect_imported_carrier_priority_ids_from_imports(
 
 #[cfg(test)]
 pub(super) fn collect_imported_carrier_priority_ids_from_imports_with_transient_fallback<F>(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     imports: &[verter_semantic::analysis::AnalyzedImport],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
@@ -1536,7 +1543,7 @@ where
         let Some(canonical_id) = canonical_id.as_ref() else {
             continue;
         };
-        if carrier_language_for(canonical_id).is_none() {
+        if carrier_language_for(classifier, canonical_id).is_none() {
             continue;
         }
         if seen.insert(canonical_id.clone()) {
@@ -1548,6 +1555,7 @@ where
 }
 
 pub(super) fn collect_imported_carrier_priority_ids_from_imports_for_publication<F>(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     imports: &[verter_semantic::analysis::AnalyzedImport],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
@@ -1571,7 +1579,9 @@ where
         let Some(canonical_id) = canonical_id else {
             continue;
         };
-        if carrier_language_for(&canonical_id).is_some() && seen.insert(canonical_id.clone()) {
+        if carrier_language_for(classifier, &canonical_id).is_some()
+            && seen.insert(canonical_id.clone())
+        {
             ids.push(canonical_id);
         }
     }
@@ -1584,6 +1594,7 @@ where
 /// it deliberately consumes only syntax facts, so `didOpen` never has to request a
 /// full Verter analysis merely to determine which carrier API companions matter.
 pub(super) fn collect_imported_carrier_priority_ids_from_specifiers_for_publication<F>(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     imports: &[verter_session::ScriptImportInfo],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
@@ -1607,7 +1618,9 @@ where
         let Some(canonical_id) = canonical_id else {
             continue;
         };
-        if carrier_language_for(&canonical_id).is_some() && seen.insert(canonical_id.clone()) {
+        if carrier_language_for(classifier, &canonical_id).is_some()
+            && seen.insert(canonical_id.clone())
+        {
             ids.push(canonical_id);
         }
     }
@@ -1817,7 +1830,9 @@ fn compute_verter_diagnostics_for_with_views(
             // Filter at the public diagnostic boundary, where the authored
             // carrier language is authoritative, rather than weakening the
             // shared semantic facts used by completion and navigation.
-            if carrier_language_for(&canonical_id).is_some_and(|language| language.is_svelte()) {
+            if carrier_language_for(documents.language_classifier(), &canonical_id)
+                .is_some_and(|language| language.is_svelte())
+            {
                 diags.retain(|diagnostic| {
                     !matches!(
                         diagnostic.code.as_ref(),
@@ -1917,6 +1932,7 @@ pub(crate) fn verter_owned_diagnostics(
     // nothing at all.
     if let Some(source) = documents.host().get_source(canonical_id) {
         diags.extend(crate::svelte_assets::svelte_package_diagnostic(
+            documents.language_classifier(),
             canonical_id,
             &source,
         ));

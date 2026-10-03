@@ -587,6 +587,7 @@ impl VerterLanguageServer {
             };
             let direct_targets =
                 match super::server_utils::collect_imported_carrier_priority_ids_from_imports_for_publication(
+                    self.documents.language_classifier(),
                     &ingress.imports,
                     Some(source.as_str()),
                     |parent, specifier| {

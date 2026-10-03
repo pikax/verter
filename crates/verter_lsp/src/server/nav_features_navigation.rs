@@ -397,6 +397,7 @@ pub(super) async fn handle_goto_definition(
             .as_ref()
             .map(|snapshot| snapshot.structure().clone());
         let mut def = definition_at_position(
+            server.documents.language_classifier(),
             position,
             &doc.source,
             &blocks,

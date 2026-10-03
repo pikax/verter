@@ -90,7 +90,7 @@ impl VerterLanguageServer {
             return None;
         }
 
-        if is_default_export_component_carrier(canonical_id) {
+        if is_default_export_component_carrier(self.documents.language_classifier(), canonical_id) {
             let profile = self.documents.tsx_profile.read().clone();
             // ANALYSIS-facing side effect: this is intentionally the shared
             // compile path, which also leaves the exact carrier public API ready
@@ -156,7 +156,8 @@ impl VerterLanguageServer {
         );
 
         for candidate in candidates {
-            if is_default_export_component_carrier(&candidate) {
+            if is_default_export_component_carrier(self.documents.language_classifier(), &candidate)
+            {
                 if self.ensure_component_ready(&candidate).is_some() {
                     return Some(candidate);
                 }
@@ -179,8 +180,10 @@ impl VerterLanguageServer {
             else {
                 continue;
             };
-            if is_default_export_component_carrier(&resolved_id)
-                && self.ensure_component_ready(&resolved_id).is_some()
+            if is_default_export_component_carrier(
+                self.documents.language_classifier(),
+                &resolved_id,
+            ) && self.ensure_component_ready(&resolved_id).is_some()
             {
                 return Some(resolved_id);
             }
@@ -442,7 +445,10 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if is_default_export_component_carrier(canonical_id) {
+                    if is_default_export_component_carrier(
+                        self.documents.language_classifier(),
+                        canonical_id,
+                    ) {
                         if let Some(location) =
                             self.resolve_precise_export_location(canonical_id, "default")
                         {
@@ -459,7 +465,10 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if is_default_export_component_carrier(&resolved) {
+                    if is_default_export_component_carrier(
+                        self.documents.language_classifier(),
+                        &resolved,
+                    ) {
                         if let Some(location) =
                             self.resolve_precise_export_location(&resolved, "default")
                         {

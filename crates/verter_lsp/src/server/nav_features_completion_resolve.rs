@@ -79,13 +79,16 @@ pub(super) fn resolve_provider_auto_import_edits(
     // descriptor-identity `carrier_kind_for_language`. ONLY a `Some(CarrierKind::Vue)` continues; a
     // Svelte / non-carrier classification — and any future markup carrier without its own arm —
     // fails closed here (`Ok(None)`), never falling through into Vue `<script setup>` synthesis.
-    let carrier_continues =
-        crate::server::carrier_language_for(carrier_uri.as_str()).is_some_and(|language| {
-            matches!(
-                crate::features::auto_close_tag::carrier_kind_for_language(&language),
-                Some(crate::features::auto_close_tag::CarrierKind::Vue)
-            )
-        });
+    let carrier_continues = crate::server::carrier_language_for(
+        server.documents.language_classifier(),
+        carrier_uri.as_str(),
+    )
+    .is_some_and(|language| {
+        matches!(
+            crate::features::auto_close_tag::carrier_kind_for_language(&language),
+            Some(crate::features::auto_close_tag::CarrierKind::Vue)
+        )
+    });
     if !carrier_continues {
         return Ok(None);
     }

@@ -94,6 +94,22 @@ impl HostLanguageClassifier {
         self.admission_resolved(language)
     }
 
+    /// [`Self::classify`] for a path whose extension the registry
+    /// registers; `None` for an unregistered extension (no language row —
+    /// the plain-script catch-all [`Self::classify`] applies is not a
+    /// registration). An unadmitted vertical's extensions stay registered:
+    /// they resolve to the plain-script routing admission projects them to.
+    #[must_use]
+    pub fn classify_registered(&self, path: &str) -> Option<FileLanguage> {
+        if matches!(
+            self.registry.classify_static(path),
+            StaticClassification::Unknown
+        ) {
+            return None;
+        }
+        Some(self.classify(path))
+    }
+
     /// The admission projection of a classified row: a framework carrier
     /// or adapter module whose adapter is not admitted degrades to the
     /// routing an unregistered extension gets — the plain-script

@@ -44,6 +44,7 @@ pub struct WorkspaceComponent {
 /// component's analysis snapshot for cross-file prop completions.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn completions_at_position(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     position: &Position,
     source: &str,
     blocks: &[CarrierBlockView],
@@ -56,7 +57,8 @@ pub fn completions_at_position(
     structure: Option<&RegisteredFileStructure>,
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
-    let carrier_language = doc_uri.and_then(CarrierTemplateLanguage::from_uri);
+    let carrier_language =
+        doc_uri.and_then(|uri| CarrierTemplateLanguage::from_uri(classifier, uri));
 
     // Classify cursor using AST-based context detection
     let context = classify_cursor_context_for_language(

@@ -42,6 +42,10 @@ pub struct DocumentRegistry {
     /// access goes through [`Self::host`], which holds a semantic-activity
     /// guard for the call (see [`guarded_host`]).
     host: SharedHost,
+    /// The host's language classifier, captured once: it is immutable for
+    /// the host's lifetime, so protocol paths classify under the host's
+    /// framework admission without borrowing the host per call.
+    language_classifier: verter_session::framework::HostLanguageClassifier,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
@@ -531,8 +535,10 @@ impl DocumentRegistry {
     pub fn new(host: Arc<VerterHost>) -> Self {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
+        let language_classifier = host.language_classifier().clone();
         Self {
             host: SharedHost::new(host),
+            language_classifier,
             documents: DashMap::new(),
             diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
             diagnostics_refresh_tx,
@@ -803,6 +809,7 @@ impl DocumentRegistry {
     /// shift for every position; the rewrite column shifts refine import lines
     /// once the resolver lands.
     fn build_self_file_projection(
+        classifier: &verter_session::framework::HostLanguageClassifier,
         canonical_id: &str,
         source: &str,
         replacements: &[(usize, usize, String)],
@@ -811,7 +818,7 @@ impl DocumentRegistry {
         // Path-gated: the registry extension table is the authority, so an
         // unknown extension (which the host classifier's catch-all would
         // report as a TS script) builds NO projection.
-        let file_language = crate::server::self_file_language_for(canonical_id)?;
+        let file_language = crate::server::self_file_language_for(classifier, canonical_id)?;
         let built = verter_session::framework::self_file_provider_content(&file_language, source)?;
         let mapper =
             SelfFileProviderMapper::new(built.prelude_line_count, replacements, line_index);
@@ -838,8 +845,7 @@ impl DocumentRegistry {
     /// to its framework row here and the host upsert parses it through the
     /// registered carrier.
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
-        let host = self.host();
-        let classifier = host.language_classifier();
+        let classifier = self.language_classifier();
         classifier
             .carrier_for_editor_language_id(language_id)
             .unwrap_or_else(|| classifier.classify(canonical_id))
@@ -982,7 +988,13 @@ impl DocumentRegistry {
                 .and_then(|tsx| PositionMapper::from_json(tsx.source_map.as_ref()?).ok())
                 .map(DocumentProviderProjection::carrier_ide)
         } else {
-            Self::build_self_file_projection(&canonical_id, &source, &[], line_index.as_ref())
+            Self::build_self_file_projection(
+                self.language_classifier(),
+                &canonical_id,
+                &source,
+                &[],
+                line_index.as_ref(),
+            )
         };
         if let Some(outcome) = &carrier_compile {
             self.account_carrier_ide_content_verdict(
@@ -1208,7 +1220,13 @@ impl DocumentRegistry {
             // extension → `None`). The prelude offset is content-independent;
             // rebuild it whole-line (rewrite segments get refined by the
             // server once the resolver is ready).
-            Self::build_self_file_projection(&canonical_id, &source, &[], new_line_index.as_ref())
+            Self::build_self_file_projection(
+                self.language_classifier(),
+                &canonical_id,
+                &source,
+                &[],
+                new_line_index.as_ref(),
+            )
         };
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
@@ -1750,9 +1768,13 @@ impl DocumentRegistry {
         let canonical_id = entry.canonical_id.clone();
         let source = entry.source.clone();
         let line_index = entry.line_index.clone();
-        if let Some(projection) =
-            Self::build_self_file_projection(&canonical_id, &source, replacements, &line_index)
-        {
+        if let Some(projection) = Self::build_self_file_projection(
+            self.language_classifier(),
+            &canonical_id,
+            &source,
+            replacements,
+            &line_index,
+        ) {
             entry.projection = Some(projection);
         }
     }
@@ -1922,6 +1944,12 @@ impl DocumentRegistry {
     /// (see [`guarded_host`]).
     pub fn host(&self) -> HostRef<'_> {
         self.host.host()
+    }
+
+    /// The serving host's language classifier — the admission-aware
+    /// authority every protocol-level carrier decision reads.
+    pub fn language_classifier(&self) -> &verter_session::framework::HostLanguageClassifier {
+        &self.language_classifier
     }
 
     /// A shareable host handle for work that outlives this borrow (a blocking

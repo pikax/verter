@@ -62,6 +62,7 @@ fn test_go_to_definition_from_template_to_script_via_span() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -121,6 +122,7 @@ fn incomplete_script_member_access_resolves_same_file_binding() {
             .offset_to_position(use_offset as u32)
             .expect("usage position");
         let result = definition_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -151,6 +153,7 @@ fn incomplete_script_member_access_resolves_same_file_binding() {
             .expect("unknown position");
         assert!(
             definition_at_position(
+                &verter_session::framework::HostLanguageClassifier::default(),
                 &unknown_position,
                 &unknown_source,
                 &test_carrier_blocks(&unknown_source),
@@ -252,6 +255,7 @@ fn svelte_local_render_definition_uses_registered_structure_without_template_ana
 
     for analysis in [None, Some(&FileAnalysisSnapshot::default())] {
         let result = definition_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -520,6 +524,7 @@ fn assert_render_definition_targets_authored_span(
         .offset_to_position(use_offset as u32)
         .expect("render use position");
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -602,6 +607,7 @@ fn svelte_render_callee_without_snippet_identity_uses_normal_navigation() {
     let remote_use = source.rfind("remoteRow").unwrap();
     let remote_position = line_index.offset_to_position(remote_use as u32).unwrap();
     let remote = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &remote_position,
         source,
         &blocks,
@@ -620,6 +626,7 @@ fn svelte_render_callee_without_snippet_identity_uses_normal_navigation() {
     let dynamic_use = source.rfind("dynamicRow").unwrap();
     let dynamic_position = line_index.offset_to_position(dynamic_use as u32).unwrap();
     let dynamic = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &dynamic_position,
         source,
         &blocks,
@@ -696,6 +703,7 @@ fn svelte_render_source_authority_is_limited_to_the_static_callee_token() {
         let position = line_index.offset_to_position(collision as u32).unwrap();
         assert!(
             definition_at_position(
+                &verter_session::framework::HostLanguageClassifier::default(),
                 &position,
                 source,
                 &blocks,
@@ -743,6 +751,7 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to
     let position = line_index.offset_to_position(ref_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -819,6 +828,7 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
     };
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -894,6 +904,7 @@ fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fa
     };
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -942,6 +953,7 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
     let position = line_index.offset_to_position(helper_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1001,6 +1013,7 @@ fn test_go_to_macro_binding_from_template() {
     let position = line_index.offset_to_position(props_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1047,6 +1060,7 @@ fn test_no_definition_for_unknown_binding() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1105,6 +1119,7 @@ fn test_no_definition_inside_html_comment() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1152,6 +1167,7 @@ fn comment_suppression_reads_registered_facts_not_raw_source() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let with_facts = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1167,6 +1183,7 @@ fn comment_suppression_reads_registered_facts_not_raw_source() {
     );
 
     let without_facts = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1212,6 +1229,7 @@ fn navigation_survives_decoy_comment_open_inside_attribute_string() {
     let offset = source.find("count").unwrap();
     let position = line_index.offset_to_position(offset as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1316,6 +1334,7 @@ fn test_go_to_component_definition_from_template() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1355,6 +1374,7 @@ fn test_go_to_component_definition_from_template() {
         }
     };
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1462,6 +1482,7 @@ fn test_css_nav_template_class_to_style() {
     let position = line_index.offset_to_position(btn_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1564,6 +1585,7 @@ fn test_css_nav_multi_class_attr() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1661,6 +1683,7 @@ fn test_css_nav_template_id_to_style() {
     let position = line_index.offset_to_position(app_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1750,6 +1773,7 @@ fn test_css_nav_dynamic_class_object_key_navigates() {
     let position = line_index.offset_to_position(active_offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1852,6 +1876,7 @@ fn test_css_nav_style_to_template() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1921,6 +1946,7 @@ fn test_import_source_string_navigation() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1992,6 +2018,7 @@ fn test_path_alias_resolution_on_binding() {
         }
     };
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2030,6 +2057,7 @@ fn test_path_alias_resolution_on_binding() {
         }
     };
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2054,6 +2082,7 @@ fn test_path_alias_resolution_on_binding() {
 
     // Without any resolver: should fall back to import span
     let result_no_resolver = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2119,6 +2148,7 @@ fn test_path_alias_resolution_on_import_string() {
         }
     };
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2233,6 +2263,7 @@ fn test_dom_query_selector_navigates_to_element() {
     let position = line_index.offset_to_position(abs_cursor as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2322,6 +2353,7 @@ fn test_dom_query_selector_no_match() {
     let position = line_index.offset_to_position(abs_cursor as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2417,6 +2449,7 @@ fn test_dom_query_selector_falls_back_to_css() {
     let position = line_index.offset_to_position(abs_cursor as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2507,6 +2540,7 @@ fn test_path_alias_resolution_on_component_tag() {
     };
     // Without export resolver: falls back to .vue file navigation
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2547,6 +2581,7 @@ fn test_path_alias_resolution_on_component_tag() {
         }
     };
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2664,6 +2699,7 @@ fn test_go_to_definition_event_handler_click() {
         .offset_to_position((click_offset + 1) as u32)
         .unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2782,6 +2818,7 @@ fn test_go_to_definition_inline_event_no_binding() {
         .offset_to_position((click_offset + 1) as u32)
         .unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2873,6 +2910,7 @@ fn test_go_to_definition_component_event_name_defers_to_server() {
         .offset_to_position((event_offset + 1) as u32)
         .unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2937,6 +2975,7 @@ fn test_go_to_definition_dollar_props() {
 
     let pos = line_index.offset_to_position(props_offset as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3006,6 +3045,7 @@ fn test_go_to_definition_dollar_emit() {
 
     let pos = line_index.offset_to_position(emit_offset as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3054,6 +3094,7 @@ fn test_go_to_definition_dollar_props_without_macro() {
 
     let pos = line_index.offset_to_position(props_offset as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3136,6 +3177,7 @@ fn definition_prop_field_type_based() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3226,6 +3268,7 @@ fn definition_prop_field_runtime() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3319,6 +3362,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
         .unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3399,6 +3443,7 @@ fn test_vue_default_import_retries_with_default_binding() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3453,6 +3498,7 @@ fn test_named_import_non_carrier_no_default_fallback() {
 
     // Without export resolver, non-.vue targets still return None
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3543,6 +3589,7 @@ fn test_component_tag_default_fallback() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3618,6 +3665,7 @@ fn test_script_context_vue_import_default_fallback() {
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3730,6 +3778,7 @@ fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
     let cursor = source.find("class=\"title\"").unwrap() + 7;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3820,6 +3869,7 @@ fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
     let cursor = source.find("class=\"primary\"").unwrap() + 8;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3877,6 +3927,7 @@ fn css_class_definition_reaches_deep_inner_class() {
     let cursor = source.find("class=\"inner\"").unwrap() + 8;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3939,6 +3990,7 @@ fn css_class_definition_reaches_nested_scss_class() {
     let cursor = source.find("class=\"title\"").unwrap() + 8;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4002,6 +4054,7 @@ fn css_class_definition_kebab_token_at_hyphen_position() {
     let cursor = source.find("class=\"my-card\"").unwrap() + 7 + "my".len();
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4099,6 +4152,7 @@ fn svelte_class_attr_definition_to_style_rule() {
     let cursor = source.find("class=\"card\"").unwrap() + 8;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4129,6 +4183,7 @@ fn svelte_class_directive_definition_to_style_rule() {
     let cursor = source.find("class:open").unwrap() + 7;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4159,6 +4214,7 @@ fn svelte_class_token_without_rule_fails_closed() {
     let cursor = source.find("class=\"ghost\"").unwrap() + 8;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4185,6 +4241,7 @@ fn svelte_style_class_definition_to_markup_usages() {
     let cursor = source.find(".card {").unwrap() + 2;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -4254,6 +4311,7 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
         let cursor = source.find("class=\"btn\"").unwrap() + 7;
         let position = line_index.offset_to_position(cursor as u32).unwrap();
         let result = definition_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -4323,6 +4381,7 @@ fn module_style_class_token_is_not_a_navigation_origin() {
     let cursor = source.find(".btn { color").unwrap() + 1;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,

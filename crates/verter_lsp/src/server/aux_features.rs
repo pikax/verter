@@ -619,6 +619,7 @@ async fn handle_code_action_attempt(
                         };
                         let preamble_reanchor =
                             crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor_from_structure(
+                                server.documents.language_classifier(),
                                 &ctx.tsx_path,
                                 &carrier_source,
                                 &user_import_spans,
@@ -1189,17 +1190,14 @@ pub(super) async fn handle_formatting(
 /// else (non-carrier, or a future carrier without its own arm) returns `None`
 /// and the on-type handler emits no edit.
 fn carrier_kind_for_on_type(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     language_id: &str,
     canonical_id: &str,
 ) -> Option<crate::features::auto_close_tag::CarrierKind> {
     use crate::features::auto_close_tag::carrier_kind_for_language;
-    let language = verter_session::LanguageRegistry::global()
+    let language = classifier
         .carrier_for_editor_language_id(language_id)
-        .unwrap_or_else(|| {
-            verter_session::LanguageRegistry::global()
-                .classify_static(canonical_id)
-                .static_resolution()
-        });
+        .unwrap_or_else(|| classifier.classify(canonical_id));
     carrier_kind_for_language(&language)
 }
 
@@ -1222,7 +1220,11 @@ pub(super) async fn handle_on_type_formatting(
         // `<script>` / `<style>` blocks. The carrier kind is resolved from the
         // document's authoritative editor `language_id`; the region gate lives
         // in `auto_close_tag_in_carrier`.
-        let carrier = carrier_kind_for_on_type(&doc.language_id, &doc.canonical_id)?;
+        let carrier = carrier_kind_for_on_type(
+            server.documents.language_classifier(),
+            &doc.language_id,
+            &doc.canonical_id,
+        )?;
 
         let offset = doc.line_index.position_to_offset(position)? as usize;
         let snippet = crate::features::auto_close_tag::auto_close_tag_in_structure(
@@ -1334,8 +1336,18 @@ pub(super) async fn handle_outgoing_calls(
 
 #[cfg(test)]
 mod on_type_gate_tests {
-    use super::carrier_kind_for_on_type;
     use crate::features::auto_close_tag::CarrierKind;
+    use verter_session::framework::{
+        FrameworkOptions, HostLanguageClassifier, ProjectCapabilitySnapshot,
+    };
+
+    fn carrier_kind_for_on_type(language_id: &str, canonical_id: &str) -> Option<CarrierKind> {
+        super::carrier_kind_for_on_type(
+            &HostLanguageClassifier::default(),
+            language_id,
+            canonical_id,
+        )
+    }
 
     /// BLOCKER 1: the on-type auto-close gate must resolve a carrier ONLY for a
     /// framework carrier document. A plain `.ts` / `.js` / `.tsx` document (where
@@ -1395,6 +1407,32 @@ mod on_type_gate_tests {
         assert_eq!(
             carrier_kind_for_on_type("plaintext", "file:///proj/src/App.svelte"),
             Some(CarrierKind::Svelte),
+        );
+    }
+
+    /// A host narrowed to Vue never resolves the Svelte markup carrier — not
+    /// from the editor `languageId`, not from the `.svelte` path — so on-type
+    /// formatting cannot answer with Svelte tag edits for a vertical the
+    /// serving host does not admit, while the admitted carrier still engages.
+    #[test]
+    fn unadmitted_carrier_resolves_to_no_carrier_on_a_narrowed_host() {
+        let vue_only = HostLanguageClassifier::with_built_in_registry_and_options(
+            ProjectCapabilitySnapshot::empty(),
+            &FrameworkOptions::admitting_names(["vue"]).expect("vue is composed"),
+        );
+        for (lang, path) in [
+            ("svelte", "file:///proj/src/App.svelte"),
+            ("plaintext", "file:///proj/src/App.svelte"),
+        ] {
+            assert_eq!(
+                super::carrier_kind_for_on_type(&vue_only, lang, path),
+                None,
+                "`{lang}` at {path} names a carrier this host does not admit",
+            );
+        }
+        assert_eq!(
+            super::carrier_kind_for_on_type(&vue_only, "vue", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
         );
     }
 }
