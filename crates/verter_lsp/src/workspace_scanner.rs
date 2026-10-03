@@ -1037,6 +1037,47 @@ pub(crate) async fn sync_file_to_provider(
     let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
+    #[cfg(test)]
+    crate::sync_coordinator::test_hooks::maybe_pause_after_ide_compile(canonical_id).await;
+
+    // ONE lane per open document, shared with the interactive repair, the
+    // coordinator and the drains. Taken HERE — after the compile, immediately
+    // before the gateway's membership decision and provider write — because that
+    // is the delivery point. A scanner transaction that started while the
+    // document was closed and finds it open now therefore serializes on the live
+    // transaction instead of interleaving with it. A busy lane YIELDS: the
+    // scanner re-sweeps on its next pass, and never blocks behind a repair.
+    let _document_lane = match documents {
+        Some(documents) => match documents.try_delivery_lane(canonical_id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+            crate::document_sync_lane::DeliveryLane::Closed => None,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                tracing::debug!(
+                    "workspace_scanner: yielding {canonical_id}, its document sync lane is held"
+                );
+                if let Some(queue) = requeue {
+                    queue.insert(canonical_id.to_string());
+                }
+                return;
+            }
+        },
+        // No registry wired (a standalone scan with no editor session): there is
+        // no open document and no lane to take.
+        None => None,
+    };
+
+    if open_pin.is_none()
+        && documents.is_some_and(|documents| documents.canonical_id_to_uri(canonical_id).is_some())
+    {
+        if let Some(queue) = requeue {
+            queue.insert(canonical_id.to_string());
+        }
+        return;
+    }
+
+    #[cfg(test)]
+    crate::sync_coordinator::test_hooks::maybe_pause_before_delivery(canonical_id).await;
+
     // Route through the SINGLE carrier-sync gateway: the membership decision
     // (publish on owned / retract on owner-loss for tsserver) is FUSED with the
     // provider-state commit. The background full-project scan previously committed a
@@ -1095,12 +1136,14 @@ pub(crate) async fn sync_file_to_provider(
             // `Superseded` commit (a newer transaction reclaimed the source, or an owner-loss
             // advanced the barrier) is re-queued for a fresh transaction — never a
             // requeue-less drop.
-            if carrier_coordinator.admit_owned(
+            if carrier_coordinator.admit_owned_fenced(
                 host,
                 sync_states,
                 canonical_id,
                 committed_state,
                 &receipt,
+                documents,
+                open_pin,
             ) == crate::external_ts::AdmitOutcome::Superseded
             {
                 if let Some(requeue) = requeue {
@@ -1126,110 +1169,158 @@ pub(crate) async fn sync_file_to_provider(
             let stale_paths = transition.stale_paths;
             let mut committed_state = transition.next;
             let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+            // The receipt this scan pass's own IDE delivery produced, carried to
+            // the commit below. `None` when no IDE companion opened.
+            let mut ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface> =
+                None;
 
             // Sync DTS (tsgo opens the companion buffer directly).
-            let api = match host.get_public_api(canonical_id) {
-                Ok(api) => api,
-                Err(error) => {
-                    crate::report_public_api_projection_error(
-                        "workspace_scanner",
-                        canonical_id,
-                        &error,
-                    );
-                    return;
-                }
-            };
-            if let Some(api) = api {
-                if let Some(dts_path) = committed_state.api_path.clone() {
-                    // The whole-project scan is bulk work: every companion open
-                    // rides the BACKGROUND lane so it never preempts (nor, on the
-                    // owned tsgo provider, serializes behind a diagnostic barrier
-                    // ahead of) the user's own interactive queries.
-                    //
-                    // Destination-keyed rendering (the `.verter.ts` companion
-                    // is TypeScript-labeled whatever the SFC's dialect);
-                    // stamp/record the SAME bytes that were delivered.
-                    let api_code = api.code_for_companion_path(&dts_path);
-                    let result = if is_tsgo {
-                        sync.open_dts_background(&dts_path, api_code).await
-                    } else {
-                        sync.load_dts_background(&dts_path, api_code).await
-                    };
-                    if result.is_ok() {
-                        committed_state.mark_api_delivered(api_code);
-                        synced_kinds.push(ProviderPathKind::Api);
-                        // Record a fresh generation pinning the synced content + its
-                        // same-content source map. Prefers the open document's live
-                        // buffer when the scanner is wired to one and the carrier
-                        // happens to be open; falls back to host/VFS otherwise.
-                        crate::provider_surface_store::record_carrier_api_surface(
-                            provider_surfaces,
-                            documents,
-                            host,
+            if documents.is_none() {
+                let api = match host.get_public_api(canonical_id) {
+                    Ok(api) => api,
+                    Err(error) => {
+                        crate::report_public_api_projection_error(
+                            "workspace_scanner",
                             canonical_id,
-                            &dts_path,
-                            api_code,
-                            api.source_map.as_deref(),
+                            &error,
                         );
+                        return;
                     }
-                }
-            }
-
-            // Sync IDE artifact.
-            if let Some(ide) = ide {
-                if let Some(tsx_path) = committed_state.ide_path.clone() {
-                    let result = if is_tsgo {
-                        sync.open_tsx_background(&tsx_path, &ide.code).await
-                    } else {
-                        sync.load_tsx_background(&tsx_path, &ide.code).await
-                    };
-                    if result.is_ok() {
-                        // Record a fresh generation pinning the EXACT IDE bytes just
-                        // synced (interactive queries capture this surface), through
-                        // the shared fenced choke point: `open_pin` was captured
-                        // above BEFORE the compile, so this scan pass can never pair
-                        // stale bytes with a since-edited open document's source —
-                        // it either records the coherent pair or refuses.
-                        if let Some(delivered) = sync.receipt_for_commit(&tsx_path, &ide.code) {
-                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                            synced_kinds.push(ProviderPathKind::Ide);
-                            crate::provider_surface_store::record_carrier_ide_surface_fenced(
+                };
+                if let Some(api) = api {
+                    if let Some(dts_path) = committed_state.api_path.clone() {
+                        // The whole-project scan is bulk work: every companion open
+                        // rides the BACKGROUND lane so it never preempts (nor, on the
+                        // owned tsgo provider, serializes behind a diagnostic barrier
+                        // ahead of) the user's own interactive queries.
+                        //
+                        // Destination-keyed rendering (the `.verter.ts` companion
+                        // is TypeScript-labeled whatever the SFC's dialect);
+                        // stamp/record the SAME bytes that were delivered.
+                        let api_code = api.code_for_companion_path(&dts_path);
+                        let result = if is_tsgo {
+                            sync.open_dts_background(&dts_path, api_code).await
+                        } else {
+                            sync.load_dts_background(&dts_path, api_code).await
+                        };
+                        if result.is_ok() {
+                            committed_state.mark_api_delivered(api_code);
+                            synced_kinds.push(ProviderPathKind::Api);
+                            // Record a fresh generation pinning the synced content + its
+                            // same-content source map. Prefers the open document's live
+                            // buffer when the scanner is wired to one and the carrier
+                            // happens to be open; falls back to host/VFS otherwise.
+                            crate::provider_surface_store::record_carrier_api_surface(
                                 provider_surfaces,
                                 documents,
                                 host,
                                 canonical_id,
-                                &tsx_path,
-                                &delivered,
-                                ide.source_map.as_deref(),
-                                open_pin,
+                                &dts_path,
+                                api_code,
+                                api.source_map.as_deref(),
                             );
                         }
                     }
                 }
             }
-
+            // Sync IDE artifact.
+            if let Some(ide) = ide {
+                if let Some(tsx_path) = committed_state.ide_path.clone() {
+                    let current = documents.is_some_and(|documents| {
+                        crate::provider_sync::open_ide_leg_is_current(
+                            sync,
+                            documents,
+                            previous_state.as_ref(),
+                            canonical_id,
+                            &tsx_path,
+                            &ide.code,
+                            &committed_state.owner_binding,
+                        )
+                    });
+                    if !current {
+                        // Evaluated under the per-path delivery lock: a scan that
+                        // started while the document was closed is refused once
+                        // it opened, and the open's own transaction serves it.
+                        let still_current = || match documents {
+                            Some(documents) => {
+                                documents.compile_pin_is_current(canonical_id, open_pin)
+                            }
+                            None => open_pin.is_none(),
+                        };
+                        let result = sync
+                            .publish_tsx_fenced(
+                                &tsx_path,
+                                &ide.code,
+                                crate::type_provider::project_sync::ProviderLane::Background,
+                                if is_tsgo {
+                                    crate::type_provider::project_sync::ProviderFileVerb::Open
+                                } else {
+                                    crate::type_provider::project_sync::ProviderFileVerb::Load
+                                },
+                                Some(&still_current),
+                            )
+                            .await;
+                        if matches!(
+                            result,
+                            Ok(crate::type_provider::project_sync::CarrierDelivery::Refused)
+                        ) && !still_current()
+                        {
+                            if let Some(requeue) = requeue {
+                                requeue.insert(canonical_id.to_string());
+                            }
+                            return;
+                        }
+                        if let Ok(delivery) = result {
+                            // Record a fresh generation pinning the EXACT IDE bytes just
+                            // synced (interactive queries capture this surface), through
+                            // the shared fenced choke point: `open_pin` was captured
+                            // above BEFORE the compile, so this scan pass can never pair
+                            // stale bytes with a since-edited open document's source —
+                            // it either records the coherent pair or refuses.
+                            if let Some(delivery) = delivery.ide_surface() {
+                                let delivered = delivery.delivered();
+                                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                                synced_kinds.push(ProviderPathKind::Ide);
+                                crate::provider_surface_store::record_carrier_ide_surface_fenced(
+                                    provider_surfaces,
+                                    documents,
+                                    host,
+                                    canonical_id,
+                                    &tsx_path,
+                                    delivered,
+                                    ide.source_map.as_deref(),
+                                    open_pin,
+                                );
+                                // The commit seals the SAME content this pass
+                                // delivered and recorded, carried forward whole
+                                // instead of re-read from the path's ledger.
+                                ide_delivery = Some(delivery);
+                            }
+                        }
+                    }
+                }
+            }
             if !synced_kinds.is_empty() {
                 revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
                 let genuinely_stale =
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let ide_surface = committed_state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| sync.synced_tsx_surface(path));
-                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
+                // The IDE evidence is THIS pass's own delivery receipt.
+                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_delivery);
                 // Gate the stale-path close on ADMISSION and never drop the outcome: a
                 // `Superseded` commit (a newer transaction reclaimed the source, or an
                 // owner-loss advanced the barrier) re-queues the source and closes NOTHING —
                 // the computed stale paths may be the newer transaction's LIVE buffers. Only
                 // an admitted commit closes them.
-                if carrier_coordinator.admit_owned(
+                if carrier_coordinator.admit_owned_fenced(
                     host,
                     sync_states,
                     canonical_id,
                     committed_state,
                     &receipt,
+                    documents,
+                    open_pin,
                 ) == crate::external_ts::AdmitOutcome::Superseded
                 {
                     if let Some(requeue) = requeue {
@@ -1245,6 +1336,25 @@ pub(crate) async fn sync_file_to_provider(
                     )
                     .await;
                 }
+            }
+            drop(_document_lane);
+            if let Some(documents) = documents {
+                let local_queue = DashSet::new();
+                crate::server::sync_carrier_api_transaction(
+                    sync,
+                    &snapshot,
+                    documents,
+                    Some(&vfs_handle),
+                    sync_states,
+                    canonical_id,
+                    is_jsx,
+                    carrier_coordinator,
+                    requeue.unwrap_or(&local_queue),
+                    crate::document_sync_lane::LaneAcquire::Try,
+                    // The bulk scan must never preempt interactive queries.
+                    crate::type_provider::project_sync::ProviderLane::Background,
+                )
+                .await;
             }
             // On total failure nothing is committed and nothing is closed: the
             // previous state + provider paths are retained intact, and the pending
@@ -1768,7 +1878,18 @@ mod tests {
     /// call, so an interactive-lane open shows up as `OpenFile` and fails here.
     #[tokio::test]
     async fn scanner_opens_carrier_companions_on_the_background_lane() {
-        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        // Wired to a document registry, the scan's API leg runs as a document
+        // transaction; it must keep the background lane on both routes.
+        for wired in [false, true] {
+            assert_scanner_opens_carrier_companions_on_the_background_lane(wired).await;
+        }
+    }
+
+    async fn assert_scanner_opens_carrier_companions_on_the_background_lane(wired: bool) {
+        let host = Arc::new(VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let documents = wired.then(|| DocumentRegistry::new(Arc::clone(&host)));
         let canonical_id = "/workspace/pkg-a/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1805,7 +1926,7 @@ mod tests {
         sync_file_to_provider(
             canonical_id,
             &host,
-            None,
+            documents.as_ref(),
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -1852,13 +1973,13 @@ mod tests {
 
         assert!(
             interactive.is_empty(),
-            "the background scan must not open carrier companions on the interactive \
-             lane, but opened: {interactive:?}"
+            "the background scan (registry wired: {wired}) must not open carrier \
+             companions on the interactive lane, but opened: {interactive:?}"
         );
         assert!(
             background.contains(&api_path),
-            "the API companion must be opened on the background lane; background \
-             opens were {background:?}, expected to contain {api_path}"
+            "the API companion must be opened on the background lane (registry wired: \
+             {wired}); background opens were {background:?}, expected to contain {api_path}"
         );
         assert!(
             background.contains(&ide_path),

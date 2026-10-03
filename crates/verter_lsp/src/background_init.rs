@@ -366,6 +366,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         // newer live init pass re-established reachability for.
         my_gen,
         &carrier_transaction_coordinator,
+        &pending_snapshot_provider_sync,
     )
     .await;
 

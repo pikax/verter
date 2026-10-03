@@ -1374,6 +1374,30 @@ impl CarrierTransactionCoordinator {
         state.committed_ide_surface = None;
     }
 
+    /// [`Self::convert_to_unresolved`] applied to the LIVE state in `states` (created
+    /// empty when absent), then `update` on that same entry — one in-place conversion
+    /// that never overwrites concurrent writes to the entry's other fields. The barrier
+    /// entry is taken BEFORE the states entry, the same barrier→states nesting
+    /// [`Self::admit_owned`] uses, so the advance decision is read from the live token and
+    /// no owned commit can interleave between the advance and the clear. No `.await` is
+    /// held across the guards.
+    pub(crate) fn convert_live_to_unresolved(
+        &self,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        update: impl FnOnce(&mut ProviderSyncState),
+    ) {
+        let mut barrier = self.barriers.entry(source.to_string()).or_default();
+        let mut state = states.entry(source.to_string()).or_default();
+        if state.commit_stamp.is_some() {
+            barrier.intent_epoch = barrier.intent_epoch.saturating_add(1);
+        }
+        state.owner_binding = ProviderOwnerBinding::Unresolved;
+        state.commit_stamp = None;
+        state.committed_ide_surface = None;
+        update(&mut state);
+    }
+
     /// THE carrier provider-state admission gate — the sole RECEIPT-GATED owned-state
     /// installer of the committed IDE-surface stamp ([`CommittedCarrierIdeSurface`]) and the
     /// commit stamp ([`CarrierCommitStamp`]) for the PRIMARY carrier-sync paths. It is NOT
@@ -1424,8 +1448,78 @@ impl CarrierTransactionCoordinator {
         host: &VerterHost,
         states: &DashMap<String, ProviderSyncState>,
         source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+    ) -> AdmitOutcome {
+        self.admit_owned_inner(host, states, source, state, receipt, false)
+    }
+
+    /// Fence state admission against the same document revision that produced
+    /// the delivered surface. No registry lookup occurs inside admission itself.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "admission includes its document identity fence"
+    )]
+    pub(crate) fn admit_owned_fenced(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+        documents: Option<&crate::documents::DocumentRegistry>,
+        open_pin: Option<(
+            &tower_lsp_server::ls_types::Uri,
+            &crate::documents::DocumentSnapshotIdentity,
+        )>,
+    ) -> AdmitOutcome {
+        match (documents, open_pin) {
+            (Some(documents), Some((uri, identity))) => documents
+                .with_current_snapshot_identity(uri, identity, |_| {
+                    self.admit_owned(host, states, source, state, receipt)
+                })
+                .unwrap_or(AdmitOutcome::Superseded),
+            (Some(documents), None) if documents.canonical_id_to_uri(source).is_some() => {
+                AdmitOutcome::Superseded
+            }
+            (_, Some(_)) => AdmitOutcome::Superseded,
+            (_, None) => self.admit_owned(host, states, source, state, receipt),
+        }
+    }
+
+    /// API-only admission patches the live map entry so IDE or declaration
+    /// work completed during API I/O cannot be overwritten by the old capture.
+    pub(crate) fn admit_api_owned(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+    ) -> AdmitOutcome {
+        if receipt.companions().is_empty()
+            || receipt
+                .companions()
+                .iter()
+                .any(|c| c.role != SnapshotRole::CarrierApi)
+        {
+            return AdmitOutcome::Superseded;
+        }
+        self.admit_owned_inner(host, states, source, state, receipt, true)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "admission chooses a complete state or an API-only patch under the same entry lock"
+    )]
+    fn admit_owned_inner(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
         mut state: ProviderSyncState,
         receipt: &ProviderReadyReceipt,
+        api_only: bool,
     ) -> AdmitOutcome {
         // OWNER admission (reads the receipt/state only — no map access).
         if let Some(owner_key) = state.owner_binding.owner_key() {
@@ -1464,6 +1558,14 @@ impl CarrierTransactionCoordinator {
         use dashmap::mapref::entry::Entry;
         match states.entry(source.to_string()) {
             Entry::Occupied(mut occupied) => {
+                if api_only {
+                    crate::provider_sync::revert_unsynced_kinds(
+                        &mut state,
+                        Some(occupied.get()),
+                        &[ProviderPathKind::Api],
+                    );
+                }
+
                 let current_stamp = occupied.get().commit_stamp;
                 let prior_ide_surface = occupied.get().committed_ide_surface.clone();
                 // Whether this commit keeps the SAME committed IDE path. The equal-key
@@ -1528,6 +1630,14 @@ impl CarrierTransactionCoordinator {
                 occupied.insert(state);
             }
             Entry::Vacant(vacant) => {
+                if api_only {
+                    crate::provider_sync::revert_unsynced_kinds(
+                        &mut state,
+                        None,
+                        &[ProviderPathKind::Api],
+                    );
+                }
+
                 state.committed_ide_surface =
                     committed_ide_surface_for_commit(None, &state, receipt);
                 state.commit_stamp = Some(incoming);
@@ -1625,9 +1735,9 @@ fn committed_ide_surface_for_commit(
     }
     // This commit did not re-advertise the IDE surface at `ide_path` (an api-only refresh,
     // or a partial open where the IDE buffer failed): preserve the prior committed IDE
-    // stamp iff the live path is unchanged.
+    // stamp iff the live path and owner are unchanged.
     let prior = prior?;
-    if prior.ide_path.as_deref() == Some(ide_path) {
+    if prior.ide_path.as_deref() == Some(ide_path) && prior.owner_binding == state.owner_binding {
         prior.committed_ide_surface.clone()
     } else {
         None

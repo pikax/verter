@@ -305,6 +305,14 @@ impl PendingProviderReady {
         }
     }
 
+    pub(crate) fn source_revision(&self) -> u64 {
+        self.source_revision
+    }
+
+    pub(crate) fn binding(&self) -> &ProjectBinding {
+        &self.binding
+    }
+
     /// Mint the readiness receipt AFTER the site's companion buffers have opened,
     /// attesting EXACTLY the companion kinds that ACTUALLY opened this pass
     /// (`opened_kinds`). This is the SOLE tsgo mint path, keeping

@@ -308,22 +308,17 @@ real_provider_test!(
         assert!(text.contains("string"), "mixed hover should mention string, got: {text}");
         assert!(text.contains("number"), "mixed hover should mention number, got: {text}");
 
-        // Let the debounced coordinator finish the provider sync this document's
-        // open queued. That sync delivers whatever the host holds when it runs, so
-        // landing after the edit below it would race the hover's own repair for
-        // the same carrier and could leave the hover failing closed to the
-        // Verter-only answer. Settled first, the edit below is synchronized by
-        // nothing but the hover's freshness gate.
-        session
-            .server()
-            .test_settle_open_document(&type_res_uri)
-            .await;
-
         // Advance the live document registry without going through the lifecycle's
         // eager provider sync. This models an external host update racing the next
         // request and discriminates the hover handler's foreground freshness gate:
         // returning the old provider surface (or Verter-only fallback) would omit
         // `boolean`, while a request-time sync resolves the edited union exactly.
+        //
+        // The debounced coordinator's own sync of this document is not settled
+        // first: it serializes on the document's one sync lane, so its
+        // transaction either fully precedes this request's repair or yields to
+        // it, and never delivers a pre-edit revision's bytes between the
+        // request's own delivery and its commit.
         let edited = session
             .server()
             .test_documents()

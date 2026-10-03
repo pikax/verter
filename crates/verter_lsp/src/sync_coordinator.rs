@@ -27,7 +27,7 @@ use crate::provider_sync::{
     RedeliverReopenedSurface, RedeliveryFuture,
 };
 use crate::type_provider::merge;
-use crate::type_provider::project_sync::ProjectSync;
+use crate::type_provider::project_sync::{CarrierDelivery, ProjectSync};
 use crate::type_provider::traits::TypeProvider;
 
 /// The carrier-sync surface's re-delivery of a provider surface that was REOPENED
@@ -1208,6 +1208,37 @@ async fn coordinator_loop(
                             .ok()
                             .and_then(|uri| deps.documents.get(&uri).map(|document| document.version));
                         let sync_outcome = sync_file(&deps, &canonical_id, &signal.uri).await;
+                        if sync_outcome == SyncFileOutcome::LaneBusy {
+                            // Another transaction owns this document. Requeue the
+                            // work bit `will_sync` consumed above and keep the
+                            // document's FULL retry budget: yielding for a lane is
+                            // not a failed attempt, so spending one here would
+                            // strand a document whose only failure was contention.
+                            //
+                            // The receipt is RE-stamped, exactly as the `Retry`
+                            // arm does. Keeping the elapsed stamp would make the
+                            // loop's next deadline already due, and this serial
+                            // loop would re-dispatch the same busy document in a
+                            // hot spin while the lane stays held; the re-stamp
+                            // parks it for one quiet window so every OTHER
+                            // document's sync is serviced meanwhile.
+                            // `sync_file` additionally parked the id on the shared
+                            // pending-snapshot queue, so the work is redriven even
+                            // if this receipt is later coalesced away.
+                            deps.needs_provider_sync.insert(canonical_id.clone());
+                            let requeued_at = Instant::now();
+                            pending_files.insert(
+                                canonical_id,
+                                (
+                                    requeued_at,
+                                    PendingSignal {
+                                        received_at: requeued_at,
+                                        ..signal.clone()
+                                    },
+                                ),
+                            );
+                            continue;
+                        }
                         if sync_outcome == SyncFileOutcome::Retry
                             && signal.sync_retries_remaining > 0
                         {
@@ -1534,9 +1565,36 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
 /// do here at all; the tick still publishes Verter-owned diagnostics
 /// afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SyncFileOutcome {
+pub(crate) enum SyncFileOutcome {
     Settled,
     Retry,
+    /// The document's per-document sync lane is held by another transaction
+    /// (an interactive repair, a background drain). The coordinator NEVER waits
+    /// for it: this serial loop services one document per dispatch, so blocking
+    /// here would park every other document's sync behind one user's repair.
+    /// The document is requeued instead, without spending its retry budget.
+    LaneBusy,
+}
+
+#[cfg(test)]
+pub(crate) async fn synchronize_document_for_test(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &str,
+) -> bool {
+    matches!(
+        sync_file(deps, canonical_id, uri).await,
+        SyncFileOutcome::Settled
+    )
+}
+
+#[cfg(test)]
+pub(crate) async fn synchronize_document_outcome_for_test(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &str,
+) -> SyncFileOutcome {
+    sync_file(deps, canonical_id, uri).await
 }
 
 async fn sync_file(
@@ -1547,6 +1605,31 @@ async fn sync_file(
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return SyncFileOutcome::Settled;
     };
+    // ONE lane per open document, shared with the interactive repair and every
+    // other background writer. Asked at the point of DELIVERY, so a transaction
+    // that started while the document was closed and finds it open now serializes
+    // on the open document's live transaction instead of interleaving with it.
+    let _document_lane = match deps.documents.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+        // Closed: no editor has it open, so there is no interactive transaction
+        // to interleave with and the coordinator proceeds unserialized.
+        crate::document_sync_lane::DeliveryLane::Closed => None,
+        crate::document_sync_lane::DeliveryLane::Busy => {
+            tracing::debug!(
+                "sync_coordinator: yielding {canonical_id}, its document sync lane is held"
+            );
+            // The in-band parking queue every other transient refusal already
+            // uses (`Superseded`, an `Ok(false)` delivery fence). Its bounded
+            // redrive chain and exhaustion budget live on the shared carrier
+            // transaction coordinator, so this yield competes with NONE of the
+            // coordinator's own retry budget.
+            deps.pending_snapshot_provider_sync
+                .insert(canonical_id.to_string());
+            return SyncFileOutcome::LaneBusy;
+        }
+    };
+    #[cfg(test)]
+    test_hooks::maybe_pause_after_lane_probe(canonical_id).await;
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Re-readable: the self-file sync below revalidates the published snapshot
     // AFTER its provider await, so it needs the accessor, not one capture.
@@ -1631,6 +1714,14 @@ async fn sync_file(
     let ide_compile_revision = uri_for_open_identity
         .as_ref()
         .and_then(|uri| deps.documents.snapshot_identity(uri));
+    // The lane probe found the document closed, but it opened before this pin:
+    // its revision belongs to the open document's own lane, so this lane-less
+    // transaction yields instead of delivering it unserialized.
+    if _document_lane.is_none() && ide_compile_revision.is_some() {
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
+        return SyncFileOutcome::LaneBusy;
+    }
 
     // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
     // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
@@ -1666,6 +1757,41 @@ async fn sync_file(
         (Some(uri), Some(revision)) => Some((uri, revision)),
         _ => None,
     };
+
+    // FRESHNESS (membership-only engine): the gateway's store publication below
+    // IS this engine's IDE-leg application, so a publication another
+    // transaction already made for this revision, owner and projection settles
+    // here instead of being repeated.
+    if snapshot.ownership_ready
+        && open_pin.is_some()
+        && deps
+            .documents
+            .compile_pin_is_current(canonical_id, open_pin)
+        && ide.as_ref().is_some_and(|ide| {
+            let committed = deps
+                .provider_sync_states
+                .get(canonical_id)
+                .map(|entry| entry.clone());
+            crate::provider_sync::published_carrier_is_current(
+                project_sync,
+                &deps.documents,
+                deps.carrier_publish_coordinator
+                    .as_ref()
+                    .map(|coordinator| coordinator.backend().membership_ledger().as_ref()),
+                committed.as_ref(),
+                &snapshot.resolver,
+                canonical_id,
+                is_jsx,
+                &ide.code,
+                ide.source_map.as_deref(),
+            )
+        })
+    {
+        tracing::info!(
+            "sync_coordinator: PUBLISH_CURRENT {canonical_id} — this revision is already published"
+        );
+        return SyncFileOutcome::Settled;
+    }
 
     // The tsserver carrier-membership context: the debounced carrier reaches the
     // provider as a store-backed configured-project member. Clone the VFS handle in
@@ -1715,12 +1841,14 @@ async fn sync_file(
             receipt,
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
-            if deps.carrier_transaction_coordinator.admit_owned(
+            if deps.carrier_transaction_coordinator.admit_owned_fenced(
                 &deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
                 &receipt,
+                Some(&deps.documents),
+                open_pin,
             ) == crate::external_ts::AdmitOutcome::Superseded
             {
                 deps.pending_snapshot_provider_sync
@@ -1746,138 +1874,153 @@ async fn sync_file(
             let stale_paths = transition.stale_paths;
             let mut committed_state = transition.next;
             let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+            // The receipt this transaction's own IDE delivery produced, carried
+            // to the commit. `None` until that leg runs, and `None` for
+            // the whole transaction when it delivered no IDE companion.
+            let mut ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface> =
+                None;
+            // An IDE leg delivered without a certified receipt commits nothing
+            // and is still owed once the independent API leg below finishes.
+            let mut ide_receipt_missing = false;
 
             if let Some(ide) = ide.as_ref() {
                 if let Some(ide_path) = committed_state.ide_path.clone() {
-                    tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
-                    // DELIVERY FENCE: `ide.code` was compiled from the revision
-                    // `open_pin` names. The fence runs under the per-path delivery
-                    // lock, right before the provider write, so a tick that
-                    // compiled the PRE-edit source and then waited on the lock while
-                    // the interactive repair delivered the edit is refused instead
-                    // of overwriting the newer buffer (the record below was already
-                    // fenced; the provider write was not — `hover_secondary_files_tsgo`
-                    // then mapped fresh offsets onto stale tsgo bytes).
-                    let still_current = || {
-                        open_pin.is_none_or(|(pin_uri, revision)| {
-                            deps.documents
-                                .snapshot_identity_is_current(pin_uri, revision)
-                        })
-                    };
-                    let result = if committed_state.ide_background_loaded {
-                        project_sync
-                            .sync_tsx_fenced(&ide_path, &ide.code, &still_current)
-                            .await
+                    // FRESHNESS (the IDE leg's own basis, under the document
+                    // lane): a leg some other writer already delivered,
+                    // recorded and committed for this exact revision — same
+                    // owner, same path, the bytes a fresh preparation produces
+                    // still applied in the serving engine — is skipped, so an
+                    // open or an edit applies the IDE companion ONCE however
+                    // many transactions arrive for it. A restart, an owner
+                    // change or a changed projection misses and delivers.
+                    let ide_leg_current = open_pin.is_some_and(|(pin_uri, revision)| {
+                        deps.documents
+                            .snapshot_identity_is_current(pin_uri, revision)
+                            && crate::provider_sync::open_ide_leg_is_current(
+                                project_sync,
+                                &deps.documents,
+                                previous_state.as_ref(),
+                                canonical_id,
+                                &ide_path,
+                                &ide.code,
+                                &committed_state.owner_binding,
+                            )
+                    });
+                    if ide_leg_current {
+                        tracing::info!(
+                            "sync_coordinator: TSX_SYNC_CURRENT {ide_path} — this revision is \
+                             already delivered and committed"
+                        );
                     } else {
-                        project_sync
-                            .open_tsx_fenced(&ide_path, &ide.code, &still_current)
-                            .await
-                    };
-                    match result {
-                        Ok(false) => {
-                            tracing::info!(
-                                "sync_coordinator: TSX_SYNC_SKIPPED {ide_path} — the document \
+                        tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
+                        // DELIVERY FENCE: `ide.code` was compiled from the revision
+                        // `open_pin` names. The fence runs under the per-path delivery
+                        // lock, right before the provider write, so a tick that
+                        // compiled the PRE-edit source and then waited on the lock while
+                        // the interactive repair delivered the edit is refused instead
+                        // of overwriting the newer buffer (the record below was already
+                        // fenced; the provider write was not — `hover_secondary_files_tsgo`
+                        // then mapped fresh offsets onto stale tsgo bytes).
+                        let still_current = || {
+                            deps.documents
+                                .compile_pin_is_current(canonical_id, open_pin)
+                        };
+                        let result = if committed_state.ide_background_loaded {
+                            project_sync
+                                .sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                .await
+                        } else {
+                            project_sync
+                                .open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                .await
+                        };
+                        let result = project_sync
+                            .settle_uncertified_tsx(&ide_path, &ide.code, result, &still_current)
+                            .await;
+                        match result {
+                            Ok(CarrierDelivery::Refused) => {
+                                tracing::info!(
+                                    "sync_coordinator: TSX_SYNC_SKIPPED {ide_path} — the document \
                                  moved after this compile; the live revision is resynced"
-                            );
-                            deps.pending_snapshot_provider_sync
-                                .insert(canonical_id.to_string());
-                            return SyncFileOutcome::Retry;
-                        }
-                        Ok(true) => {
-                            // Record a fresh generation pinning the EXACT IDE bytes
-                            // just synced (interactive queries capture this surface),
-                            // through the shared fenced choke point: `open_pin` was
-                            // captured BEFORE the compile above, so the two awaits
-                            // just run (open_tsx/sync_tsx) giving a concurrent
-                            // `did_change` a window to land can only make this
-                            // record fail closed, never falsely pair `ide.code` with
-                            // a source it wasn't compiled from. Same hazard, same
-                            // fence shape, as
-                            // `VerterLanguageServer::record_carrier_ide_snapshot_if_current`
-                            // on the interactive repair path.
-                            if let Some(delivered) =
-                                project_sync.receipt_for_commit(&ide_path, &ide.code)
-                            {
-                                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                                synced_kinds.push(ProviderPathKind::Ide);
-                                crate::provider_surface_store::record_carrier_ide_surface_fenced(
+                                );
+                                deps.pending_snapshot_provider_sync
+                                    .insert(canonical_id.to_string());
+                                return SyncFileOutcome::Retry;
+                            }
+                            Ok(delivery) => {
+                                // This delivery's own receipt, carried into the commit
+                                // below instead of re-reading the provider path's
+                                // ledger there.
+                                ide_delivery = delivery.ide_surface();
+                                if ide_delivery.is_none() {
+                                    deps.pending_snapshot_provider_sync
+                                        .insert(canonical_id.to_string());
+                                    ide_receipt_missing = true;
+                                }
+                                // Record a fresh generation pinning the EXACT IDE bytes
+                                // just synced (interactive queries capture this surface),
+                                // through the shared fenced choke point: `open_pin` was
+                                // captured BEFORE the compile above, so the two awaits
+                                // just run (open_tsx/sync_tsx) giving a concurrent
+                                // `did_change` a window to land can only make this
+                                // record fail closed, never falsely pair `ide.code` with
+                                // a source it wasn't compiled from. Same hazard, same
+                                // fence shape, as
+                                // `VerterLanguageServer::record_delivered_carrier_ide_snapshot`
+                                // on the interactive repair path.
+                                if let Some(delivery) = ide_delivery.as_ref() {
+                                    let delivered = delivery.delivered();
+                                    committed_state
+                                        .set_background_loaded(ProviderPathKind::Ide, true);
+                                    synced_kinds.push(ProviderPathKind::Ide);
+                                    crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
                                     &deps.documents.host(),
                                     canonical_id,
                                     &ide_path,
-                                    &delivered,
+                                    delivered,
                                     ide.source_map.as_deref(),
                                     open_pin,
                                 );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "sync_coordinator: tsx sync failed for {ide_path}: {e}"
+                                )
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}")
-                        }
-                    }
-                    tracing::info!("sync_coordinator: TSX_SYNC_DONE {ide_path}");
-                }
-            }
-
-            let api = match tokio::task::block_in_place(|| {
-                deps.documents.host().get_public_api(canonical_id)
-            }) {
-                Ok(api) => api,
-                Err(error) => {
-                    crate::report_public_api_projection_error(
-                        "sync_coordinator",
-                        canonical_id,
-                        &error,
-                    );
-                    return SyncFileOutcome::Settled;
-                }
-            };
-            if let Some(api) = api {
-                if let Some(dts_path) = committed_state.api_path.clone() {
-                    // Destination-keyed rendering (the `.verter.ts` companion
-                    // is TypeScript-labeled whatever the SFC's dialect);
-                    // stamp/record the SAME bytes that were delivered.
-                    let api_code = api.code_for_companion_path(&dts_path);
-                    let result = if committed_state.api_background_loaded {
-                        project_sync.sync_dts(&dts_path, api_code).await
-                    } else {
-                        project_sync.open_dts(&dts_path, api_code).await
-                    };
-                    match result {
-                        Ok(()) => {
-                            committed_state.mark_api_delivered(api_code);
-                            synced_kinds.push(ProviderPathKind::Api);
-                            // Record a fresh generation pinning the EXACT content
-                            // just synced under this virtual path.
-                            crate::provider_surface_store::record_carrier_api_surface(
-                                deps.documents.provider_surfaces(),
-                                Some(&deps.documents),
-                                &deps.documents.host(),
-                                canonical_id,
-                                &dts_path,
-                                api_code,
-                                api.source_map.as_deref(),
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}")
-                        }
+                        tracing::info!("sync_coordinator: TSX_SYNC_DONE {ide_path}");
                     }
                 }
             }
 
             if !synced_kinds.is_empty() {
+                // FENCE (pre-commit — the commit leg's own basis check). The
+                // deliveries + records above all awaited; an edit landing
+                // across them means the commit would publish a superseded
+                // revision's state. Cancel the whole transaction rather than
+                // attempt a commit the admission gate will refuse.
+                if !deps
+                    .documents
+                    .compile_pin_is_current(canonical_id, open_pin)
+                {
+                    tracing::info!(
+                        "sync_coordinator: COMMIT_SKIPPED {canonical_id} — the document moved \
+                         after this compile; the live revision is resynced"
+                    );
+                    deps.pending_snapshot_provider_sync
+                        .insert(canonical_id.to_string());
+                    return SyncFileOutcome::Retry;
+                }
                 revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
                 let genuinely_stale =
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let ide_surface = committed_state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| project_sync.synced_tsx_surface(path));
-                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
+                // The IDE evidence is THIS transaction's own delivery receipt.
+                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_delivery);
                 // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
                 // transaction reclaimed the source, or an owner-loss advanced the barrier)
                 // requeues and closes NOTHING — the computed stale paths may be the newer
@@ -1885,12 +2028,14 @@ async fn sync_file(
                 // the shared stale close retires any closed `Api` surface's active generation in
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
-                if deps.carrier_transaction_coordinator.admit_owned(
+                if deps.carrier_transaction_coordinator.admit_owned_fenced(
                     &deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
                     &receipt,
+                    Some(&deps.documents),
+                    open_pin,
                 ) == crate::external_ts::AdmitOutcome::Superseded
                 {
                     deps.pending_snapshot_provider_sync
@@ -1906,6 +2051,32 @@ async fn sync_file(
                     )
                     .await;
                 }
+            }
+            drop(_document_lane);
+            match crate::server::sync_carrier_api_transaction(
+                project_sync,
+                &snapshot,
+                &deps.documents,
+                vfs.as_deref(),
+                &deps.provider_sync_states,
+                canonical_id,
+                is_jsx,
+                &deps.carrier_transaction_coordinator,
+                &deps.pending_snapshot_provider_sync,
+                crate::document_sync_lane::LaneAcquire::Try,
+                crate::type_provider::project_sync::ProviderLane::Foreground,
+            )
+            .await
+            {
+                crate::server::ApiLegOutcome::Current if ide_receipt_missing => {
+                    return SyncFileOutcome::Retry;
+                }
+                crate::server::ApiLegOutcome::Current => {}
+                // An interactive request took the lane the IDE leg just
+                // released. Yielding to it is contention, not a failed
+                // attempt, so it keeps the document's retry budget.
+                crate::server::ApiLegOutcome::LaneBusy => return SyncFileOutcome::LaneBusy,
+                crate::server::ApiLegOutcome::Refused => return SyncFileOutcome::Retry,
             }
         }
         crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
@@ -1923,7 +2094,7 @@ async fn sync_file(
             );
             if class.runs_buffer_cleanup() {
                 if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
-                    preserve_open_unresolved_carrier(
+                    if !preserve_open_unresolved_carrier(
                         deps,
                         project_sync,
                         canonical_id,
@@ -1931,7 +2102,10 @@ async fn sync_file(
                         ide.as_ref(),
                         open_pin,
                     )
-                    .await;
+                    .await
+                    {
+                        return SyncFileOutcome::Retry;
+                    }
                 } else if snapshot.ownership_ready {
                     clear_provider_sync_state(
                         project_sync,
@@ -1972,7 +2146,16 @@ async fn preserve_open_unresolved_carrier(
         &tower_lsp_server::ls_types::Uri,
         &crate::documents::DocumentSnapshotIdentity,
     )>,
-) {
+) -> bool {
+    let pin_is_current = || {
+        deps.documents
+            .compile_pin_is_current(canonical_id, open_pin)
+    };
+    if !pin_is_current() {
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
+        return false;
+    }
     let previous = deps
         .provider_sync_states
         .get(canonical_id)
@@ -1992,35 +2175,74 @@ async fn preserve_open_unresolved_carrier(
     // owner-derived API dropped.
     let target = open_unresolved_carrier_state(previous.as_ref(), canonical_id, is_jsx);
 
+    // FRESHNESS: an unresolved state already delivered, recorded and still
+    // applied for this exact revision owes nothing — no delivery, no commit, no
+    // close — so an open or edit applies the companion once.
+    if let (Some(ide), Some(ide_path), Some((pin_uri, revision))) =
+        (ide, target.ide_path.as_deref(), open_pin)
+    {
+        let current = deps
+            .documents
+            .snapshot_identity_is_current(pin_uri, revision)
+            && crate::provider_sync::open_ide_leg_is_current(
+                project_sync,
+                &deps.documents,
+                previous.as_ref(),
+                canonical_id,
+                ide_path,
+                &ide.code,
+                &target.owner_binding,
+            );
+        if current {
+            tracing::info!(
+                "sync_coordinator: TSX_SYNC_CURRENT {ide_path} — this revision is already \
+                 delivered and committed"
+            );
+            return true;
+        }
+    }
+
     // Attempt the desired IDE sync when fresh code is available (update-in-place
     // when the desired path is already live, else first-open).
     let mut ide_synced = false;
     if let (Some(ide), Some(ide_path)) = (ide, target.ide_path.clone()) {
         let result = if target.ide_background_loaded {
-            project_sync.sync_tsx(&ide_path, &ide.code).await
+            project_sync
+                .sync_tsx_fenced(&ide_path, &ide.code, &pin_is_current)
+                .await
         } else {
-            project_sync.open_tsx(&ide_path, &ide.code).await
+            project_sync
+                .open_tsx_fenced(&ide_path, &ide.code, &pin_is_current)
+                .await
         };
         match result {
-            Ok(()) => {
+            Ok(delivery) => {
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface), through the
                 // shared fenced choke point: `open_pin` was captured by the
                 // caller BEFORE this compile, so the just-run provider await
                 // can only make this record fail closed, never falsely pair
                 // `ide.code` with a source it wasn't compiled from.
-                if let Some(delivered) = project_sync.receipt_for_commit(&ide_path, &ide.code) {
-                    ide_synced = true;
-                    crate::provider_surface_store::record_carrier_ide_surface_fenced(
+                if let Some(prepared) = delivery.prepared_surface() {
+                    if !crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
                         &deps.documents.host(),
                         canonical_id,
                         &ide_path,
-                        &delivered,
+                        prepared,
                         ide.source_map.as_deref(),
                         open_pin,
-                    );
+                    ) {
+                        deps.pending_snapshot_provider_sync
+                            .insert(canonical_id.to_string());
+                        return false;
+                    }
+                    ide_synced = true;
+                } else {
+                    deps.pending_snapshot_provider_sync
+                        .insert(canonical_id.to_string());
+                    return false;
                 }
             }
             Err(error) => tracing::warn!(
@@ -2035,7 +2257,23 @@ async fn preserve_open_unresolved_carrier(
     // open — rows 7 & 9), the owner-derived API is dropped+closed unconditionally,
     // and the orphaned prior IDE path is closed ONLY after a successful flip.
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
-    commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
+    let admitted = match open_pin {
+        Some((uri, revision)) => deps
+            .documents
+            .with_current_snapshot_identity(uri, revision, |_| {
+                commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
+            })
+            .is_some(),
+        None => {
+            commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
+            true
+        }
+    };
+    if !admitted {
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
+        return false;
+    }
     if let Some(dropped) = commit.dropped_api {
         close_stale_provider_paths_with(
             project_sync,
@@ -2056,6 +2294,7 @@ async fn preserve_open_unresolved_carrier(
         )
         .await;
     }
+    true
 }
 
 async fn clear_provider_sync_state(
@@ -2554,6 +2793,58 @@ pub(crate) mod test_hooks {
     /// zero cost.
     pub(crate) async fn maybe_pause_after_ide_compile(canonical_id: &str) {
         if let Some((_, (arrived, release))) = PAUSE_AFTER_IDE_COMPILE.remove(canonical_id) {
+            arrived.notify_one();
+            release.notified().await;
+        }
+    }
+
+    static PAUSE_AFTER_LANE_PROBE: LazyLock<DashMap<String, PauseGates>> =
+        LazyLock::new(DashMap::new);
+
+    /// Register a one-shot pause right after the coordinator's lane probe — the
+    /// window in which a document that was closed at the probe can open before
+    /// the transaction pins its revision.
+    pub(crate) fn block_after_lane_probe(canonical_id: &str) -> PauseGates {
+        let arrived = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        PAUSE_AFTER_LANE_PROBE.insert(
+            canonical_id.to_string(),
+            (
+                std::sync::Arc::clone(&arrived),
+                std::sync::Arc::clone(&release),
+            ),
+        );
+        (arrived, release)
+    }
+
+    pub(crate) async fn maybe_pause_after_lane_probe(canonical_id: &str) {
+        if let Some((_, (arrived, release))) = PAUSE_AFTER_LANE_PROBE.remove(canonical_id) {
+            arrived.notify_one();
+            release.notified().await;
+        }
+    }
+
+    static PAUSE_BEFORE_DELIVERY: LazyLock<DashMap<String, PauseGates>> =
+        LazyLock::new(DashMap::new);
+
+    /// Register a one-shot pause between a background writer's lane probe and
+    /// its provider delivery — the window in which a document that was closed
+    /// at the probe can open.
+    pub(crate) fn block_before_delivery(canonical_id: &str) -> PauseGates {
+        let arrived = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        PAUSE_BEFORE_DELIVERY.insert(
+            canonical_id.to_string(),
+            (
+                std::sync::Arc::clone(&arrived),
+                std::sync::Arc::clone(&release),
+            ),
+        );
+        (arrived, release)
+    }
+
+    pub(crate) async fn maybe_pause_before_delivery(canonical_id: &str) {
+        if let Some((_, (arrived, release))) = PAUSE_BEFORE_DELIVERY.remove(canonical_id) {
             arrived.notify_one();
             release.notified().await;
         }
