@@ -13471,7 +13471,7 @@ const extra = 42
 /// record cannot pair A's provider bytes/map with B's live source.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_change_after_the_check_prevents_the_surface_record() {
-    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let (service, provider, uri) = make_request_surface_carrier().await;
     let server = service.inner();
     let canonical_id = "/workspace/src/App.vue";
     const SOURCE_B: &str = r#"<script setup lang="ts">
@@ -13490,6 +13490,9 @@ const extra = 42
         .current_snapshot(&ide_path)
         .expect("baseline CarrierIde surface");
 
+    // A restarted engine no longer holds the delivered bytes, so the repair
+    // owes the IDE leg and runs it through to the record.
+    provider.forget_applied_content();
     server.needs_ide_sync.insert(canonical_id.to_string());
     let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
     let repair = server.ensure_current_file_synced(&uri);
@@ -37372,5 +37375,45 @@ async fn a_rearmed_repair_of_a_current_ide_leg_applies_nothing_until_the_engine_
         ide_writes(),
         delivered + 1,
         "a restarted engine no longer holds the bytes, so the repair delivers again"
+    );
+}
+
+/// An open whose eager sync already delivered, recorded and committed the IDE
+/// leg re-arms only what is still owed: the interactive repair is not re-armed,
+/// so the first request after the open does not apply the revision a second
+/// time. Once the engine no longer holds the bytes, the leg reads as owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let canonical_id = "/workspace/src/App.vue";
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: REQUEST_SURFACE_APP.to_string(),
+            },
+        })
+        .await;
+
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "the open's eager sync committed the IDE surface"
+    );
+    assert!(
+        !server.needs_ide_sync.contains(canonical_id),
+        "an open whose IDE leg is already current must not re-arm the repair"
+    );
+    assert!(!server.ide_leg_owed_for_open_document(&uri));
+    provider.forget_applied_content();
+    assert!(
+        server.ide_leg_owed_for_open_document(&uri),
+        "once the engine no longer holds the bytes the leg is owed again"
     );
 }
