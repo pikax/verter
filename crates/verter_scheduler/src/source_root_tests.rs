@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::executor::{StageError, StageExecutor};
+use crate::execution::executor::{StageError, StageExecutor};
 use crate::node::{FileNode, SourceSnapshot};
 use crate::scheduler::{Request, Scheduler, SchedulerConfig};
 use crate::source_loader::MemorySourceLoader;

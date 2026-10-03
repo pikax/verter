@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use verter_scheduler::cpu_concurrency::{CpuConcurrencyPermit, CpuConcurrencySemaphore};
+use verter_scheduler::execution::cpu_concurrency::{CpuConcurrencyPermit, CpuConcurrencySemaphore};
 
 /// Capacity cap: with capacity N, the (N+1)th `acquire()` BLOCKS until a
 /// permit is released. This test is deterministic and discriminating — it
