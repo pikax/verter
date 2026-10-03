@@ -119,6 +119,25 @@ impl HostLanguageClassifier {
         language
     }
 
+    /// The ADMITTED framework-carrier row an editor `languageId` names
+    /// (`"vue"` → the Vue carrier row), `None` for a non-carrier id or a
+    /// carrier whose vertical this host does not admit.
+    ///
+    /// Editor ingress resolves a document's carrier here — never from a
+    /// process-global registry — so a document whose client names an
+    /// unadmitted carrier falls back to path classification, which routes
+    /// it exactly like an unregistered extension.
+    #[must_use]
+    pub fn carrier_for_editor_language_id(&self, language_id: &str) -> Option<FileLanguage> {
+        self.registry
+            .carrier_for_editor_language_id(language_id)
+            .filter(|language| {
+                language
+                    .adapter_id()
+                    .is_none_or(|adapter_id| self.framework.admits(adapter_id))
+            })
+    }
+
     /// The capability-snapshot hash — the classification cache key
     /// dimension (a capability flip changes it; raw config edits that
     /// flip no derived bit do not).
@@ -319,6 +338,14 @@ mod tests {
             FileLanguage::script(verter_language::ScriptSourceType::js()),
             "an unadmitted adapter module classifies as a plain js script"
         );
+        // An editor `languageId` naming the unadmitted carrier resolves to
+        // no carrier row, so editor ingress falls back to path
+        // classification instead of reaching the unadmitted carrier.
+        assert_eq!(classifier.carrier_for_editor_language_id("svelte"), None);
+        assert_eq!(
+            classifier.carrier_for_editor_language_id("vue"),
+            Some(FileLanguage::vue())
+        );
         // The surface accessors narrow with the admission.
         assert_eq!(classifier.carrier_extensions(), vec!["vue"]);
         assert!(
@@ -347,6 +374,14 @@ mod tests {
                 verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
             ),
             "an admitted adapter module keeps its rune-module flavor"
+        );
+        assert_eq!(
+            classifier.carrier_for_editor_language_id("svelte"),
+            Some(FileLanguage::svelte())
+        );
+        assert_eq!(
+            classifier.carrier_for_editor_language_id("typescript"),
+            None
         );
         let mut extensions = classifier.carrier_extensions();
         extensions.sort_unstable();

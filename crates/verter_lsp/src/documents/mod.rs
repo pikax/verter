@@ -743,20 +743,24 @@ impl DocumentRegistry {
 
     /// Resolve the [`FileLanguage`] row for an editor document.
     ///
-    /// The client's `language_id` is authoritative for a framework CARRIER
-    /// (an in-memory carrier document may not carry its `.vue` / `.svelte`
-    /// path); every other document classifies by canonical path through the
-    /// host's language classifier — the same authority the workspace-scan
-    /// ingress uses, so one file resolves one `FileLanguage` row regardless of
-    /// which ingress loaded it. The carrier mapping is REGISTRY-driven
-    /// (`carrier_for_editor_language_id`), not a hardcoded `== "vue"` branch:
-    /// any registered carrier (`vue`, `svelte`, …) resolves to its framework
-    /// row here and the host upsert parses it through the registered carrier —
-    /// never silently as a plain script.
+    /// The client's `language_id` is authoritative for an ADMITTED framework
+    /// CARRIER (an in-memory carrier document may not carry its `.vue` /
+    /// `.svelte` path); every other document classifies by canonical path.
+    /// Both halves read the host's language classifier — the same authority
+    /// the workspace-scan ingress uses, composed under the host's framework
+    /// admission — so one file resolves one `FileLanguage` row regardless of
+    /// which ingress loaded it, and a `language_id` naming a carrier this host
+    /// does not admit never reaches that carrier. The carrier mapping is
+    /// REGISTRY-driven (`carrier_for_editor_language_id`), not a hardcoded
+    /// `== "vue"` branch: any admitted carrier (`vue`, `svelte`, …) resolves
+    /// to its framework row here and the host upsert parses it through the
+    /// registered carrier.
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
-        verter_session::LanguageRegistry::global()
+        let host = self.host();
+        let classifier = host.language_classifier();
+        classifier
             .carrier_for_editor_language_id(language_id)
-            .unwrap_or_else(|| self.host().language_classifier().classify(canonical_id))
+            .unwrap_or_else(|| classifier.classify(canonical_id))
     }
 
     /// Re-establish the host/VFS overlay for `canonical_id` from the OPEN

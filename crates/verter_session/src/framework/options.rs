@@ -18,10 +18,9 @@
 //!
 //! Constructor-time per the host's configuration discipline: a request
 //! cannot mutate a constructed host's framework admission. The LSP
-//! rejects an `initializationOptions.frameworks` key for exactly that
-//! reason — the host it serves was constructed before `initialize`
-//! arrived, and an option that silently failed to apply is the defect
-//! class this type exists to close.
+//! therefore takes its admission from the `--frameworks` process flag —
+//! the only channel that exists before its host is constructed — and
+//! reads no `initializationOptions` key for it.
 
 use std::collections::BTreeSet;
 

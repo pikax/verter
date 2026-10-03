@@ -128,18 +128,6 @@ pub(super) async fn handle_initialize(
     // Parse initialization options (statistics config, lint config, etc.)
     if let Some(opts) = &params.initialization_options {
         tracing::debug!("initialization options: {opts}");
-        // Fail closed on a framework-admission key: the serving host was
-        // constructed before `initialize` arrived, so no runtime value can
-        // apply — accepting it would be a silently-ignored configuration
-        // route around the typed construction options.
-        if let Some(message) = crate::config::framework_admission_init_option_error(opts) {
-            tracing::error!("{message}");
-            return Err(tower_lsp_server::jsonrpc::Error {
-                code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
-                message: std::borrow::Cow::Owned(message),
-                data: None,
-            });
-        }
         if let Some(stats_enabled) = opts
             .get("statistics")
             .and_then(|s| s.get("enabled"))
