@@ -8,14 +8,14 @@
 
 use std::marker::PhantomData;
 
-use crate::pool::SchedulerPoolTask;
+use crate::execution::pool::SchedulerPoolTask;
 
 /// Scheduler CPU-pool owner. Commands of this owner submit only to
-/// [`crate::pool::SchedulerCpuPool`].
+/// [`crate::execution::pool::SchedulerCpuPool`].
 pub enum Cpu {}
 
 /// Scheduler I/O-pool owner. Commands of this owner submit only to
-/// [`crate::pool::SchedulerIoPool`].
+/// [`crate::execution::pool::SchedulerIoPool`].
 pub enum Io {}
 
 /// Host/provider coordinator-pool owner. Commands of this owner are
@@ -62,15 +62,21 @@ impl<O> OwnerCommand<O> {
 /// fail to compile.
 const _: () = {
     fn cpu_pool_accepts_cpu(
-        pool: &crate::pool::SchedulerCpuPool,
+        pool: &crate::execution::pool::SchedulerCpuPool,
         command: OwnerCommand<Cpu>,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+    ) -> Result<
+        crate::execution::pool::SchedulerPoolSubmitResult,
+        crate::execution::pool::SchedulerPoolSubmitError,
+    > {
         pool.try_submit(command)
     }
     fn io_pool_accepts_io(
-        pool: &crate::pool::SchedulerIoPool,
+        pool: &crate::execution::pool::SchedulerIoPool,
         command: OwnerCommand<Io>,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+    ) -> Result<
+        crate::execution::pool::SchedulerPoolSubmitResult,
+        crate::execution::pool::SchedulerPoolSubmitError,
+    > {
         pool.try_submit(command)
     }
     let _ = cpu_pool_accepts_cpu;

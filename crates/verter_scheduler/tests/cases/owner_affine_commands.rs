@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use verter_scheduler::dag::{DepKey, FileStageKey, WorkNodeIdentity};
-use verter_scheduler::owner_command::OwnerCommand;
-use verter_scheduler::pool::{
+use verter_scheduler::execution::owner_command::OwnerCommand;
+use verter_scheduler::execution::pool::{
     SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError, SchedulerPoolSubmitResult,
 };
 use verter_scheduler::{Admission, CpuPool};

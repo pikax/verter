@@ -1023,7 +1023,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_scheduler/src/node.rs` | `FileNode` -- per-file state container |
 | `crates/verter_scheduler/src/scheduler.rs` | `Scheduler` -- DashMap of FileNodes, driver thread |
 | `crates/verter_scheduler/src/job.rs` | `CompletionHandle<T>` -- request-scoped result handle |
-| `crates/verter_scheduler/src/executor.rs` | `StageExecutor` trait |
+| `crates/verter_scheduler/src/execution/executor.rs` | `StageExecutor` trait |
 | `crates/verter_scheduler/src/stage.rs` | `Priority` enum |
 | `crates/verter_scheduler/src/edges.rs` | `EdgeManager` -- reverse index + blocker registry |
 | `crates/verter_session/src/lib.rs` | `VerterHost` -- holds `Arc<Scheduler>`, `compile_cache` |

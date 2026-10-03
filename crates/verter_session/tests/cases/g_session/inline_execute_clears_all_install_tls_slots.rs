@@ -33,7 +33,7 @@ use std::sync::Arc;
 use verter_audit::current_observer;
 use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::caller_kind::CallerKind;
-use verter_scheduler::executor::{StageError, StageExecutor};
+use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::job::CompletionState;
 use verter_scheduler::node::{AnalysisSnapshot, SourceSnapshot};
 use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};

@@ -1630,6 +1630,141 @@ fn deep_source() -> String {
     )
 }
 
+/// A source shallow enough that its parse and walks fit any thread's stack
+/// in place: only a forced region path makes either of them reserve, so
+/// what a refusal test proves is the fault and the region, never the depth
+/// ([`super::faults::force_reservations_here`]).
+fn shallow_source() -> &'static str {
+    "export const v = (1);\n"
+}
+
+/// Force `purposes` onto the region path for as long as the returned guard
+/// lives, so the refusals below come from the injected fault and not from a
+/// source too deep for the thread that parses it. The force is this thread's
+/// ([`super::faults::force_reservations_here`]): every test here runs its work
+/// on the thread it established, so no other test's walk or parse is on it,
+/// whatever stack either runs on.
+fn forcing(purposes: &[super::stack::Reservation]) -> super::faults::ForcedRegions {
+    super::faults::force_reservations_here(purposes)
+}
+
+/// A parse and a walk refused their region, twenty times over, on a thread
+/// whose stack is explicitly large (64 MiB): the forcing, not the thread's
+/// stack, is what makes either reserve, so a refusal is the same on a stack
+/// far larger than the source could exhaust. This is the proof the refusal
+/// tests hold on a runner that hands a thread more stack than they ask for
+/// (glibc serves a cached stack up to four times the size requested, and a
+/// runner's main thread is larger still): nothing below depends on the
+/// thread's real stack, so none of it can flake on one.
+#[test]
+fn a_forced_refusal_holds_twenty_times_on_a_large_stack() {
+    use super::stack::Reservation;
+    let (refusals, retried) = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(|| {
+            let source = shallow_source();
+            let _forcing = forcing(&[Reservation::Parse, Reservation::Lease]);
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+            assert_eq!(parsed.program.body.len(), 1);
+            let program = &parsed.program;
+            let mut refusals = 0;
+            for _ in 0..20 {
+                super::faults::fail_next_reservations(1);
+                let refused = Parser::new(&allocator, source, SourceType::ts()).parse();
+                refusals += usize::from(super::parse_refusal(&refused).is_some());
+                super::faults::fail_next_reservations(1);
+                refusals +=
+                    usize::from(super::with_program_walk_stack_lease(program, || ()).is_err());
+            }
+            // Nothing armed, the same work parses and walks.
+            let clean = Parser::new(&allocator, source, SourceType::ts()).parse();
+            let retried = (
+                clean.program.body.len(),
+                clean.diagnostics.len(),
+                super::with_program_walk_stack_lease(program, || ()).is_ok(),
+            );
+            (refusals, retried)
+        })
+        .expect("spawn the large-stack thread")
+        .join()
+        .expect("the work returns");
+    assert_eq!(refusals, 40, "every armed reservation was refused");
+    assert_eq!(retried, (1, 0, true), "the unarmed work runs");
+}
+
+/// A parse inside a walk-stack lease that holds a region runs on that region
+/// and reserves nothing, exactly as in production; a parse of a forced purpose
+/// reserves a region of its own and is the reservation an armed fault refuses.
+/// Were the lease to satisfy the forced parse, no reservation would be this
+/// call's to refuse and the fault would leak into the next one — the retry
+/// below would answer a parse nothing refused. Forcing `Lease` is what makes
+/// the lease hold a region on a thread of any stack, so the proof does not
+/// depend on the size of the stack it runs on.
+#[test]
+fn a_forced_parse_inside_a_region_lease_is_the_refused_reservation() {
+    use super::stack::Reservation;
+    let deep = deep_source();
+    let shallow = shallow_source();
+    let needed = super::parse_stack_bytes(shallow, SourceType::ts());
+    let allocator = Allocator::default();
+    let deep_program = Parser::new(&allocator, &deep, SourceType::ts())
+        .parse()
+        .program;
+    let _leases = forcing(&[Reservation::Lease]);
+    let leased = super::with_program_walk_stack_lease(&deep_program, || {
+        let _ = super::faults::take_reservations();
+        let parsed = Parser::new(&allocator, &deep, SourceType::ts()).parse();
+        (
+            parsed.program.body.len(),
+            parsed.diagnostics.len(),
+            super::faults::take_reservations(),
+        )
+    })
+    .expect("the lease");
+    assert_eq!(
+        leased,
+        (1, 0, 0),
+        "the lease's region ran the parse and reserved nothing"
+    );
+    let _parses = forcing(&[Reservation::Parse]);
+    let shallow_program = Parser::new(&allocator, shallow, SourceType::ts())
+        .parse()
+        .program;
+    let refused = super::with_program_walk_stack_lease(&shallow_program, || {
+        // The armed fault is this thread's next reservation, which is the
+        // forced parse's: nothing else reserves between the two statements.
+        super::faults::fail_next_reservations(1);
+        let _ = super::faults::take_reservations();
+        let refused = Parser::new(&allocator, shallow, SourceType::ts()).parse();
+        let refusal = super::parse_refusal(&refused);
+        let retried = Parser::new(&allocator, shallow, SourceType::ts()).parse();
+        (
+            refusal,
+            refused.program.body.len(),
+            retried.program.body.len(),
+            retried.diagnostics.len(),
+            super::faults::take_reservations(),
+        )
+    })
+    .expect("the lease");
+    assert_eq!(
+        refused.0,
+        Some(super::StackUnavailable { needed }),
+        "the forced parse is the refused reservation, sized from the syntax scan"
+    );
+    assert_eq!(refused.1, 0, "a refused parse publishes no program");
+    assert_eq!(
+        (refused.2, refused.3),
+        (1, 0),
+        "the retry parses, so the armed fault was this parse's and leaked to none"
+    );
+    assert_eq!(
+        refused.4, 2,
+        "the refused parse and its retry each reserved under the lease"
+    );
+}
+
 /// A parse and a walk that need a stack region run on one (a fiber on
 /// Windows, switched to and back through the region's handoff), many times
 /// over, and each answers what it would on an unbounded stack: one
@@ -1682,34 +1817,43 @@ fn a_parse_and_a_walk_on_a_region_answer_on_it_again_and_again() {
 
 /// A parse whose region cannot be reserved returns the typed diagnostic in
 /// place of the program, marked fatal, and the thread goes on: the same
-/// parse retried, and a shallow one, parse.
+/// parse retried, and a shallow one, parse. The forcing, not the source's
+/// depth, is what makes the parse reserve, so the fault fires on a thread
+/// of any stack — glibc may hand one asking for 1 MiB a cached stack up to
+/// four times the size.
 #[test]
 fn a_parse_whose_region_cannot_be_reserved_is_typed_and_a_retry_parses() {
-    let (refused, retried, shallow) = on_a_small_thread(|| {
-        let source = deep_source();
-        let allocator = Allocator::default();
-        super::faults::fail_next_reservations(1);
-        let refused = Parser::new(&allocator, &source, SourceType::ts()).parse();
-        let refused = (
-            refused.fatal_error,
-            refused.program.body.len(),
-            refused
-                .diagnostics
-                .errors()
-                .all(super::is_stack_unavailable),
-            refused.diagnostics.len(),
-        );
-        let retried = Parser::new(&allocator, &source, SourceType::ts()).parse();
-        let shallow = Parser::new(&allocator, "export const v = (1);", SourceType::ts()).parse();
-        (
-            refused,
-            (retried.program.body.len(), retried.diagnostics.len()),
-            (shallow.program.body.len(), shallow.diagnostics.len()),
-        )
-    });
+    let source = shallow_source();
+    let allocator = Allocator::default();
+    let _forcing = forcing(&[super::stack::Reservation::Parse]);
+    let _ = super::faults::take_reservations();
+    super::faults::fail_next_reservations(1);
+    let refused = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let refused = (
+        refused.fatal_error,
+        refused.program.body.len(),
+        refused
+            .diagnostics
+            .errors()
+            .all(super::is_stack_unavailable),
+        refused.diagnostics.len(),
+    );
+    let retried = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let shallow = Parser::new(&allocator, "export const v = (1);", SourceType::ts()).parse();
+    let parses = super::faults::take_reservations();
     assert_eq!(refused, (true, 0, true, 1));
-    assert_eq!(retried, (1, 0));
-    assert_eq!(shallow, (1, 0));
+    assert!(
+        parses >= 2,
+        "the refused parse and its retry each reserved: {parses}"
+    );
+    assert_eq!(
+        (retried.program.body.len(), retried.diagnostics.len()),
+        (1, 0)
+    );
+    assert_eq!(
+        (shallow.program.body.len(), shallow.diagnostics.len()),
+        (1, 0)
+    );
 }
 
 /// A walk-stack lease whose region cannot be reserved is the operation's
@@ -1718,25 +1862,29 @@ fn a_parse_whose_region_cannot_be_reserved_is_typed_and_a_retry_parses() {
 #[test]
 fn a_walk_stack_lease_that_cannot_be_reserved_starts_no_walk() {
     use oxc_allocator::CloneIn;
-    let (refused, started, retried) = on_a_small_thread(|| {
-        let source = deep_source();
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-        let program = &parsed.program;
-        let clones = Allocator::default();
-        let started = std::cell::Cell::new(false);
-        super::faults::fail_next_reservations(1);
-        let refused = super::with_program_walk_stack_lease(program, || {
-            started.set(true);
-            super::with_program_stack(program, || program.clone_in(&clones).body.len())
-        });
-        let retried = super::with_program_walk_stack_lease(program, || {
-            super::with_program_stack(program, || program.clone_in(&clones).body.len())
-        });
-        (refused.is_err(), started.get(), retried)
+    let source = shallow_source();
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let program = &parsed.program;
+    let clones = Allocator::default();
+    let started = std::cell::Cell::new(false);
+    let _forcing = forcing(&[super::stack::Reservation::Lease]);
+    let _ = super::faults::take_reservations();
+    super::faults::fail_next_reservations(1);
+    let refused = super::with_program_walk_stack_lease(program, || {
+        started.set(true);
+        super::with_program_stack(program, || program.clone_in(&clones).body.len())
     });
-    assert!(refused, "the lease is refused");
-    assert!(!started, "no walk starts under a refused lease");
+    let retried = super::with_program_walk_stack_lease(program, || {
+        super::with_program_stack(program, || program.clone_in(&clones).body.len())
+    });
+    let leases = super::faults::take_reservations();
+    assert!(refused.is_err(), "the lease is refused");
+    assert!(!started.get(), "no walk starts under a refused lease");
+    assert!(
+        leases >= 2,
+        "the refused lease and the retried one each reserved: {leases}"
+    );
     assert_eq!(retried, Ok(1));
 }
 
@@ -1747,48 +1895,47 @@ fn a_walk_stack_lease_that_cannot_be_reserved_starts_no_walk() {
 /// and a refusal made where no operation records is recorded nowhere.
 #[test]
 fn an_operation_learns_of_every_stack_refusal_made_inside_it() {
-    let outcomes = on_a_small_thread(|| {
-        let source = deep_source();
-        let parenthesized = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
-        let allocator = Allocator::default();
-        let parse = || {
-            super::faults::fail_next_reservations(1);
-            // The operation reads the refused parse as an empty program.
-            Parser::new(&allocator, &source, SourceType::ts())
-                .parse()
-                .program
-                .body
-                .len()
-        };
-        let parsed = super::refusals_within(parse);
-        let expression = super::refusals_within(|| {
-            super::faults::fail_next_reservations(1);
-            Parser::new(&allocator, &parenthesized, SourceType::ts())
-                .parse_expression()
-                .is_err()
-        });
-        let program = Parser::new(&allocator, &source, SourceType::ts())
+    use super::stack::Reservation;
+    let source = shallow_source();
+    let parenthesized = "(1)";
+    let allocator = Allocator::default();
+    let _forcing = forcing(&[Reservation::Parse, Reservation::Lease]);
+    let parse = || {
+        super::faults::fail_next_reservations(1);
+        // The operation reads the refused parse as an empty program.
+        Parser::new(&allocator, source, SourceType::ts())
             .parse()
-            .program;
-        let leased = super::refusals_within(|| {
-            super::faults::fail_next_reservations(1);
-            super::with_program_walk_stack_lease(&program, || ()).is_err()
-        });
-        let enclosing = super::refusals_within(|| super::refusals_within(parse).1);
-        let complete = super::refusals_within(|| {
-            Parser::new(&allocator, &source, SourceType::ts())
-                .parse()
-                .program
-                .body
-                .len()
-        });
-        let unrecorded = parse();
-        let after = super::refusals_within(|| ()).1;
-        (
-            parsed, expression, leased, enclosing, complete, unrecorded, after,
-        )
+            .program
+            .body
+            .len()
+    };
+    let parsed = super::refusals_within(parse);
+    let expression = super::refusals_within(|| {
+        super::faults::fail_next_reservations(1);
+        Parser::new(&allocator, parenthesized, SourceType::ts())
+            .parse_expression()
+            .is_err()
     });
-    let (parsed, expression, leased, enclosing, complete, unrecorded, after) = outcomes;
+    let program = Parser::new(&allocator, source, SourceType::ts())
+        .parse()
+        .program;
+    let leased = super::refusals_within(|| {
+        super::faults::fail_next_reservations(1);
+        super::with_program_walk_stack_lease(&program, || ()).is_err()
+    });
+    let enclosing = super::refusals_within(|| super::refusals_within(parse).1);
+    let complete = super::refusals_within(|| {
+        Parser::new(&allocator, source, SourceType::ts())
+            .parse()
+            .program
+            .body
+            .len()
+    });
+    let unrecorded = parse();
+    let after = super::refusals_within(|| ()).1;
+    let (parsed, expression, leased, enclosing, complete, unrecorded, after) = (
+        parsed, expression, leased, enclosing, complete, unrecorded, after,
+    );
     assert_eq!(parsed.0, 0);
     assert!(parsed.1.is_some(), "the parse's refusal");
     assert!(expression.0);
@@ -1810,36 +1957,30 @@ fn an_operation_learns_of_every_stack_refusal_made_inside_it() {
 /// records, whose refusal would reach none.
 #[test]
 fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
-    let (recorded, unrecorded, retried, reported) = on_a_small_thread(|| {
-        let source = deep_source();
-        let allocator = Allocator::default();
-        let program = Parser::new(&allocator, &source, SourceType::ts())
-            .parse()
-            .program;
-        let _ = super::faults::take_unleased_walks();
-        let walked = std::cell::Cell::new(false);
-        let walk = || walked.set(true);
-        super::faults::fail_next_reservations(1);
-        let recorded_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
-        let recorded = super::refusals_within(|| super::leased_program_walk(&program, walk));
-        let recorded = (recorded.0.is_err(), recorded.1.is_some(), walked.get());
-        super::faults::fail_next_reservations(1);
-        let site = format!("oxc_parse/tests.rs:{}", line!() + 1);
-        let unrecorded = super::leased_program_walk(&program, walk).is_err();
-        let unrecorded = (unrecorded, walked.get(), site);
-        let retried_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
-        let retried = super::refusals_within(|| super::leased_program_walk(&program, walk));
-        let retried = (retried.0.is_ok(), retried.1.is_none(), walked.get());
-        let recorded = (recorded, [recorded_site, retried_site]);
-        (
-            recorded,
-            unrecorded,
-            retried,
-            super::faults::take_unleased_walks(),
-        )
-    });
+    let source = shallow_source();
+    let allocator = Allocator::default();
+    let program = Parser::new(&allocator, source, SourceType::ts())
+        .parse()
+        .program;
+    let _ = super::faults::take_unleased_walks();
+    let walked = std::cell::Cell::new(false);
+    let walk = || walked.set(true);
+    let _forcing = forcing(&[super::stack::Reservation::Lease]);
+    super::faults::fail_next_reservations(1);
+    let recorded_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
+    let recorded = super::refusals_within(|| super::leased_program_walk(&program, walk));
+    let recorded = (recorded.0.is_err(), recorded.1.is_some(), walked.get());
+    super::faults::fail_next_reservations(1);
+    let site = format!("oxc_parse/tests.rs:{}", line!() + 1);
+    let unrecorded = super::leased_program_walk(&program, walk).is_err();
+    let unrecorded = (unrecorded, walked.get(), site);
+    let retried_site = format!("oxc_parse/tests.rs:{}", line!() + 1);
+    let retried = super::refusals_within(|| super::leased_program_walk(&program, walk));
+    let retried = (retried.0.is_ok(), retried.1.is_none(), walked.get());
+    let recorded = (recorded, [recorded_site, retried_site]);
     let (unrecorded, unrecorded_walked, site) = unrecorded;
     let (recorded, recording_sites) = recorded;
+    let reported = super::faults::take_unleased_walks();
     assert_eq!(recorded, (true, true, false), "refused, recorded, not run");
     assert_eq!(
         (unrecorded, unrecorded_walked),
@@ -1870,17 +2011,16 @@ fn a_leased_walk_refused_its_lease_is_the_typed_refusal() {
 /// which keeps the refusal it learned of before.
 #[test]
 fn an_unwinding_operation_restores_the_enclosing_record() {
-    let (inner_unwound, outer) = on_a_small_thread(|| {
-        let source = deep_source();
-        super::refusals_within(|| {
-            let allocator = Allocator::default();
-            super::faults::fail_next_reservations(1);
-            Parser::new(&allocator, &source, SourceType::ts()).parse();
-            std::panic::catch_unwind(|| {
-                super::refusals_within(|| -> () { std::panic::resume_unwind(Box::new("unwinds")) })
-            })
-            .is_err()
+    let source = shallow_source();
+    let _forcing = forcing(&[super::stack::Reservation::Parse]);
+    let (inner_unwound, outer) = super::refusals_within(|| {
+        let allocator = Allocator::default();
+        super::faults::fail_next_reservations(1);
+        Parser::new(&allocator, source, SourceType::ts()).parse();
+        std::panic::catch_unwind(|| {
+            super::refusals_within(|| -> () { std::panic::resume_unwind(Box::new("unwinds")) })
         })
+        .is_err()
     });
     assert!(inner_unwound);
     assert!(

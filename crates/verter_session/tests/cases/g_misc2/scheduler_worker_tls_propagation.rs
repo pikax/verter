@@ -37,8 +37,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_scheduler::owner_command::OwnerCommand;
-use verter_scheduler::pool::SchedulerIoPool;
+use verter_scheduler::execution::owner_command::OwnerCommand;
+use verter_scheduler::execution::pool::SchedulerIoPool;
 use verter_scheduler::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
@@ -207,7 +207,7 @@ fn opaque_context_guard_install_does_not_recurse() {
 #[test]
 fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
     use verter_language::FileLanguage as SchedFileKind;
-    use verter_scheduler::executor::{StageError, StageExecutor};
+    use verter_scheduler::execution::executor::{StageError, StageExecutor};
     use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
     use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
     use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};

@@ -630,7 +630,7 @@ test("ARH1-import-direction: inline crate:: paths name their crate-internal root
     [
       "use crate::dag::Thing;",
       "#[cfg(test)]",
-      "mod t { fn g() { crate::pool::SchedulerCpuPool::wrap(); } }",
+      "mod t { fn g() { crate::execution::pool::SchedulerCpuPool::wrap(); } }",
       "fn h() { crate::cache_id::SchedulerCacheId::new(); }",
     ].join("\n"),
   );
@@ -640,7 +640,7 @@ test("ARH1-import-direction: inline crate:: paths name their crate-internal root
 test("ARH1-import-direction dirty twin: undeclaring a production inline crate-internal root is rejected", () => {
   const dirty = cloneProducts();
   const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
-  aid.crateInternal = aid.crateInternal.filter((v) => v !== "pool"); // live constructor params
+  aid.crateInternal = aid.crateInternal.filter((v) => v !== "execution"); // live constructor params
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -648,7 +648,7 @@ test("ARH1-import-direction dirty twin: undeclaring a production inline crate-in
       (e) =>
         e.caseId === "ARH1-import-direction" &&
         e.code === "import-drift" &&
-        e.detail.includes("crate-internal import pool is not declared"),
+        e.detail.includes("crate-internal import execution is not declared"),
     ),
     JSON.stringify(result.errors),
   );

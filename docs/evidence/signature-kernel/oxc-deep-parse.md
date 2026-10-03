@@ -196,6 +196,62 @@ on a lease region restores the stack and the lease; a covered walk reached
 on a region reserved past the lease does not re-enter the lease's region
 under its own suspended work.
 
+#### How a refusal is tested
+
+A reservation only happens when the thread's stack is too small for the
+work, so a test that injects the fault has to make one happen — and the
+thread's real stack is not the test's to decide. glibc serves a thread
+that asked for 1 MiB a cached stack up to four times the size, and a
+runner's own thread is larger still, so a fixture sized from the size
+asked for parses in place, reserves nothing, and the fault never fires:
+the refusal tests flaked in Compiler Contracts on 2026-09-29 and
+2026-10-02, and sizing the fixtures from the stack the thread turned out
+to have is the same dependence wearing a different hat.
+
+`faults::force_reservations(&[purpose], needed)` removes it. The forcing is
+test-only and restores itself on drop (and on unwind), like the cross-thread
+fault it sits beside; the work of a forced purpose skips the parse length
+shortcut, the thread's own stack, and the walk-stack lease — one holding a
+region included, for that lease's region would run the work with no
+reservation of its own for a fault to refuse — so a parse or a walk of that
+purpose reserves a region wherever it runs, a scheduler worker's included.
+
+Reaching a scheduler worker is why the forcing is not scoped to a thread: no
+thread-scoped forcing reaches work the test did not start. It is scoped to
+the *reservation* instead — the purposes it names, and the bytes it names
+beside them. A forced reservation is sized from the syntax scan, so `needed`
+is the size of the test's own source's scan
+(`parse_stack_bytes`), and the forcing leaves every other size to the
+thread's own stack, as in production: a test holding a forcing changes no
+other test's walk or parse, whatever stack either runs on. The tests in one
+binary that force a purpose therefore give it sizes no other of them parses
+— a distinct nesting depth is a distinct size. Work that runs on the thread
+the test itself established takes `faults::force_reservations_here(&[purpose])`
+instead, which reaches that thread's reservations of any size and no other
+thread's: it is the scoping for a test that enumerates every reservation its
+work makes, over sources of several sizes.
+
+Nothing any of it does is reachable outside `cfg(test)` and the dev-only
+`stack-fault-injection` feature, so a shipped build carries none of it and
+the refusal semantics, `stack_bytes`, the wasm32 profile and the census are
+untouched.
+
+Every refusal test then takes its proof from the fault, not from a
+source too deep for the machine: a small source, the forcing, the
+injected reservation refused, nothing published, and a retry without the
+fault succeeding. A forced purpose sizes its reservation from the syntax
+scan and never from the length, so the size a test computes with
+`parse_stack_bytes` is exactly the size the operation reserves whatever
+stack the thread has. A test that keys its fault on a size takes it on the
+work of its own thread where the work runs on one — the Vue and Svelte
+execution refusals enumerate this thread's parses of the script and refuse
+each in turn — because a size-keyed fault is process-wide and matches
+whichever thread makes the reservation, so two tests keying the same size
+would take each other's faults.
+`a_forced_refusal_holds_twenty_times_on_a_large_stack` is the standing
+proof: twenty refused parses and twenty refused leases, on a thread whose
+stack is explicitly 64 MiB.
+
 A walk no lease covers reserves a region of its own and, when that
 reservation fails, ends the process as a failed allocation does. That
 stays so until each operation that starts oxc walks holds a lease, and it
