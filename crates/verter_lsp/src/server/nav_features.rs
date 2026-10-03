@@ -201,10 +201,11 @@ pub(super) async fn handle_hover(
         .timer("hover", Some(uri.as_str().to_string()));
     // The whole response settles against a basis captured after the route's
     // current-file repair. A diagnostics-generation-only advance during the
-    // provider await (this request's own repair, a cold native hydration, or a
-    // background sync) repeats the repair and recomputes once against a fresh
-    // basis captured after it; an edit,
-    // close/reopen or workspace change still answers `ContentModified`.
+    // provider await (this request's own repair, a cold native hydration, a
+    // background sync, or an importer re-armed by a dependency's settled edit)
+    // repeats the repair and recomputes against a fresh basis captured after
+    // it, until one attempt observes no move; an edit, close/reopen or
+    // workspace change still answers `ContentModified`.
     server
         .settle_request_with_generation_retry(uri, || handle_hover_attempt(server, &params))
         .await
@@ -319,7 +320,7 @@ async fn handle_hover_attempt(
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
                 // A cold native projection can hydrate an imported declaration
                 // and advance the diagnostics generation; `handle_hover`'s
-                // settlement recomputes once and never carries this payload
+                // settlement recomputes and never carries this payload
                 // into the new basis.
                 return Ok(Some(child_hover));
             }
@@ -626,12 +627,33 @@ pub(super) async fn handle_completion(
     // final native-only attempt keeps the commit fence through native calculation,
     // so it returns the coherent post-fence snapshot even if the pre-wait identity
     // sampled here was older.
-    for _attempt in 0..2 {
+    //
+    // Only edit, reopen and workspace races spend those two retries. A move of
+    // the diagnostics generation alone is background settlement (an imported
+    // carrier settling right after open, a resync or compile of this file), not
+    // a content change: recompute against a fresh basis, bounded as every
+    // request route is, so a cold provider answer is not demoted to the
+    // native-only list while that work drains.
+    let mut edit_races = 0;
+    let mut generation_recomputations = 0;
+    while edit_races < 2 {
         let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
         let response = handle_completion_attempt(server, &params, false).await?;
         if settlement.is_current(&server.documents, &uri) {
             return Ok(response);
         }
+        if settlement.document_and_workspace_are_current(&server.documents, &uri) {
+            if generation_recomputations == super::GENERATION_ONLY_RECOMPUTE_LIMIT {
+                break;
+            }
+            generation_recomputations += 1;
+            tracing::debug!(
+                "completion: recomputing {} after a diagnostics-generation-only move ({generation_recomputations})",
+                uri.as_str()
+            );
+            continue;
+        }
+        edit_races += 1;
         tracing::debug!(
             "completion: retrying {} after readiness basis advanced (version {:?} -> {:?})",
             uri.as_str(),
