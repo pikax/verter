@@ -913,6 +913,124 @@ pub(crate) fn open_ide_leg_is_current(
         })
 }
 
+/// Whether an OPEN carrier's store-published companions are already current in
+/// the membership-only topology (tsserver), where the carrier-sync gateway's
+/// publication IS the IDE-leg application: it records a new generation of every
+/// companion surface and bumps the version the engine re-reads.
+///
+/// That engine holds no buffer the application witness can certify, so its
+/// freshness basis is the committed state, the recorded surfaces and the store
+/// membership, all describing the same companions:
+/// - the committed state owns the IDE path the gateway would publish under
+///   `resolver`, under the owner it resolves, and its
+///   receipt-attested IDE fingerprint is the recorded surface's stamp;
+/// - the recorded IDE surface holds exactly the bytes a FRESH preparation of
+///   `generated` produces (a changed projection misses), with the compile's map,
+///   and describes the live source (revision);
+/// - every committed API companion's recorded surface holds the current public
+///   API projection for the live source;
+/// - the membership ledger advertises the source under the current session with
+///   those companions (a retraction or session change misses).
+///
+/// Anything else — another engine topology, an unresolved binding, a document
+/// that is not open — is not current here.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the witness covers committed state, recorded surfaces and membership together"
+)]
+pub(crate) fn published_carrier_is_current(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    documents: &crate::documents::DocumentRegistry,
+    ledger: Option<&crate::external_ts::MembershipLedger>,
+    committed: Option<&ProviderSyncState>,
+    resolver: &ModuleResolverCore,
+    canonical_id: &str,
+    is_jsx: bool,
+    generated: &str,
+    ide_map: Option<&str>,
+) -> bool {
+    let (Some(ledger), Some(committed)) = (ledger, committed) else {
+        return false;
+    };
+    if !sync.carrier_companion_open_suppressed() {
+        return false;
+    }
+    // The owner and IDE path the gateway would publish under right now.
+    let owner_binding = current_owner_binding_for_source(resolver, canonical_id);
+    let Some(ide_path) = resolver.provider_ide_id_for_source(canonical_id, is_jsx) else {
+        return false;
+    };
+    let ide_path = ide_path.as_str();
+    if owner_binding.is_unresolved()
+        || committed.owner_binding != owner_binding
+        || !committed.ide_background_loaded
+        || committed.ide_path.as_deref() != Some(ide_path)
+    {
+        return false;
+    }
+    let Some(live_source) = documents.canonical_id_to_uri(canonical_id).and_then(|uri| {
+        documents
+            .get(&uri)
+            .map(|document| std::sync::Arc::clone(&document.source))
+    }) else {
+        return false;
+    };
+    let live_source_hash = ContentHash::of(&live_source);
+    let map_hash = |map: Option<&str>| {
+        map.map(|map| ContentHash::of(map).to_hash16())
+            .unwrap_or([0; 16])
+    };
+    let surfaces = documents.provider_surfaces();
+    let Ok(prepared) = sync.carrier_provider_surface_for_publication(ide_path, generated) else {
+        return false;
+    };
+    let ide_current = surfaces.current_snapshot(ide_path).is_some_and(|snapshot| {
+        snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+            && snapshot.source_canonical.as_ref() == canonical_id
+            && snapshot.source_hash == live_source_hash
+            && snapshot.provider_content.as_ref() == prepared.content().as_ref()
+            && snapshot.stamp.map_hash == map_hash(ide_map)
+            && committed.authorizes_carrier_ide_capture(
+                snapshot.stamp.content_hash.to_hash16(),
+                snapshot.stamp.map_hash,
+            )
+    });
+    if !ide_current {
+        return false;
+    }
+    if let Some(api_path) = committed.api_path.as_deref() {
+        let Ok(Some(api)) = documents.host().get_public_api(canonical_id) else {
+            return false;
+        };
+        let api_code = api.code_for_companion_path(api_path);
+        let api_current = surfaces.current_snapshot(api_path).is_some_and(|snapshot| {
+            snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierApi
+                && snapshot.source_canonical.as_ref() == canonical_id
+                && snapshot.source_hash == live_source_hash
+                && *snapshot.provider_content == **api_code
+                && snapshot.stamp.map_hash == map_hash(api.source_map.as_deref())
+        });
+        if !api_current {
+            return false;
+        }
+    }
+    let source = crate::external_ts::CanonicalSource::new(canonical_id);
+    ledger.is_advertised(&source)
+        && ledger
+            .record_snapshot(&source)
+            .and_then(|record| {
+                record.advertised_companions().map(|companions| {
+                    let advertises = |path: &str| {
+                        companions
+                            .iter()
+                            .any(|companion| companion.provider_uri.as_ref() == path)
+                    };
+                    advertises(ide_path) && committed.api_path.as_deref().is_none_or(advertises)
+                })
+            })
+            .unwrap_or(false)
+}
+
 /// Resolve the [`verter_session::FileLanguage`] for a non-carrier
 /// provider-sync target.
 ///

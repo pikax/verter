@@ -832,18 +832,17 @@ impl VerterLanguageServer {
     }
 
     /// Whether the open-document revision this transaction pinned before it
-    /// compiled is still the live one.
-    ///
-    /// `None` is a document with no open generation to have moved — a closed or
-    /// not-yet-open source, whose provider surface no editor is asking about —
-    /// so the pin cannot have gone stale and the leg proceeds.
+    /// compiled is still the live one; see
+    /// [`crate::documents::DocumentRegistry::compile_pin_is_current`]. `None`
+    /// is a transaction that started while the document was closed, current
+    /// only while it stays closed.
     pub(super) fn open_pin_is_current(
         &self,
+        canonical_id: &str,
         open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
     ) -> bool {
-        open_pin.is_none_or(|(uri, identity)| {
-            self.documents.snapshot_identity_is_current(uri, identity)
-        })
+        self.documents
+            .compile_pin_is_current(canonical_id, open_pin)
     }
 
     /// Whether an open document's IDE leg is already current for `generated`
@@ -874,8 +873,8 @@ impl VerterLanguageServer {
 
     /// Whether an open document's IDE leg is still owed: no committed surface
     /// describes its live source, or the serving engine no longer holds that
-    /// surface's bytes (a restart, or a membership-only engine that holds no
-    /// buffer this can witness).
+    /// surface (a restart; for a membership-only engine, a publication that no
+    /// longer matches the committed state, recorded surfaces and membership).
     pub(super) fn ide_leg_owed_for_open_document(&self, uri: &Uri) -> bool {
         let (Some(sync), Some(snapshot)) = (
             self.project_sync.as_ref(),
@@ -883,7 +882,57 @@ impl VerterLanguageServer {
         ) else {
             return true;
         };
+        if sync.carrier_companion_open_suppressed() {
+            // Membership-only engine: its own freshness witness, over the
+            // current cached compile (an uncached compile is owed).
+            let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+                return true;
+            };
+            let profile = self.documents.tsx_profile.read().clone();
+            let Some(ide) = self.documents.host().get_ide(&canonical_id, &profile) else {
+                return true;
+            };
+            return !self.published_carrier_is_current(
+                &canonical_id,
+                ide.is_jsx,
+                &ide.code,
+                ide.source_map.as_deref(),
+            );
+        }
         !sync.companion_applied_verbatim(&snapshot.stamp.provider_path, &snapshot.provider_content)
+    }
+
+    /// Whether an open carrier's store-published companions are already
+    /// current for `generated` in the membership-only (tsserver) topology; see
+    /// [`crate::provider_sync::published_carrier_is_current`].
+    pub(super) fn published_carrier_is_current(
+        &self,
+        canonical_id: &str,
+        is_jsx: bool,
+        generated: &str,
+        ide_map: Option<&str>,
+    ) -> bool {
+        let (Some(sync), Some(snapshot)) = (self.project_sync.as_ref(), self.published_resolver())
+        else {
+            return false;
+        };
+        if !snapshot.ownership_ready {
+            return false;
+        }
+        let committed = self.provider_sync_state_for_source(canonical_id);
+        crate::provider_sync::published_carrier_is_current(
+            sync,
+            &self.documents,
+            self.carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.backend().membership_ledger().as_ref()),
+            committed.as_ref(),
+            &snapshot.resolver,
+            canonical_id,
+            is_jsx,
+            generated,
+            ide_map,
+        )
     }
 
     pub(super) fn provider_sync_state_for_source(
@@ -1127,11 +1176,15 @@ impl VerterLanguageServer {
                 }
             }
             let result = if target.ide_background_loaded {
-                sync.sync_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(retained))
-                    .await
+                sync.sync_tsx_fenced(&ide_path, ide_code, &|| {
+                    self.open_pin_is_current(canonical_id, retained)
+                })
+                .await
             } else {
-                sync.open_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(retained))
-                    .await
+                sync.open_tsx_fenced(&ide_path, ide_code, &|| {
+                    self.open_pin_is_current(canonical_id, retained)
+                })
+                .await
             };
             match result {
                 Ok(delivery) => {

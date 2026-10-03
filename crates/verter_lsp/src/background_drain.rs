@@ -1199,12 +1199,12 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     // already live (a same-extension preserve), else first-open.
     let result = if target.ide_background_loaded {
         sync.sync_tsx_fenced(&ide_path, &ide.code, &|| {
-            open_pin.is_none_or(|(uri, id)| documents.snapshot_identity_is_current(uri, id))
+            documents.compile_pin_is_current(canonical_id, open_pin)
         })
         .await
     } else {
         sync.open_tsx_fenced(&ide_path, &ide.code, &|| {
-            open_pin.is_none_or(|(uri, id)| documents.snapshot_identity_is_current(uri, id))
+            documents.compile_pin_is_current(canonical_id, open_pin)
         })
         .await
     };
@@ -1456,21 +1456,21 @@ async fn apply_owner_resolved_carrier_sync(
             if let (Some(ide), Some(ide_path)) = (ide, committed_state.ide_path.clone()) {
                 attempted.push(ProviderPathKind::Ide);
                 if !ide_current {
+                    // Evaluated under the per-path delivery lock: a transaction
+                    // that started closed is refused once the document opened.
+                    let still_current = || documents.compile_pin_is_current(canonical_id, open_pin);
                     let result = if committed_state.ide_background_loaded {
-                        sync.sync_tsx_fenced(&ide_path, &ide.code, &|| {
-                            open_pin.is_none_or(|(uri, id)| {
-                                documents.snapshot_identity_is_current(uri, id)
-                            })
-                        })
-                        .await
+                        sync.sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                            .await
                     } else {
-                        sync.open_tsx_fenced(&ide_path, &ide.code, &|| {
-                            open_pin.is_none_or(|(uri, id)| {
-                                documents.snapshot_identity_is_current(uri, id)
-                            })
-                        })
-                        .await
+                        sync.open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                            .await
                     };
+                    if !still_current() {
+                        // The revision this pass compiled is no longer the one to
+                        // serve. The live revision's own transaction delivers it.
+                        return CarrierApplyOutcome::Pending;
+                    }
                     let result = match result {
                         Ok(crate::type_provider::project_sync::CarrierDelivery::Refused)
                         | Ok(crate::type_provider::project_sync::CarrierDelivery::Delivered(
@@ -1562,6 +1562,7 @@ async fn apply_owner_resolved_carrier_sync(
                 crate::document_sync_lane::LaneAcquire::Try,
             )
             .await
+            .is_current()
             {
                 synced.push(ProviderPathKind::Api);
             }
@@ -1669,6 +1670,26 @@ pub(super) async fn sync_api_to_provider_background_task(
     .await;
 }
 
+/// How one API-leg transaction ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApiLegOutcome {
+    /// The API companion is delivered and committed for this basis, or already
+    /// was.
+    Current,
+    /// Another transaction held the document's lane, so this one yielded it and
+    /// requeued the document. Contention is not a failed attempt: a caller with
+    /// a retry budget must not spend it on this.
+    LaneBusy,
+    /// The transaction failed or its basis moved; nothing of it was committed.
+    Refused,
+}
+
+impl ApiLegOutcome {
+    pub(crate) fn is_current(self) -> bool {
+        self == Self::Current
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "shared API sync retains the same gateway dependencies as the carrier transaction"
@@ -1684,17 +1705,19 @@ pub(crate) async fn sync_carrier_api_transaction(
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     pending_snapshot_provider_sync: &dashmap::DashSet<String>,
     lane: crate::document_sync_lane::LaneAcquire,
-) -> bool {
+) -> ApiLegOutcome {
     let host = documents.host_arc();
     let provider_surfaces = documents.provider_surfaces();
     let (open_uri, open_revision) = documents.open_compile_pin(canonical_id);
     let open_pin = open_uri.as_ref().zip(open_revision.as_ref());
+    #[cfg(test)]
+    crate::sync_coordinator::test_hooks::maybe_pause_before_delivery(canonical_id).await;
     let document_lane = match documents.delivery_lane(canonical_id, lane).await {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
         crate::document_sync_lane::DeliveryLane::Closed => None,
         crate::document_sync_lane::DeliveryLane::Busy => {
             pending_snapshot_provider_sync.insert(canonical_id.to_string());
-            return false;
+            return ApiLegOutcome::LaneBusy;
         }
     };
     // Route through the SINGLE carrier-sync gateway. This API-only background task
@@ -1733,11 +1756,13 @@ pub(crate) async fn sync_carrier_api_transaction(
             // API-only background task does no buffer conversion.
             crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
                 let _ = carrier_coordinator.settle(not_owned, canonical_id, None);
-                return false;
+                return ApiLegOutcome::Refused;
             }
             // A tsserver `Published` outcome cannot occur here (`membership: None` ⇒ tsgo
             // direct-open only); the store publish is the tsserver path's job.
-            crate::external_ts::CarrierSyncDecision::Published { .. } => return false,
+            crate::external_ts::CarrierSyncDecision::Published { .. } => {
+                return ApiLegOutcome::Refused
+            }
         };
     deliver_api_transaction(
         sync,
@@ -1778,10 +1803,10 @@ pub(super) async fn deliver_api_transaction(
     lane: crate::document_sync_lane::LaneAcquire,
     ownership_ready: bool,
     open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
-) -> bool {
+) -> ApiLegOutcome {
     if open_pin.is_none() && documents.canonical_id_to_uri(canonical_id).is_some() {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     }
     let host = documents.host();
     let lanes = documents.document_lanes();
@@ -1798,7 +1823,7 @@ pub(super) async fn deliver_api_transaction(
         })
             && host.last_content_transition_generation(canonical_id) == revision
             && lanes.open_generation(canonical_id) == generation
-            && open_pin.is_none_or(|(uri, identity)| documents.snapshot_identity_is_current(uri, identity))
+            && documents.compile_pin_is_current(canonical_id, open_pin)
             && match (publication.as_ref(), vfs.and_then(|vfs| vfs.load_published())) {
                 (Some(captured), Some(current)) => Arc::ptr_eq(captured, &current),
                 (None, None) => true,
@@ -1816,11 +1841,11 @@ pub(super) async fn deliver_api_transaction(
     };
     let mut state = transition.next;
     let Some(path) = state.api_path.clone() else {
-        return true;
+        return ApiLegOutcome::Current;
     };
     let Ok(Some(api)) = host.get_public_api(canonical_id) else {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     };
     let code = api.code_for_companion_path(&path);
     let carrier_source =
@@ -1828,7 +1853,7 @@ pub(super) async fn deliver_api_transaction(
     let previous = states.get(canonical_id).map(|entry| entry.clone());
     if !basis_is_current() {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     }
     if crate::provider_sync::api_leg_is_current(
         sync,
@@ -1840,7 +1865,7 @@ pub(super) async fn deliver_api_transaction(
         canonical_id,
         documents,
     ) {
-        return true;
+        return ApiLegOutcome::Current;
     }
     drop(document_lane);
     let delivery = sync
@@ -1848,14 +1873,14 @@ pub(super) async fn deliver_api_transaction(
         .await;
     let Ok(Some(delivery)) = delivery else {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     };
     let _document_lane = match documents.delivery_lane(canonical_id, lane).await {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
         crate::document_sync_lane::DeliveryLane::Closed => None,
         crate::document_sync_lane::DeliveryLane::Busy => {
             queue.insert(canonical_id.to_string());
-            return false;
+            return ApiLegOutcome::LaneBusy;
         }
     };
     let projection_is_current = host
@@ -1867,7 +1892,7 @@ pub(super) async fn deliver_api_transaction(
         });
     if !basis_is_current() || !projection_is_current || !delivery.is_current(sync) {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     }
     state.mark_api_delivered(code);
     let receipt = pending.confirm_opened(&[ProviderPathKind::Api]);
@@ -1887,7 +1912,7 @@ pub(super) async fn deliver_api_transaction(
     });
     if !fingerprint_matches {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     }
     // Record only after admission, under the same document identity pin. The
     // source comes from that pin rather than a second live registry lookup.
@@ -1918,7 +1943,7 @@ pub(super) async fn deliver_api_transaction(
     };
     if outcome != Some(crate::external_ts::AdmitOutcome::Admitted) {
         queue.insert(canonical_id.to_string());
-        return false;
+        return ApiLegOutcome::Refused;
     }
     drop(_document_lane);
     let latest = states.get(canonical_id).map(|entry| entry.clone());
@@ -1934,7 +1959,7 @@ pub(super) async fn deliver_api_transaction(
         )
         .await;
     }
-    true
+    ApiLegOutcome::Current
 }
 
 pub(super) async fn sync_pending_non_carrier_provider_file(

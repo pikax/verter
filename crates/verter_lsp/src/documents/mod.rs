@@ -699,7 +699,13 @@ impl DocumentRegistry {
         &self,
         canonical_id: &str,
     ) -> crate::document_sync_lane::DeliveryLane {
-        self.establish_open_generation(canonical_id);
+        if self
+            .document_lanes
+            .try_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            == crate::document_sync_lane::EstablishedGeneration::Busy
+        {
+            return crate::document_sync_lane::DeliveryLane::Busy;
+        }
         self.document_lanes.try_delivery_lane(canonical_id)
     }
 
@@ -713,22 +719,44 @@ impl DocumentRegistry {
         match mode {
             crate::document_sync_lane::LaneAcquire::Try => self.try_delivery_lane(canonical_id),
             crate::document_sync_lane::LaneAcquire::Wait => {
-                self.establish_open_generation(canonical_id);
+                self.document_lanes
+                    .wait_establish_open_generation(canonical_id, || {
+                        self.is_registered(canonical_id)
+                    })
+                    .await;
                 self.document_lanes.wait_delivery_lane(canonical_id).await
             }
         }
     }
 
-    fn establish_open_generation(&self, canonical_id: &str) {
-        if self.document_lanes.open_generation(canonical_id).is_none() {
-            if let Some(uri) = self.canonical_id_to_uri(canonical_id) {
-                // Keep membership pinned while lazily establishing its generation.
-                if let Some(document) = self.documents.get(uri.as_str()) {
-                    if document.canonical_id == canonical_id {
-                        self.document_lanes.init_open_generation(canonical_id);
-                    }
-                }
-            }
+    /// The open generation of a registered document, established under its
+    /// lifecycle lane when no open minted one yet (a document registered
+    /// directly through this registry). Waits for an open or close in flight.
+    pub(crate) async fn establish_open_generation(&self, canonical_id: &str) -> Option<u64> {
+        self.document_lanes
+            .wait_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            .await
+    }
+
+    fn is_registered(&self, canonical_id: &str) -> bool {
+        self.canonical_id_to_uri(canonical_id).is_some()
+    }
+
+    /// Whether the open-document revision a transaction pinned before it
+    /// compiled is still the live one — evaluated at the point of delivery.
+    ///
+    /// A transaction with no pin started while its document was closed. It is
+    /// current only while the document STAYS closed: an open that lands before
+    /// delivery belongs to the open document's own lane, so the closed-start
+    /// writer must yield rather than write disk-compiled bytes beneath it.
+    pub(crate) fn compile_pin_is_current(
+        &self,
+        canonical_id: &str,
+        open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
+    ) -> bool {
+        match open_pin {
+            Some((uri, identity)) => self.snapshot_identity_is_current(uri, identity),
+            None => !self.is_registered(canonical_id),
         }
     }
 

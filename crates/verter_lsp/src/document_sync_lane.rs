@@ -18,6 +18,9 @@
 //! 3. the per-path provider delivery lock,
 //! 4. the provider-hub single-writer actor.
 //!
+//! An open generation is minted only under the document's lifecycle lane, so a
+//! writer probing mid-open yields to the open instead of minting its own.
+//!
 //! Edit commits take only the global-commit mutex; they never await a document
 //! lane while holding it. Background writers try the lane and requeue busy
 //! documents; imported-carrier sync, which already waits for the lane before
@@ -166,6 +169,19 @@ pub(crate) enum DeliveryLane {
     Acquired(tokio::sync::OwnedMutexGuard<()>),
     /// Another transaction holds this document's lane. A background caller
     /// YIELDS: it re-arms the document and delivers nothing this pass.
+    Busy,
+}
+
+/// A document's open generation, as established by a writer that may run before
+/// `did_open` finished minting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EstablishedGeneration {
+    /// The document is open under this generation.
+    Open(u64),
+    /// The document is not registered: no editor has it open.
+    Closed,
+    /// The document's lifecycle lane is held (an open or close is mid-flight),
+    /// so its generation cannot be established without waiting.
     Busy,
 }
 
@@ -320,21 +336,74 @@ impl DocumentSyncLanes {
         self.open_generations.get(canonical_id).map(|entry| *entry)
     }
 
-    /// Mint (or lazily establish) the open generation of a document that an
-    /// editor has open. The id is inserted under the entry so two concurrent
-    /// callers observe the same generation.
-    pub(crate) fn init_open_generation(&self, canonical_id: &str) -> u64 {
+    /// Establish the open generation of a registered document that has none,
+    /// without waiting: [`EstablishedGeneration::Busy`] when its lifecycle lane
+    /// is held.
+    ///
+    /// A generation is minted ONLY under the document's lifecycle lane, exactly
+    /// as `did_open` mints one. `did_open` registers the document before it
+    /// mints the generation, all under that lane, so a writer probing in that
+    /// window finds the lane held and yields; minting outside it would hand the
+    /// writer a second lane object for the same open document. `is_registered`
+    /// is re-read under the lane, so a close that won the race is never
+    /// resurrected.
+    pub(crate) fn try_establish_open_generation(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        is_registered: impl Fn() -> bool,
+    ) -> EstablishedGeneration {
         if let Some(generation) = self.open_generation(canonical_id) {
-            return generation;
+            return EstablishedGeneration::Open(generation);
         }
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        match self.open_generations.entry(canonical_id.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(generation);
-                generation
-            }
+        if !is_registered() {
+            return EstablishedGeneration::Closed;
         }
+        let lease = self.lifecycle_lease(canonical_id);
+        let Some(_guard) = lease.try_lock() else {
+            return EstablishedGeneration::Busy;
+        };
+        self.establish_under_lifecycle(canonical_id, &lease, is_registered)
+    }
+
+    /// [`Self::try_establish_open_generation`] that waits for a held lifecycle
+    /// lane instead of yielding. `None` for a document that is not registered.
+    pub(crate) async fn wait_establish_open_generation(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        is_registered: impl Fn() -> bool,
+    ) -> Option<u64> {
+        if let Some(generation) = self.open_generation(canonical_id) {
+            return Some(generation);
+        }
+        if !is_registered() {
+            return None;
+        }
+        let lease = self.lifecycle_lease(canonical_id);
+        let _guard = lease.lock().await;
+        match self.establish_under_lifecycle(canonical_id, &lease, is_registered) {
+            EstablishedGeneration::Open(generation) => Some(generation),
+            EstablishedGeneration::Closed | EstablishedGeneration::Busy => None,
+        }
+    }
+
+    /// Mint the generation while the caller holds `lease`'s lifecycle lane.
+    fn establish_under_lifecycle(
+        &self,
+        canonical_id: &str,
+        lease: &DocumentLaneLease,
+        is_registered: impl Fn() -> bool,
+    ) -> EstablishedGeneration {
+        if let Some(generation) = self.open_generation(canonical_id) {
+            return EstablishedGeneration::Open(generation);
+        }
+        if !is_registered() {
+            // The lane this probe installed serves no open document: retire it
+            // so the final lease drop removes it. A concurrent open revives it
+            // in place.
+            lease.retire();
+            return EstablishedGeneration::Closed;
+        }
+        EstablishedGeneration::Open(self.begin_open_generation(canonical_id, lease.lane()))
     }
 
     pub(crate) fn begin_open_generation(
@@ -447,7 +516,11 @@ mod tests {
     fn the_first_delivery_probe_installs_the_open_generations_lane() {
         let lanes = lanes();
         let canonical = "/workspace/src/App.vue";
-        let generation = lanes.init_open_generation(canonical);
+        let EstablishedGeneration::Open(generation) =
+            lanes.try_establish_open_generation(canonical, || true)
+        else {
+            panic!("a registered document with a free lifecycle lane establishes its generation");
+        };
         let DeliveryLane::Acquired(guard) = lanes.try_delivery_lane(canonical) else {
             panic!("an open generation without a lane must acquire its new lane");
         };
@@ -458,6 +531,35 @@ mod tests {
         );
         drop(guard);
         assert!(repair.try_lock().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_writer_probing_mid_open_yields_instead_of_minting_a_second_lane() {
+        let lanes = lanes();
+        let canonical = "/workspace/src/App.vue";
+        // `did_open` holds the lifecycle lane and has registered the document,
+        // but has not minted its generation yet.
+        let open = lanes.lifecycle_lease(canonical);
+        let opening = open.lock().await;
+        assert_eq!(
+            lanes.try_establish_open_generation(canonical, || true),
+            EstablishedGeneration::Busy,
+            "a writer in the open window yields to the open"
+        );
+        assert!(lanes.open_generation(canonical).is_none());
+        let generation = lanes.begin_open_generation(canonical, open.lane());
+        drop(opening);
+
+        let DeliveryLane::Acquired(guard) = lanes.try_delivery_lane(canonical) else {
+            panic!("the open's own lane is free once the open finishes");
+        };
+        let repair = lanes.repair_lease(canonical, generation);
+        assert!(
+            Arc::ptr_eq(repair.lane(), open.lane()),
+            "every writer of the generation shares the lane the open minted"
+        );
+        assert!(repair.try_lock().is_none(), "the delivery holds that lane");
+        drop(guard);
     }
 
     #[tokio::test]
@@ -490,7 +592,10 @@ mod tests {
     async fn a_waiting_writer_takes_its_turn_but_never_a_closed_generations_lane() {
         let lanes = lanes();
         let canonical = "/workspace/src/App.vue";
-        let generation = lanes.init_open_generation(canonical);
+        let generation = lanes
+            .wait_establish_open_generation(canonical, || true)
+            .await
+            .expect("a registered document establishes its generation");
 
         // A waiter queued behind the holder gets the lane on release instead
         // of yielding it, which a try would do.

@@ -6528,7 +6528,12 @@ async fn a_waiter_of_a_retired_open_generation_never_takes_the_reopened_document
     let lanes = documents.document_lanes();
 
     // The transaction captures the open generation, then the document is closed.
-    let stale = lanes.repair_lease(canonical_id, lanes.init_open_generation(canonical_id));
+    let crate::document_sync_lane::EstablishedGeneration::Open(opened) =
+        lanes.try_establish_open_generation(canonical_id, || true)
+    else {
+        panic!("the document's generation is established");
+    };
+    let stale = lanes.repair_lease(canonical_id, opened);
     let stale_generation = stale.generation();
     assert!(lanes.generation_is_open(canonical_id, stale_generation));
 

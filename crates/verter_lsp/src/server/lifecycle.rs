@@ -993,9 +993,14 @@ pub(super) async fn handle_did_close(
     let close_canonical_id = (!is_virtual)
         .then(|| server.documents.get_canonical_id(uri))
         .flatten();
-    let close_generation = close_canonical_id.as_ref().and_then(|canonical_id| {
-        server.current_or_init_ide_sync_open_generation(uri, canonical_id)
-    });
+    let close_generation = match close_canonical_id.as_ref() {
+        Some(canonical_id) => {
+            server
+                .current_or_init_ide_sync_open_generation(uri, canonical_id)
+                .await
+        }
+        None => None,
+    };
     let close_repair_lease = close_canonical_id
         .as_ref()
         .zip(close_generation)

@@ -1366,9 +1366,7 @@ async fn handle_completion_attempt(
                     || async {
                         match server.type_provider_kind {
                             crate::TypeProviderKind::Tsserver => {
-                                if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-                                    server.publish_carrier_to_external_ts(&canonical_id).await;
-                                }
+                                server.publish_open_carrier_to_external_ts(uri).await;
                             }
                             crate::TypeProviderKind::Tsgo => {
                                 server.force_reopen_current_file_in_type_provider(uri).await;

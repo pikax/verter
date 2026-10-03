@@ -1075,6 +1075,9 @@ pub(crate) async fn sync_file_to_provider(
         return;
     }
 
+    #[cfg(test)]
+    crate::sync_coordinator::test_hooks::maybe_pause_before_delivery(canonical_id).await;
+
     // Route through the SINGLE carrier-sync gateway: the membership decision
     // (publish on owned / retract on owner-loss for tsserver) is FUSED with the
     // provider-state commit. The background full-project scan previously committed a
@@ -1235,6 +1238,15 @@ pub(crate) async fn sync_file_to_provider(
                         )
                     });
                     if !current {
+                        // Evaluated under the per-path delivery lock: a scan that
+                        // started while the document was closed is refused once
+                        // it opened, and the open's own transaction serves it.
+                        let still_current = || match documents {
+                            Some(documents) => {
+                                documents.compile_pin_is_current(canonical_id, open_pin)
+                            }
+                            None => open_pin.is_none(),
+                        };
                         let result = sync
                             .publish_tsx_fenced(
                                 &tsx_path,
@@ -1245,15 +1257,19 @@ pub(crate) async fn sync_file_to_provider(
                                 } else {
                                     crate::type_provider::project_sync::ProviderFileVerb::Load
                                 },
-                                Some(&|| {
-                                    open_pin.is_none_or(|(uri, id)| {
-                                        documents.is_some_and(|documents| {
-                                            documents.snapshot_identity_is_current(uri, id)
-                                        })
-                                    })
-                                }),
+                                Some(&still_current),
                             )
                             .await;
+                        if matches!(
+                            result,
+                            Ok(crate::type_provider::project_sync::CarrierDelivery::Refused)
+                        ) && !still_current()
+                        {
+                            if let Some(requeue) = requeue {
+                                requeue.insert(canonical_id.to_string());
+                            }
+                            return;
+                        }
                         if let Ok(delivery) = result {
                             // Record a fresh generation pinning the EXACT IDE bytes just
                             // synced (interactive queries capture this surface), through

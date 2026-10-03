@@ -755,7 +755,9 @@ impl VerterLanguageServer {
                     return;
                 }
                 let delivery = sync
-                    .sync_tsx_fenced(&ide_path, &ide.code, &|| self.open_pin_is_current(open_pin))
+                    .sync_tsx_fenced(&ide_path, &ide.code, &|| {
+                        self.open_pin_is_current(&canonical_id, open_pin)
+                    })
                     .await;
                 if let Err(e) = &delivery {
                     tracing::warn!("sync_ide: failed for {ide_path}: {e}");
@@ -981,6 +983,32 @@ impl VerterLanguageServer {
             }
         }
         true
+    }
+
+    /// [`Self::publish_carrier_to_external_ts`] for an OPEN document, run on the
+    /// document's sync lane. The publish records and versions the document's
+    /// companion surfaces, so it must not supersede a lane holder's recorded
+    /// surface mid-transaction; like every interactive path it waits its turn.
+    pub(super) async fn publish_open_carrier_to_external_ts(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
+        else {
+            return;
+        };
+        let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        let _repair_guard = repair_lease.lock().await;
+        if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
+            // Same revived-lane guard as `ensure_current_file_synced`.
+            if repair_lease.generation() == open_generation {
+                repair_lease.retire();
+            }
+            return;
+        }
+        self.publish_carrier_to_external_ts(&canonical_id).await;
     }
 
     pub(super) async fn notify_editor_carrier_store_changed(&self) {
@@ -1429,8 +1457,9 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
-        let Some(open_generation) =
-            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
         else {
             return;
         };
@@ -1613,6 +1642,26 @@ impl VerterLanguageServer {
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(&canonical_id);
+
+        // FRESHNESS (membership-only engine): there the gateway's publication IS
+        // the IDE-leg application — it records and versions every companion — so
+        // the leg's basis is checked BEFORE it. A publication another transaction
+        // already made for this revision, owner and projection is not repeated.
+        if !needs_owner_reconcile
+            && ide.as_ref().is_some_and(|ide| {
+                self.published_carrier_is_current(
+                    &canonical_id,
+                    is_jsx,
+                    &ide.code,
+                    ide.source_map.as_deref(),
+                )
+            })
+        {
+            tracing::debug!(
+                "ensure_current_file_synced: {canonical_id}'s published companions are already current"
+            );
+            return;
+        }
 
         // Route the carrier MEMBERSHIP decision through the SINGLE carrier-sync
         // gateway and capture the POST-open commit authorization that GATES the
@@ -2029,8 +2078,9 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
-        let Some(open_generation) =
-            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        let Some(open_generation) = self
+            .current_or_init_ide_sync_open_generation(uri, &canonical_id)
+            .await
         else {
             return;
         };
@@ -2678,11 +2728,15 @@ impl VerterLanguageServer {
         let needs_open =
             state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
         let result = if needs_open {
-            sync.open_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(open_pin))
-                .await
+            sync.open_tsx_fenced(&ide_path, ide_code, &|| {
+                self.open_pin_is_current(canonical_id, open_pin)
+            })
+            .await
         } else {
-            sync.sync_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(open_pin))
-                .await
+            sync.sync_tsx_fenced(&ide_path, ide_code, &|| {
+                self.open_pin_is_current(canonical_id, open_pin)
+            })
+            .await
         };
 
         match result {
@@ -2731,10 +2785,21 @@ impl VerterLanguageServer {
             return false;
         };
         let lanes = self.documents.document_lanes();
-        let lane = match self.documents.try_delivery_lane(canonical_id) {
+        // The imported-carrier caller is ordered on this child's lifecycle lane
+        // and released it only between its legs, so it WAITS for its turn, as the
+        // resolved arm does; every refusal below requeues the source, because
+        // the callers' retry outcome has nothing to redrive it.
+        let lane = match self
+            .documents
+            .delivery_lane(canonical_id, crate::document_sync_lane::LaneAcquire::Wait)
+            .await
+        {
             crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
             crate::document_sync_lane::DeliveryLane::Closed => None,
-            crate::document_sync_lane::DeliveryLane::Busy => return false,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            }
         };
         let generation = lanes.open_generation(canonical_id);
         let host = self.documents.host();
@@ -2751,7 +2816,7 @@ impl VerterLanguageServer {
             .as_ref()
             .and_then(|workspace| workspace.load_published());
         let current = || {
-            self.open_pin_is_current(pin)
+            self.open_pin_is_current(canonical_id, pin)
                 && lanes.open_generation(canonical_id) == generation
                 && host.last_content_transition_generation(canonical_id) == revision
                 && match (
@@ -2801,16 +2866,24 @@ impl VerterLanguageServer {
             };
             Some(delivery)
         };
-        let _lane = match self.documents.try_delivery_lane(canonical_id) {
+        let _lane = match self
+            .documents
+            .delivery_lane(canonical_id, crate::document_sync_lane::LaneAcquire::Wait)
+            .await
+        {
             crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
             crate::document_sync_lane::DeliveryLane::Closed => None,
-            crate::document_sync_lane::DeliveryLane::Busy => return false,
+            crate::document_sync_lane::DeliveryLane::Busy => {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return false;
+            }
         };
         if !current()
             || delivery
                 .as_ref()
                 .is_some_and(|delivery| !delivery.is_current(sync))
         {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
             return false;
         }
         let install = |source: Option<Arc<str>>| {
@@ -2859,6 +2932,7 @@ impl VerterLanguageServer {
                 })
                 .is_none()
             {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
                 return false;
             }
         } else {
@@ -3178,12 +3252,12 @@ impl VerterLanguageServer {
                                 ) {
                                     let result = if committed_state.ide_background_loaded {
                                         sync.sync_tsx_fenced(&ide_path, &ide.code, &|| {
-                                            self.open_pin_is_current(open_pin)
+                                            self.open_pin_is_current(canonical_id, open_pin)
                                         })
                                         .await
                                     } else {
                                         sync.open_tsx_fenced(&ide_path, &ide.code, &|| {
-                                            self.open_pin_is_current(open_pin)
+                                            self.open_pin_is_current(canonical_id, open_pin)
                                         })
                                         .await
                                     };
@@ -3250,7 +3324,8 @@ impl VerterLanguageServer {
                                     // released it between legs; it keeps its turn for the API leg.
                                     crate::document_sync_lane::LaneAcquire::Wait,
                                 )
-                                .await,
+                                .await
+                                .is_current(),
                             ));
                         }
                         return outcome;
@@ -3665,12 +3740,12 @@ impl VerterLanguageServer {
                         );
                         let result = if is_bg {
                             sync.sync_tsx_fenced(&tsx_path, &ide.code, &|| {
-                                self.open_pin_is_current(open_pin)
+                                self.open_pin_is_current(canonical_id, open_pin)
                             })
                             .await
                         } else {
                             sync.open_tsx_fenced(&tsx_path, &ide.code, &|| {
-                                self.open_pin_is_current(open_pin)
+                                self.open_pin_is_current(canonical_id, open_pin)
                             })
                             .await
                         };

@@ -172,13 +172,13 @@ pub(crate) use self::server_utils::{
 mod background_drain;
 #[cfg(test)]
 pub(crate) use background_drain::drain_pending_snapshot_provider_sync;
-pub(crate) use background_drain::sync_carrier_api_transaction;
 #[cfg(test)]
 pub(crate) use background_drain::PendingSyncRedrive;
 pub(crate) use background_drain::{
     arm_pending_sync_redrive_once, drain_pending_snapshot_provider_sync_owned,
     signal_pending_sync_redrive, PendingSyncDrain, PENDING_SYNC_REDRIVE,
 };
+pub(crate) use background_drain::{sync_carrier_api_transaction, ApiLegOutcome};
 #[path = "../background_drain_decl_closure.rs"]
 mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
@@ -880,9 +880,10 @@ impl VerterLanguageServer {
             .begin_open_generation(canonical_id, lane)
     }
 
-    /// Test helpers often register directly through `DocumentRegistry`; lazily
-    /// establish the same open generation production `did_open` records.
-    fn current_or_init_ide_sync_open_generation(
+    /// The document's open generation. Test helpers often register directly
+    /// through `DocumentRegistry`; their generation is established lazily under
+    /// the lifecycle lane, the same lane production `did_open` mints under.
+    async fn current_or_init_ide_sync_open_generation(
         &self,
         uri: &Uri,
         canonical_id: &str,
@@ -890,10 +891,7 @@ impl VerterLanguageServer {
         if self.documents.get_canonical_id(uri).as_deref() != Some(canonical_id) {
             return None;
         }
-        Some(
-            self.ide_sync_repair_locks
-                .init_open_generation(canonical_id),
-        )
+        self.documents.establish_open_generation(canonical_id).await
     }
 
     fn ide_sync_generation_is_open(&self, uri: &Uri, canonical_id: &str, generation: u64) -> bool {

@@ -1359,8 +1359,8 @@ fn a_delivery_probe_joins_a_registered_document_before_its_first_interactive_rep
         crate::document_sync_lane::DeliveryLane::Busy
     ));
     assert_eq!(
-        registry.document_lanes().init_open_generation(&id),
-        generation
+        registry.document_lanes().open_generation(&id),
+        Some(generation)
     );
     assert!(matches!(
         registry.try_delivery_lane("/workspace/Closed.vue"),
@@ -1371,4 +1371,46 @@ fn a_delivery_probe_joins_a_registered_document_before_its_first_interactive_rep
         registry.try_delivery_lane(&id),
         crate::document_sync_lane::DeliveryLane::Acquired(_)
     ));
+}
+
+/// `did_open` registers the document and only then mints its generation, both
+/// under the lifecycle lane. A background writer probing between the two must
+/// yield to the open, never mint its own generation and run on a second lane
+/// object beside the open's eager repair.
+#[tokio::test]
+async fn a_delivery_probe_during_an_open_yields_to_the_open() {
+    let host = Arc::new(VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///workspace/Opening.vue".parse().unwrap();
+    let id = uri_to_canonical_id(&uri);
+    let open = registry.document_lanes().lifecycle_lease(&id);
+    let opening = open.lock().await;
+    let _ = registry.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div /></template>".into(),
+    });
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Busy
+    ));
+    assert!(
+        registry.document_lanes().open_generation(&id).is_none(),
+        "only the open mints the generation"
+    );
+    registry
+        .document_lanes()
+        .begin_open_generation(&id, open.lane());
+    drop(opening);
+    let crate::document_sync_lane::DeliveryLane::Acquired(_guard) = registry.try_delivery_lane(&id)
+    else {
+        panic!("the finished open's lane is free");
+    };
+    assert!(
+        open.try_lock().is_none(),
+        "the writer holds the lane the open minted, not a second one"
+    );
 }

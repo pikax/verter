@@ -1565,7 +1565,7 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
 /// do here at all; the tick still publishes Verter-owned diagnostics
 /// afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SyncFileOutcome {
+pub(crate) enum SyncFileOutcome {
     Settled,
     Retry,
     /// The document's per-document sync lane is held by another transaction
@@ -1586,6 +1586,15 @@ pub(crate) async fn synchronize_document_for_test(
         sync_file(deps, canonical_id, uri).await,
         SyncFileOutcome::Settled
     )
+}
+
+#[cfg(test)]
+pub(crate) async fn synchronize_document_outcome_for_test(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &str,
+) -> SyncFileOutcome {
+    sync_file(deps, canonical_id, uri).await
 }
 
 async fn sync_file(
@@ -1739,6 +1748,41 @@ async fn sync_file(
         _ => None,
     };
 
+    // FRESHNESS (membership-only engine): the gateway's store publication below
+    // IS this engine's IDE-leg application, so a publication another
+    // transaction already made for this revision, owner and projection settles
+    // here instead of being repeated.
+    if snapshot.ownership_ready
+        && open_pin.is_some()
+        && deps
+            .documents
+            .compile_pin_is_current(canonical_id, open_pin)
+        && ide.as_ref().is_some_and(|ide| {
+            let committed = deps
+                .provider_sync_states
+                .get(canonical_id)
+                .map(|entry| entry.clone());
+            crate::provider_sync::published_carrier_is_current(
+                project_sync,
+                &deps.documents,
+                deps.carrier_publish_coordinator
+                    .as_ref()
+                    .map(|coordinator| coordinator.backend().membership_ledger().as_ref()),
+                committed.as_ref(),
+                &snapshot.resolver,
+                canonical_id,
+                is_jsx,
+                &ide.code,
+                ide.source_map.as_deref(),
+            )
+        })
+    {
+        tracing::info!(
+            "sync_coordinator: PUBLISH_CURRENT {canonical_id} — this revision is already published"
+        );
+        return SyncFileOutcome::Settled;
+    }
+
     // The tsserver carrier-membership context: the debounced carrier reaches the
     // provider as a store-backed configured-project member. Clone the VFS handle in
     // its own statement so the `RwLockReadGuard` is dropped BEFORE any await. tsgo
@@ -1865,10 +1909,8 @@ async fn sync_file(
                         // fenced; the provider write was not — `hover_secondary_files_tsgo`
                         // then mapped fresh offsets onto stale tsgo bytes).
                         let still_current = || {
-                            open_pin.is_none_or(|(pin_uri, revision)| {
-                                deps.documents
-                                    .snapshot_identity_is_current(pin_uri, revision)
-                            })
+                            deps.documents
+                                .compile_pin_is_current(canonical_id, open_pin)
                         };
                         let result = if committed_state.ide_background_loaded {
                             project_sync
@@ -1939,10 +1981,10 @@ async fn sync_file(
                 // across them means the commit would publish a superseded
                 // revision's state. Cancel the whole transaction rather than
                 // attempt a commit the admission gate will refuse.
-                if !open_pin.is_none_or(|(pin_uri, revision)| {
-                    deps.documents
-                        .snapshot_identity_is_current(pin_uri, revision)
-                }) {
+                if !deps
+                    .documents
+                    .compile_pin_is_current(canonical_id, open_pin)
+                {
                     tracing::info!(
                         "sync_coordinator: COMMIT_SKIPPED {canonical_id} — the document moved \
                          after this compile; the live revision is resynced"
@@ -1990,7 +2032,7 @@ async fn sync_file(
                 }
             }
             drop(_document_lane);
-            if !crate::server::sync_carrier_api_transaction(
+            match crate::server::sync_carrier_api_transaction(
                 project_sync,
                 &snapshot,
                 &deps.documents,
@@ -2004,7 +2046,12 @@ async fn sync_file(
             )
             .await
             {
-                return SyncFileOutcome::Retry;
+                crate::server::ApiLegOutcome::Current => {}
+                // An interactive request took the lane the IDE leg just
+                // released. Yielding to it is contention, not a failed
+                // attempt, so it keeps the document's retry budget.
+                crate::server::ApiLegOutcome::LaneBusy => return SyncFileOutcome::LaneBusy,
+                crate::server::ApiLegOutcome::Refused => return SyncFileOutcome::Retry,
             }
         }
         crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
@@ -2076,13 +2123,10 @@ async fn preserve_open_unresolved_carrier(
     )>,
 ) -> bool {
     let pin_is_current = || {
-        open_pin.is_none_or(|(uri, revision)| {
-            deps.documents.snapshot_identity_is_current(uri, revision)
-        })
+        deps.documents
+            .compile_pin_is_current(canonical_id, open_pin)
     };
-    if !pin_is_current()
-        || (open_pin.is_none() && deps.documents.canonical_id_to_uri(canonical_id).is_some())
-    {
+    if !pin_is_current() {
         deps.pending_snapshot_provider_sync
             .insert(canonical_id.to_string());
         return false;
@@ -2724,6 +2768,32 @@ pub(crate) mod test_hooks {
     /// zero cost.
     pub(crate) async fn maybe_pause_after_ide_compile(canonical_id: &str) {
         if let Some((_, (arrived, release))) = PAUSE_AFTER_IDE_COMPILE.remove(canonical_id) {
+            arrived.notify_one();
+            release.notified().await;
+        }
+    }
+
+    static PAUSE_BEFORE_DELIVERY: LazyLock<DashMap<String, PauseGates>> =
+        LazyLock::new(DashMap::new);
+
+    /// Register a one-shot pause between a background writer's lane probe and
+    /// its provider delivery — the window in which a document that was closed
+    /// at the probe can open.
+    pub(crate) fn block_before_delivery(canonical_id: &str) -> PauseGates {
+        let arrived = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        PAUSE_BEFORE_DELIVERY.insert(
+            canonical_id.to_string(),
+            (
+                std::sync::Arc::clone(&arrived),
+                std::sync::Arc::clone(&release),
+            ),
+        );
+        (arrived, release)
+    }
+
+    pub(crate) async fn maybe_pause_before_delivery(canonical_id: &str) {
+        if let Some((_, (arrived, release))) = PAUSE_BEFORE_DELIVERY.remove(canonical_id) {
             arrived.notify_one();
             release.notified().await;
         }

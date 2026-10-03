@@ -13590,8 +13590,8 @@ const extra = 42
 }
 
 /// The per-leg basis re-check the API and commit fences call must see an edit
-/// that lands after the pin was captured, and must treat a document with no open
-/// generation as un-movable (a closed source has no pin to go stale).
+/// that lands after the pin was captured. A pin-less transaction started while
+/// its document was closed and is current only while it stays closed.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_api_leg_pin_recheck_follows_the_live_revision() {
     let (service, _provider, uri) = make_request_surface_carrier().await;
@@ -13608,21 +13608,26 @@ const extra = 42
     let pin_uri = pin_uri.expect("the fixture's document is open");
     let pin_revision = pin_revision.expect("the open document has a revision");
     assert!(
-        server.open_pin_is_current(Some((&pin_uri, &pin_revision))),
+        server.open_pin_is_current(canonical_id, Some((&pin_uri, &pin_revision))),
         "a pin captured for the live revision is current"
     );
 
     let _ = server.documents.did_change(&uri, 2, SOURCE_B);
     assert!(
-        !server.open_pin_is_current(Some((&pin_uri, &pin_revision))),
+        !server.open_pin_is_current(canonical_id, Some((&pin_uri, &pin_revision))),
         "the API leg's fence must see the edit that landed after its pin — \
          without it a `.d.ts` built from the previous revision would be \
          delivered and committed as this document's public API"
     );
     assert!(
-        server.open_pin_is_current(None),
-        "a source with no open generation has no pin that can have moved, so \
-         its leg proceeds"
+        server.open_pin_is_current("/workspace/src/Closed.vue", None),
+        "a closed source has no pin that can have moved, so its leg proceeds"
+    );
+    assert!(
+        !server.open_pin_is_current(canonical_id, None),
+        "a transaction that started while its document was closed is refused \
+         at delivery once the document is open — its disk-compiled bytes must \
+         not land beneath the open document's own transaction"
     );
 }
 
@@ -18324,12 +18329,16 @@ const msg = 'hello'
     // Fail the in-place update of the live `.tsx`.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
 
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { updated: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -18646,12 +18655,16 @@ const msg = 'hello'
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -18754,12 +18767,16 @@ const msg = 'hello'
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -37864,6 +37881,102 @@ async fn did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed() 
     );
 }
 
+/// tsserver serves carriers from the publish store, so the gateway's
+/// publication is its IDE-leg application. Once a revision is published,
+/// committed and advertised, an open owes nothing and a repair re-armed for the
+/// same revision publishes nothing; an edit owes the leg again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tsserver_revision_already_published_is_not_published_again() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/PublishedOnce.vue";
+    install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    server.ensure_current_file_synced(&uri).await;
+    let ide_path = server
+        .provider_sync_state_for_source(canonical_id)
+        .and_then(|state| state.ide_path)
+        .expect("the repair committed the published carrier");
+    let published = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the publication recorded the IDE companion")
+        .stamp
+        .generation;
+
+    assert!(
+        !server.ide_leg_owed_for_open_document(&uri),
+        "a published, committed and advertised revision owes no IDE leg"
+    );
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .expect("the IDE companion stays recorded")
+            .stamp
+            .generation,
+        published,
+        "a repair of an already-published revision must not publish it a second time"
+    );
+
+    let _ = server
+        .documents
+        .did_change(&uri, 2, &MEMBERSHIP_TEST_VUE.replace("'hi'", "'edited'"));
+    assert!(
+        server.ide_leg_owed_for_open_document(&uri),
+        "an edit owes the leg again"
+    );
+}
+
+/// The completion recovery republishes an OPEN document's companions, which
+/// records and versions its surfaces. It must take the document's lane, so it
+/// cannot supersede a lane holder's recorded surface mid-transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_open_carrier_republish_waits_for_the_document_lane() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/RepublishOnLane.vue";
+    install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    let held = match server.documents.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the open document's lane is free, got {other:?}"),
+    };
+    let republish = server.publish_open_carrier_to_external_ts(&uri);
+    tokio::pin!(republish);
+    assert!(
+        futures_util::poll!(republish.as_mut()).is_pending(),
+        "the republish waits for the lane holder"
+    );
+    assert!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .record_snapshot(&crate::external_ts::CanonicalSource::from(canonical_id))
+            .is_none(),
+        "nothing was published while the lane was held"
+    );
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(10), republish)
+        .await
+        .expect("the republish runs once the lane is released");
+    assert!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(canonical_id)),
+        "the republish ran on its turn"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_api_provider_round_trip_does_not_block_interactive_ide_repair() {
     let (service, provider, uri) = make_request_surface_carrier().await;
@@ -37872,6 +37985,7 @@ async fn an_api_provider_round_trip_does_not_block_interactive_ide_repair() {
     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
     let generation = server
         .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .await
         .expect("open generation");
     let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
     let api_path = server
@@ -37941,6 +38055,7 @@ async fn lane_interleaving_fixture(
     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
     let generation = server
         .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .await
         .unwrap();
     let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
     server.sync_ide_to_provider(&uri).await;
@@ -38202,6 +38317,149 @@ async fn a_scanner_started_closed_yields_when_the_document_opens_after_compile()
     assert_eq!(ide_application_count(&provider, id), before);
     assert!(server.pending_snapshot_provider_sync.contains(id));
     assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+/// The document is still closed when the scanner probes its lane, and opens
+/// with an edited buffer — the open's own eager repair delivering it — before
+/// the scanner delivers. The scanner's delivery fence must see the open and
+/// refuse its disk-compiled bytes, so the open buffer's surface is the only one
+/// applied and is never clobbered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scanner_started_closed_is_refused_when_the_document_opens_after_its_lane_probe() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/ScannerMeetsOpenAtDelivery.vue";
+    let uri: Uri = "file:///workspace/src/ScannerMeetsOpenAtDelivery.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let profile = server.documents.tsx_profile.read().clone();
+    let host = server.documents.host();
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_before_delivery(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'opened'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (_, before) = tokio::join!(
+        crate::workspace_scanner::sync_file_to_provider(
+            id,
+            &host,
+            Some(&server.documents),
+            &profile,
+            server.project_sync.as_ref(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            true,
+            &server.provider_sync_states,
+            server.carrier_publish_coordinator.as_ref(),
+            &server.carrier_transaction_coordinator,
+            Some(&server.pending_snapshot_provider_sync),
+            None
+        ),
+        opening
+    );
+    assert_eq!(before, 1, "the open's own repair delivered the document");
+    assert_eq!(
+        ide_application_count(&provider, id),
+        before,
+        "the closed-start scanner delivered nothing beneath the open document"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(id));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+/// The coordinator releases the lane after its IDE leg and an interactive
+/// request takes it before the API leg asks again. Yielding to that request is
+/// contention, not a failed attempt: the transaction reports a lane yield, which
+/// the serial loop requeues without spending the document's retry budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_leg_yielding_to_an_interactive_request_is_a_lane_yield_not_a_retry() {
+    let (service, _provider, uri) = lane_interleaving_fixture("ApiLegYields").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_before_delivery(&id);
+    let interactive = async {
+        arrived.notified().await;
+        let held = match server.documents.try_delivery_lane(&id) {
+            crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+            other => panic!("the IDE leg released the lane, got {other:?}"),
+        };
+        release.notify_one();
+        held
+    };
+    let (outcome, held) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, &id, uri.as_str()),
+        interactive
+    );
+    drop(held);
+    assert_eq!(
+        outcome,
+        crate::sync_coordinator::SyncFileOutcome::LaneBusy,
+        "an API leg that yields the lane must not read as a failed transaction"
+    );
+    assert!(
+        server.pending_snapshot_provider_sync.contains(&id),
+        "the yielded API leg stays owed"
+    );
+}
+
+/// The imported-carrier writer releases the child's lane between its legs. Its
+/// unresolved API leg must then wait its turn behind a lane holder, exactly as
+/// the resolved arm does, rather than return a retry its callers discard —
+/// leaving the leg undelivered with nothing to redrive it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unresolved_api_leg_waits_its_turn_behind_the_lane_holder() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let api_code = server
+        .documents
+        .host()
+        .get_public_api(&id)
+        .expect("public API projection")
+        .expect("the carrier has a public API")
+        .ts_labeled_code()
+        .to_string();
+    let held = match server.documents.try_delivery_lane(&id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the open document's lane is free, got {other:?}"),
+    };
+    let leg = server.sync_carrier_api_unresolved(&id, &api_code);
+    tokio::pin!(leg);
+    assert!(
+        futures_util::poll!(leg.as_mut()).is_pending(),
+        "the leg waits for the holder instead of giving up"
+    );
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(10), leg)
+        .await
+        .expect("the leg runs once the holder releases the lane");
 }
 
 #[tokio::test(flavor = "multi_thread")]
