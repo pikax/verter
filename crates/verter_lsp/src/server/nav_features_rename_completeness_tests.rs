@@ -1443,6 +1443,7 @@ async fn prepare_rename_handshake_offers_the_instance_member_then_renames_only_p
     let caps = crate::capabilities::server_capabilities(
         &tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
         false,
+        &verter_session::framework::HostLanguageClassifier::default(),
     );
     match caps.rename_provider {
         Some(tower_lsp_server::ls_types::OneOf::Right(options)) => assert_eq!(

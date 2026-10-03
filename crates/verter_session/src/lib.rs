@@ -724,13 +724,14 @@ pub struct VerterHost {
     /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
     pub(crate) typeinfo_scratch_cache:
         parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
-    /// The framework adapter registry — the single hub binding each
-    /// framework's descriptor, carrier leg, synthesis leg, public-API
-    /// projector, and surface-resolution disposition. Built ONCE at host
-    /// construction and immutable thereafter; the framework-surface executor,
-    /// the neutral synth injection, and the public-API projection all dispatch
-    /// through it. See `framework::registry::FrameworkAdapterRegistry`.
-    pub(crate) framework_registry: std::sync::Arc<crate::framework::FrameworkAdapterRegistry>,
+    /// The host's composed framework services — the capability catalog that
+    /// names the carrier grammars plus the adapter registry the framework-
+    /// surface executor, the neutral synth injection and the public-API
+    /// projection dispatch through. ONE construction step builds and
+    /// cross-validates both, so the grammar authority and the dispatch
+    /// authority cannot describe different framework sets. Built ONCE at host
+    /// construction and immutable thereafter. See `framework::registry::HostServices`.
+    pub(crate) framework_services: std::sync::Arc<crate::framework::HostServices>,
     /// Host-owned framework script-fact caches — the resolved-validation half
     /// of the script-fact seam. The content-addressed candidate store + the
     /// resolved-fact store the registry's active providers write through.
