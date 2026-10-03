@@ -80,6 +80,9 @@ use completion::*;
 use dependencies::*;
 use driver::*;
 use identity::*;
+// `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
+// the glob with it keeps the wasm32 build free of an unused-import warning.
+#[cfg(not(target_arch = "wasm32"))]
 use lifecycle::*;
 
 // Roots only the responsibility modules below name. They are imported here
