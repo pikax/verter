@@ -882,6 +882,9 @@ impl VerterLanguageServer {
                     &self.carrier_transaction_coordinator,
                     &self.pending_snapshot_provider_sync,
                     _document_lane,
+                    crate::document_sync_lane::LaneAcquire::Try,
+                    self.published_resolver()
+                        .is_some_and(|snapshot| snapshot.ownership_ready),
                     open_pin,
                 )
                 .await;
@@ -3243,6 +3246,9 @@ impl VerterLanguageServer {
                                     is_jsx,
                                     &self.carrier_transaction_coordinator,
                                     &self.pending_snapshot_provider_sync,
+                                    // This writer waited for the child's lifecycle lane above and only
+                                    // released it between legs; it keeps its turn for the API leg.
+                                    crate::document_sync_lane::LaneAcquire::Wait,
                                 )
                                 .await,
                             ));
@@ -3718,6 +3724,7 @@ impl VerterLanguageServer {
                         is_jsx,
                         &self.carrier_transaction_coordinator,
                         &self.pending_snapshot_provider_sync,
+                        crate::document_sync_lane::LaneAcquire::Try,
                     )
                     .await;
                 }

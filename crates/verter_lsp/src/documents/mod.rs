@@ -699,6 +699,27 @@ impl DocumentRegistry {
         &self,
         canonical_id: &str,
     ) -> crate::document_sync_lane::DeliveryLane {
+        self.establish_open_generation(canonical_id);
+        self.document_lanes.try_delivery_lane(canonical_id)
+    }
+
+    /// Ask for the delivery lane in `mode`; see
+    /// [`crate::document_sync_lane::LaneAcquire`].
+    pub(crate) async fn delivery_lane(
+        &self,
+        canonical_id: &str,
+        mode: crate::document_sync_lane::LaneAcquire,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        match mode {
+            crate::document_sync_lane::LaneAcquire::Try => self.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::LaneAcquire::Wait => {
+                self.establish_open_generation(canonical_id);
+                self.document_lanes.wait_delivery_lane(canonical_id).await
+            }
+        }
+    }
+
+    fn establish_open_generation(&self, canonical_id: &str) {
         if self.document_lanes.open_generation(canonical_id).is_none() {
             if let Some(uri) = self.canonical_id_to_uri(canonical_id) {
                 // Keep membership pinned while lazily establishing its generation.
@@ -709,7 +730,6 @@ impl DocumentRegistry {
                 }
             }
         }
-        self.document_lanes.try_delivery_lane(canonical_id)
     }
 
     /// Set the negotiated position encoding. Called once during `initialize()`,

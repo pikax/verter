@@ -1334,6 +1334,7 @@ pub(crate) async fn sync_file_to_provider(
                     is_jsx,
                     carrier_coordinator,
                     requeue.unwrap_or(&local_queue),
+                    crate::document_sync_lane::LaneAcquire::Try,
                 )
                 .await;
             }

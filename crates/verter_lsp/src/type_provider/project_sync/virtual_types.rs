@@ -5,7 +5,10 @@ use super::*;
 
 impl ProjectSync {
     /// API I/O owns only the path lock. The document transaction releases its
-    /// lane before calling this and validates again after reacquiring it.
+    /// lane before calling this and validates again after reacquiring it. The
+    /// write keeps the foreground priority of the direct carrier-API open/update
+    /// verbs; releasing the lane, not a lower hub priority, is what keeps an
+    /// interactive repair from waiting on this round trip.
     pub(crate) async fn deliver_api_fenced(
         &self,
         path: &str,
@@ -22,7 +25,7 @@ impl ProjectSync {
             .publish_provider_file(
                 path,
                 content,
-                ProviderLane::Background,
+                ProviderLane::Foreground,
                 if update {
                     ProviderFileVerb::Update
                 } else {

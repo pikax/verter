@@ -20,7 +20,8 @@
 //!
 //! Edit commits take only the global-commit mutex; they never await a document
 //! lane while holding it. Background writers try the lane and requeue busy
-//! documents. API-only delivery releases the document lane for provider I/O,
+//! documents; imported-carrier sync, which already waits for the lane before
+//! its IDE leg, waits for it again for its API leg. API-only delivery releases the document lane for provider I/O,
 //! then tries it again and validates the exact basis and its own delivery before
 //! admitting only the API fields. No path reacquires a lane it already holds.
 
@@ -168,6 +169,19 @@ pub(crate) enum DeliveryLane {
     Busy,
 }
 
+/// How a transaction asks for a document's delivery lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneAcquire {
+    /// Take the lane only if it is free right now; a busy document yields and
+    /// is requeued. Background writers and the coordinator's serial loop.
+    Try,
+    /// Wait for the lane. Only for a writer that is already ordered on the
+    /// document's lifecycle lane (imported-carrier sync): it released that
+    /// lane between its legs, and a waiter queued behind it would otherwise
+    /// take its turn and leave its API leg requeued with nothing to redrive it.
+    Wait,
+}
+
 impl std::fmt::Debug for DeliveryLane {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -277,6 +291,23 @@ impl DocumentSyncLanes {
         let Some(guard) = lease.try_lock() else {
             return DeliveryLane::Busy;
         };
+        if !lease.lane.serves_generation(generation)
+            || self.open_generation(canonical_id) != Some(generation)
+        {
+            return DeliveryLane::Busy;
+        }
+        DeliveryLane::Acquired(guard)
+    }
+
+    /// [`Self::try_delivery_lane`] that waits for a busy lane instead of
+    /// yielding. A close or reopen while waiting answers `Busy`: the waiter's
+    /// generation is gone and it commits nothing into the replacement.
+    pub(crate) async fn wait_delivery_lane(self: &Arc<Self>, canonical_id: &str) -> DeliveryLane {
+        let Some(generation) = self.open_generation(canonical_id) else {
+            return DeliveryLane::Closed;
+        };
+        let lease = self.repair_lease(canonical_id, generation);
+        let guard = lease.lock().await;
         if !lease.lane.serves_generation(generation)
             || self.open_generation(canonical_id) != Some(generation)
         {
@@ -453,6 +484,43 @@ mod tests {
             DeliveryLane::Acquired(guard) => drop(guard),
             other => panic!("the released lane must be acquirable, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_waiting_writer_takes_its_turn_but_never_a_closed_generations_lane() {
+        let lanes = lanes();
+        let canonical = "/workspace/src/App.vue";
+        let generation = lanes.init_open_generation(canonical);
+
+        // A waiter queued behind the holder gets the lane on release instead
+        // of yielding it, which a try would do.
+        let holder = lanes.repair_lease(canonical, generation);
+        let held = holder.lock().await;
+        let waiter = tokio::spawn({
+            let lanes = Arc::clone(&lanes);
+            async move { lanes.wait_delivery_lane(canonical).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "the waiter waits for the holder");
+        drop(held);
+        let DeliveryLane::Acquired(guard) = waiter.await.expect("waiter task") else {
+            panic!("the waiter takes the released lane of its own generation");
+        };
+        drop(guard);
+
+        // A waiter whose generation closes while it waits takes nothing.
+        let held = holder.lock().await;
+        let waiter = tokio::spawn({
+            let lanes = Arc::clone(&lanes);
+            async move { lanes.wait_delivery_lane(canonical).await }
+        });
+        tokio::task::yield_now().await;
+        lanes.close_open_generation(canonical, generation);
+        drop(held);
+        assert!(
+            matches!(waiter.await.expect("waiter task"), DeliveryLane::Busy),
+            "a waiter of a closed generation yields instead of delivering"
+        );
     }
 
     #[tokio::test]

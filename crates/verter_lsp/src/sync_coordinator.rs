@@ -2000,6 +2000,7 @@ async fn sync_file(
                 is_jsx,
                 &deps.carrier_transaction_coordinator,
                 &deps.pending_snapshot_provider_sync,
+                crate::document_sync_lane::LaneAcquire::Try,
             )
             .await
             {

@@ -1559,6 +1559,7 @@ async fn apply_owner_resolved_carrier_sync(
                 is_jsx,
                 carrier_coordinator,
                 &api_queue,
+                crate::document_sync_lane::LaneAcquire::Try,
             )
             .await
             {
@@ -1663,6 +1664,7 @@ pub(super) async fn sync_api_to_provider_background_task(
         is_jsx,
         &carrier_coordinator,
         &pending_snapshot_provider_sync,
+        crate::document_sync_lane::LaneAcquire::Try,
     )
     .await;
 }
@@ -1681,12 +1683,13 @@ pub(crate) async fn sync_carrier_api_transaction(
     is_jsx: bool,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     pending_snapshot_provider_sync: &dashmap::DashSet<String>,
+    lane: crate::document_sync_lane::LaneAcquire,
 ) -> bool {
     let host = documents.host_arc();
     let provider_surfaces = documents.provider_surfaces();
     let (open_uri, open_revision) = documents.open_compile_pin(canonical_id);
     let open_pin = open_uri.as_ref().zip(open_revision.as_ref());
-    let document_lane = match documents.try_delivery_lane(canonical_id) {
+    let document_lane = match documents.delivery_lane(canonical_id, lane).await {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
         crate::document_sync_lane::DeliveryLane::Closed => None,
         crate::document_sync_lane::DeliveryLane::Busy => {
@@ -1747,6 +1750,8 @@ pub(crate) async fn sync_carrier_api_transaction(
         carrier_coordinator,
         pending_snapshot_provider_sync,
         document_lane,
+        lane,
+        snapshot.ownership_ready,
         open_pin,
     )
     .await
@@ -1770,6 +1775,8 @@ pub(super) async fn deliver_api_transaction(
     coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     queue: &dashmap::DashSet<String>,
     document_lane: Option<tokio::sync::OwnedMutexGuard<()>>,
+    lane: crate::document_sync_lane::LaneAcquire,
+    ownership_ready: bool,
     open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
 ) -> bool {
     if open_pin.is_none() && documents.canonical_id_to_uri(canonical_id).is_some() {
@@ -1797,9 +1804,13 @@ pub(super) async fn deliver_api_transaction(
                 (None, None) => true,
                 _ => false,
             }
-            && vfs.is_some_and(|vfs| {
+            // Ownership re-resolves over the same workspace and readiness the
+            // gateway resolved it from. No workspace is no ownership evidence,
+            // not a refusal: a workspace that appeared or vanished since the
+            // capture already fails the publication identity above.
+            && vfs.is_none_or(|vfs| {
                 matches!(crate::external_ts::resolve_carrier_ownership_over_vfs(
-                    &host, vfs, canonical_id, true, Arc::from(binding.ensure_project_request().ts_version())),
+                    &host, vfs, canonical_id, ownership_ready, Arc::from(binding.ensure_project_request().ts_version())),
                     verter_session::external_ts::CarrierOwnershipResolution::Bound(current) if current == binding)
             })
     };
@@ -1839,7 +1850,7 @@ pub(super) async fn deliver_api_transaction(
         queue.insert(canonical_id.to_string());
         return false;
     };
-    let _document_lane = match documents.try_delivery_lane(canonical_id) {
+    let _document_lane = match documents.delivery_lane(canonical_id, lane).await {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
         crate::document_sync_lane::DeliveryLane::Closed => None,
         crate::document_sync_lane::DeliveryLane::Busy => {

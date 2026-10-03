@@ -16378,7 +16378,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFileBackground { path, .. } | MockCall::UpdateFile { path, .. }
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
                 if path.ends_with(".vue.verter.ts")
         )),
         "drain should sync the Vue public API through .vue.verter.ts"
@@ -16701,14 +16701,19 @@ async fn pending_sync_redrive_budget_survives_wakes_and_re_arms_on_the_retry_sig
 
     // New work stays live while an old cohort holds its budget: a freshly
     // queued entry (here: the same source re-queued after a superseded
-    // commit) is NOT in the exhausted cohort and arms on a plain wake.
+    // commit) is NOT in the exhausted cohort and arms on a plain wake. The
+    // armed pass either attempts a leg still owed or, finding every leg
+    // already current, settles the entry without a provider round trip; an
+    // unarmed entry does neither.
     let settled_calls = provider.file_sync_calls().len();
     provider.set_fail_file_ops(true);
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
     arm_pending_sync_redrive_once(&drain, redrive);
     let attempted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if provider.file_sync_calls().len() > settled_calls {
+            if provider.file_sync_calls().len() > settled_calls
+                || !pending_snapshot_provider_sync.contains("/workspace/src/App.vue")
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -20145,7 +20150,7 @@ defineProps<{ msg: string }>()
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::OpenFileBackground { path, .. }
+            MockCall::OpenFile { path, .. }
                 | MockCall::UpdateFile { path, .. }
                 | MockCall::LoadFile { path, .. }
             if path == &new_api_path
@@ -23724,7 +23729,7 @@ defineProps<{ msg: string }>()
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFileBackground { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
             )),
             "TSGO pending sync should keep syncing the API artifact, calls={calls:?}"
         );
