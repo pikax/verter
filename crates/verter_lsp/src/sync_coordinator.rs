@@ -1628,6 +1628,8 @@ async fn sync_file(
             return SyncFileOutcome::LaneBusy;
         }
     };
+    #[cfg(test)]
+    test_hooks::maybe_pause_after_lane_probe(canonical_id).await;
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Re-readable: the self-file sync below revalidates the published snapshot
     // AFTER its provider await, so it needs the accessor, not one capture.
@@ -1712,6 +1714,14 @@ async fn sync_file(
     let ide_compile_revision = uri_for_open_identity
         .as_ref()
         .and_then(|uri| deps.documents.snapshot_identity(uri));
+    // The lane probe found the document closed, but it opened before this pin:
+    // its revision belongs to the open document's own lane, so this lane-less
+    // transaction yields instead of delivering it unserialized.
+    if _document_lane.is_none() && ide_compile_revision.is_some() {
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
+        return SyncFileOutcome::LaneBusy;
+    }
 
     // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
     // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
@@ -1869,6 +1879,9 @@ async fn sync_file(
             // the whole transaction when it delivered no IDE companion.
             let mut ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface> =
                 None;
+            // An IDE leg delivered without a certified receipt commits nothing
+            // and is still owed once the independent API leg below finishes.
+            let mut ide_receipt_missing = false;
 
             if let Some(ide) = ide.as_ref() {
                 if let Some(ide_path) = committed_state.ide_path.clone() {
@@ -1921,6 +1934,9 @@ async fn sync_file(
                                 .open_tsx_fenced(&ide_path, &ide.code, &still_current)
                                 .await
                         };
+                        let result = project_sync
+                            .settle_uncertified_tsx(&ide_path, &ide.code, result, &still_current)
+                            .await;
                         match result {
                             Ok(CarrierDelivery::Refused) => {
                                 tracing::info!(
@@ -1936,6 +1952,11 @@ async fn sync_file(
                                 // below instead of re-reading the provider path's
                                 // ledger there.
                                 ide_delivery = delivery.ide_surface();
+                                if ide_delivery.is_none() {
+                                    deps.pending_snapshot_provider_sync
+                                        .insert(canonical_id.to_string());
+                                    ide_receipt_missing = true;
+                                }
                                 // Record a fresh generation pinning the EXACT IDE bytes
                                 // just synced (interactive queries capture this surface),
                                 // through the shared fenced choke point: `open_pin` was
@@ -2043,9 +2064,13 @@ async fn sync_file(
                 &deps.carrier_transaction_coordinator,
                 &deps.pending_snapshot_provider_sync,
                 crate::document_sync_lane::LaneAcquire::Try,
+                crate::type_provider::project_sync::ProviderLane::Foreground,
             )
             .await
             {
+                crate::server::ApiLegOutcome::Current if ide_receipt_missing => {
+                    return SyncFileOutcome::Retry;
+                }
                 crate::server::ApiLegOutcome::Current => {}
                 // An interactive request took the lane the IDE leg just
                 // released. Yielding to it is contention, not a failed
@@ -2768,6 +2793,32 @@ pub(crate) mod test_hooks {
     /// zero cost.
     pub(crate) async fn maybe_pause_after_ide_compile(canonical_id: &str) {
         if let Some((_, (arrived, release))) = PAUSE_AFTER_IDE_COMPILE.remove(canonical_id) {
+            arrived.notify_one();
+            release.notified().await;
+        }
+    }
+
+    static PAUSE_AFTER_LANE_PROBE: LazyLock<DashMap<String, PauseGates>> =
+        LazyLock::new(DashMap::new);
+
+    /// Register a one-shot pause right after the coordinator's lane probe — the
+    /// window in which a document that was closed at the probe can open before
+    /// the transaction pins its revision.
+    pub(crate) fn block_after_lane_probe(canonical_id: &str) -> PauseGates {
+        let arrived = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        PAUSE_AFTER_LANE_PROBE.insert(
+            canonical_id.to_string(),
+            (
+                std::sync::Arc::clone(&arrived),
+                std::sync::Arc::clone(&release),
+            ),
+        );
+        (arrived, release)
+    }
+
+    pub(crate) async fn maybe_pause_after_lane_probe(canonical_id: &str) {
+        if let Some((_, (arrived, release))) = PAUSE_AFTER_LANE_PROBE.remove(canonical_id) {
             arrived.notify_one();
             release.notified().await;
         }

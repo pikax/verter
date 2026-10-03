@@ -16468,6 +16468,7 @@ export const direct = Comp;
         None,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
         false,
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -23629,6 +23630,7 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     assert_eq!(synced, SyncOutcome::FullyReconciled);
@@ -23733,6 +23735,7 @@ defineProps<{ msg: string }>()
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26441,6 +26444,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26644,6 +26648,7 @@ async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26788,6 +26793,7 @@ async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -26932,6 +26938,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         &decl_overlay_owner,
         5,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_stale = provider.file_sync_calls();
@@ -26961,6 +26968,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         &decl_overlay_owner,
         101,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -27072,6 +27080,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
     // older open passes any pre-seam state and is only gated by the atomic re-read.
     let interleave = decl_overlay_owner.arm_add_gate_interleave_for_test(&root_canonical);
     let carrier_coordinator = crate::external_ts::CarrierTransactionCoordinator::new();
+    let pending = dashmap::DashSet::new();
     let pass = resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
@@ -27082,6 +27091,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         &decl_overlay_owner,
         5,
         &carrier_coordinator,
+        &pending,
     );
     let advance_between_gate_and_record = async {
         // Wait until the older open reaches the add-gate seam (after its path-lock +
@@ -27125,6 +27135,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         &decl_overlay_owner,
         101,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -27367,6 +27378,7 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28155,6 +28167,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28189,6 +28202,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         &decl_overlay_owner,
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28686,6 +28700,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28808,6 +28823,7 @@ import Child from '@/components/Child.vue'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -28924,6 +28940,7 @@ import { Overlay } from './components'
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -29105,6 +29122,7 @@ defineProps<{ msg: string }>()
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -29298,6 +29316,7 @@ defineProps<{ show: boolean }>()
         &DeclOverlayOwner::default(),
         1,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -37720,6 +37739,7 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
         &app_id,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
+        &dashmap::DashSet::new(),
     )
     .await;
 
@@ -38390,6 +38410,66 @@ async fn a_scanner_started_closed_is_refused_when_the_document_opens_after_its_l
     );
     assert!(server.pending_snapshot_provider_sync.contains(id));
     assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+/// The document is closed when the coordinator probes its lane and opens before
+/// the coordinator pins its revision. The pinned open revision belongs to the
+/// open document's own lane, so the lane-less coordinator yields instead of
+/// delivering that revision unserialized beside the open's own repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coordinator_started_closed_yields_when_the_document_opens_before_its_pin() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/CoordinatorMeetsOpenAtPin.vue";
+    let uri: Uri = "file:///workspace/src/CoordinatorMeetsOpenAtPin.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_lane_probe(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'opened'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (outcome, before) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, id, uri.as_str()),
+        opening
+    );
+    assert_eq!(
+        outcome,
+        crate::sync_coordinator::SyncFileOutcome::LaneBusy,
+        "a coordinator holding no lane must yield the open document's revision"
+    );
+    assert_eq!(
+        ide_application_count(&provider, id),
+        before,
+        "the lane-less coordinator delivered nothing beside the open document"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(id));
 }
 
 /// The coordinator releases the lane after its IDE leg and an interactive

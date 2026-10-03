@@ -400,6 +400,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             Some(&carrier_publish),
             carrier_coordinator,
             is_tsgo,
+            pending_snapshot_provider_sync,
         )
         .await;
 
@@ -452,6 +453,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     decl_overlay_owner: &DeclOverlayOwner,
     pass_generation: u64,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    pending_snapshot_provider_sync: &DashSet<String>,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
@@ -595,24 +597,22 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         if crate::provider_sync::current_owner_binding_for_source(&snapshot.resolver, import_id)
             .is_unresolved()
         {
-            if matches!(
-                reconcile_unowned_carrier_provider_file(
-                    sync,
-                    documents,
-                    provider_sync_states,
-                    &snapshot,
-                    import_id,
-                    None,
-                    None,
-                    "aliased_resync",
-                    carrier_publish.as_ref(),
-                    carrier_coordinator,
-                )
-                .await,
-                CarrierApplyOutcome::Pending
-            ) {
-                return false;
-            }
+            // A pending reconcile (its document lane is held, or an open is
+            // mid-flight) is that document's own transaction to finish; it
+            // stays local to this import and the pass carries on.
+            let _ = reconcile_unowned_carrier_provider_file(
+                sync,
+                documents,
+                provider_sync_states,
+                &snapshot,
+                import_id,
+                None,
+                None,
+                "aliased_resync",
+                carrier_publish.as_ref(),
+                carrier_coordinator,
+            )
+            .await;
             continue;
         }
 
@@ -658,6 +658,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             "aliased_resync",
             carrier_publish.as_ref(),
             carrier_coordinator,
+            pending_snapshot_provider_sync,
         )
         .await
         {
@@ -794,24 +795,22 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             )
             .is_unresolved()
             {
-                if matches!(
-                    reconcile_unowned_carrier_provider_file(
-                        sync,
-                        documents,
-                        provider_sync_states,
-                        &snapshot,
-                        carrier_id,
-                        None,
-                        None,
-                        "barrel_carrier_dep",
-                        carrier_publish.as_ref(),
-                        carrier_coordinator,
-                    )
-                    .await,
-                    CarrierApplyOutcome::Pending
-                ) {
-                    return false;
-                }
+                // A pending reconcile (its document lane is held, or an open is
+                // mid-flight) is that document's own transaction to finish; it
+                // stays local to this import and the pass carries on.
+                let _ = reconcile_unowned_carrier_provider_file(
+                    sync,
+                    documents,
+                    provider_sync_states,
+                    &snapshot,
+                    carrier_id,
+                    None,
+                    None,
+                    "barrel_carrier_dep",
+                    carrier_publish.as_ref(),
+                    carrier_coordinator,
+                )
+                .await;
                 continue;
             }
 
@@ -850,6 +849,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 "barrel_carrier_dep",
                 carrier_publish.as_ref(),
                 carrier_coordinator,
+                pending_snapshot_provider_sync,
             )
             .await
             {
@@ -930,6 +930,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     rewrite_import_specifiers: bool,
+    pending_snapshot_provider_sync: &DashSet<String>,
 ) -> SyncOutcome {
     if carrier_language_for(canonical_id).is_some() {
         sync_pending_carrier_provider_file(
@@ -940,6 +941,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
             canonical_id,
             carrier_publish,
             carrier_coordinator,
+            pending_snapshot_provider_sync,
         )
         .await
     } else {
@@ -1027,6 +1029,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
     canonical_id: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    pending_snapshot_provider_sync: &DashSet<String>,
 ) -> SyncOutcome {
     // Ensure the file and its deps are loaded. The scheduler's extract_deps
     // + auto-ingress handles recursive dependency walking.
@@ -1073,6 +1076,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
         "pending_snapshot",
         carrier_publish,
         carrier_coordinator,
+        pending_snapshot_provider_sync,
     )
     .await;
     classify_carrier_apply_outcome(outcome)
@@ -1348,6 +1352,9 @@ async fn apply_owner_resolved_carrier_sync(
     context: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    // The shared pending set: an API leg that yields or is refused requeues
+    // the source here so the drain redrives it.
+    pending_snapshot_provider_sync: &DashSet<String>,
 ) -> CarrierApplyOutcome {
     let document_lane = match documents.try_delivery_lane(canonical_id) {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
@@ -1471,13 +1478,9 @@ async fn apply_owner_resolved_carrier_sync(
                         // serve. The live revision's own transaction delivers it.
                         return CarrierApplyOutcome::Pending;
                     }
-                    let result = match result {
-                        Ok(crate::type_provider::project_sync::CarrierDelivery::Refused)
-                        | Ok(crate::type_provider::project_sync::CarrierDelivery::Delivered(
-                            None,
-                        )) => sync.synchronize_pending_tsx(&ide_path, &ide.code).await,
-                        result => result,
-                    };
+                    let result = sync
+                        .settle_uncertified_tsx(&ide_path, &ide.code, result, &still_current)
+                        .await;
                     match result {
                         Ok(delivery) => {
                             // Record a fresh generation pinning the EXACT IDE bytes just
@@ -1548,7 +1551,6 @@ async fn apply_owner_resolved_carrier_sync(
             }
             drop(document_lane);
             attempted.push(ProviderPathKind::Api);
-            let api_queue = dashmap::DashSet::new();
             if sync_carrier_api_transaction(
                 sync,
                 snapshot,
@@ -1558,8 +1560,9 @@ async fn apply_owner_resolved_carrier_sync(
                 canonical_id,
                 is_jsx,
                 carrier_coordinator,
-                &api_queue,
+                pending_snapshot_provider_sync,
                 crate::document_sync_lane::LaneAcquire::Try,
+                crate::type_provider::project_sync::ProviderLane::Foreground,
             )
             .await
             .is_current()
@@ -1666,6 +1669,7 @@ pub(super) async fn sync_api_to_provider_background_task(
         &carrier_coordinator,
         &pending_snapshot_provider_sync,
         crate::document_sync_lane::LaneAcquire::Try,
+        crate::type_provider::project_sync::ProviderLane::Foreground,
     )
     .await;
 }
@@ -1705,6 +1709,7 @@ pub(crate) async fn sync_carrier_api_transaction(
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     pending_snapshot_provider_sync: &dashmap::DashSet<String>,
     lane: crate::document_sync_lane::LaneAcquire,
+    provider_lane: crate::type_provider::project_sync::ProviderLane,
 ) -> ApiLegOutcome {
     let host = documents.host_arc();
     let provider_surfaces = documents.provider_surfaces();
@@ -1776,6 +1781,7 @@ pub(crate) async fn sync_carrier_api_transaction(
         pending_snapshot_provider_sync,
         document_lane,
         lane,
+        provider_lane,
         snapshot.ownership_ready,
         open_pin,
     )
@@ -1801,6 +1807,7 @@ pub(super) async fn deliver_api_transaction(
     queue: &dashmap::DashSet<String>,
     document_lane: Option<tokio::sync::OwnedMutexGuard<()>>,
     lane: crate::document_sync_lane::LaneAcquire,
+    provider_lane: crate::type_provider::project_sync::ProviderLane,
     ownership_ready: bool,
     open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
 ) -> ApiLegOutcome {
@@ -1869,7 +1876,13 @@ pub(super) async fn deliver_api_transaction(
     }
     drop(document_lane);
     let delivery = sync
-        .deliver_api_fenced(&path, code, state.api_background_loaded, &basis_is_current)
+        .deliver_api_fenced(
+            &path,
+            code,
+            state.api_background_loaded,
+            provider_lane,
+            &basis_is_current,
+        )
         .await;
     let Ok(Some(delivery)) = delivery else {
         queue.insert(canonical_id.to_string());

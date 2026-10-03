@@ -379,6 +379,12 @@ impl ProjectSync {
     /// miss; the engine's own application receipt is what makes a restarted
     /// engine miss. `None` for a membership-only engine, which holds no buffer
     /// whose currency this could witness.
+    ///
+    /// A preparation that rewrites the carrier onto the adjacent `@verter/types`
+    /// declaration overlay is current only while that overlay is published too:
+    /// a delivery the engine held retracts the overlay it created, while bytes
+    /// the engine accepted earlier stay applied, so the carrier bytes alone
+    /// would vouch for a buffer whose framework imports no longer resolve.
     pub(crate) fn carrier_companion_applied(
         &self,
         path: &str,
@@ -388,6 +394,13 @@ impl ProjectSync {
             return None;
         }
         let prepared = self.prepare_tsx_surface(path, generated).ok()?;
+        if prepared
+            .virtual_verter_types_path
+            .as_deref()
+            .is_some_and(|overlay| !self.virtual_verter_types_paths.contains(overlay))
+        {
+            return None;
+        }
         self.certified_delivery(path, prepared.prepared)
     }
 
@@ -1552,6 +1565,44 @@ mod tests {
         assert!(
             matches!(&calls[1], MockCall::LoadFile { path, .. } if path == &provider_path),
             "the carrier must remain load-only: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_applied_carrier_is_not_current_while_its_verter_types_overlay_is_retracted() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let virtual_path = format!("{provider_path}.__verter_types.d.ts");
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+        assert!(
+            sync.carrier_companion_applied(&provider_path, source)
+                .is_some(),
+            "an applied carrier with its live overlay is current"
+        );
+
+        // A delivery the engine held retracts the overlay it published, while
+        // the engine keeps the carrier bytes it accepted earlier.
+        assert!(sync
+            .virtual_verter_types_paths
+            .remove(&virtual_path)
+            .is_some());
+        assert!(
+            sync.carrier_companion_applied(&provider_path, source)
+                .is_none(),
+            "carrier bytes whose `@verter/types` overlay is gone must be redelivered, \
+             not vouched current"
         );
     }
 

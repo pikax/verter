@@ -5,15 +5,17 @@ use super::*;
 
 impl ProjectSync {
     /// API I/O owns only the path lock. The document transaction releases its
-    /// lane before calling this and validates again after reacquiring it. The
-    /// write keeps the foreground priority of the direct carrier-API open/update
-    /// verbs; releasing the lane, not a lower hub priority, is what keeps an
-    /// interactive repair from waiting on this round trip.
+    /// lane before calling this and validates again after reacquiring it, so
+    /// releasing the lane is what keeps an interactive repair from waiting on
+    /// this round trip. `lane` is the caller's provider priority: editor-driven
+    /// transactions write in the foreground, a bulk workspace scan in the
+    /// background so it never preempts interactive queries.
     pub(crate) async fn deliver_api_fenced(
         &self,
         path: &str,
         content: &str,
         update: bool,
+        lane: ProviderLane,
         fence: &(dyn Fn() -> bool + Sync),
     ) -> Result<Option<SyncedApiSurface>, TypeProviderError> {
         let lock = self.virtual_verter_types_lock(path);
@@ -25,7 +27,7 @@ impl ProjectSync {
             .publish_provider_file(
                 path,
                 content,
-                ProviderLane::Foreground,
+                lane,
                 if update {
                     ProviderFileVerb::Update
                 } else {
@@ -61,6 +63,26 @@ impl ProjectSync {
         let receipt = SyncedTsxSurface::from_delivered(path, delivered.clone());
         self.record_delivered_carrier_surface(path, content, delivered);
         Ok(CarrierDelivery::Delivered(Some(receipt)))
+    }
+
+    /// Settle a carrier delivery the engine held or has not certified: while the
+    /// transaction's revision is still current, drive the held lazy demand once
+    /// ([`Self::synchronize_pending_tsx`]) so the engine can certify exactly these
+    /// bytes. A delivery refused because the revision moved stays refused — that
+    /// revision's own transaction delivers it.
+    pub(crate) async fn settle_uncertified_tsx(
+        &self,
+        path: &str,
+        content: &str,
+        delivery: Result<CarrierDelivery, TypeProviderError>,
+        still_current: &(dyn Fn() -> bool + Sync),
+    ) -> Result<CarrierDelivery, TypeProviderError> {
+        match delivery {
+            Ok(CarrierDelivery::Refused | CarrierDelivery::Delivered(None)) if still_current() => {
+                self.synchronize_pending_tsx(path, content).await
+            }
+            other => other,
+        }
     }
 
     /// Produce the exact carrier bytes owned by this provider topology.

@@ -754,16 +754,21 @@ impl VerterLanguageServer {
                 ) {
                     return;
                 }
+                let still_current = || self.open_pin_is_current(&canonical_id, open_pin);
                 let delivery = sync
-                    .sync_tsx_fenced(&ide_path, &ide.code, &|| {
-                        self.open_pin_is_current(&canonical_id, open_pin)
-                    })
+                    .sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                    .await;
+                let delivery = sync
+                    .settle_uncertified_tsx(&ide_path, &ide.code, delivery, &still_current)
                     .await;
                 if let Err(e) = &delivery {
                     tracing::warn!("sync_ide: failed for {ide_path}: {e}");
                 } else if let Ok(delivery) = delivery {
                     ide_delivery = delivery.ide_surface();
                     if ide_delivery.is_none() {
+                        // No certified receipt: nothing commits, so the source
+                        // stays owed and the drain redelivers it.
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
                         return;
                     }
                     committed_state.set_background_loaded(ProviderPathKind::Ide, true);
@@ -885,6 +890,7 @@ impl VerterLanguageServer {
                     &self.pending_snapshot_provider_sync,
                     _document_lane,
                     crate::document_sync_lane::LaneAcquire::Try,
+                    crate::type_provider::project_sync::ProviderLane::Foreground,
                     self.published_resolver()
                         .is_some_and(|snapshot| snapshot.ownership_ready),
                     open_pin,
@@ -2142,14 +2148,19 @@ impl VerterLanguageServer {
             self.needs_ide_sync.insert(canonical_id);
             return;
         }
+        let still_current =
+            || self.retained_ide_response_is_current(uri, compiled_revision.as_ref());
+        let reopened = sync
+            .open_tsx_fenced(&ide_path, &ide.code, &still_current)
+            .await;
         match sync
-            .open_tsx_fenced(&ide_path, &ide.code, &|| {
-                self.retained_ide_response_is_current(uri, compiled_revision.as_ref())
-            })
+            .settle_uncertified_tsx(&ide_path, &ide.code, reopened, &still_current)
             .await
         {
             Ok(delivery) => {
                 let Some(delivery) = delivery.ide_surface() else {
+                    // No certified receipt: the repair is still owed.
+                    self.needs_ide_sync.insert(canonical_id);
                     return;
                 };
                 // FENCE (pre-record): the close and the reopen both awaited. The
@@ -2858,7 +2869,13 @@ impl VerterLanguageServer {
             None
         } else {
             let Ok(Some(delivery)) = sync
-                .deliver_api_fenced(&path, api_code, update, &current)
+                .deliver_api_fenced(
+                    &path,
+                    api_code,
+                    update,
+                    crate::type_provider::project_sync::ProviderLane::Foreground,
+                    &current,
+                )
                 .await
             else {
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
@@ -2887,20 +2904,11 @@ impl VerterLanguageServer {
             return false;
         }
         let install = |source: Option<Arc<str>>| {
-            let mut state = self
-                .provider_sync_state_for_source(canonical_id)
-                .unwrap_or_default();
             self.carrier_transaction_coordinator
-                .convert_to_unresolved(canonical_id, &mut state);
-            let mut live = self
-                .provider_sync_states
-                .entry(canonical_id.to_string())
-                .or_default();
-            live.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
-            live.commit_stamp = None;
-            live.committed_ide_surface = None;
-            live.api_path = Some(path.clone());
-            live.mark_api_delivered(api_code);
+                .convert_live_to_unresolved(&self.provider_sync_states, canonical_id, |live| {
+                    live.api_path = Some(path.clone());
+                    live.mark_api_delivered(api_code);
+                });
             // Bootstrap binding conversion needs no coordinate model. Record
             // one only when this transaction actually captured its source.
             let Some(source) = source else {
@@ -3250,21 +3258,30 @@ impl VerterLanguageServer {
                                     &ide.code,
                                     &committed_state.owner_binding,
                                 ) {
+                                    let still_current =
+                                        || self.open_pin_is_current(canonical_id, open_pin);
                                     let result = if committed_state.ide_background_loaded {
-                                        sync.sync_tsx_fenced(&ide_path, &ide.code, &|| {
-                                            self.open_pin_is_current(canonical_id, open_pin)
-                                        })
-                                        .await
+                                        sync.sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                            .await
                                     } else {
-                                        sync.open_tsx_fenced(&ide_path, &ide.code, &|| {
-                                            self.open_pin_is_current(canonical_id, open_pin)
-                                        })
-                                        .await
+                                        sync.open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                                            .await
                                     };
+                                    let result = sync
+                                        .settle_uncertified_tsx(
+                                            &ide_path,
+                                            &ide.code,
+                                            result,
+                                            &still_current,
+                                        )
+                                        .await;
                                     outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                                     if let Ok(delivery) = result {
                                         ide_delivery = delivery.ide_surface();
                                         if ide_delivery.is_none() {
+                                            self.queue_snapshot_provider_sync(
+                                                canonical_id.to_string(),
+                                            );
                                             return ImportSyncOutcome::Retry;
                                         }
                                         committed_state
@@ -3323,6 +3340,7 @@ impl VerterLanguageServer {
                                     // This writer waited for the child's lifecycle lane above and only
                                     // released it between legs; it keeps its turn for the API leg.
                                     crate::document_sync_lane::LaneAcquire::Wait,
+                                    crate::type_provider::project_sync::ProviderLane::Foreground,
                                 )
                                 .await
                                 .is_current(),
@@ -3738,20 +3756,21 @@ impl VerterLanguageServer {
                             canonical_id,
                             ProviderPathKind::Ide,
                         );
+                        let still_current = || self.open_pin_is_current(canonical_id, open_pin);
                         let result = if is_bg {
-                            sync.sync_tsx_fenced(&tsx_path, &ide.code, &|| {
-                                self.open_pin_is_current(canonical_id, open_pin)
-                            })
-                            .await
+                            sync.sync_tsx_fenced(&tsx_path, &ide.code, &still_current)
+                                .await
                         } else {
-                            sync.open_tsx_fenced(&tsx_path, &ide.code, &|| {
-                                self.open_pin_is_current(canonical_id, open_pin)
-                            })
-                            .await
+                            sync.open_tsx_fenced(&tsx_path, &ide.code, &still_current)
+                                .await
                         };
+                        let result = sync
+                            .settle_uncertified_tsx(&tsx_path, &ide.code, result, &still_current)
+                            .await;
                         if let Ok(delivery) = result {
                             ide_delivery = delivery.ide_surface();
                             if ide_delivery.is_none() {
+                                self.queue_snapshot_provider_sync(canonical_id.to_string());
                                 return;
                             }
                             committed_state.set_background_loaded(ProviderPathKind::Ide, true);
@@ -3800,6 +3819,7 @@ impl VerterLanguageServer {
                         &self.carrier_transaction_coordinator,
                         &self.pending_snapshot_provider_sync,
                         crate::document_sync_lane::LaneAcquire::Try,
+                        crate::type_provider::project_sync::ProviderLane::Foreground,
                     )
                     .await;
                 }

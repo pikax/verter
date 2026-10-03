@@ -1175,20 +1175,23 @@ impl VerterLanguageServer {
                     return;
                 }
             }
+            let still_current = || self.open_pin_is_current(canonical_id, retained);
             let result = if target.ide_background_loaded {
-                sync.sync_tsx_fenced(&ide_path, ide_code, &|| {
-                    self.open_pin_is_current(canonical_id, retained)
-                })
-                .await
+                sync.sync_tsx_fenced(&ide_path, ide_code, &still_current)
+                    .await
             } else {
-                sync.open_tsx_fenced(&ide_path, ide_code, &|| {
-                    self.open_pin_is_current(canonical_id, retained)
-                })
-                .await
+                sync.open_tsx_fenced(&ide_path, ide_code, &still_current)
+                    .await
             };
+            let result = sync
+                .settle_uncertified_tsx(&ide_path, ide_code, result, &still_current)
+                .await;
             match result {
                 Ok(delivery) => {
                     let Some(prepared) = delivery.prepared_surface() else {
+                        // Nothing delivered or certified: the repair that
+                        // consumed this source's owed sync still owes it.
+                        self.needs_ide_sync.insert(canonical_id.to_string());
                         return;
                     };
                     ide_synced = true;

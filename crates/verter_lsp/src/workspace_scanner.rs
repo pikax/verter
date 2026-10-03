@@ -1351,6 +1351,8 @@ pub(crate) async fn sync_file_to_provider(
                     carrier_coordinator,
                     requeue.unwrap_or(&local_queue),
                     crate::document_sync_lane::LaneAcquire::Try,
+                    // The bulk scan must never preempt interactive queries.
+                    crate::type_provider::project_sync::ProviderLane::Background,
                 )
                 .await;
             }
@@ -1876,7 +1878,18 @@ mod tests {
     /// call, so an interactive-lane open shows up as `OpenFile` and fails here.
     #[tokio::test]
     async fn scanner_opens_carrier_companions_on_the_background_lane() {
-        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        // Wired to a document registry, the scan's API leg runs as a document
+        // transaction; it must keep the background lane on both routes.
+        for wired in [false, true] {
+            assert_scanner_opens_carrier_companions_on_the_background_lane(wired).await;
+        }
+    }
+
+    async fn assert_scanner_opens_carrier_companions_on_the_background_lane(wired: bool) {
+        let host = Arc::new(VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let documents = wired.then(|| DocumentRegistry::new(Arc::clone(&host)));
         let canonical_id = "/workspace/pkg-a/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1913,7 +1926,7 @@ mod tests {
         sync_file_to_provider(
             canonical_id,
             &host,
-            None,
+            documents.as_ref(),
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -1960,13 +1973,13 @@ mod tests {
 
         assert!(
             interactive.is_empty(),
-            "the background scan must not open carrier companions on the interactive \
-             lane, but opened: {interactive:?}"
+            "the background scan (registry wired: {wired}) must not open carrier \
+             companions on the interactive lane, but opened: {interactive:?}"
         );
         assert!(
             background.contains(&api_path),
-            "the API companion must be opened on the background lane; background \
-             opens were {background:?}, expected to contain {api_path}"
+            "the API companion must be opened on the background lane (registry wired: \
+             {wired}); background opens were {background:?}, expected to contain {api_path}"
         );
         assert!(
             background.contains(&ide_path),

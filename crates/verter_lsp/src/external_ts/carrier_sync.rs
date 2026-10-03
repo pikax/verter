@@ -1374,6 +1374,30 @@ impl CarrierTransactionCoordinator {
         state.committed_ide_surface = None;
     }
 
+    /// [`Self::convert_to_unresolved`] applied to the LIVE state in `states` (created
+    /// empty when absent), then `update` on that same entry — one in-place conversion
+    /// that never overwrites concurrent writes to the entry's other fields. The barrier
+    /// entry is taken BEFORE the states entry, the same barrier→states nesting
+    /// [`Self::admit_owned`] uses, so the advance decision is read from the live token and
+    /// no owned commit can interleave between the advance and the clear. No `.await` is
+    /// held across the guards.
+    pub(crate) fn convert_live_to_unresolved(
+        &self,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        update: impl FnOnce(&mut ProviderSyncState),
+    ) {
+        let mut barrier = self.barriers.entry(source.to_string()).or_default();
+        let mut state = states.entry(source.to_string()).or_default();
+        if state.commit_stamp.is_some() {
+            barrier.intent_epoch = barrier.intent_epoch.saturating_add(1);
+        }
+        state.owner_binding = ProviderOwnerBinding::Unresolved;
+        state.commit_stamp = None;
+        state.committed_ide_surface = None;
+        update(&mut state);
+    }
+
     /// THE carrier provider-state admission gate — the sole RECEIPT-GATED owned-state
     /// installer of the committed IDE-surface stamp ([`CommittedCarrierIdeSurface`]) and the
     /// commit stamp ([`CarrierCommitStamp`]) for the PRIMARY carrier-sync paths. It is NOT
