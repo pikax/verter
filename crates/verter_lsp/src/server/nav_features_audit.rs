@@ -248,7 +248,7 @@ pub(super) async fn handle_rename_with_audit(
                 server.prepare_foreground(&uri).await?;
                 // Rename re-runs its own current-file repair and frontier
                 // activation after this capture; a diagnostics-generation-only
-                // advance repeats the repair and recomputes once instead of
+                // advance repeats the repair and recomputes instead of
                 // answering stale.
                 server
                     .settle_request_with_generation_retry(&uri, || {

@@ -724,6 +724,12 @@ fn e2e_provider_only_completions_enabled() -> bool {
         )
 }
 
+/// Recomputations one request spends when only the diagnostics generation of
+/// its document moves (see `settle_with_generation_retry`). Convergence comes
+/// from the background work draining, not from this number; it is only the
+/// ceiling past which sustained churn answers `ContentModified`.
+const GENERATION_ONLY_RECOMPUTE_LIMIT: usize = 8;
+
 impl VerterLanguageServer {
     /// Repair request-answering surfaces before capturing their response basis.
     /// Passive decoration requests keep their existing cache-only policy.
@@ -745,8 +751,9 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Recompute once when background settlement advances only the diagnostics
-    /// generation. Never reuse the first payload or retry an edit/ownership race.
+    /// Recompute when background settlement advances only the diagnostics
+    /// generation, until one computation settles against an unmoved basis.
+    /// Never reuse a superseded payload or retry an edit/ownership race.
     async fn settle_foreground_with_generation_retry<T, F>(
         &self,
         uri: &Uri,
@@ -759,7 +766,7 @@ impl VerterLanguageServer {
     }
 
     /// [`Self::settle_foreground_with_generation_retry`] for request-answering
-    /// routes: the recomputation repeats the current-file repair BEFORE it
+    /// routes: each recomputation repeats the current-file repair BEFORE it
     /// captures its basis. The background sync that advanced the generation
     /// can leave the carrier's IDE compile cold; without the repair the
     /// recomputation's own compile would advance the generation again after
@@ -775,6 +782,18 @@ impl VerterLanguageServer {
         self.settle_with_generation_retry(uri, true, compute).await
     }
 
+    /// The diagnostics generation is per file, but it also advances for work
+    /// that changes nothing the client sent: each settled edit of an imported
+    /// file bumps every open importer, and each background resync or compile
+    /// of the file bumps it again. Opening several files back to back
+    /// therefore moves the requested document's generation several times
+    /// while one request is in flight, and a single recomputation can itself
+    /// observe the next move. A generation-only move is not a content change
+    /// and must not answer `ContentModified`: recompute against a fresh basis
+    /// until one computation observes no move. Every move is finite
+    /// background work, so this converges once that work drains; the bound
+    /// only stops a request from chasing unbounded churn. Document edits,
+    /// close/reopen and workspace replacement still fail closed at once.
     async fn settle_with_generation_retry<T, F>(
         &self,
         uri: &Uri,
@@ -785,28 +804,41 @@ impl VerterLanguageServer {
         F: std::future::Future<Output = Result<Option<T>>>,
     {
         let first = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
-        let response = compute().await?;
-        if response.is_none()
-            || first.is_current(&self.documents, uri)
-            || !first.document_and_workspace_are_current(&self.documents, uri)
-        {
-            return first.settle(&self.documents, uri, response);
-        }
-        drop(response);
-        if repair_before_retry {
-            self.prepare_foreground(uri).await?;
+        let mut retry = None;
+        let mut recomputations = 0;
+        loop {
+            let response = compute().await?;
             if !first.document_and_workspace_are_current(&self.documents, uri) {
-                return Err(tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                ));
+                // An edit, close/reopen or workspace replacement since the
+                // request began: a genuine content change.
+                return first.settle(&self.documents, uri, response);
             }
+            let settlement = retry.as_ref().unwrap_or(&first);
+            if response.is_none()
+                || settlement.is_current(&self.documents, uri)
+                || recomputations == GENERATION_ONLY_RECOMPUTE_LIMIT
+            {
+                return settlement.settle(&self.documents, uri, response);
+            }
+            drop(response);
+            recomputations += 1;
+            tracing::debug!(
+                "settle: recomputing {} after a diagnostics-generation-only move ({recomputations})",
+                uri.as_str()
+            );
+            if repair_before_retry {
+                self.prepare_foreground(uri).await?;
+                if !first.document_and_workspace_are_current(&self.documents, uri) {
+                    return Err(tower_lsp_server::jsonrpc::Error::new(
+                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                    ));
+                }
+            }
+            retry = Some(crate::documents::ForegroundSettlement::capture(
+                &self.documents,
+                uri,
+            ));
         }
-        let retry = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
-        let response = compute().await?;
-        if !first.document_and_workspace_are_current(&self.documents, uri) {
-            return first.settle(&self.documents, uri, response);
-        }
-        retry.settle(&self.documents, uri, response)
     }
 
     /// Select this request's production deadline from the configured budget
@@ -1725,31 +1757,38 @@ impl LanguageServer for VerterLanguageServer {
                 == Some("type_provider")
         });
         crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.completion), async {
-            let settlement = uri
-                .as_ref()
-                .map(|uri| crate::documents::ForegroundSettlement::capture(&self.documents, uri));
+            let content_modified = || {
+                tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                )
+            };
+            let Some(uri) = uri else {
+                if is_provider_resolve {
+                    return Err(content_modified());
+                }
+                return nav_features::handle_completion_resolve(self, item).await;
+            };
             if is_provider_resolve
-                && settlement
-                    .as_ref()
-                    .and_then(|basis| basis.version())
+                && crate::documents::ForegroundSettlement::capture(&self.documents, &uri)
+                    .version()
                     .is_none()
             {
-                return Err(tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                ));
+                return Err(content_modified());
             }
-            let response = nav_features::handle_completion_resolve(self, item).await?;
-            if uri
-                .as_ref()
-                .zip(settlement)
-                .is_some_and(|(uri, settlement)| !settlement.is_current(&self.documents, uri))
-            {
-                Err(tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                ))
-            } else {
-                Ok(response)
-            }
+            // A resolve always answers an item, so every attempt settles a
+            // `Some`; a generation-only move recomputes it like any other
+            // document response.
+            let resolved = self
+                .settle_foreground_with_generation_retry(&uri, || {
+                    let item = item.clone();
+                    async move {
+                        nav_features::handle_completion_resolve(self, item)
+                            .await
+                            .map(Some)
+                    }
+                })
+                .await?;
+            Ok(resolved.unwrap_or(item))
         })
         .await
     }
