@@ -29,10 +29,14 @@
 //!
 //! [`CertifiedTypeEngineBinding::certify`] mints the witness only over a
 //! [`BoundProject`] whose negotiated capabilities (the
-//! `external_ts::EngineCapabilities` it carries) record a
-//! handshake. Capabilities with no recorded interpretation — the `Default`
-//! construction — are refused, because a profile composed over an assumed
-//! interpretation is the self-certification above wearing a different coat.
+//! `external_ts::EngineCapabilities` it carries) record a version. The
+//! version's PROVENANCE is part of what composes the profile: a handshake the
+//! engine reported in-band and a segment this publisher declared locally
+//! (`external_ts::EngineVersion::{Reported, Declared}`) encode under different
+//! discriminants, so a local segment can never pass as an observation of the
+//! peer, and a record carrying neither — the `Default` construction — is
+//! refused outright, because a profile composed over an assumed interpretation
+//! is the self-certification above wearing a different coat.
 //!
 //! # Identity discipline
 //!
@@ -41,14 +45,20 @@
 //! independent, so it is the only cross-snapshot cache-candidate key. The
 //! flight is [`SemanticFlightKey`] = (`QueryIdentity`, `InputBasisId`): the
 //! basis the answer will be attributed to, never a cache key. A result whose
-//! basis is superseded before publication is returned to its caller and
-//! discarded, never warmed; degraded outcomes never warm. The dormant closure
-//! states this boundary; the activation block (TCM4) implements it.
+//! basis is superseded before publication is REFUSED at the seam
+//! ([`CertifiedTypeEngineBinding::publish_admitted`]) rather than returned to
+//! its caller and dropped, and a result whose SERVING SESSION has rotated past
+//! the one it was certified under is refused the same way
+//! ([`CertifiedTypeEngineBinding::serving_admitted`]); degraded outcomes never
+//! warm.
 //!
-//! # Dormant
+//! # What is still dormant
 //!
-//! No production route reaches this module. Activation is a separate, atomic
-//! step that replaces the route it displaces rather than answering beside it.
+//! This module is live: the carrier publish path certifies a
+//! [`CertifiedTypeEngineBinding`] before any snapshot reaches a store. The
+//! MAPPING half ([`crate::content_mapper`]) is the dormant one — no production
+//! route reaches it, and its activation is a separate, atomic step that
+//! replaces the route it displaces rather than answering beside it.
 
 use std::sync::Arc;
 
@@ -57,7 +67,7 @@ use verter_identity::identity::{
     InputBasisId, ProviderContractId, QueryIdentity, ResultContractId, SemanticFlightKey,
 };
 
-use crate::external_ts::{BoundProject, EngineIdentity, QueryFeature, ServeMode};
+use crate::external_ts::{BoundProject, EngineIdentity, PublishSnapshot, QueryFeature, ServeMode};
 
 /// One closed capability row: the capability, and the canonical query-kind
 /// domain tag that composes its [`QueryIdentity`]. The row IS the closure
@@ -262,13 +272,23 @@ const fn serve_mode_discriminant(mode: ServeMode) -> u32 {
 
 /// Descriptor the observed engine profile hashes through. Every input is a
 /// fact the backend negotiated or the serving session reported — never a
-/// default someone assumed. The serving identity (mode, wire pin, session
-/// generation) is a first-class dimension: an OWNED and a SHARED identity
-/// over the same project and version never compose the same profile, so one
-/// engine's facts cannot launder into the other's question identities. The
-/// bound project and its env dimensions pin whose facts these are.
+/// default someone assumed — with two named exceptions, both of which name
+/// themselves in the encoding rather than passing as observations: the version's
+/// provenance discriminant (a local publisher's own declared segment is
+/// recorded as declared, and never aliases a reported handshake over the same
+/// text), and `wire_pin`, the local publisher's carrier-store FORMAT pin (see
+/// `carrier_publish_store::CARRIER_STORE_WIRE_PIN`). Each stays an honest
+/// dimension because it records WHICH wire contract this publisher writes, so
+/// a differently pinned publisher can never compose the same profile; neither
+/// is evidence of what the peer currently speaks. The serving identity (mode,
+/// wire pin, session generation) is a first-class dimension: an OWNED and a
+/// SHARED identity over the same project and version never compose the same
+/// profile, so one engine's facts cannot launder into the other's question
+/// identities. The bound project and its env dimensions pin whose facts these
+/// are.
 struct ObservedEngineProfile<'a> {
-    reported_version: &'a str,
+    version_provenance: u32,
+    version: &'a str,
     static_module_resolution_map: bool,
     async_cancellable_queries: bool,
     serve_mode: ServeMode,
@@ -283,22 +303,26 @@ struct ObservedEngineProfile<'a> {
 }
 
 impl CanonicalEncode for ObservedEngineProfile<'_> {
+    // v2: the version's provenance discriminant joined the profile, so a locally
+    // DECLARED segment can never compose the identity a REPORTED handshake over
+    // the same string would.
     const DOMAIN_TAG: &'static str =
-        "verter.session.semantic_capability.observed_engine_profile.v1";
+        "verter.session.semantic_capability.observed_engine_profile.v2";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-        encoder.field_str(1, self.reported_version);
-        encoder.field_bool(2, self.static_module_resolution_map);
-        encoder.field_bool(3, self.async_cancellable_queries);
-        encoder.field_enum_discriminant(4, serve_mode_discriminant(self.serve_mode));
-        encoder.field_str(5, self.serving_version);
-        encoder.field_u64(6, self.wire_pin);
-        encoder.field_u64(7, self.editor_session_generation);
-        encoder.field_str(8, self.project);
-        encoder.field_bytes(9, &self.parse_env_hash);
-        encoder.field_bytes(10, &self.resolve_env_hash);
-        encoder.field_bytes(11, &self.lib_env_hash);
-        encoder.field_bytes(12, &self.project_identity);
+        encoder.field_enum_discriminant(1, self.version_provenance);
+        encoder.field_str(2, self.version);
+        encoder.field_bool(3, self.static_module_resolution_map);
+        encoder.field_bool(4, self.async_cancellable_queries);
+        encoder.field_enum_discriminant(5, serve_mode_discriminant(self.serve_mode));
+        encoder.field_str(6, self.serving_version);
+        encoder.field_u64(7, self.wire_pin);
+        encoder.field_u64(8, self.editor_session_generation);
+        encoder.field_str(9, self.project);
+        encoder.field_bytes(10, &self.parse_env_hash);
+        encoder.field_bytes(11, &self.resolve_env_hash);
+        encoder.field_bytes(12, &self.lib_env_hash);
+        encoder.field_bytes(13, &self.project_identity);
     }
 }
 
@@ -306,20 +330,47 @@ impl CanonicalEncode for ObservedEngineProfile<'_> {
 /// and none is a degraded form of a binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertificationRefusal {
-    /// The negotiated [`crate::external_ts::EngineCapabilities`] carried no
-    /// recorded handshake
-    /// version. A profile composed over an assumed interpretation would
+    /// The capability record carried no engine version at all — neither a
+    /// reported handshake nor a declared local contract segment
+    /// ([`crate::external_ts::EngineVersion::Undeclared`], the `Default`
+    /// construction). A profile composed over an assumed interpretation would
     /// certify an observation that never happened.
     UnobservedEngineCapabilities,
+}
+
+/// The membership lease a certification was minted under: MEMBERSHIP-validity
+/// granularity (which session's advertisement is still valid), a DISTINCT
+/// identity space from [`crate::external_ts::EngineSessionFacts::editor_session_generation`]
+/// (the attach/spawn generation). The certification seam compares it as its own
+/// typed dimension at the store write — never stored in, or compared through,
+/// the editor-session generation slot — so a lease and an editor generation
+/// that happen to share an integer never merge into one identity dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ServingLease(u64);
+
+impl ServingLease {
+    /// A lease from the ledger session value it was minted under.
+    #[must_use]
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// The underlying lease value.
+    #[must_use]
+    pub fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// The sole route by which a TypeScript engine's answer enters the semantic
 /// plane. A witness, not a handle: holding one means a project binding was
 /// resolved (the [`BoundProject`] it was certified over), the engine's
-/// capability interpretation was observed, the serving session (mode, wire
-/// pin, generation) was identified and recorded in the profile that composes
-/// every [`QueryIdentity`] minted under it, and the basis the answer will be
-/// attributed to is the one named at certification.
+/// capability interpretation was observed, the serving session was identified
+/// (mode, attach/spawn session generation, wire pin, and the membership lease
+/// as its own typed [`ServingLease`] dimension),
+/// recorded in the profile that composes every [`QueryIdentity`] minted under
+/// it, and the basis the answer will be attributed to is the one named at
+/// certification.
 ///
 /// It mints no engine, holds no callback, and reaches no backend: a caller
 /// cannot ask it a question, only compose the identities a certified flight
@@ -329,28 +380,41 @@ pub struct CertifiedTypeEngineBinding {
     project: Arc<str>,
     observed_profile: ProviderContractId,
     input_basis: InputBasisId,
+    /// The serving session as it was OBSERVED at certification. Kept as the
+    /// plain facts the backend recomposes per publish, so the store write can
+    /// refuse a session that has since rotated rather than admit an answer
+    /// under a session the certification never saw.
+    serving: EngineIdentity,
+    /// The membership lease the certification was minted under, as its own
+    /// typed dimension (see [`ServingLease`]). The editor-session generation
+    /// inside `serving` is the attach/spawn generation and is NOT this lease;
+    /// the store write compares both dimensions separately.
+    serving_lease: ServingLease,
 }
 
 impl CertifiedTypeEngineBinding {
     /// Certify the binding: project binding resolved, capability
-    /// interpretation observed, serving session identified, basis named. The
+    /// interpretation observed, serving session identified (engine identity
+    /// plus the membership lease it was minted under), basis named. The
     /// only constructor — the fields are private and no struct-literal path
     /// exists outside this module, so a binding cannot be fabricated from
     /// parts.
     pub fn certify(
         bound: &BoundProject,
         serving: &EngineIdentity,
+        serving_lease: ServingLease,
         input_basis: InputBasisId,
     ) -> Result<Self, CertificationRefusal> {
         let capabilities = bound.capabilities();
-        let Some(reported_version) = capabilities.reported_version.as_deref() else {
+        let Some(version) = capabilities.version.as_str() else {
             return Err(CertificationRefusal::UnobservedEngineCapabilities);
         };
         let env_dims = bound.env_dims();
         Ok(Self {
             project: bound.project_arc(),
             observed_profile: ProviderContractId::from_canonical(&ObservedEngineProfile {
-                reported_version,
+                version_provenance: capabilities.version.provenance_discriminant(),
+                version,
                 static_module_resolution_map: capabilities.static_module_resolution_map,
                 async_cancellable_queries: capabilities.async_cancellable_queries,
                 serve_mode: serving.mode,
@@ -364,6 +428,8 @@ impl CertifiedTypeEngineBinding {
                 project_identity: env_dims.project_identity.0,
             }),
             input_basis,
+            serving: serving.clone(),
+            serving_lease,
         })
     }
 
@@ -383,12 +449,49 @@ impl CertifiedTypeEngineBinding {
     }
 
     /// The basis answers will be attributed to. Supersession after
-    /// certification is the flight runtime's publication rule to enforce, not
-    /// this witness's: results from a superseded basis are returned and
-    /// discarded, never warmed.
+    /// certification is refused AT this witness, not left to the flight
+    /// runtime downstream: [`Self::publish_admitted`] admits only a snapshot
+    /// carrying this exact basis, and the engine seam refuses before the store
+    /// write, so a superseded result is never produced to be returned, let
+    /// alone warmed.
     #[must_use]
     pub fn input_basis(&self) -> &InputBasisId {
         &self.input_basis
+    }
+
+    /// The serving session this binding was certified over, as it was observed
+    /// then — the same facts the backend recomposes on every publish. The
+    /// membership lease is NOT in here: it is the separate typed dimension
+    /// [`Self::serving_lease`] names.
+    #[must_use]
+    pub fn serving_identity(&self) -> &EngineIdentity {
+        &self.serving
+    }
+
+    /// The membership lease this binding was certified under, as its own typed
+    /// dimension ([`ServingLease`]) — never the editor-session generation the
+    /// serving identity carries.
+    #[must_use]
+    pub fn serving_lease(&self) -> ServingLease {
+        self.serving_lease
+    }
+
+    /// Whether `serving` is still the session and `lease` still the membership
+    /// lease this binding was certified over: same mode, same observed version,
+    /// same wire pin, same attach/spawn generation, same lease.
+    ///
+    /// The half of the publication rule the BASIS cannot express. A snapshot
+    /// basis covers the published bytes, so it says nothing about the serving
+    /// session the answer is produced under; a retained binding minted under
+    /// lease L1 would otherwise still admit an unchanged snapshot after the
+    /// ledger rotates to L2, composing an answer under a membership session the
+    /// certification never saw. The lease is compared as its OWN type — an
+    /// editor-session generation that numerically equals a lease value never
+    /// substitutes for it. The engine seam calls this where the store write
+    /// happens, so the rotation is refused BEFORE the warm.
+    #[must_use]
+    pub fn serving_admitted(&self, serving: &EngineIdentity, lease: ServingLease) -> bool {
+        &self.serving == serving && self.serving_lease == lease
     }
 
     /// Compose the snapshot-independent question identity for one capability:
@@ -426,6 +529,25 @@ impl CertifiedTypeEngineBinding {
             query_identity: self.query_identity(feature, semantic_arguments),
             input_basis: self.input_basis.clone(),
         }
+    }
+
+    /// The publication rule this plane enforces at the engine seam: a binding
+    /// admits exactly ONE published snapshot — the one whose
+    /// [`PublishSnapshot::input_basis`] is the basis the binding was certified
+    /// over, recomputed here rather than read back from the binding's own field
+    /// — and only when that snapshot carries at most one row per
+    /// `provider_uri` ([`PublishSnapshot::duplicate_provider_uri`]).
+    ///
+    /// So a caller cannot certify over one snapshot and publish another, a
+    /// snapshot whose basis was superseded between certification and the store
+    /// write is REFUSED before it can warm, and a snapshot whose manifest bytes
+    /// the input order would decide (two rows for one `provider_uri`) is
+    /// refused wholesale — one basis must name one publication. The disposition
+    /// is a refusal, not a degraded publish: there is no result from a
+    /// superseded basis to return, let alone to warm.
+    #[must_use]
+    pub fn publish_admitted(&self, snapshot: &PublishSnapshot) -> bool {
+        snapshot.duplicate_provider_uri().is_none() && snapshot.input_basis() == self.input_basis
     }
 }
 

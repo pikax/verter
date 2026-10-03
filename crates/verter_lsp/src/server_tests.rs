@@ -3417,11 +3417,25 @@ fn import_resolved_does_not_match_different_component() {
     ));
 }
 
+/// The capabilities a serving host advertises, built from THAT host's own
+/// composed classification authority — the same source the initialize
+/// handler reads, never a process-global registry.
+fn host_server_capabilities(
+    resolve_provider: bool,
+) -> tower_lsp_server::ls_types::ServerCapabilities {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    crate::capabilities::server_capabilities(
+        &PositionEncodingKind::UTF16,
+        resolve_provider,
+        host.language_classifier(),
+    )
+}
+
 /// Server capabilities must NOT include `diagnostic_provider` (pull diagnostics).
 /// We use push diagnostics exclusively to avoid flickering during typing.
 #[test]
 fn capabilities_do_not_include_pull_diagnostics() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     assert!(
         caps.diagnostic_provider.is_none(),
         "diagnostic_provider must be removed — we use push diagnostics only"
@@ -3435,7 +3449,7 @@ fn capabilities_do_not_include_pull_diagnostics() {
 /// honest trigger set the handler can actually act on.
 #[test]
 fn on_type_formatting_triggers_on_gt_only_not_slash() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     let on_type = caps
         .document_on_type_formatting_provider
         .as_ref()
@@ -3468,7 +3482,7 @@ fn on_type_formatting_triggers_on_gt_only_not_slash() {
 fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() {
     use tower_lsp_server::ls_types::SemanticTokensServerCapabilities;
 
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
         caps.semantic_tokens_provider.as_ref()
     else {
@@ -3507,7 +3521,7 @@ fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() 
 /// active provider's `supports_completion_resolve`), never a hard-coded `true`.
 #[test]
 fn resolve_provider_capability_is_honest() {
-    let with_resolve = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let with_resolve = host_server_capabilities(true);
     assert_eq!(
         with_resolve
             .completion_provider
@@ -3517,8 +3531,7 @@ fn resolve_provider_capability_is_honest() {
         "a resolve-capable provider must advertise resolve_provider: true"
     );
 
-    let without_resolve =
-        crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, false);
+    let without_resolve = host_server_capabilities(false);
     assert_eq!(
         without_resolve
             .completion_provider
@@ -23768,45 +23781,50 @@ fn test_carrier_language_for() {
     assert!(carrier_language_for("file:///project/vue.config.js").is_none());
 }
 
-/// The watcher glob is registry-derived: it covers every carrier row,
-/// including `.svelte` (a registered carrier). The IDE TSX
-/// projection for `.svelte` is a separate vertical, so `resync` still
-/// produces no provider sync state for it — the watcher coverage is the
-/// load-bearing assertion here.
+/// The watcher glob is host-derived: it covers every carrier row of the
+/// serving host's own composed classification authority, including
+/// `.svelte` (a registered carrier). The IDE TSX projection for `.svelte` is
+/// a separate vertical, so `resync` still produces no provider sync state for
+/// it — the watcher coverage is the load-bearing assertion here.
 #[test]
 fn test_carrier_watch_glob_covers_registry_carrier_rows() {
-    let glob = crate::capabilities::carrier_watch_glob();
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let glob = crate::capabilities::carrier_watch_glob(host.language_classifier());
     assert_eq!(glob, "**/*.{svelte,vue}");
 }
 
 /// Guard `lifecycle_watch_globs_are_descriptor_derived`: the watcher globs are
 /// DESCRIPTOR-DERIVED, never hand-listed. The carrier glob comes from the
-/// registry's carrier rows; the adapter-module glob comes from
-/// `all_adapter_module_extensions()` (`**/*.{svelte.ts,svelte.js}`) — a rune
-/// module is NOT a carrier, so its coverage is the dedicated adapter-module
-/// glob, NOT the generic `**/*.{ts,tsx,…}` glob (which the assertion proves
-/// excludes the rune extensions). Without the dedicated glob the rune module
-/// would only be covered incidentally by the generic TS glob (the S2a P1 gap).
+/// host's composed registry carrier rows; the adapter-module glob comes from
+/// the same authority's `adapter_module_extensions()`
+/// (`**/*.{svelte.ts,svelte.js}`) — a rune module is NOT a carrier, so its
+/// coverage is the dedicated adapter-module glob, NOT the generic
+/// `**/*.{ts,tsx,…}` glob (which the assertion proves excludes the rune
+/// extensions). Without the dedicated glob the rune module would only be
+/// covered incidentally by the generic TS glob (the S2a P1 gap).
 #[test]
 fn lifecycle_watch_globs_are_descriptor_derived() {
-    // The adapter-module glob is built from the registry, covering the
-    // registered rune-module extensions in longest-suffix-first row order.
-    let adapter_glob = crate::capabilities::adapter_module_watch_glob()
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let framework = host.language_classifier();
+    // The adapter-module glob is built from the host's own composed
+    // classification authority, covering the registered rune-module
+    // extensions in longest-suffix-first row order.
+    let adapter_glob = crate::capabilities::adapter_module_watch_glob(framework)
         .expect("the svelte adapter registers rune-module extensions");
-    // The adapter-module glob is built from the SAME registry source the
-    // descriptor authority exposes — not a hand-listed literal.
-    let from_registry = verter_session::LanguageRegistry::global().all_adapter_module_extensions();
+    // The adapter-module glob is built from the SAME host-composed authority
+    // — not a hand-listed literal.
+    let from_registry = framework.adapter_module_extensions();
     assert_eq!(
         adapter_glob,
         format!("**/*.{{{}}}", from_registry.join(",")),
-        "the adapter-module glob is descriptor-derived from all_adapter_module_extensions()"
+        "the adapter-module glob is descriptor-derived from the host's composed registry"
     );
     let mut sorted = from_registry.clone();
     sorted.sort_unstable();
     assert_eq!(
         sorted,
         vec!["svelte.js", "svelte.ts"],
-        "the registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
+        "the host's composed registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
     );
 
     // The generic TS/JS glob does NOT carry rune-module coverage: `.svelte.ts`
