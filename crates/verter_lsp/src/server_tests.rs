@@ -3417,11 +3417,25 @@ fn import_resolved_does_not_match_different_component() {
     ));
 }
 
+/// The capabilities a serving host advertises, built from THAT host's own
+/// composed classification authority — the same source the initialize
+/// handler reads, never a process-global registry.
+fn host_server_capabilities(
+    resolve_provider: bool,
+) -> tower_lsp_server::ls_types::ServerCapabilities {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    crate::capabilities::server_capabilities(
+        &PositionEncodingKind::UTF16,
+        resolve_provider,
+        host.language_classifier(),
+    )
+}
+
 /// Server capabilities must NOT include `diagnostic_provider` (pull diagnostics).
 /// We use push diagnostics exclusively to avoid flickering during typing.
 #[test]
 fn capabilities_do_not_include_pull_diagnostics() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     assert!(
         caps.diagnostic_provider.is_none(),
         "diagnostic_provider must be removed — we use push diagnostics only"
@@ -3435,7 +3449,7 @@ fn capabilities_do_not_include_pull_diagnostics() {
 /// honest trigger set the handler can actually act on.
 #[test]
 fn on_type_formatting_triggers_on_gt_only_not_slash() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     let on_type = caps
         .document_on_type_formatting_provider
         .as_ref()
@@ -3468,7 +3482,7 @@ fn on_type_formatting_triggers_on_gt_only_not_slash() {
 fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() {
     use tower_lsp_server::ls_types::SemanticTokensServerCapabilities;
 
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let caps = host_server_capabilities(true);
     let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
         caps.semantic_tokens_provider.as_ref()
     else {
@@ -3507,7 +3521,7 @@ fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() 
 /// active provider's `supports_completion_resolve`), never a hard-coded `true`.
 #[test]
 fn resolve_provider_capability_is_honest() {
-    let with_resolve = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let with_resolve = host_server_capabilities(true);
     assert_eq!(
         with_resolve
             .completion_provider
@@ -3517,8 +3531,7 @@ fn resolve_provider_capability_is_honest() {
         "a resolve-capable provider must advertise resolve_provider: true"
     );
 
-    let without_resolve =
-        crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, false);
+    let without_resolve = host_server_capabilities(false);
     assert_eq!(
         without_resolve
             .completion_provider
@@ -23866,45 +23879,50 @@ fn test_carrier_language_for() {
     assert!(carrier_language_for("file:///project/vue.config.js").is_none());
 }
 
-/// The watcher glob is registry-derived: it covers every carrier row,
-/// including `.svelte` (a registered carrier). The IDE TSX
-/// projection for `.svelte` is a separate vertical, so `resync` still
-/// produces no provider sync state for it — the watcher coverage is the
-/// load-bearing assertion here.
+/// The watcher glob is host-derived: it covers every carrier row of the
+/// serving host's own composed classification authority, including
+/// `.svelte` (a registered carrier). The IDE TSX projection for `.svelte` is
+/// a separate vertical, so `resync` still produces no provider sync state for
+/// it — the watcher coverage is the load-bearing assertion here.
 #[test]
 fn test_carrier_watch_glob_covers_registry_carrier_rows() {
-    let glob = crate::capabilities::carrier_watch_glob();
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let glob = crate::capabilities::carrier_watch_glob(host.language_classifier());
     assert_eq!(glob, "**/*.{svelte,vue}");
 }
 
 /// Guard `lifecycle_watch_globs_are_descriptor_derived`: the watcher globs are
 /// DESCRIPTOR-DERIVED, never hand-listed. The carrier glob comes from the
-/// registry's carrier rows; the adapter-module glob comes from
-/// `all_adapter_module_extensions()` (`**/*.{svelte.ts,svelte.js}`) — a rune
-/// module is NOT a carrier, so its coverage is the dedicated adapter-module
-/// glob, NOT the generic `**/*.{ts,tsx,…}` glob (which the assertion proves
-/// excludes the rune extensions). Without the dedicated glob the rune module
-/// would only be covered incidentally by the generic TS glob (the S2a P1 gap).
+/// host's composed registry carrier rows; the adapter-module glob comes from
+/// the same authority's `adapter_module_extensions()`
+/// (`**/*.{svelte.ts,svelte.js}`) — a rune module is NOT a carrier, so its
+/// coverage is the dedicated adapter-module glob, NOT the generic
+/// `**/*.{ts,tsx,…}` glob (which the assertion proves excludes the rune
+/// extensions). Without the dedicated glob the rune module would only be
+/// covered incidentally by the generic TS glob (the S2a P1 gap).
 #[test]
 fn lifecycle_watch_globs_are_descriptor_derived() {
-    // The adapter-module glob is built from the registry, covering the
-    // registered rune-module extensions in longest-suffix-first row order.
-    let adapter_glob = crate::capabilities::adapter_module_watch_glob()
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let framework = host.language_classifier();
+    // The adapter-module glob is built from the host's own composed
+    // classification authority, covering the registered rune-module
+    // extensions in longest-suffix-first row order.
+    let adapter_glob = crate::capabilities::adapter_module_watch_glob(framework)
         .expect("the svelte adapter registers rune-module extensions");
-    // The adapter-module glob is built from the SAME registry source the
-    // descriptor authority exposes — not a hand-listed literal.
-    let from_registry = verter_session::LanguageRegistry::global().all_adapter_module_extensions();
+    // The adapter-module glob is built from the SAME host-composed authority
+    // — not a hand-listed literal.
+    let from_registry = framework.adapter_module_extensions();
     assert_eq!(
         adapter_glob,
         format!("**/*.{{{}}}", from_registry.join(",")),
-        "the adapter-module glob is descriptor-derived from all_adapter_module_extensions()"
+        "the adapter-module glob is descriptor-derived from the host's composed registry"
     );
     let mut sorted = from_registry.clone();
     sorted.sort_unstable();
     assert_eq!(
         sorted,
         vec!["svelte.js", "svelte.ts"],
-        "the registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
+        "the host's composed registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
     );
 
     // The generic TS/JS glob does NOT carry rune-module coverage: `.svelte.ts`
@@ -34259,7 +34277,7 @@ async fn v_bind_hover_shows_provider_type_from_declaration() {
 #[tokio::test]
 async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
     let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
-    for change in ["edit", "reopen", "diagnostics", "workspace"] {
+    for change in ["edit", "reopen", "workspace"] {
         let provider = Arc::new(MockTypeProvider::new());
         let service = make_hover_test_service_tsgo(provider.clone());
         let server = service.inner();
@@ -34292,9 +34310,6 @@ async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
                 "edit" => {
                     documents.did_change(&raced_uri, 2, &source.replace("width", "height"));
                 }
-                "diagnostics" => documents
-                    .host()
-                    .bump_diagnostics_generation("/workspace/src/App.vue"),
                 "workspace" => install_test_resolver(&raced_server),
                 _ => unreachable!(),
             }),
@@ -34304,6 +34319,104 @@ async fn v_bind_hover_refuses_a_native_fallback_after_its_basis_moves() {
             matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
             "a superseded native fallback must return the typed stale-request outcome ({change})"
         );
+    }
+}
+
+/// A diagnostics-generation-only advance during the provider await (its own
+/// repair, a native hydration or a background sync) is not a content change:
+/// hover recomputes once against a fresh basis and answers the recomputed
+/// provider result instead of `ContentModified`. A second advance during the
+/// recomputation still fails closed.
+#[tokio::test]
+async fn hover_recomputes_once_when_only_the_diagnostics_generation_moves() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>{{ width }}</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
+    let canonical = "/workspace/src/App.vue";
+    for (route, needle, offset) in [
+        ("provider merge", "{{ width }}", 3),
+        ("v-bind", "v-bind(width)", 8),
+    ] {
+        for repeated in [false, true] {
+            let provider = Arc::new(MockTypeProvider::new());
+            let service = make_hover_test_service_tsgo(provider.clone());
+            let server = service.inner();
+            install_test_resolver(server);
+            let uri = open_test_vue(server, canonical, source);
+            server.ensure_current_file_synced(&uri).await;
+            let decl = find_document_position(server, &uri, "const width", 6);
+            set_type_hover_at_vue_position(server, &provider, &uri, decl, "const width: number");
+            let template = find_document_position(server, &uri, "{{ width }}", 3);
+            set_type_hover_at_vue_position(
+                server,
+                &provider,
+                &uri,
+                template,
+                "const width: number",
+            );
+            let position = find_document_position(server, &uri, needle, offset);
+            let path = server.active_ide_path_for_uri(&uri).unwrap();
+            let hover_calls = |provider: &MockTypeProvider| {
+                provider
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, MockCall::GetHover { path: p, .. } if *p == path))
+                    .count()
+            };
+
+            if !repeated {
+                let documents = Arc::clone(&server.documents);
+                provider.set_on_query(
+                    &path,
+                    Box::new(move || documents.host().bump_diagnostics_generation(canonical)),
+                );
+            } else {
+                // Re-arm the one-shot seam from inside the first query so the
+                // recomputation observes a second generation advance.
+                let rearm_provider = Arc::clone(&provider);
+                let documents = Arc::clone(&server.documents);
+                let rearm_path = path.clone();
+                provider.set_on_query(
+                    &path,
+                    Box::new(move || {
+                        documents.host().bump_diagnostics_generation(canonical);
+                        let documents = Arc::clone(&documents);
+                        rearm_provider.set_on_query(
+                            &rearm_path,
+                            Box::new(move || {
+                                documents.host().bump_diagnostics_generation(canonical)
+                            }),
+                        );
+                    }),
+                );
+            }
+            provider.clear_calls();
+            let result = server.hover(hover_params(&uri, position)).await;
+            if repeated {
+                assert!(
+                    matches!(result, Err(ref error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{route}: a second generation advance must fail closed, got {result:?}"
+                );
+                continue;
+            }
+            let hover = result
+                .unwrap_or_else(|error| {
+                    panic!("{route}: a generation-only move must recompute, got {error:?}")
+                })
+                .unwrap_or_else(|| panic!("{route}: the recomputed hover must answer"));
+            let HoverContents::Markup(contents) = hover.contents else {
+                panic!("{route}: expected markup");
+            };
+            assert!(
+                contents.value.contains("width: number"),
+                "{route}: the answer is the recomputed provider hover: {}",
+                contents.value
+            );
+            assert_eq!(
+                hover_calls(&provider),
+                2,
+                "{route}: exactly one recomputation re-queries the provider"
+            );
+            drop(service);
+        }
     }
 }
 
@@ -36469,6 +36582,88 @@ async fn rename_still_covers_the_full_authored_set_when_the_provider_answers() {
         rename_edit_ranges(&edit, &uri),
         authored_token_ranges(RENAME_COMPLETENESS_VUE, "jsValue"),
         "the rename must cover the exact authored occurrence set, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Rename re-runs its current-file repair and frontier activation after the
+/// route captured its basis, and background syncs can land during the provider
+/// await. A diagnostics-generation-only advance there recomputes the rename once
+/// instead of discarding a complete edit as `ContentModified`.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_recomputes_once_when_only_the_diagnostics_generation_moves() {
+    let app_path = "src/JavaScriptCase.vue";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "vue", RENAME_COMPLETENESS_VUE)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "jsValue", 0);
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let decl_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("the declaration position maps into the IDE surface");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        decl_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: decl_offset,
+            end: decl_offset + "jsValue".len() as u32,
+        }],
+    );
+
+    let (arrived, release) = provider.block_get_rename_locations(&ctx.tsx_path);
+    provider.clear_calls();
+    let canonical = crate::documents::uri_to_canonical_id(&uri);
+    let rename = server.rename(RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        new_name: "jsDatum".into(),
+        work_done_progress_params: Default::default(),
+    });
+    let advance_generation_during_provider_await = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified())
+            .await
+            .expect("rename must reach the provider");
+        server
+            .documents
+            .host()
+            .bump_diagnostics_generation(&canonical);
+        release.notify_one();
+    };
+    let (edit, ()) = tokio::join!(rename, advance_generation_during_provider_await);
+    let edit = edit
+        .expect("a generation-only move must recompute, not answer ContentModified")
+        .expect("the recomputed rename must produce an edit");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(RENAME_COMPLETENESS_VUE, "jsValue"),
+        "the recomputed rename must cover the exact authored occurrence set, got {edit:?}"
+    );
+    let rename_queries = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetRenameLocations { .. }))
+        .count();
+    assert_eq!(
+        rename_queries, 2,
+        "exactly one recomputation re-queries the provider"
     );
 
     drain_handle.abort();

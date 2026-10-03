@@ -672,24 +672,40 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Settle the whole response, including native fallbacks, against its input basis.
-    fn settle_foreground<'a, T>(
-        &'a self,
-        uri: &'a Uri,
-        future: impl std::future::Future<Output = Result<Option<T>>> + 'a,
-    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a {
-        let settlement = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
-        // Map in the finishing poll without another async frame around large handlers.
-        futures_util::FutureExt::map(future, move |response| {
-            settlement.settle(&self.documents, uri, response?)
-        })
-    }
-
     /// Recompute once when background settlement advances only the diagnostics
     /// generation. Never reuse the first payload or retry an edit/ownership race.
     async fn settle_foreground_with_generation_retry<T, F>(
         &self,
         uri: &Uri,
+        compute: impl FnMut() -> F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        self.settle_with_generation_retry(uri, false, compute).await
+    }
+
+    /// [`Self::settle_foreground_with_generation_retry`] for request-answering
+    /// routes: the recomputation repeats the current-file repair BEFORE it
+    /// captures its basis. The background sync that advanced the generation
+    /// can leave the carrier's IDE compile cold; without the repair the
+    /// recomputation's own compile would advance the generation again after
+    /// the capture and fail the retry as stale.
+    async fn settle_request_with_generation_retry<T, F>(
+        &self,
+        uri: &Uri,
+        compute: impl FnMut() -> F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        self.settle_with_generation_retry(uri, true, compute).await
+    }
+
+    async fn settle_with_generation_retry<T, F>(
+        &self,
+        uri: &Uri,
+        repair_before_retry: bool,
         mut compute: impl FnMut() -> F,
     ) -> Result<Option<T>>
     where
@@ -704,6 +720,14 @@ impl VerterLanguageServer {
             return first.settle(&self.documents, uri, response);
         }
         drop(response);
+        if repair_before_retry {
+            self.prepare_foreground(uri).await?;
+            if !first.document_and_workspace_are_current(&self.documents, uri) {
+                return Err(tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                ));
+            }
+        }
         let retry = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
         let response = compute().await?;
         if !first.document_and_workspace_are_current(&self.documents, uri) {
@@ -1567,10 +1591,9 @@ impl LanguageServer for VerterLanguageServer {
             self.request_deadline(|b| b.goto_definition),
             async {
                 self.prepare_foreground(&uri).await?;
-                self.settle_foreground(
-                    &uri,
-                    nav_features_navigation::handle_goto_type_definition(self, params),
-                )
+                self.settle_request_with_generation_retry(&uri, || {
+                    nav_features_navigation::handle_goto_type_definition(self, params.clone())
+                })
                 .await
             },
         )
@@ -1590,8 +1613,10 @@ impl LanguageServer for VerterLanguageServer {
             self.request_deadline(|b| b.goto_definition),
             async {
                 self.prepare_foreground(&uri).await?;
-                self.settle_foreground(&uri, rename_prepare::handle_prepare_rename(self, params))
-                    .await
+                self.settle_request_with_generation_retry(&uri, || {
+                    rename_prepare::handle_prepare_rename(self, params.clone())
+                })
+                .await
             },
         )
         .await
@@ -1638,8 +1663,10 @@ impl LanguageServer for VerterLanguageServer {
             .clone();
         crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
             self.prepare_foreground(&uri).await?;
-            self.settle_foreground(&uri, aux_features::handle_signature_help(self, params))
-                .await
+            self.settle_request_with_generation_retry(&uri, || {
+                aux_features::handle_signature_help(self, params.clone())
+            })
+            .await
         })
         .await
     }

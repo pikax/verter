@@ -204,7 +204,9 @@ pub(super) async fn handle_references_with_audit(
             async move {
                 server.prepare_foreground(&uri).await?;
                 server
-                    .settle_foreground(&uri, handle_references(server, params))
+                    .settle_request_with_generation_retry(&uri, || {
+                        handle_references(server, params.clone())
+                    })
                     .await
             },
             |payload, value| {
@@ -244,8 +246,14 @@ pub(super) async fn handle_rename_with_audit(
             Some(position),
             async move {
                 server.prepare_foreground(&uri).await?;
+                // Rename re-runs its own current-file repair and frontier
+                // activation after this capture; a diagnostics-generation-only
+                // advance repeats the repair and recomputes once instead of
+                // answering stale.
                 server
-                    .settle_foreground(&uri, handle_rename(server, params))
+                    .settle_request_with_generation_retry(&uri, || {
+                        handle_rename(server, params.clone())
+                    })
                     .await
             },
             |payload, value| {

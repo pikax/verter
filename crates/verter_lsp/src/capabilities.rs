@@ -1,31 +1,29 @@
 use serde_json::json;
 use tower_lsp_server::ls_types::*;
+use verter_session::framework::HostLanguageClassifier;
 
 /// Build the server capabilities to advertise during initialization.
 ///
 /// `encoding` is the negotiated position encoding to announce to the client.
-/// Watcher glob covering every registered framework-carrier extension,
-/// built from `LanguageRegistry::carrier_extensions()` (e.g.
-/// `**/*.{svelte,vue}`). Carrier rows without a registered carrier
-/// implementation widen the glob too — their watched events are inert
-/// (no virtual-file wiring exists for them), so watching is harmless
-/// and the glob stays registry-derived rather than hand-enumerated.
-pub(crate) fn carrier_watch_glob() -> String {
-    let extensions = verter_session::LanguageRegistry::global().carrier_extensions();
-    glob_for_extensions(&extensions)
+/// `framework` is the serving host's own composed classification authority:
+/// the watcher globs below are derived from the registry THIS host built, so
+/// the advertised framework surface cannot describe a framework set the host
+/// does not serve. Reading a process-global registry instead would let a
+/// watcher's surface and the host's surface disagree.
+pub(crate) fn carrier_watch_glob(framework: &HostLanguageClassifier) -> String {
+    glob_for_extensions(&framework.carrier_extensions())
 }
 
 /// Watcher glob covering every registered ADAPTER-MODULE extension across all
-/// adapters (e.g. `**/*.{svelte.js,svelte.ts}`), built from
-/// `LanguageRegistry::adapter_module_extensions(...)`. An adapter module is a
+/// adapters (e.g. `**/*.{svelte.js,svelte.ts}`), built from the serving
+/// host's own composed classification authority. An adapter module is a
 /// standalone NON-component rune module (`.svelte.ts` / `.svelte.js`) — NOT a
 /// carrier — so it is NOT covered by [`carrier_watch_glob`]; this dedicated
 /// glob is the descriptor-derived authority for its coverage (the generic
 /// `**/*.{ts,tsx,…}` glob no longer carries rune-module responsibility).
-/// Returns `None` when no adapter registers any module extension.
-pub(crate) fn adapter_module_watch_glob() -> Option<String> {
-    let registry = verter_session::LanguageRegistry::global();
-    let extensions = registry.all_adapter_module_extensions();
+/// Returns `None` when the serving host classifies no adapter-module extension.
+pub(crate) fn adapter_module_watch_glob(framework: &HostLanguageClassifier) -> Option<String> {
+    let extensions = framework.adapter_module_extensions();
     if extensions.is_empty() {
         return None;
     }
@@ -49,9 +47,16 @@ fn glob_for_extensions(extensions: &[&str]) -> String {
 /// session with no provider, or a provider without resolve support, advertises
 /// `resolve_provider: false` so the client never sends resolve requests the
 /// server would silently no-op.
+///
+/// `framework` is the serving host's composed classification authority, read
+/// for the watcher globs (e.g. `**/*.{svelte,vue}`). Carrier rows without a
+/// registered carrier implementation widen the glob too — their watched
+/// events are inert (no virtual-file wiring exists for them), so watching is
+/// harmless and the glob stays registry-derived rather than hand-enumerated.
 pub fn server_capabilities(
     encoding: &PositionEncodingKind,
     resolve_provider: bool,
+    framework: &HostLanguageClassifier,
 ) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.clone()),
@@ -205,7 +210,7 @@ pub fn server_capabilities(
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: carrier_watch_glob(),
+                            glob: carrier_watch_glob(framework),
                             matches: None,
                             options: None,
                         },
@@ -215,7 +220,7 @@ pub fn server_capabilities(
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: carrier_watch_glob(),
+                            glob: carrier_watch_glob(framework),
                             matches: None,
                             options: None,
                         },

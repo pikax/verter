@@ -361,49 +361,20 @@ impl VerterHost {
             verter_language::carrier_grammar::CarrierGrammarAuthority::new()
                 .expect("carrier grammar authority"),
         );
-        use verter_language::carrier_grammar::{
-            CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
-        };
-        // Seed the live grammar registry from the compiler's frontend
-        // catalog rows: the catalog `CarrierFrontend` registration is the
-        // SOLE grammar authority, so the host registers the catalog fact
-        // itself rather than an independently spelled copy. The version
-        // pairs below are host registration metadata (adapter semantic
-        // version × parser grammar version), not grammar content. A
-        // catalog row without a registered grammar fact fails host
-        // construction loudly — never a silently skipped registration.
-        for (language, adapter_version, grammar_version) in [
-            (verter_language::FileLanguage::vue(), 1, 1),
-            (verter_language::FileLanguage::svelte(), 1, 1),
-        ] {
-            let adapter_id = language
-                .adapter_id()
-                .expect("built-in carrier language carries a framework adapter id");
-            let carrier_language_id = language
-                .carrier_language_id()
-                .expect("built-in carrier language carries a carrier language id");
-            let grammar = verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
-                adapter_id,
-                carrier_language_id,
-            )
-            .unwrap_or_else(|| {
-                panic!(
-                    "frontend catalog row for adapter '{adapter_id}' × language \
-                     '{carrier_language_id}' carries no registered grammar fact"
-                )
-            })
-            .clone();
-            carrier_grammar_authority
-                .register_carrier_grammar(
-                    language.clone(),
-                    FrameworkAdapterSemanticVersion::new(adapter_version).expect("adapter version"),
-                    CarrierParserGrammarVersion::new(grammar_version).expect("grammar version"),
-                    grammar,
-                )
-                .unwrap_or_else(|error| {
-                    panic!("register catalog grammar for adapter '{adapter_id}': {error:?}")
-                });
-        }
+        // Seed the live grammar registry from the composed framework
+        // capability catalog. The catalog projects the compiler's frontend
+        // `CarrierFrontend` registrations — the SOLE grammar authority — so
+        // the host enumerates no frameworks of its own: a framework added to
+        // that catalog registers itself here, and one removed upstream stops
+        // being claimed here. A catalog row without a registered grammar
+        // fact fails construction loudly, never a silently skipped row.
+        let framework_services = std::sync::Arc::new(crate::framework::HostServices::built_in());
+        framework_services
+            .capabilities()
+            .register_all(&carrier_grammar_authority)
+            .unwrap_or_else(|error| {
+                panic!("register composed capability-catalog carrier grammars: {error:?}")
+            });
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),
@@ -420,6 +391,14 @@ impl VerterHost {
         let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
             crate::framework::ProjectCapabilitySnapshot::empty(),
         );
+        // The classifier is the host's watch surface and the language
+        // server's advertised framework surface, so it must classify exactly
+        // the carriers the composed services registered. Without this the two
+        // could drift: an extension classified as a carrier the catalog never
+        // registered would be watched but unservable, and a registered carrier
+        // the classifier never resolves would be served but unwatched. Both
+        // fail construction instead.
+        framework_services.assert_classifier_agrees(&language_classifier);
 
         // The platform-services profile this target requires. Bound
         // before the scheduler seam so the seam's compiled transport
@@ -433,9 +412,7 @@ impl VerterHost {
                 .expect("wasm32 host must bind a browser-admissible route set");
         }
 
-        // The framework adapter registry, built ONCE here.
-        let framework_registry =
-            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in());
+        // Host-owned framework script-fact caches, built ONCE here.
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
@@ -667,7 +644,7 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
-            framework_registry,
+            framework_services,
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
@@ -1315,7 +1292,7 @@ impl VerterHost {
     /// public-API-projection dispatch authority. Built once at host
     /// construction and immutable thereafter.
     pub(crate) fn framework_registry(&self) -> &crate::framework::FrameworkAdapterRegistry {
-        &self.framework_registry
+        self.framework_services.framework_registry()
     }
 
     /// The framework script-fact caches — the resolved-validation half's

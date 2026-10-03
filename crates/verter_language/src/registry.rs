@@ -216,6 +216,20 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The `(extension, FileLanguage)` pair of every framework-CARRIER static
+    /// row, in the same order as [`Self::carrier_extensions`].
+    pub fn carrier_rows(&self) -> Vec<(&str, FileLanguage)> {
+        self.rows
+            .iter()
+            .filter_map(|(_, row)| match &row.classification {
+                RowClassification::Static(language) if language.is_framework_carrier() => {
+                    Some((row.extension.as_str(), language.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Resolve an EDITOR `language_id` (the client's `TextDocumentItem`
     /// `languageId` — `"vue"`, `"svelte"`, …) to its framework CARRIER
     /// [`FileLanguage`] row, or `None` when no registered carrier owns that

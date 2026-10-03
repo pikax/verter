@@ -20047,3 +20047,68 @@ fn component_meta_hot_paths_self_test_cfg_test_item_initializer_is_ignored() {
          and must be ignored; got: {v:?}"
     );
 }
+
+/// K1: the host's live carrier-grammar authority is composed from the
+/// capability catalog the compiler's immutable frontend registrations
+/// produce — never from a per-framework row list spelled in the host.
+///
+/// The `[(FileLanguage::vue(), 1, 1), (FileLanguage::svelte(), 1, 1)]`
+/// matrix the host used to carry enumerated frameworks twice: once here,
+/// once in the adapter registry. A framework added to the compiler
+/// catalog registered itself from one matrix but was silently absent
+/// from the other, so the host's grammar authority and its dispatch
+/// authority could disagree. Composition makes the catalog the only
+/// enumeration; `HostServices` fails closed when the two disagree.
+#[test]
+fn host_carrier_grammar_registration_is_catalog_composed() {
+    let src = read_workspace_file("crates/verter_session/src/host_construction.rs");
+    let start = src
+        .find("let carrier_grammar_authority")
+        .expect("host construction still builds a carrier-grammar authority");
+    let end = src
+        .find("let carrier_publication_store")
+        .expect("the carrier-grammar authority is still published into a publication store");
+    let region = &src[start..end];
+    for framework in ["FileLanguage::vue()", "FileLanguage::svelte()"] {
+        assert!(
+            !region.contains(framework),
+            "host construction registers carrier grammars from the composed capability \
+             catalog; a `{framework}` row literal in the registration region is the \
+             per-framework branch matrix:\n{region}"
+        );
+    }
+    assert!(
+        region.contains("HostServices::built_in()")
+            || region.contains("FrameworkCapabilityCatalog::built_in()"),
+        "the host must seed its grammar authority from the composed framework services:\n{region}"
+    );
+    assert!(
+        region.contains("register_all("),
+        "the host registers carrier grammars through the catalog, never row by row:\n{region}"
+    );
+}
+
+/// K1: the LSP capability advertisement is built from the host's own
+/// composed classification authority.
+///
+/// `LanguageRegistry::global()` is a process-wide, install-once catalog
+/// authority: any consumer can read it whether or not the host it serves
+/// composed that generation, so a watcher's surface and the host's own
+/// surface can disagree. Reading the host's classifier keeps the
+/// advertised framework surface inside the host's construction.
+#[test]
+fn lsp_capabilities_read_the_host_composed_classifier() {
+    let src = read_workspace_file("crates/verter_lsp/src/capabilities.rs");
+    for needle in ["LanguageRegistry::global()", "LanguageRegistry::built_in()"] {
+        assert!(
+            !src.contains(needle),
+            "the LSP capability surface must read classification from the host it \
+             serves, never from a process-global registry; `{needle}` reintroduces a \
+             second, install-once catalog authority"
+        );
+    }
+    assert!(
+        src.contains("HostLanguageClassifier"),
+        "the LSP capability surface must take the host's composed classifier:\n{src}"
+    );
+}
