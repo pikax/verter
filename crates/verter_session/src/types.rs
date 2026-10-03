@@ -748,6 +748,20 @@ pub struct HostConfig {
     /// [`crate::VerterHost::cooperative_drive`].
     pub cooperative_yield:
         Option<std::sync::Arc<dyn crate::cooperative_scheduler::CooperativeYield>>,
+    /// Typed framework construction options — which framework verticals
+    /// the host admits. The default admits every vertical the composed
+    /// capability catalog names; an explicit admission is validated
+    /// against that catalog by
+    /// [`FrameworkOptions::admitting_names`](crate::framework::FrameworkOptions::admitting_names)
+    /// (the one validator every carrier funnels through) before it
+    /// reaches here.
+    ///
+    /// Constructor-time like the other host policy fields: the composed
+    /// framework services, the classifier, and the grammar authority are
+    /// all built from it once at host construction, and no request path
+    /// can retarget admission afterwards — request-specific options
+    /// cannot mutate this host-scoped configuration.
+    pub framework: crate::framework::FrameworkOptions,
 }
 
 /// Test / advanced-tuning hooks for resolver budgets. Each field is
@@ -1298,6 +1312,7 @@ impl Default for HostConfig {
             query_profile: verter_semantic::profile::QueryProfile::LspInteractive,
             resource_policy: HostResourcePolicy::default(),
             cooperative_yield: None,
+            framework: crate::framework::FrameworkOptions::default(),
         }
     }
 }
@@ -5172,6 +5187,7 @@ mod tests {
             query_profile: _,
             resource_policy: _,
             cooperative_yield: _,
+            framework: _,
         } = HostConfig::default();
     }
 

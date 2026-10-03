@@ -11,7 +11,7 @@ const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
 #[test]
 fn lsp_projection_host_uses_only_bounded_codegen_facts() {
-    let config = lsp_projection_host_config();
+    let config = lsp_projection_host_config(verter_session::framework::FrameworkOptions::default());
     assert_eq!(
         config.effective_scope(),
         verter_semantic::analysis::AnalysisScope::BUILD,
@@ -815,5 +815,55 @@ fn the_two_tsgo_topologies_are_distinguishable_on_the_wire() {
         TypeProviderTopology::None,
     ] {
         assert!(!topology.wire().is_empty());
+    }
+}
+
+/// K2 typed framework options — the LSP carrier half. The `--frameworks`
+/// CLI flag is the LSP's construction-time framework channel; it parses
+/// through the ONE shared session validator, so the language server
+/// accepts exactly the names, defaults, and rejections the native, NAPI,
+/// and WebAssembly carriers do.
+mod framework_options_carrier_tests {
+    use super::*;
+
+    #[test]
+    fn cli_frameworks_flag_parses_into_the_typed_options() {
+        let args =
+            CliArgs::parse_from(["--frameworks=vue".to_string(), "C:/workspace".to_string()]);
+        assert_eq!(args.frameworks.as_deref(), Some("vue"));
+        let options =
+            framework_options_from_cli(args.frameworks.as_deref()).expect("vue is composed");
+        assert_eq!(
+            options,
+            verter_session::framework::FrameworkOptions::admitting_names(["vue"])
+                .expect("vue is composed")
+        );
+    }
+
+    #[test]
+    fn cli_frameworks_rejects_unknown_names_with_the_shared_diagnostic() {
+        let error = framework_options_from_cli(Some("vue,react"))
+            .expect_err("react is not a composed vertical");
+        assert!(
+            error.contains("'react'") && error.contains("svelte, vue"),
+            "the LSP surfaces the shared diagnostic verbatim: {error}"
+        );
+    }
+
+    #[test]
+    fn cli_frameworks_absent_keeps_the_default_admission() {
+        let options = framework_options_from_cli(None).expect("absent flag parses");
+        assert_eq!(
+            options,
+            verter_session::framework::FrameworkOptions::default()
+        );
+    }
+
+    #[test]
+    fn lsp_projection_host_carries_the_admission_into_construction() {
+        let vue_only = verter_session::framework::FrameworkOptions::admitting_names(["vue"])
+            .expect("vue is composed");
+        let config = lsp_projection_host_config(vue_only.clone());
+        assert_eq!(config.framework, vue_only);
     }
 }

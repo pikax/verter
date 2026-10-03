@@ -27,6 +27,7 @@ use verter_protocol::typeinfo::graph::FrameworkTag;
 
 use crate::framework::api_projector::ComponentApiProjector;
 use crate::framework::language_classifier::HostLanguageClassifier;
+use crate::framework::options::FrameworkOptions;
 use crate::framework::surface_store::ErasedFrameworkSurfaceStore;
 use crate::framework::synth::ComponentDefaultSynth;
 use crate::typeinfo::framework_surface::FrameworkSurfaceAdapter;
@@ -450,6 +451,24 @@ impl FrameworkCapabilityCatalog {
         self.rows.iter().any(|row| row.adapter_id() == adapter_id)
     }
 
+    /// The rows `options` admits, in catalog order.
+    ///
+    /// A projection of this catalog, never a second enumeration: the
+    /// admission set was validated against the composed rows when it was
+    /// constructed, so filtering preserves the closed-set invariant —
+    /// every admitted row exists here, and no new row is invented.
+    #[must_use]
+    pub fn admitting(&self, options: &FrameworkOptions) -> Self {
+        Self {
+            rows: self
+                .rows
+                .iter()
+                .filter(|row| options.admits(row.adapter_id()))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// Register every composed row's carrier grammar into `authority`.
     ///
     /// The composition is ALL-OR-NOTHING. Every row is first accepted against
@@ -563,30 +582,41 @@ impl std::error::Error for CarrierGrammarCompositionError {}
 /// One construction step produces the whole framework axis of a host: the
 /// capability catalog that names the carrier grammars, and the adapter
 /// registry those grammars dispatch through. Both are built here and
-/// validated against each other, so a host is never published with a grammar
-/// authority and a dispatch authority that disagree about which frameworks
-/// exist.
+/// validated against each other, so a host is never published with a
+/// grammar authority and a dispatch authority that disagree about which
+/// frameworks exist.
 #[derive(Debug)]
 pub struct HostServices {
     capabilities: FrameworkCapabilityCatalog,
     registry: FrameworkAdapterRegistry,
+    options: FrameworkOptions,
 }
 
 impl HostServices {
-    /// Compose the built-in framework services.
+    /// Compose the framework services under `options`.
+    ///
+    /// The typed construction entry: every carrier funnels its framework
+    /// configuration into the validated [`FrameworkOptions`] and composes
+    /// the host's framework services through here, so admission is the
+    /// ONE authority (the catalog and the adapter registry are filtered
+    /// by the same set) rather than per-surface configuration. An
+    /// unadmitted vertical registers no grammar, dispatches nothing, and
+    /// contributes no script-fact provider — its sources fail closed at
+    /// the grammar authority instead of half-existing.
     ///
     /// # Panics
     ///
-    /// When a frontend capability row publishes no grammar fact, or when the
-    /// two authorities disagree about which frameworks exist. Both mean the
+    /// When a frontend capability row publishes no grammar fact, or when
+    /// the two authorities disagree about which frameworks exist. Both mean the
     /// compiler catalog and the adapter legs describe different framework sets;
     /// a partially composed host would serve a framework through one authority
     /// and not the other.
     #[must_use]
-    pub fn built_in() -> Self {
+    pub fn composed(options: &FrameworkOptions) -> Self {
         let capabilities = FrameworkCapabilityCatalog::built_in()
-            .expect("every built-in frontend capability row publishes a carrier grammar fact");
-        let registry = FrameworkAdapterRegistry::built_in();
+            .expect("every built-in frontend capability row publishes a carrier grammar fact")
+            .admitting(options);
+        let registry = FrameworkAdapterRegistry::built_in_admitting(options);
         // BOTH directions, in production and not only in the unit test: the
         // grammar authority and the dispatch authority must name the same
         // framework set. Catalog-without-registration drops a framework the
@@ -611,7 +641,31 @@ impl HostServices {
         Self {
             capabilities,
             registry,
+            options: options.clone(),
         }
+    }
+
+    /// Compose the built-in framework services (every composed vertical
+    /// admitted — the default [`FrameworkOptions`]).
+    ///
+    /// # Panics
+    ///
+    /// When a frontend capability row publishes no grammar fact, or when the
+    /// two authorities disagree about which frameworks exist. Both mean the
+    /// compiler catalog and the adapter legs describe different framework sets;
+    /// a partially composed host would serve a framework through one authority
+    /// and not the other.
+    #[must_use]
+    pub fn built_in() -> Self {
+        Self::composed(&FrameworkOptions::default())
+    }
+
+    /// The typed framework options this composition was built from —
+    /// constructor-time and immutable for the host's lifetime (a request
+    /// cannot retarget framework admission).
+    #[must_use]
+    pub fn options(&self) -> &FrameworkOptions {
+        &self.options
     }
 
     /// Fail unless `classifier` classifies exactly the framework-carrier
@@ -696,9 +750,21 @@ impl FrameworkAdapterRegistry {
     /// Build the registry with the production adapter rows.
     #[must_use]
     pub fn built_in() -> Self {
+        Self::built_in_admitting(&FrameworkOptions::default())
+    }
+
+    /// Build the registry with the production adapter rows `options`
+    /// admits — one registration per admitted vertical, none for an
+    /// unadmitted one.
+    #[must_use]
+    pub fn built_in_admitting(options: &FrameworkOptions) -> Self {
         let mut registrations = FxHashMap::default();
-        registrations.insert(FrameworkAdapterId::vue(), vue_registration());
-        registrations.insert(FrameworkAdapterId::svelte(), svelte_registration());
+        if options.admits(&FrameworkAdapterId::vue()) {
+            registrations.insert(FrameworkAdapterId::vue(), vue_registration());
+        }
+        if options.admits(&FrameworkAdapterId::svelte()) {
+            registrations.insert(FrameworkAdapterId::svelte(), svelte_registration());
+        }
         Self::finish(registrations)
     }
 
@@ -1301,6 +1367,101 @@ mod tests {
                 descriptor.id
             );
         }
+    }
+
+    /// A narrowed admission composes COHERENTLY: the catalog, the adapter
+    /// registry, and the retained options all describe the admitted set,
+    /// and nothing else. An unadmitted vertical dispatches nothing — its
+    /// wire tag resolves to the DeferredVertical disposition instead of a
+    /// fabricated registration.
+    #[test]
+    fn a_narrowed_admission_composes_only_the_admitted_verticals() {
+        let vue_only =
+            FrameworkOptions::admitting_names(["vue"]).expect("the Vue vertical is composed");
+        let services = HostServices::composed(&vue_only);
+        let registry = services.framework_registry();
+        assert!(
+            registry.contains(&FrameworkAdapterId::vue()),
+            "the admitted Vue vertical registers"
+        );
+        assert!(
+            !registry.contains(&FrameworkAdapterId::svelte()),
+            "the unadmitted Svelte vertical must not register"
+        );
+        // The wire completeness oracle degrades to the modeled deferred
+        // disposition, not to a fabricated registration.
+        assert_eq!(
+            registry.tag_disposition(FrameworkTag::Svelte),
+            Some(TagDisposition::DeferredVertical),
+            "an unadmitted vertical is a deferred vertical on the wire"
+        );
+        assert_eq!(
+            services.capabilities().adapter_ids().count(),
+            1,
+            "the admitted catalog carries exactly the admitted verticals"
+        );
+        assert_eq!(services.options(), &vue_only);
+        // The script-fact index is empty without the Svelte provider — the
+        // vue-only host pays nothing for Svelte syntax capture.
+        assert!(
+            registry.active_provider_index().is_empty(),
+            "an unadmitted vertical contributes no script-fact provider"
+        );
+    }
+
+    /// The fail-closed half of admission: a host composed without the
+    /// Svelte vertical registers no Svelte carrier grammar, so a Svelte
+    /// source is REJECTED by the grammar authority — never parsed, never
+    /// served — while the admitted Vue grammar keeps registering.
+    #[test]
+    fn an_unadmitted_vertical_registers_no_carrier_grammar() {
+        let vue_only =
+            FrameworkOptions::admitting_names(["vue"]).expect("the Vue vertical is composed");
+        let services = HostServices::composed(&vue_only);
+        let authority = CarrierGrammarAuthority::new().expect("carrier grammar authority");
+        services
+            .capabilities()
+            .register_all(&authority)
+            .expect("the admitted composition publishes into a fresh authority");
+
+        let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+        let svelte_source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///workspace/Box.svelte"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                FileLanguage::svelte(),
+                Arc::from("<script>let x = 1;</script>"),
+            )
+            .expect("registered source");
+        let svelte_grammar = verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+            &FrameworkAdapterId::svelte(),
+            &LanguageId::new("svelte"),
+        )
+        .expect("the frontend catalog publishes the Svelte carrier grammar");
+        assert_eq!(
+            authority
+                .accept_registered_source(&source_authority, &svelte_source, svelte_grammar)
+                .err(),
+            Some(CarrierAcceptanceError::NoRegisteredGrammar),
+            "an unadmitted vertical's sources must fail closed at the grammar authority"
+        );
+
+        let vue_source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///workspace/App.vue"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                FileLanguage::vue(),
+                Arc::from("<template><p/></template>"),
+            )
+            .expect("registered source");
+        assert!(
+            authority
+                .accept_registered_source(&source_authority, &vue_source, registered_vue_grammar())
+                .is_ok(),
+            "the admitted vertical's sources keep registering"
+        );
     }
 
     /// Two catalog rows that resolve to ONE carrier language are an identity

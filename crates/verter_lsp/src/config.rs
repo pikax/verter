@@ -77,6 +77,28 @@ pub fn parse_hover_init_options(init_options: &serde_json::Value) -> HoverOption
     }
 }
 
+/// The actionable diagnostic for an `initializationOptions.frameworks`
+/// key: framework admission is fixed when the LSP's host is constructed
+/// (before `initialize` arrives), so a runtime key cannot apply — an
+/// option that silently failed to apply is exactly the loosely typed
+/// configuration route the typed options exist to close.
+pub const FRAMEWORK_ADMISSION_IS_CONSTRUCTION_TIME: &str = "initializationOptions.frameworks \
+     cannot change framework admission: it is fixed when the server's host is constructed. \
+     Pass --frameworks=<vue,svelte> to the verter-lsp process instead";
+
+/// Reject an `initializationOptions.frameworks` key.
+///
+/// Returns the diagnostic when the key is present (any value — the
+/// point is that no runtime value can apply), `None` when absent. The
+/// LSP's framework admission is construction-time through the shared
+/// typed options; `initialize` fails closed rather than accepting a
+/// configuration it cannot honor.
+pub fn framework_admission_init_option_error(init_options: &serde_json::Value) -> Option<String> {
+    init_options
+        .get("frameworks")
+        .map(|_| FRAMEWORK_ADMISSION_IS_CONSTRUCTION_TIME.to_string())
+}
+
 /// Optional native semantic-enrichment policy. TypeScript-backed IDE features
 /// never depend on this lane; the Analysis UI or an explicitly enabled Verter
 /// lint configuration opts into isolated background snapshots.
@@ -1991,5 +2013,37 @@ export default defineConfig(({ mode }) => ({
             ws2.root, "/home/user/project",
             "Linux-style root should pass through unchanged"
         );
+    }
+}
+
+#[cfg(test)]
+mod framework_admission_config_tests {
+    use super::*;
+
+    /// A `frameworks` key under initializationOptions is rejected with
+    /// the actionable construction-time diagnostic — whatever its value,
+    /// because no runtime value can apply to the already-constructed
+    /// host.
+    #[test]
+    fn a_frameworks_init_option_key_is_rejected_with_guidance() {
+        let with_key = serde_json::json!({ "frameworks": ["vue"] });
+        let error = framework_admission_init_option_error(&with_key)
+            .expect("the frameworks key must be rejected");
+        assert!(
+            error.contains("--frameworks="),
+            "the diagnostic names the construction-time channel: {error}"
+        );
+        // Any value shape is rejected the same way — even `false` or a
+        // string — because the key itself cannot apply at runtime.
+        let falsy = serde_json::json!({ "frameworks": false });
+        assert!(framework_admission_init_option_error(&falsy).is_some());
+    }
+
+    /// Absent key: no error — every other init option keeps parsing.
+    #[test]
+    fn no_frameworks_init_option_key_is_clean() {
+        let without_key = serde_json::json!({ "lint": { "enabled": true }, "hover": {} });
+        assert!(framework_admission_init_option_error(&without_key).is_none());
+        assert!(framework_admission_init_option_error(&serde_json::json!({})).is_none());
     }
 }
