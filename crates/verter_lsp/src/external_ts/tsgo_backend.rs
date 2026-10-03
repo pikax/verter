@@ -26,8 +26,9 @@ use std::sync::Arc;
 
 use verter_session::external_ts::{
     BoundProject, Diagnostics, DiagnosticsOutcome, EngineBackend, EngineCapabilities, EngineError,
-    EnsureProject, PublishSnapshot, Query, QueryOutcome,
+    EngineVersion, EnsureProject, PublishSnapshot, Query, QueryOutcome,
 };
+use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 
 /// The OWNED tsgo engine backend: the project-association witness authority for the
 /// one-instance dual-surface provider.
@@ -37,25 +38,31 @@ use verter_session::external_ts::{
 /// gate production ops behind a resolved-project [`BoundProject`] witness.
 #[derive(Debug)]
 pub struct TsgoEngineBackend {
-    /// The negotiated capabilities reported for every bound project.
+    /// The capabilities recorded for every bound project.
     capabilities: EngineCapabilities,
 }
 
 impl TsgoEngineBackend {
-    /// Build the backend for a negotiated tsgo engine version.
+    /// Build the backend for a tsgo engine version this session negotiated.
     ///
     /// The dual-surface handshake (§2.8): `--api` checker + diagnostics + project
     /// membership are REQUIRED and present; the engine exposes NO static
     /// module-resolution-map endpoint and NO wire-level cancellation (the shipped
     /// `--api` has neither — `api_wire_cancel = false` is the EXPECTED recorded
     /// value, not a failure), so both capability flags are `false`.
+    ///
+    /// The version is recorded as [`EngineVersion::Declared`]: the string names
+    /// the engine this session was NEGOTIATED with, which the bootstrap
+    /// OWNED-gate path supplies before any in-band report exists. It separates
+    /// two differently-negotiated engines in a certified profile without ever
+    /// claiming to be a handshake the engine did not make.
     #[must_use]
     pub fn new(engine_version: impl Into<Arc<str>>) -> Self {
         Self {
             capabilities: EngineCapabilities {
                 static_module_resolution_map: false,
                 async_cancellable_queries: false,
-                reported_version: Some(engine_version.into()),
+                version: EngineVersion::Declared(engine_version.into()),
             },
         }
     }
@@ -80,7 +87,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// call here is a wiring error — fail LOUDLY rather than silently no-op.
     fn publish_snapshot(
         &self,
-        _project: &BoundProject,
+        _project: &CertifiedTypeEngineBinding,
         _snapshot: PublishSnapshot,
     ) -> Result<(), EngineError> {
         unimplemented!(
@@ -93,7 +100,11 @@ impl EngineBackend for TsgoEngineBackend {
 
     /// Answered by the live `TsgoOwnedProvider` (`--api` checker over the attached
     /// pipe), wired separately from this project-association witness.
-    fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
+    fn query(
+        &self,
+        _project: &CertifiedTypeEngineBinding,
+        _query: Query,
+    ) -> Result<QueryOutcome, EngineError> {
         unimplemented!(
             "TsgoEngineBackend::query is answered by the live TsgoOwnedProvider's --api \
              checker over the attached pipe, wired separately from this witness authority."
@@ -104,7 +115,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// wired separately. See [`Self::query`].
     fn diagnostics(
         &self,
-        _project: &BoundProject,
+        _project: &CertifiedTypeEngineBinding,
         _request: Diagnostics,
     ) -> Result<DiagnosticsOutcome, EngineError> {
         unimplemented!(

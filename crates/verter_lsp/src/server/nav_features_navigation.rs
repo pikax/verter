@@ -491,9 +491,40 @@ pub(super) async fn handle_goto_definition(
             tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
         ));
     }
-    let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, uri);
-    let settle = |response| settlement.settle(&server.documents, uri, response);
+    // The provider leg settles against a basis captured after that repair. A
+    // diagnostics-generation-only move during its await (a background sync,
+    // or an importer re-armed by a dependency's settled edit) recomputes it
+    // against a fresh basis instead of answering `ContentModified`; the
+    // native result above was already accepted against such a basis and is
+    // reused. An edit, close/reopen or workspace change still fails closed.
+    let mut prepared_ctx = Some(prepared_ctx);
+    server
+        .settle_request_with_generation_retry(uri, || {
+            let prepared_ctx = prepared_ctx.take();
+            let verter_result = verter_result.clone();
+            async move {
+                let ctx = match prepared_ctx {
+                    Some(ctx) => ctx,
+                    None if server.type_provider.is_some() => {
+                        server.repaired_type_provider_context(uri).await
+                    }
+                    None => None,
+                };
+                definition_provider_attempt(server, uri, position, verter_result, ctx).await
+            }
+        })
+        .await
+}
 
+/// The provider leg of one definition attempt; [`handle_goto_definition`]
+/// owns its settlement.
+async fn definition_provider_attempt(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    position: &Position,
+    verter_result: Option<GotoDefinitionResponse>,
+    prepared_ctx: Option<super::TypeProviderContext>,
+) -> Result<Option<GotoDefinitionResponse>> {
     // Enhance with the TypeProvider immediately. Dependency readiness above is
     // a background-healing signal, not an admission gate for non-destructive
     // navigation; a partial provider answer during project loading is preferable
@@ -552,7 +583,7 @@ pub(super) async fn handle_goto_definition(
                             "definition: dropping provider locations — captured surface \
                                  no longer valid"
                         );
-                        return settle(verter_result);
+                        return Ok(verter_result);
                     }
                     tracing::debug!(
                         "definition: type provider returned {} locations",
@@ -634,7 +665,7 @@ pub(super) async fn handle_goto_definition(
                         Some(GotoDefinitionResponse::Scalar(_)) => false,
                     };
                     if !(provider_had_defs && resolved_is_empty) {
-                        return settle(resolved);
+                        return Ok(resolved);
                     }
                     tracing::debug!(
                         "definition: all provider targets were synthetic — retrying {} \
@@ -654,10 +685,10 @@ pub(super) async fn handle_goto_definition(
                     }
                     // Post-await validation (fail closed), same as above.
                     if !server.provider_context_still_valid(uri, &ctx) {
-                        return settle(None);
+                        return Ok(None);
                     }
                     if probe_defs.is_empty() {
-                        return settle(None);
+                        return Ok(None);
                     }
                     // A provider may follow the augmentation member THROUGH
                     // `typeof C` to the component's synthesized API carrier
@@ -680,7 +711,7 @@ pub(super) async fn handle_goto_definition(
                         false
                     });
                     if probe_defs.is_empty() {
-                        return settle(if native_locations.is_empty() {
+                        return Ok(if native_locations.is_empty() {
                             None
                         } else {
                             Some(GotoDefinitionResponse::Array(native_locations))
@@ -720,7 +751,7 @@ pub(super) async fn handle_goto_definition(
                         None => Vec::new(),
                     };
                     locations.extend(native_locations);
-                    return settle(if locations.is_empty() {
+                    return Ok(if locations.is_empty() {
                         None
                     } else {
                         Some(GotoDefinitionResponse::Array(locations))
@@ -737,7 +768,7 @@ pub(super) async fn handle_goto_definition(
         }
     }
 
-    settle(verter_result)
+    Ok(verter_result)
 }
 
 pub(super) async fn handle_goto_type_definition(

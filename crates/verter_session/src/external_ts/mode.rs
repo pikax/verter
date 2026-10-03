@@ -502,7 +502,10 @@ impl ReferenceComponent {
 pub struct EngineSessionFacts {
     /// The engine version observed in-band from the session itself.
     pub observed_version: Arc<str>,
-    /// The negotiated wire/protocol pin of the session.
+    /// The wire/protocol pin of the session: a fingerprint the peer
+    /// advertised in-band, or the local carrier-store FORMAT pin a spawned
+    /// OWNED publisher declares. Either way it is the session's contract
+    /// version, never a placeholder.
     pub wire_pin: u64,
     /// The attach-session generation (bumps on editor engine restart or
     /// reconnect; the OWNED session uses its own spawn generation).
@@ -605,7 +608,9 @@ pub struct EngineIdentity {
     pub mode: ServeMode,
     /// The engine version observed in-band from the serving session.
     pub observed_version: Arc<str>,
-    /// The negotiated wire/protocol pin of the serving session.
+    /// The wire/protocol pin of the serving session (see
+    /// [`EngineSessionFacts::wire_pin`] — advertised for an attached session,
+    /// declared by a spawned OWNED one).
     pub wire_pin: u64,
     /// The serving session's generation.
     pub editor_session_generation: u64,

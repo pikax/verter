@@ -16,6 +16,8 @@ mod carrier_companion_suffix_collision_free;
 mod carrier_never_shadows_real_user_file;
 #[path = "../g_extts/carrier_ownership_extension_rules.rs"]
 mod carrier_ownership_extension_rules;
+#[path = "../g_extts/certified_engine_seam.rs"]
+mod certified_engine_seam;
 #[path = "../g_extts/component_bare_import_resolves_to_declaration_carrier.rs"]
 mod component_bare_import_resolves_to_declaration_carrier;
 #[path = "../g_extts/same_stem_svelte_component_rune_fails_closed.rs"]
