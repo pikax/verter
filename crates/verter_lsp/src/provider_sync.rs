@@ -839,19 +839,78 @@ impl IdeLegBasis<'_> {
 /// observed a different public API since, and the serving engine incarnation
 /// still holds those bytes. A restarted engine, an owner change or a moved public
 /// API leaves the leg owed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the API leg validates the full source and projection basis"
+)]
 pub(crate) fn api_leg_is_current(
     project_sync: &crate::type_provider::project_sync::ProjectSync,
     committed: Option<&ProviderSyncState>,
     owner_binding: &ProviderOwnerBinding,
     dts_path: &str,
     api_code: &str,
+    source_map_json: Option<&str>,
+    canonical_id: &str,
+    documents: &crate::documents::DocumentRegistry,
 ) -> bool {
+    let source = crate::provider_surface_store::resolve_carrier_source(
+        Some(documents),
+        &documents.host(),
+        canonical_id,
+    );
+    let snapshot = documents.provider_surfaces().current_snapshot(dts_path);
     committed.is_some_and(|committed| {
         committed.owner_binding == *owner_binding
             && committed.api_path.as_deref() == Some(dts_path)
             && committed.api_companion_is_live_and_current()
             && committed.api_delivered_hash == Some(api_declaration_identity(api_code))
     }) && project_sync.companion_applied_verbatim(dts_path, api_code)
+        && snapshot.zip(source).is_some_and(|(snapshot, source)| {
+            snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierApi
+                && snapshot.source_canonical.as_ref() == canonical_id
+                && snapshot.source_hash == ContentHash::of(&source)
+                && snapshot.provider_content.as_ref() == api_code
+                && snapshot.stamp.map_hash
+                    == source_map_json
+                        .map(|map| ContentHash::of(map).to_hash16())
+                        .unwrap_or([0; 16])
+        })
+}
+
+pub(crate) fn open_ide_leg_is_current(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    documents: &crate::documents::DocumentRegistry,
+    committed: Option<&ProviderSyncState>,
+    canonical_id: &str,
+    ide_path: &str,
+    generated: &str,
+    owner_binding: &ProviderOwnerBinding,
+) -> bool {
+    let Some(uri) = documents.canonical_id_to_uri(canonical_id) else {
+        return false;
+    };
+    documents.get(&uri).is_some_and(|document| {
+        IdeLegBasis {
+            canonical_id,
+            ide_path,
+            generated,
+            owner_binding,
+            live_source: &document.source,
+        }
+        .is_current(sync, documents.provider_surfaces(), committed)
+    }) && documents
+        .host()
+        .get_ide(canonical_id, &documents.tsx_profile.read())
+        .filter(|ide| ide.code.as_ref() == generated)
+        .zip(documents.provider_surfaces().current_snapshot(ide_path))
+        .is_some_and(|(ide, snapshot)| {
+            snapshot.stamp.map_hash
+                == ide
+                    .source_map
+                    .as_deref()
+                    .map(|map| ContentHash::of(map).to_hash16())
+                    .unwrap_or([0; 16])
+        })
 }
 
 /// Resolve the [`verter_session::FileLanguage`] for a non-carrier

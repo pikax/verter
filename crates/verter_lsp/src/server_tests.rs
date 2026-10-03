@@ -16378,7 +16378,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            MockCall::OpenFileBackground { path, .. } | MockCall::UpdateFile { path, .. }
                 if path.ends_with(".vue.verter.ts")
         )),
         "drain should sync the Vue public API through .vue.verter.ts"
@@ -19761,6 +19761,14 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
         "bootstrap sync_carrier_api_unresolved must force an Unresolved binding, got {:?}",
         state.owner_binding
     );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(state.api_path.as_deref().expect("bootstrap API path"))
+            .is_none(),
+        "without captured source bytes, binding conversion must not invent a surface"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -19787,7 +19795,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -19874,10 +19882,8 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
@@ -19885,7 +19891,7 @@ defineProps<{ msg: string }>()
         // The task's lane probe is answered by a standalone registry that holds no
         // open generation for this canonical, so it takes the same unserialized
         // path the task took before the shared per-document lane existed.
-        Arc::clone(documents.document_lanes()),
+        Arc::clone(&documents),
     )
     .await;
 
@@ -19939,7 +19945,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -20000,10 +20006,8 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
@@ -20011,7 +20015,7 @@ defineProps<{ msg: string }>()
         // No open generation for this canonical in a registry that never opened
         // it, so the lane probe reports Closed and the task runs unserialized —
         // the same path it took before the shared lane existed.
-        Arc::clone(documents.document_lanes()),
+        Arc::clone(&documents),
     )
     .await;
 
@@ -20060,7 +20064,7 @@ defineProps<{ msg: string }>()
     .expect("write App.vue");
 
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
-    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
@@ -20120,10 +20124,8 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
-        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
@@ -20131,7 +20133,7 @@ defineProps<{ msg: string }>()
         // The task's lane probe is answered by a standalone registry that holds no
         // open generation for this canonical, so it takes the same unserialized
         // path the task took before the shared per-document lane existed.
-        Arc::clone(documents.document_lanes()),
+        Arc::clone(&documents),
     )
     .await;
 
@@ -20143,7 +20145,7 @@ defineProps<{ msg: string }>()
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. }
+            MockCall::OpenFile { path, .. } | MockCall::OpenFileBackground { path, .. }
                 | MockCall::UpdateFile { path, .. }
                 | MockCall::LoadFile { path, .. }
             if path == &new_api_path
@@ -23722,7 +23724,7 @@ defineProps<{ msg: string }>()
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
+                MockCall::OpenFileBackground { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
             )),
             "TSGO pending sync should keep syncing the API artifact, calls={calls:?}"
         );
@@ -37855,4 +37857,455 @@ async fn did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed() 
         server.ide_leg_owed_for_open_document(&uri),
         "once the engine no longer holds the bytes the leg is owed again"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_provider_round_trip_does_not_block_interactive_ide_repair() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    server.sync_api_to_provider(&uri).await;
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let generation = server
+        .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .expect("open generation");
+    let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
+    let api_path = server
+        .provider_sync_state_for_source(&canonical_id)
+        .expect("owned fixture")
+        .api_path
+        .expect("API companion");
+    provider.forget_applied_content();
+    let (arrived, release) = provider.block_open_file(&api_path);
+    let (updated, release_update) = provider.block_update_file(&api_path);
+    let repair = async {
+        tokio::select! { _ = arrived.notified() => {}, _ = updated.notified() => {} }
+        server.needs_ide_sync.insert(canonical_id.clone());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.ensure_current_file_synced(&uri),
+        )
+        .await;
+        release.notify_one();
+        release_update.notify_one();
+        result
+    };
+    let (_, result) = tokio::join!(server.sync_api_to_provider(&uri), repair);
+    assert!(
+        result.is_ok(),
+        "IDE repair must finish while the API write is parked"
+    );
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+fn lane_interleaving_deps(
+    server: &VerterLanguageServer,
+) -> crate::sync_coordinator::SyncCoordinatorDeps {
+    crate::sync_coordinator::SyncCoordinatorDeps {
+        documents: Arc::clone(&server.documents),
+        project_sync: server.project_sync.clone(),
+        needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
+        pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),
+        client: server.client.clone(),
+        type_provider: server.type_provider.clone(),
+        cached_verter_diags: Arc::clone(&server.cached_verter_diags),
+        position_encoding: Arc::clone(&server.position_encoding),
+        provider_sync_states: Arc::clone(&server.provider_sync_states),
+        vfs_workspace: Arc::clone(&server.vfs_workspace),
+        type_provider_kind: server.type_provider_kind,
+        carrier_publish_coordinator: server.carrier_publish_coordinator.clone(),
+        carrier_transaction_coordinator: Arc::clone(&server.carrier_transaction_coordinator),
+    }
+}
+
+async fn lane_interleaving_fixture(
+    name: &str,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        &format!("/workspace/src/{name}.vue"),
+        REQUEST_SURFACE_APP,
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let generation = server
+        .current_or_init_ide_sync_open_generation(&uri, &canonical_id)
+        .unwrap();
+    let _lease = server.ide_sync_repair_lease(&canonical_id, generation);
+    server.sync_ide_to_provider(&uri).await;
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "const msg: string // provider lane answer",
+    );
+    provider.clear_calls();
+    (service, provider, uri)
+}
+
+fn ide_application_count(provider: &MockTypeProvider, canonical_id: &str) -> usize {
+    let path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(call,
+        MockCall::OpenFile { path: p, .. } | MockCall::OpenFileBackground { path: p, .. }
+        | MockCall::UpdateFile { path: p, .. } | MockCall::LoadFile { path: p, .. } if p == &path)
+        })
+        .count()
+}
+
+fn edit_interleaving_document(server: &VerterLanguageServer, uri: &Uri, version: i32, value: &str) {
+    let source = REQUEST_SURFACE_APP.replace("'hello'", &format!("'{value}'"));
+    assert!(server.documents.did_change(uri, version, &source).changed);
+    let canonical_id = crate::documents::uri_to_canonical_id(uri);
+    server.needs_ide_sync.insert(canonical_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_joins_a_coordinator_parked_after_compile_without_an_extra_ide_application() {
+    let (service, provider, uri) = lane_interleaving_fixture("HoverJoinsCompile").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let (waiting, resume) = server.pause_next_ide_sync_after_lease(&id);
+    let request = async {
+        arrived.notified().await;
+        let control = async {
+            waiting.notified().await;
+            let writes = ide_application_count(&provider, &id);
+            resume.notify_one();
+            release.notify_one();
+            writes
+        };
+        tokio::join!(server.hover(hover_params(&uri, position)), control)
+    };
+    let (settled, (hover, before)) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        request
+    );
+    if !settled {
+        assert!(
+            server.pending_snapshot_provider_sync.contains(&id),
+            "an API leg yielding to the waiting hover stays owed"
+        );
+    }
+    assert_eq!(
+        before, 0,
+        "the hover reached the held lane before any IDE write"
+    );
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+    drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        true,
+        None,
+        server.carrier_publish_coordinator.as_ref(),
+        &server.carrier_transaction_coordinator,
+    )
+    .await;
+    assert_eq!(ide_application_count(&provider, &id), 1);
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&id),
+        "neither commit was superseded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tick_yields_to_hover_parked_before_write_and_skips_after_its_commit() {
+    let (service, provider, uri) = lane_interleaving_fixture("TickJoinsHover").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(&id);
+    let ticking = async {
+        arrived.notified().await;
+        let settled =
+            crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()).await;
+        let writes = ide_application_count(&provider, &id);
+        release.notify_one();
+        (settled, writes)
+    };
+    let (hover, (settled, before)) =
+        tokio::join!(server.hover(hover_params(&uri, position)), ticking);
+    assert!(!settled, "the contended tick requeues instead of waiting");
+    assert_eq!(before, 0);
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert!(crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()).await);
+    assert_eq!(ide_application_count(&provider, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_fences_the_parked_coordinator_and_hover_repairs_the_new_revision() {
+    let (service, provider, uri) = lane_interleaving_fixture("EditFencesCompile").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let editing = async {
+        arrived.notified().await;
+        edit_interleaving_document(server, &uri, 3, "again");
+        release.notify_one();
+        server.hover(hover_params(&uri, position)).await
+    };
+    let (settled, hover) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        editing
+    );
+    assert!(
+        !settled,
+        "the coordinator's obsolete transaction is refused"
+    );
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert_eq!(ide_application_count(&provider, &id), 1);
+    let surface = server.capture_provider_request_surface(&uri).unwrap();
+    assert_eq!(
+        surface.source_hash,
+        crate::provider_surface_store::ContentHash::of(
+            &REQUEST_SURFACE_APP.replace("'hello'", "'again'")
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_orders_after_the_holder_and_an_old_waiter_cannot_commit_into_reopen() {
+    let (service, provider, uri) = lane_interleaving_fixture("CloseOrdersRepair").await;
+    let server = service.inner();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(&id);
+    let closing = async {
+        arrived.notified().await;
+        let close = server.did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        });
+        tokio::pin!(close);
+        let close_waited = futures_util::poll!(close.as_mut()).is_pending();
+        let old_waiter = server.ensure_current_file_synced(&uri);
+        tokio::pin!(old_waiter);
+        let waiter_waited = futures_util::poll!(old_waiter.as_mut()).is_pending();
+        release.notify_one();
+        close.await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 3,
+                    text: REQUEST_SURFACE_APP.replace("'hello'", "'again'"),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, &id);
+        old_waiter.await;
+        (close_waited, waiter_waited, before)
+    };
+    let (_, (close_waited, waiter_waited, before)) =
+        tokio::join!(server.ensure_current_file_synced(&uri), closing);
+    assert!(close_waited && waiter_waited);
+    assert_eq!(
+        before, 2,
+        "the prior holder and the reopened generation each deliver once"
+    );
+    assert_eq!(
+        ide_application_count(&provider, &id),
+        before,
+        "the old waiter delivered and committed nothing"
+    );
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scanner_started_closed_yields_when_the_document_opens_after_compile() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let id = "/workspace/src/ScannerMeetsOpen.vue";
+    let uri: Uri = "file:///workspace/src/ScannerMeetsOpen.vue"
+        .parse()
+        .unwrap();
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            input_id: id.to_string(),
+            canonical_id: Some(id.to_string()),
+            source: Arc::from(REQUEST_SURFACE_APP),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .unwrap();
+    let profile = server.documents.tsx_profile.read().clone();
+    let host = server.documents.host();
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(id);
+    let opening = async {
+        arrived.notified().await;
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: REQUEST_SURFACE_APP.to_string(),
+                },
+            })
+            .await;
+        let before = ide_application_count(&provider, id);
+        release.notify_one();
+        before
+    };
+    let (_, before) = tokio::join!(
+        crate::workspace_scanner::sync_file_to_provider(
+            id,
+            &host,
+            Some(&server.documents),
+            &profile,
+            server.project_sync.as_ref(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            true,
+            &server.provider_sync_states,
+            server.carrier_publish_coordinator.as_ref(),
+            &server.carrier_transaction_coordinator,
+            Some(&server.pending_snapshot_provider_sync),
+            None
+        ),
+        opening
+    );
+    assert_eq!(before, 1);
+    assert_eq!(ide_application_count(&provider, id), before);
+    assert!(server.pending_snapshot_provider_sync.contains(id));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_parked_document_leaves_another_documents_hover_unaffected() {
+    let (service, provider, uri) = lane_interleaving_fixture("HeldWhileOtherHovers").await;
+    let server = service.inner();
+    let other = open_test_vue(
+        server,
+        "/workspace/src/UnaffectedHover.vue",
+        REQUEST_SURFACE_APP,
+    );
+    server.ensure_current_file_synced(&other).await;
+    let position = find_document_position(server, &other, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &other,
+        position,
+        "const msg: string // provider lane answer",
+    );
+    provider.clear_calls();
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let other_id = crate::documents::uri_to_canonical_id(&other);
+    edit_interleaving_document(server, &uri, 2, "world");
+    let deps = lane_interleaving_deps(server);
+    let (arrived, release) = crate::sync_coordinator::test_hooks::block_after_ide_compile(&id);
+    let requesting = async {
+        arrived.notified().await;
+        let result = server.hover(hover_params(&other, position)).await;
+        let held_writes = ide_application_count(&provider, &id);
+        release.notify_one();
+        (result, held_writes)
+    };
+    let (settled, (hover, before)) = tokio::join!(
+        crate::sync_coordinator::synchronize_document_for_test(&deps, &id, uri.as_str()),
+        requesting
+    );
+    assert!(settled);
+    assert!(hover_text(hover.unwrap()).contains("const msg: string // provider lane answer"));
+    assert_eq!(
+        before, 0,
+        "the other request completed before the holder was released"
+    );
+    assert_eq!(ide_application_count(&provider, &other_id), 0);
+    assert_eq!(ide_application_count(&provider, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_api_open_yields_to_hover_and_refuses_a_changed_revision() {
+    let (service, provider, uri) = lane_interleaving_fixture("BackgroundApiYields").await;
+    let server = service.inner();
+    let canonical = crate::documents::uri_to_canonical_id(&uri);
+    let path = verter_semantic::resolver_core::carrier_api_provider_path(&canonical);
+    let (arrived, release) = provider.block_open_file(&path);
+    let snapshot = server.published_resolver().unwrap();
+    let vfs = server.vfs_workspace.read().clone();
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let task = super::background_drain::sync_api_to_provider_background_task(
+        server.project_sync.clone().unwrap(),
+        snapshot,
+        vfs,
+        Arc::clone(&server.provider_sync_states),
+        canonical.clone(),
+        false,
+        Arc::clone(&server.carrier_transaction_coordinator),
+        Arc::clone(&server.pending_snapshot_provider_sync),
+        Arc::clone(&server.documents),
+    );
+    let request = async {
+        arrived.notified().await;
+        edit_interleaving_document(server, &uri, 2, "world");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.hover(hover_params(&uri, position)),
+        )
+        .await;
+        let before_resume = server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&path)
+            .map(|surface| surface.stamp.clone());
+        release.notify_one();
+        (result, before_resume)
+    };
+    let (_, (hover, before_resume)) = tokio::join!(task, request);
+    assert!(
+        hover.is_ok(),
+        "hover must finish before the background API open resumes"
+    );
+    assert!(
+        hover_text(hover.unwrap().unwrap()).contains("const msg: string // provider lane answer")
+    );
+    assert_eq!(ide_application_count(&provider, &canonical), 1);
+    assert_eq!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&path)
+            .map(|surface| surface.stamp.clone()),
+        before_resume,
+        "the refused API transaction must leave the hover's current coordinate record untouched"
+    );
+    assert!(
+        !server
+            .provider_sync_state_for_source(&canonical)
+            .unwrap()
+            .api_background_loaded,
+        "refused API delivery cannot mark the owed API leg applied"
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(&canonical));
+    assert!(server.capture_provider_request_surface(&uri).is_some());
 }

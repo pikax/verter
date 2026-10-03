@@ -24,14 +24,14 @@ pub(crate) struct SyncedTsxSurface {
 }
 
 impl SyncedTsxSurface {
-    /// Seal the content a delivery of `path` produced.
+    /// Seal the content this operation certified the engine applied.
     ///
     /// Only a holder of THAT content can call this — the delivery itself, or the
     /// fenced surface record that observed the same bytes. Nothing can
     /// reconstruct a receipt from a provider path alone, which is the point: a
     /// commit must attest what its own transaction delivered, not what the path
     /// happens to hold when the commit runs.
-    pub(crate) fn from_delivered(path: &str, delivered: PreparedCarrierProviderContent) -> Self {
+    fn from_delivered(path: &str, delivered: PreparedCarrierProviderContent) -> Self {
         Self {
             path: Arc::from(path),
             delivered,
@@ -76,24 +76,44 @@ pub(crate) enum CarrierDelivery {
     /// delivery prepared — the receipt a commit seals — or `None` when the
     /// serving engine has not certified it applied exactly those bytes.
     Delivered(Option<SyncedTsxSurface>),
-    /// The engine took the carrier as MEMBERSHIP rather than as a buffer
-    /// (tsserver's store-backed publish): the publication happened and the
-    /// commit proceeds, with no delivered companion surface to seal.
-    Published,
+    /// The caller's gateway owns membership publication for tsserver. This
+    /// operation carries its own prepared coordinate space, without a
+    /// competing content-open or a serving-engine application claim.
+    Published(PreparedCarrierProviderContent),
     /// Nothing was delivered: the fence refused under the per-path delivery
     /// lock, or the engine held/shadowed the file. The caller must record
     /// nothing, commit nothing and close nothing.
     Refused,
 }
 
+/// Evidence minted by one API companion operation, never by a path-ledger read.
+pub(crate) struct SyncedApiSurface {
+    path: Arc<str>,
+    content: Arc<str>,
+}
+
+impl SyncedApiSurface {
+    pub(crate) fn is_current(&self, sync: &ProjectSync) -> bool {
+        sync.companion_applied_verbatim(&self.path, &self.content)
+    }
+}
+
 impl CarrierDelivery {
-    /// The receipt this delivery produced, for a commit that seals the IDE
-    /// companion's exact bytes. `None` for a membership-only publication and
-    /// for a refusal — neither of which delivered a companion buffer.
+    /// The engine application receipt from this operation. Preparation for the
+    /// membership-only topology cannot mint an engine application receipt.
     pub(crate) fn ide_surface(self) -> Option<SyncedTsxSurface> {
         match self {
             Self::Delivered(surface) => surface,
-            Self::Published | Self::Refused => None,
+            Self::Published(_) | Self::Refused => None,
+        }
+    }
+
+    /// The coordinate model this operation owns, retained for its fenced record.
+    pub(crate) fn prepared_surface(&self) -> Option<&PreparedCarrierProviderContent> {
+        match self {
+            Self::Delivered(Some(surface)) => Some(surface.delivered()),
+            Self::Published(surface) => Some(surface),
+            Self::Delivered(None) | Self::Refused => None,
         }
     }
 }
@@ -128,14 +148,14 @@ fn carrier_failure_key(provider_path: &str) -> String {
 }
 
 #[derive(Clone, Copy)]
-enum ProviderLane {
+pub(crate) enum ProviderLane {
     Foreground,
     Background,
     Normal,
 }
 
 #[derive(Clone, Copy)]
-enum ProviderFileVerb {
+pub(crate) enum ProviderFileVerb {
     Load,
     Open,
     Update,
@@ -327,6 +347,7 @@ impl ProjectSync {
     /// coordinate space is the prepared surface rather than a file receipt.
     /// Every other provider must show an exact [`AppliedContent::Applied`]
     /// match. [`AppliedContent::Uncertified`] is not that match.
+    #[cfg(test)]
     pub(crate) fn receipt_for_commit(
         &self,
         path: &str,
@@ -441,6 +462,7 @@ impl ProjectSync {
     /// [`Self::carrier_preparation_failure`], which the debounced diagnostic
     /// pass publishes as `verter(carrier-provider-unavailable)`.
     #[allow(clippy::manual_ok_err)] // read-only accessor; publishers use the typed sibling below
+    #[cfg(test)]
     pub(crate) fn carrier_provider_surface(
         &self,
         path: &str,
@@ -506,7 +528,7 @@ impl ProjectSync {
     /// competing content authority. The publish path (and `notify_carrier_changed`)
     /// is the membership + invalidation mechanism instead.
     #[inline]
-    fn carrier_companion_open_suppressed(&self) -> bool {
+    pub(crate) fn carrier_companion_open_suppressed(&self) -> bool {
         matches!(self.kind, TypeProviderKind::Tsserver)
     }
 
@@ -2439,6 +2461,44 @@ mod tests {
                 .is_some(),
             "the ledger still holds the admitted bytes"
         );
+    }
+    #[tokio::test]
+    async fn membership_only_delivery_retains_its_own_surface_and_honors_the_fence() {
+        let mock = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new_with_kind(
+            mock.clone(),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsserver,
+        );
+        let path = "/src/Member.vue.tsx";
+        let refused = sync
+            .open_tsx_fenced(path, "const old = 1", &|| false)
+            .await
+            .unwrap();
+        assert!(matches!(refused, CarrierDelivery::Refused));
+        let first = sync
+            .open_tsx_fenced(path, "const old = 1", &|| true)
+            .await
+            .unwrap();
+        assert!(matches!(first, CarrierDelivery::Published(_)));
+        let prepared = first.prepared_surface().unwrap().clone();
+        assert!(first.ide_surface().is_none());
+        let second = sync
+            .open_tsx_fenced(path, "const new = 2", &|| true)
+            .await
+            .unwrap()
+            .prepared_surface()
+            .unwrap()
+            .clone();
+        assert!(prepared.content().contains("const old = 1"));
+        assert!(second.content().contains("const new = 2"));
+        assert!(
+            mock.file_sync_calls().is_empty(),
+            "membership owns content authority"
+        );
+        assert!(sync
+            .delivered_provider_content(path, "const old = 1")
+            .is_none());
     }
 }
 

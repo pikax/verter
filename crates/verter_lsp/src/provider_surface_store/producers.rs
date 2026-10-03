@@ -447,14 +447,15 @@ pub fn captured_surface_still_valid_for_canonical(
 /// open paths; the tsserver publish path records through
 /// [`record_and_version_carrier_companions`] inside the carrier-sync gateway,
 /// and the server-side interactive paths through
-/// `VerterLanguageServer::record_carrier_ide_snapshot`).
+/// `VerterLanguageServer::record_prepared_carrier_ide_snapshot`).
 ///
-/// Records a fresh generation pinning the EXACT `ide_code` synced under
-/// `provider_path`, with the source map parsed from the SAME bytes. Called ONLY
-/// after a SUCCESSFUL provider sync (fail-closed: a failed sync records
-/// nothing). Without this record the interactive request-surface capture has
-/// no `CarrierIde` snapshot to serve, and every provider-backed feature drops
-/// its provider contribution for the synced file.
+/// Records the coordinate model this operation owns under `provider_path`,
+/// with the source map parsed from the same bytes. Buffer transport supplies
+/// certified delivered content; membership-only transport supplies its own
+/// prepared model. Recording coordinates does not certify engine application:
+/// that evidence remains in the delivery or gateway membership receipt.
+/// A failed/refused operation records nothing. Without a matching record,
+/// interactive capture drops the provider contribution for the carrier.
 pub(crate) fn record_carrier_ide_surface(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
@@ -519,7 +520,7 @@ pub(crate) fn record_carrier_ide_surface_with_source(
 ///   live document identity, via [`DocumentRegistry::with_current_snapshot_identity`],
 ///   using the open document's own live source captured under that same guard.
 ///   A moved identity records nothing (fail closed) — the same hazard class as
-///   `VerterLanguageServer::record_carrier_ide_snapshot_if_current`.
+///   `VerterLanguageServer::record_delivered_carrier_ide_snapshot`.
 /// - `None`: the caller captured no pin because it believed the carrier closed
 ///   at compile time (no document to race). If the carrier is, right now,
 ///   open anyway — a close→open mid-flight transition, or simply a call site
@@ -659,7 +660,7 @@ pub(crate) fn record_carrier_companion_surface(
     )
 }
 
-fn record_carrier_companion_surface_with_source(
+pub(crate) fn record_carrier_companion_surface_with_source(
     store: &ProviderSurfaceStore,
     canonical_id: &str,
     provider_path: &str,

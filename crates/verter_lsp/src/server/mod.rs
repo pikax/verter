@@ -172,6 +172,7 @@ pub(crate) use self::server_utils::{
 mod background_drain;
 #[cfg(test)]
 pub(crate) use background_drain::drain_pending_snapshot_provider_sync;
+pub(crate) use background_drain::sync_carrier_api_transaction;
 #[cfg(test)]
 pub(crate) use background_drain::PendingSyncRedrive;
 pub(crate) use background_drain::{

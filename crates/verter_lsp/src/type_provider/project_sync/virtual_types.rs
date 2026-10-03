@@ -4,21 +4,60 @@
 use super::*;
 
 impl ProjectSync {
-    /// Drive held lazy demand from the background drain, then certify its exact
-    /// delivery without republishing an older snapshot over a concurrent edit.
-    pub async fn synchronize_pending_tsx(
+    /// API I/O owns only the path lock. The document transaction releases its
+    /// lane before calling this and validates again after reacquiring it.
+    pub(crate) async fn deliver_api_fenced(
         &self,
         path: &str,
         content: &str,
-    ) -> Result<(), TypeProviderError> {
+        update: bool,
+        fence: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<SyncedApiSurface>, TypeProviderError> {
+        let lock = self.virtual_verter_types_lock(path);
+        let _guard = lock.lock().await;
+        if !fence() || self.carrier_companion_open_suppressed() {
+            return Ok(None);
+        }
+        let disposition = self
+            .publish_provider_file(
+                path,
+                content,
+                ProviderLane::Background,
+                if update {
+                    ProviderFileVerb::Update
+                } else {
+                    ProviderFileVerb::Open
+                },
+            )
+            .await?;
+        if disposition != verter_type_runtime::traits::FileLoadDisposition::Forwarded
+            || !self.companion_applied_verbatim(path, content)
+        {
+            return Ok(None);
+        }
+        Ok(Some(SyncedApiSurface {
+            path: Arc::from(path),
+            content: Arc::from(content),
+        }))
+    }
+
+    /// Drive held lazy demand from the background drain, then certify its exact
+    /// delivery without republishing an older snapshot over a concurrent edit.
+    pub(crate) async fn synchronize_pending_tsx(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         self.provider.synchronize_pending_file(path).await?;
         let lock = self.virtual_verter_types_lock(path);
         let _guard = lock.lock().await;
         let prepared = self.prepare_tsx_surface(path, content)?;
-        if let Some(delivered) = self.certified_delivery(path, prepared.prepared) {
-            self.record_delivered_carrier_surface(path, content, delivered);
-        }
-        Ok(())
+        let Some(delivered) = self.certified_delivery(path, prepared.prepared) else {
+            return Ok(CarrierDelivery::Refused);
+        };
+        let receipt = SyncedTsxSurface::from_delivered(path, delivered.clone());
+        self.record_delivered_carrier_surface(path, content, delivered);
+        Ok(CarrierDelivery::Delivered(Some(receipt)))
     }
 
     /// Produce the exact carrier bytes owned by this provider topology.
@@ -201,7 +240,7 @@ impl ProjectSync {
     ///
     /// A success hands back the receipt for the content THIS call delivered, so
     /// the commit seals its own bytes instead of re-reading the path's ledger.
-    pub(super) async fn publish_tsx_fenced(
+    pub(crate) async fn publish_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
@@ -210,7 +249,11 @@ impl ProjectSync {
         fence: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<CarrierDelivery, TypeProviderError> {
         if self.carrier_companion_open_suppressed() {
-            return Ok(CarrierDelivery::Published);
+            if fence.is_some_and(|fence| !fence()) {
+                return Ok(CarrierDelivery::Refused);
+            }
+            let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
+            return Ok(CarrierDelivery::Published(prepared.prepared));
         }
 
         let lock = self.virtual_verter_types_lock(tsx_path);

@@ -1333,3 +1333,42 @@ async fn semantic_enrichment_publishes_when_the_projection_re_registers_unchange
         "the reopened revision's enrichment must publish against the structure it was opened with"
     );
 }
+
+#[test]
+fn a_delivery_probe_joins_a_registered_document_before_its_first_interactive_repair() {
+    let host = Arc::new(VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///workspace/Lane.vue".parse().unwrap();
+    let id = uri_to_canonical_id(&uri);
+    let _ = registry.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div /></template>".into(),
+    });
+    assert!(registry.document_lanes().open_generation(&id).is_none());
+    let crate::document_sync_lane::DeliveryLane::Acquired(guard) = registry.try_delivery_lane(&id)
+    else {
+        panic!("a registered open document must join its generation's lane");
+    };
+    let generation = registry.document_lanes().open_generation(&id).unwrap();
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Busy
+    ));
+    assert_eq!(
+        registry.document_lanes().init_open_generation(&id),
+        generation
+    );
+    assert!(matches!(
+        registry.try_delivery_lane("/workspace/Closed.vue"),
+        crate::document_sync_lane::DeliveryLane::Closed
+    ));
+    drop(guard);
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Acquired(_)
+    ));
+}

@@ -13,20 +13,16 @@
 //!
 //! Every path takes these in exactly this order, and no path takes them twice:
 //!
-//! 1. the document lifecycle / global-commit lock
-//!    (`VerterLanguageServer::did_change_mutex`, taken by `did_open`,
-//!    `did_close` and the imported-carrier publication lane),
-//! 2. the per-document sync lane ([`DocumentLaneLease::lock`] /
-//!    [`DocumentLaneLease::try_lock`]),
-//! 3. the per-path provider delivery lock (`sync_tsx_fenced` / `open_tsx_fenced`
-//!    / `sync_dts` inside [`crate::type_provider::ProjectSync`]),
-//! 4. the provider-hub single-writer actor (H2; untouched by this module).
+//! 1. the per-document sync lane (including lifecycle open/close),
+//! 2. the lifecycle/global-commit mutex (`did_change_mutex`), when needed,
+//! 3. the per-path provider delivery lock,
+//! 4. the provider-hub single-writer actor.
 //!
-//! The interactive repair is the only path that may WAIT for the lane: its
-//! freshness re-check turns the wait into a coalesced no-op instead of a second
-//! transaction. Every background path asks with [`DocumentLaneLease::try_lock`]
-//! and YIELDS on a busy lane, so background work can never sit in front of an
-//! interactive request or behind a provider round trip it did not need.
+//! Edit commits take only the global-commit mutex; they never await a document
+//! lane while holding it. Background writers try the lane and requeue busy
+//! documents. API-only delivery releases the document lane for provider I/O,
+//! then tries it again and validates the exact basis and its own delivery before
+//! admitting only the API fields. No path reacquires a lane it already holds.
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -277,39 +273,16 @@ impl DocumentSyncLanes {
         let Some(generation) = self.open_generation(canonical_id) else {
             return DeliveryLane::Closed;
         };
-        let lane = match self.lanes.entry(canonical_id.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(entry)
-                if entry.get().serves_generation(generation) =>
-            {
-                Arc::clone(entry.get())
-            }
-            // The document is OPEN but no live lane object serves its generation
-            // yet — its generation was minted ahead of its first repair (the
-            // request path's `current_or_init_ide_sync_open_generation`), or the
-            // open raced its own lane install. Install the lane here rather than
-            // reporting `Closed`: the interactive repair for this open document
-            // is about to take exactly this lane, so proceeding unserialized here
-            // is precisely the interleaving this registry exists to prevent.
-            _ => {
-                let installed = self.lifecycle_lease(canonical_id);
-                if !installed.lane().serves_generation(generation) {
-                    // The document was closed and reopened under this probe; the
-                    // generation it reported is gone and there is no stable
-                    // document left to serialize on.
-                    return DeliveryLane::Closed;
-                }
-                Arc::clone(installed.lane())
-            }
+        let lease = self.repair_lease(canonical_id, generation);
+        let Some(guard) = lease.try_lock() else {
+            return DeliveryLane::Busy;
         };
-        let lease = DocumentLaneLease {
-            canonical_id: canonical_id.to_string(),
-            lane,
-            lanes: Arc::clone(self),
-        };
-        match lease.try_lock() {
-            Some(guard) => DeliveryLane::Acquired(guard),
-            None => DeliveryLane::Busy,
+        if !lease.lane.serves_generation(generation)
+            || self.open_generation(canonical_id) != Some(generation)
+        {
+            return DeliveryLane::Busy;
         }
+        DeliveryLane::Acquired(guard)
     }
 
     pub(crate) fn open_generation(&self, canonical_id: &str) -> Option<u64> {
@@ -437,6 +410,23 @@ mod tests {
             lanes.try_delivery_lane("/workspace/src/App.vue"),
             DeliveryLane::Closed
         ));
+    }
+
+    #[test]
+    fn the_first_delivery_probe_installs_the_open_generations_lane() {
+        let lanes = lanes();
+        let canonical = "/workspace/src/App.vue";
+        let generation = lanes.init_open_generation(canonical);
+        let DeliveryLane::Acquired(guard) = lanes.try_delivery_lane(canonical) else {
+            panic!("an open generation without a lane must acquire its new lane");
+        };
+        let repair = lanes.repair_lease(canonical, generation);
+        assert!(
+            repair.try_lock().is_none(),
+            "repair shares the lane just installed by delivery"
+        );
+        drop(guard);
+        assert!(repair.try_lock().is_some());
     }
 
     #[tokio::test]

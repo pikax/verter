@@ -1149,12 +1149,23 @@ mod inner {
                 content: content.to_string(),
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            let block = match &state.open_block {
+                Some((armed_path, _, _)) if armed_path.is_empty() || armed_path == path => state
+                    .open_block
+                    .take()
+                    .map(|(_, arrived, release)| (arrived, release)),
+                _ => None,
+            };
             drop(state);
             self.note_recorded();
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
             Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 fail_or_ok(fail, "open_file_background")?;
                 this.accept_applied(&path_owned, &content_owned);
                 Ok(())

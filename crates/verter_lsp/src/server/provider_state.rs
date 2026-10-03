@@ -53,6 +53,7 @@ pub(super) struct CarrierSyncCommit<'a> {
     pub ide_delivery: Option<crate::type_provider::project_sync::SyncedTsxSurface>,
     /// The gateway's authorization for this transaction, confirmed post-open.
     pub pending: crate::external_ts::PendingProviderReady,
+    pub open_pin: Option<(&'a Uri, &'a crate::documents::DocumentSnapshotIdentity)>,
 }
 
 /// Resolve the exact configured-project carrier scope for a project-wide symbol
@@ -148,113 +149,13 @@ impl VerterLanguageServer {
         )
     }
 
-    /// THE server-side record choke point for an API-surface sync.
-    ///
-    /// Records a fresh generation pinning the EXACT `api_code` synced under
-    /// `dts_path`, together with the source map parsed from the SAME content.
-    /// When the caller already holds the synced content's source map it passes it
-    /// in `source_map_json`; otherwise (`None`) the live `get_public_api()` map is
-    /// used ONLY when its code byte-matches `api_code`, so a snapshot never pairs
-    /// the synced offsets with a source map produced against drifted content.
-    pub(super) fn record_carrier_api_snapshot(
-        &self,
-        canonical_id: &str,
-        dts_path: &str,
-        api_code: &str,
-        source_map_json: Option<&str>,
-    ) {
-        let store = self.documents.provider_surfaces();
-        let host = self.documents.host();
-        match source_map_json {
-            Some(_) => crate::provider_surface_store::record_carrier_api_surface(
-                store,
-                Some(&self.documents),
-                &host,
-                canonical_id,
-                dts_path,
-                api_code,
-                source_map_json,
-            ),
-            // No map in scope → use the live map only if it still matches content.
-            None => crate::provider_surface_store::record_carrier_api_surface_code_only(
-                store,
-                Some(&self.documents),
-                &host,
-                canonical_id,
-                dts_path,
-                api_code,
-            ),
-        }
-    }
-
-    /// THE server-side record choke point for a DIRECT IDE-surface sync (the
-    /// tsgo direct-open / bootstrap-unresolved paths; the tsserver publish path
-    /// records through `record_and_version_carrier_companions` inside the
-    /// carrier-sync gateway).
-    ///
-    /// Records a fresh generation pinning the EXACT provider bytes synced under
-    /// `ide_path`, together with the source map produced for the canonical IDE
-    /// artifact. Managed tsgo may replace the compiler-owned, wholly unmapped
-    /// first prelude line with its owner-bound Svelte JSX adapter; that preserves
-    /// every mapped coordinate while making the provider bytes intentionally
-    /// differ from `ide_code` on that one line.
-    /// When the caller already holds the synced content's source map it passes
-    /// it in `source_map_json`; otherwise (`None`) the live IDE artifact's map
-    /// is used ONLY when its code byte-matches `ide_code`, so a snapshot never
-    /// pairs the synced offsets with a source map produced against drifted
-    /// content. Called ONLY after a SUCCESSFUL provider sync (fail-closed:
-    /// a failed sync records nothing).
-    ///
-    /// Returns whether the surface was actually recorded — the structural
-    /// backstop in `record_carrier_ide_snapshot_inner` can refuse (`false`)
-    /// even here, when the document turns out open despite no pin having
-    /// been captured. Callers whose retry/requeue discipline depends on the
-    /// record having actually happened must check this, not assume success.
-    #[must_use]
-    pub(super) fn record_carrier_ide_snapshot(
-        &self,
-        canonical_id: &str,
-        ide_path: &str,
-        ide_code: &str,
-        source_map_json: Option<&str>,
-    ) -> bool {
-        self.record_carrier_ide_snapshot_inner(
-            None,
-            canonical_id,
-            ide_path,
-            ide_code,
-            source_map_json,
-        )
-    }
-
-    /// Record retained IDE output only if `revision` is still the live open
-    /// document at the store-write linearization point.
-    pub(super) fn record_carrier_ide_snapshot_if_current(
-        &self,
-        uri: &Uri,
-        revision: &crate::documents::DocumentSnapshotIdentity,
-        canonical_id: &str,
-        ide_path: &str,
-        ide_code: &str,
-        source_map_json: Option<&str>,
-    ) -> bool {
-        self.record_carrier_ide_snapshot_inner(
-            Some((uri, revision)),
-            canonical_id,
-            ide_path,
-            ide_code,
-            source_map_json,
-        )
-    }
-
-    /// Dispatch to whichever of [`Self::record_carrier_ide_snapshot_if_current`]
-    /// / [`Self::record_carrier_ide_snapshot`] applies, based on whether the
-    /// caller captured a pin. THE single entry a call site with a caller-
+    /// Record the provider surface using the caller's captured open pin. THE single entry a call site with a caller-
     /// supplied `open_pin` (captured before ITS OWN compile — see
     /// `DocumentRegistry::open_compile_pin`) should use, instead of choosing
     /// manually between the two — a manual choice is exactly how a confirmed-
     /// open call site ended up passing `None` and falling through to the
     /// unfenced path. Returns whether the surface was actually recorded.
+    #[cfg(test)]
     pub(super) fn record_carrier_ide_snapshot_with_pin(
         &self,
         open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
@@ -272,6 +173,7 @@ impl VerterLanguageServer {
         )
     }
 
+    #[cfg(test)]
     fn record_carrier_ide_snapshot_inner(
         &self,
         retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
@@ -342,6 +244,57 @@ impl VerterLanguageServer {
             ide_path,
             &delivered,
             map_json,
+            retained,
+        )
+    }
+
+    pub(super) fn record_delivered_carrier_ide_snapshot(
+        &self,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
+        canonical_id: &str,
+        generated: &str,
+        delivery: &crate::type_provider::project_sync::SyncedTsxSurface,
+        source_map: Option<&str>,
+    ) -> bool {
+        self.record_prepared_carrier_ide_snapshot(
+            retained,
+            canonical_id,
+            delivery.path(),
+            generated,
+            delivery.delivered(),
+            source_map,
+        )
+    }
+
+    /// Record this operation's coordinate model; membership preparation alone
+    /// carries no engine application evidence into an owned commit.
+    pub(super) fn record_prepared_carrier_ide_snapshot(
+        &self,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
+        canonical_id: &str,
+        path: &str,
+        generated: &str,
+        prepared: &crate::carrier_provider_projection::PreparedCarrierProviderContent,
+        source_map: Option<&str>,
+    ) -> bool {
+        let host = self.documents.host();
+        let owned_map = source_map
+            .is_none()
+            .then(|| {
+                let profile = self.documents.tsx_profile.read().clone();
+                host.get_ide(canonical_id, &profile)
+                    .filter(|ide| ide.code.as_ref() == generated)
+                    .and_then(|ide| ide.source_map)
+            })
+            .flatten();
+        crate::provider_surface_store::record_carrier_ide_surface_fenced(
+            self.documents.provider_surfaces(),
+            Some(&self.documents),
+            &host,
+            canonical_id,
+            path,
+            prepared,
+            source_map.or(owned_map.as_deref()),
             retained,
         )
     }
@@ -899,7 +852,7 @@ impl VerterLanguageServer {
     /// live one.
     pub(super) fn ide_leg_is_current(
         &self,
-        uri: &Uri,
+        _uri: &Uri,
         canonical_id: &str,
         committed: Option<&ProviderSyncState>,
         ide_path: &str,
@@ -908,16 +861,15 @@ impl VerterLanguageServer {
         let (Some(sync), Some(state)) = (self.project_sync.as_ref(), committed) else {
             return false;
         };
-        self.documents.get(uri).is_some_and(|document| {
-            crate::provider_sync::IdeLegBasis {
-                canonical_id,
-                ide_path,
-                generated,
-                owner_binding: &state.owner_binding,
-                live_source: &document.source,
-            }
-            .is_current(sync, self.documents.provider_surfaces(), committed)
-        })
+        crate::provider_sync::open_ide_leg_is_current(
+            sync,
+            &self.documents,
+            committed,
+            canonical_id,
+            ide_path,
+            generated,
+            &state.owner_binding,
+        )
     }
 
     /// Whether an open document's IDE leg is still owed: no committed surface
@@ -1073,13 +1025,16 @@ impl VerterLanguageServer {
         canonical_id: &str,
         state: ProviderSyncState,
         receipt: &crate::external_ts::ProviderReadyReceipt,
+        open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
-        if self.carrier_transaction_coordinator.admit_owned(
+        if self.carrier_transaction_coordinator.admit_owned_fenced(
             &self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             state,
             receipt,
+            Some(&self.documents),
+            open_pin,
         ) == crate::external_ts::AdmitOutcome::Superseded
         {
             self.queue_snapshot_provider_sync(canonical_id.to_string());
@@ -1143,6 +1098,19 @@ impl VerterLanguageServer {
             is_jsx,
         );
 
+        if let (Some((uri, identity)), Some(code), Some(path)) =
+            (retained, ide_code, target.ide_path.as_deref())
+        {
+            if self.documents.snapshot_identity_is_current(uri, identity)
+                && previous
+                    .as_ref()
+                    .is_some_and(|state| state.owner_binding == target.owner_binding)
+                && self.ide_leg_is_current(uri, canonical_id, previous.as_ref(), path, code)
+            {
+                return;
+            }
+        }
+
         // Attempt the desired IDE sync when fresh code is available (update-in-
         // place when the desired path is already live, else first-open).
         let mut ide_synced = false;
@@ -1159,12 +1127,17 @@ impl VerterLanguageServer {
                 }
             }
             let result = if target.ide_background_loaded {
-                sync.sync_tsx(&ide_path, ide_code).await
+                sync.sync_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(retained))
+                    .await
             } else {
-                sync.open_tsx(&ide_path, ide_code).await
+                sync.open_tsx_fenced(&ide_path, ide_code, &|| self.open_pin_is_current(retained))
+                    .await
             };
             match result {
-                Ok(()) => {
+                Ok(delivery) => {
+                    let Some(prepared) = delivery.prepared_surface() else {
+                        return;
+                    };
                     ide_synced = true;
                     // Record a fresh generation pinning the EXACT IDE bytes just
                     // synced (interactive queries capture this surface). No source
@@ -1173,18 +1146,14 @@ impl VerterLanguageServer {
                     #[cfg(test)]
                     self.maybe_pause_ide_sync_before_surface_record(canonical_id)
                         .await;
-                    let recorded = if let Some((uri, revision)) = retained {
-                        self.record_carrier_ide_snapshot_if_current(
-                            uri,
-                            revision,
-                            canonical_id,
-                            &ide_path,
-                            ide_code,
-                            None,
-                        )
-                    } else {
-                        self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None)
-                    };
+                    let recorded = self.record_prepared_carrier_ide_snapshot(
+                        retained,
+                        canonical_id,
+                        &ide_path,
+                        ide_code,
+                        prepared,
+                        None,
+                    );
                     if !recorded {
                         self.needs_ide_sync.insert(canonical_id.to_string());
                         return;
@@ -1260,6 +1229,7 @@ impl VerterLanguageServer {
             synced_kinds,
             ide_delivery,
             pending,
+            open_pin,
         } = commit;
         let mut committed_state = state;
         if synced_kinds.is_empty() {
@@ -1289,12 +1259,14 @@ impl VerterLanguageServer {
         // transaction reclaimed the source, or an owner-loss advanced the barrier) requeues
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
         // buffers. Only an admitted commit closes them.
-        if self.carrier_transaction_coordinator.admit_owned(
+        if self.carrier_transaction_coordinator.admit_owned_fenced(
             &self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             committed_state,
             &receipt,
+            Some(&self.documents),
+            open_pin,
         ) == crate::external_ts::AdmitOutcome::Superseded
         {
             self.queue_snapshot_provider_sync(canonical_id.to_string());

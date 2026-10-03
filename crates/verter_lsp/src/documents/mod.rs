@@ -693,6 +693,25 @@ impl DocumentRegistry {
         &self.document_lanes
     }
 
+    /// Join the registered document's generation, including a document opened
+    /// before its first interactive repair established the lane.
+    pub(crate) fn try_delivery_lane(
+        &self,
+        canonical_id: &str,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        if self.document_lanes.open_generation(canonical_id).is_none() {
+            if let Some(uri) = self.canonical_id_to_uri(canonical_id) {
+                // Keep membership pinned while lazily establishing its generation.
+                if let Some(document) = self.documents.get(uri.as_str()) {
+                    if document.canonical_id == canonical_id {
+                        self.document_lanes.init_open_generation(canonical_id);
+                    }
+                }
+            }
+        }
+        self.document_lanes.try_delivery_lane(canonical_id)
+    }
+
     /// Set the negotiated position encoding. Called once during `initialize()`,
     /// before any documents are opened.
     pub fn set_encoding(&self, encoding: PositionEncodingKind) {

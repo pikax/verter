@@ -1410,7 +1410,7 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
 /// `resolve_carrier_source` (inside the eventual record) re-reads whatever
 /// document text is live AT RECORD TIME — with no identity fence pinning the
 /// two together, unlike the interactive repair path's
-/// `record_carrier_ide_snapshot_if_current` / `retained_ide_response_is_current`.
+/// `record_delivered_carrier_ide_snapshot` / `retained_ide_response_is_current`.
 ///
 /// A `did_change` landing in the provider-await window is exactly the
 /// documented "surface a request-time repair must resync" scenario — but
@@ -1711,22 +1711,9 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
     );
 }
 
-/// The SAME compile-to-identity race as
-/// `coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after`,
-/// reached through the OTHER `sync_file` arm that records a `CarrierIde`
-/// surface: `preserve_open_unresolved_carrier` (owner-None over a ready
-/// snapshot). `sync_file` captures ONE pin near its top and threads it
-/// through to whichever arm ends up recording — this test proves that thread-
-/// through actually reaches the unresolved-preserve arm's record call, not
-/// just the owner-resolved `DirectOpen` arm the sibling test covers.
-///
-/// Same discrimination method: pausing at
-/// [`test_hooks::block_after_ide_compile`] (the pre-fix pin-capture spot) and
-/// landing an edit there reproduces the pre-fix torn pair if the pin capture
-/// is moved back below it (verified by hand while authoring this test, same
-/// as the sibling). Against the fix, the already-earlier pin stays anchored
-/// to revision A, so the mismatched live identity (B) at record time makes
-/// `preserve_open_unresolved_carrier`'s fenced record refuse outright.
+/// An unresolved coordinator compile pins A before the pause. An interleaved
+/// edit makes A ineligible for both delivery and recording. A separate transaction
+/// then pins B, delivers it once and records its own bytes, source and map.
 #[tokio::test(flavor = "multi_thread")]
 async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile_not_after() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -1789,13 +1776,14 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
     let edit = async {
         arrived.notified().await;
         let result = documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
         assert!(
             result.changed,
             "the interleaved edit must really commit revision B"
         );
-        release.notify_one();
     };
-    futures_util::future::join(tick, edit).await;
+    let (outcome, _) = futures_util::future::join(tick, edit).await;
+    assert_eq!(outcome, SyncFileOutcome::Retry);
 
     assert_eq!(
         documents
@@ -1807,34 +1795,67 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
         "precondition: the live document is revision B"
     );
 
-    let state = provider_sync_states
-        .get(canonical_id)
-        .map(|entry| entry.clone())
-        .expect("the open unresolved carrier must still commit provider state");
+    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
     assert!(
-        state.is_unresolved(),
-        "owner-None over a ready snapshot must commit an Unresolved binding"
+        provider.file_sync_calls().is_empty(),
+        "revision A must produce no provider application"
     );
-    let ide_path = state
-        .ide_path
-        .clone()
-        .expect("the preserve must keep a live IDE path");
-
-    // Same fail-closed requirement as the sibling test: the pin was captured
-    // before the compile and before the edit, so it stays anchored to A while
-    // the live identity moves to B — the fenced record inside
-    // `preserve_open_unresolved_carrier` must refuse outright.
     assert!(
         documents
             .provider_surfaces()
             .current_snapshot(&ide_path)
             .is_none(),
-        "a pin captured before the compile must make the unresolved-preserve \
-         record refuse when an edit lands after that capture — a recorded \
-         surface here means the pin either was not threaded through to this \
-         arm or was captured too late, reproducing the pre-fix torn-pairing \
-         defect"
+        "the stale revision must never be paired with revision B's source"
     );
+    assert!(
+        provider_sync_states
+            .get(canonical_id)
+            .and_then(|state| state.ide_path.clone())
+            .is_none(),
+        "first open cannot invent a live path before successful fresh delivery"
+    );
+    assert!(deps.pending_snapshot_provider_sync.contains(canonical_id));
+
+    // A separate transaction pins B before compiling. The refused transaction
+    // has released its lane, so B can deliver and record its own coherent pair.
+    assert_eq!(
+        sync_file(&deps, canonical_id, uri.as_str()).await,
+        SyncFileOutcome::Settled
+    );
+    let state = provider_sync_states.get(canonical_id).unwrap().clone();
+    assert!(state.is_unresolved());
+    assert_eq!(state.ide_path.as_deref(), Some(ide_path.as_str()));
+    assert!(state.ide_background_loaded);
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .unwrap();
+    assert_eq!(
+        snapshot.source_hash,
+        crate::provider_surface_store::ContentHash::of(SOURCE_B)
+    );
+    assert!(snapshot.provider_content.contains("revision-b-edited"));
+    assert!(!snapshot.provider_content.contains("revision-a"));
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host.get_ide(canonical_id, &profile).unwrap();
+    assert_eq!(
+        snapshot.stamp.map_hash,
+        ide.source_map
+            .as_deref()
+            .map(|map| crate::provider_surface_store::ContentHash::of(map).to_hash16())
+            .unwrap_or([0; 16])
+    );
+    assert_eq!(
+        deps.project_sync
+            .as_ref()
+            .unwrap()
+            .delivered_provider_content(&ide_path, &ide.code)
+            .as_deref(),
+        Some(snapshot.provider_content.as_ref())
+    );
+    assert_eq!(provider.file_sync_calls().iter().filter(|call| matches!(call,
+        crate::type_provider::mock::MockCall::OpenFile { path, .. } | crate::type_provider::mock::MockCall::UpdateFile { path, .. }
+        if path == &ide_path)).count(), 1);
 }
 
 /// Shared setup for the background carrier-diagnostics tests: an owner-resolved,
