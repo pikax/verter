@@ -46,6 +46,7 @@ use verter_workspace::{
 };
 
 use crate::documents::DocumentRegistry;
+use crate::external_ts::carrier_publish_store::CARRIER_STORE_WIRE_PIN;
 use crate::external_ts::{
     resolve_carrier_ownership_over_vfs, CarrierCompanion, CarrierPublishCoordinator,
     PendingProviderReady, ProviderReadyReceipt, ReconcileOutcome, ReconcileReason,
@@ -1138,7 +1139,7 @@ fn published_structure_stamp(
         .collect();
     let token = structure.public_artifact_token();
     Some(verter_session::external_ts::SnapshotStructureStamp {
-        schema_version: 1,
+        schema_version: CARRIER_STORE_WIRE_PIN as u32,
         artifact_token: Arc::from(token.as_str()),
         script_content_ranges,
         markup_opening_ranges,

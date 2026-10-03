@@ -13,7 +13,8 @@ use verter_session::external_ts::{
     EngineSessionFacts, QueryFeature, ServeMode,
 };
 use verter_session::semantic_capability::{
-    capability_row, CertificationRefusal, CertifiedTypeEngineBinding, SEMANTIC_CAPABILITY_CATALOG,
+    capability_row, CertificationRefusal, CertifiedTypeEngineBinding, ServingLease,
+    SEMANTIC_CAPABILITY_CATALOG,
 };
 
 use super::shared::resolve_with;
@@ -35,13 +36,15 @@ const EVERY_CAPABILITY: &[verter_session::external_ts::QueryFeature] = &[
     verter_session::external_ts::QueryFeature::InlayHints,
 ];
 
-/// Negotiated capabilities that carry a recorded handshake version — the
+/// Negotiated capabilities whose version the engine REPORTED in-band — the
 /// observation certification requires.
 fn observed_capabilities(version: &str) -> EngineCapabilities {
     EngineCapabilities {
         static_module_resolution_map: false,
         async_cancellable_queries: false,
-        reported_version: Some(std::sync::Arc::<str>::from(version)),
+        version: verter_session::external_ts::EngineVersion::Reported(std::sync::Arc::<str>::from(
+            version,
+        )),
     }
 }
 
@@ -112,7 +115,7 @@ fn certified_binding_for(
     };
     let witness = BoundProject::from_ensured(&binding.ensure_project_request(), capabilities);
     let basis = InputBasisId::from_canonical(&BasisArgs(basis_args));
-    CertifiedTypeEngineBinding::certify(&witness, serving, basis)
+    CertifiedTypeEngineBinding::certify(&witness, serving, ServingLease::new(1), basis)
 }
 
 struct BasisArgs<'a>(&'a [u8]);
