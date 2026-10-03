@@ -314,6 +314,21 @@ pub struct ReadyStructureStamp {
     pub markup_opening_ranges: Vec<[u32; 2]>,
 }
 
+/// The carrier-store wire contract version this publisher writes: the manifest
+/// `schema_version` every published `ReadyStructureStamp` carries.
+///
+/// A locally authored FORMAT pin, not a negotiated observation of the peer, and
+/// not one shared constant across languages: the Rust producer names it here,
+/// while each TypeScript consumer mirrors the same number as a literal
+/// (`packages/language-shared/src/carrier/remap.ts`,
+/// `packages/typescript-plugin/src/index.ts`) and fails closed to `null` on a
+/// mismatch, so a bump de-synchronises the reader instead of mis-mapping it. As
+/// a dimension of an observed engine profile
+/// (see `TsserverEngineBackend::serving_identity`) it records WHICH wire
+/// contract this publisher writes — a differently pinned publisher composes
+/// different query identities — and asserts nothing about what a peer speaks.
+pub const CARRIER_STORE_WIRE_PIN: u64 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyFile {
     pub content_hash: String,
