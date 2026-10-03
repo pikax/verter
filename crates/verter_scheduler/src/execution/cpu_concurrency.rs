@@ -5,7 +5,7 @@
 //! `parking_lot::Condvar`. It is the scheduler CPU pool's bounded
 //! transport — the analogue of the I/O pool's bounded channel — sized to
 //! dominate the DAG CPU admission budget so the DAG remains the sole
-//! admission gate. [`SchedulerCpuPool::try_submit`](crate::pool::SchedulerCpuPool::try_submit)
+//! admission gate. [`SchedulerCpuPool::try_submit`](crate::execution::pool::SchedulerCpuPool::try_submit)
 //! takes an owned permit at enqueue; the permit releases on `Drop`
 //! (RAII) when the spawned task finishes, including panic unwind.
 //!
@@ -132,7 +132,7 @@ impl CpuConcurrencySemaphore {
 
     /// Nonblocking acquire of an owned permit that can move into a
     /// `'static` pool task. Returns `None` when no slot is free — the
-    /// CPU pool maps that onto [`crate::pool::SchedulerPoolSubmitError::Full`]
+    /// CPU pool maps that onto [`crate::execution::pool::SchedulerPoolSubmitError::Full`]
     /// instead of enqueueing unbounded rayon work.
     #[must_use = "the returned OwnedCpuConcurrencyPermit holds a slot until it is dropped"]
     pub fn try_acquire_owned(self: &Arc<Self>) -> Option<OwnedCpuConcurrencyPermit> {

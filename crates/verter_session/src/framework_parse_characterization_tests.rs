@@ -502,7 +502,7 @@ fn source_stage_executor(host: &VerterHost) -> crate::host_executor::HostStageEx
 #[test]
 fn pre_publication_semantic_catalog_miss_is_stage_error_without_publish() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use verter_scheduler::executor::{StageErrorKind, StageExecutor};
+    use verter_scheduler::execution::executor::{StageErrorKind, StageExecutor};
 
     let source = concat!(
         "<script setup lang=\"ts\">\n",

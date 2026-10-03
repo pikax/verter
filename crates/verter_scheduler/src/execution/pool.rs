@@ -7,17 +7,17 @@
 //! - [`SchedulerCpuPool`] — scheduler stage CPU work (Parse / Analysis /
 //!   Artifact). Wraps a `rayon::ThreadPool` whose fire-and-forget
 //!   [`try_submit`](SchedulerCpuPool::try_submit) is bounded by a
-//!   [`CpuConcurrencySemaphore`](crate::cpu_concurrency::CpuConcurrencySemaphore)
+//!   [`CpuConcurrencySemaphore`](crate::execution::cpu_concurrency::CpuConcurrencySemaphore)
 //!   sized to dominate the DAG CPU budget. Workers register as
 //!   [`CallerKind::CpuWorker`](crate::caller_kind::CallerKind) so the
 //!   cooperative pump may inline-execute ready CPU dependencies on the
-//!   same worker. Submit takes [`OwnerCommand<Cpu>`](crate::owner_command::OwnerCommand).
+//!   same worker. Submit takes [`OwnerCommand<Cpu>`](crate::execution::owner_command::OwnerCommand).
 //! - [`SchedulerIoPool`] — scheduler source/load work. Owns a fixed-size
 //!   crossbeam-channel worker topology, separate from the CPU pool so
 //!   blocking disk reads cannot starve parse/analyze work. Workers
 //!   register as [`CallerKind::IoWorker`](crate::caller_kind::CallerKind).
 //!
-//! Both pools coexist with [`HostCpuPool`](crate::host_cpu_pool::HostCpuPool)
+//! Both pools coexist with [`HostCpuPool`](crate::execution::host_cpu_pool::HostCpuPool)
 //! (which tags `CallerKind::External`) under the dual-pool isolation
 //! invariant: host-coordinator work never runs scheduler stage work, and
 //! scheduler stage workers never run the outer batch fan-out.
@@ -99,7 +99,7 @@ static NEXT_POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 ///
 /// Named charter boundary [`CpuPool`]. Wraps a `rayon::ThreadPool` for
 /// scoped [`Self::install`] (non-`'static` waiter-side producers) and a
-/// bounded [`CpuConcurrencySemaphore`](crate::cpu_concurrency::CpuConcurrencySemaphore)
+/// bounded [`CpuConcurrencySemaphore`](crate::execution::cpu_concurrency::CpuConcurrencySemaphore)
 /// for fire-and-forget [`Self::try_submit`]. The semaphore is the CPU
 /// transport — it is sized to dominate `dag_budget.cpu` so the DAG
 /// ledger remains the sole admission gate, matching
@@ -107,14 +107,14 @@ static NEXT_POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// [`CallerKind::CpuWorker`](crate::caller_kind::CallerKind) so the
 /// cooperative pump may inline-execute ready CPU-bound dependencies on
 /// the same worker. Distinct from
-/// [`HostCpuPool`](crate::host_cpu_pool::HostCpuPool) (which tags
+/// [`HostCpuPool`](crate::execution::host_cpu_pool::HostCpuPool) (which tags
 /// `External`) — host-coordinator work never lands here.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SchedulerCpuPool {
     pool: rayon::ThreadPool,
     /// Bounded CPU transport. Each successful `try_submit` holds one
     /// owned permit until the spawned task drops it.
-    slots: std::sync::Arc<crate::cpu_concurrency::CpuConcurrencySemaphore>,
+    slots: std::sync::Arc<crate::execution::cpu_concurrency::CpuConcurrencySemaphore>,
     /// Resolved transport capacity after the same
     /// `max(threads*4, requested, 1)` floor as [`SchedulerIoPool`].
     #[cfg(any(test, feature = "test-support"))]
@@ -190,9 +190,9 @@ impl SchedulerCpuPool {
             .expect("failed to build scheduler CPU pool");
         std::sync::Arc::new(Self {
             pool,
-            slots: std::sync::Arc::new(crate::cpu_concurrency::CpuConcurrencySemaphore::new(
-                capacity,
-            )),
+            slots: std::sync::Arc::new(
+                crate::execution::cpu_concurrency::CpuConcurrencySemaphore::new(capacity),
+            ),
             #[cfg(any(test, feature = "test-support"))]
             transport_capacity: capacity,
             #[cfg(any(test, feature = "test-support"))]
@@ -214,7 +214,9 @@ impl SchedulerCpuPool {
     /// growing an unbounded queue.
     pub fn try_submit(
         &self,
-        command: crate::owner_command::OwnerCommand<crate::owner_command::Cpu>,
+        command: crate::execution::owner_command::OwnerCommand<
+            crate::execution::owner_command::Cpu,
+        >,
     ) -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError> {
         let Some(permit) = self.slots.try_acquire_owned() else {
             return Err(SchedulerPoolSubmitError::Full);
@@ -370,7 +372,7 @@ impl SchedulerIoPool {
     /// the dispatch site.
     pub fn try_submit(
         &self,
-        command: crate::owner_command::OwnerCommand<crate::owner_command::Io>,
+        command: crate::execution::owner_command::OwnerCommand<crate::execution::owner_command::Io>,
     ) -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError> {
         match self.sender.try_send(command.into_task()) {
             Ok(()) => Ok(SchedulerPoolSubmitResult::Submitted),
@@ -412,14 +414,14 @@ impl SchedulerIoPool {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::owner_command::OwnerCommand;
+    use crate::execution::owner_command::OwnerCommand;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    fn cpu(task: SchedulerPoolTask) -> OwnerCommand<crate::owner_command::Cpu> {
+    fn cpu(task: SchedulerPoolTask) -> OwnerCommand<crate::execution::owner_command::Cpu> {
         OwnerCommand::cpu(task)
     }
-    fn io(task: SchedulerPoolTask) -> OwnerCommand<crate::owner_command::Io> {
+    fn io(task: SchedulerPoolTask) -> OwnerCommand<crate::execution::owner_command::Io> {
         OwnerCommand::io(task)
     }
 

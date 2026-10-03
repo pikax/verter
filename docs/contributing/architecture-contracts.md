@@ -51,7 +51,7 @@ Responsibility split among cohesive modules:
 
 - Pool submission and admission control: `crates/verter_scheduler/src/dag.rs`
   (`SchedulerDag` is the sole readiness authority) and
-  `crates/verter_scheduler/src/pool.rs`.
+  `crates/verter_scheduler/src/execution/pool.rs`.
 - Batch coordination: `crates/verter_scheduler/src/driver.rs` (owns all
   admission and ordering policy, drains the `SubmissionInbox`).
 - Cancellation and retry bookkeeping: `crates/verter_scheduler/src/cancellation.rs`

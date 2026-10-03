@@ -556,7 +556,7 @@ separate channel-backed I/O pool preserves source-load isolation.
   pure-I/O step of `TaskKind::Source` (reading bytes off disk). Its transport
   capacity must dominate the same scheduler DAG's resolved I/O budget.
 - **Coordinator pool (`HostCpuPool`)** —
-  `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once at
+  `crates/verter_scheduler/src/execution/host_cpu_pool.rs`. Constructed once at
   startup by the external host/runtime layer via
   `verter_scheduler::HostCpuPool::new(num_threads)` and owned THERE, as a
   sibling of the `Scheduler` — NOT passed into the scheduler and NOT a
@@ -678,7 +678,7 @@ the host's CPU-thread config) and reused across every batch call, and the
 scheduler's stage `cpu_pool` runs at its configured concurrency.
 
 The `CpuConcurrencySemaphore` / `OwnedCpuConcurrencyPermit` TYPES are
-LANDED (`crates/verter_scheduler/src/cpu_concurrency.rs`) and G3-wired as
+LANDED (`crates/verter_scheduler/src/execution/cpu_concurrency.rs`) and G3-wired as
 the scheduler CPU transport: `SchedulerCpuPool::try_submit` takes an
 owned permit before spawn. The per-task `acquire()` handle on a
 `CacheNodeDagNode` (Block 7) is still UNWIRED.

@@ -45,7 +45,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use verter_language::FileLanguage as SchedFileKind;
-use verter_scheduler::executor::{StageError, StageExecutor};
+use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
 use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};

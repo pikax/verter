@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::instant::Instant;
 
 use verter_language::FileLanguage;
-use verter_scheduler::executor::{ExtractedDeps, StageError, StageErrorKind, StageExecutor};
+use verter_scheduler::execution::executor::{
+    ExtractedDeps, StageError, StageErrorKind, StageExecutor,
+};
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, SnapshotData, SourceSnapshot,
 };
