@@ -52,16 +52,22 @@ fn ensure(
 }
 
 /// Certify the way the publish coordinator does: over the backend's OWN observed
-/// serving identity and the snapshot's own basis. The snapshot is taken by value
-/// so the caller certifies the exact snapshot it then publishes — a
-/// certify-here/publish-there pair could otherwise drift apart unnoticed.
+/// serving identity, the CURRENT membership lease, and the snapshot's own basis.
+/// The snapshot is taken by value so the caller certifies the exact snapshot it
+/// then publishes — a certify-here/publish-there pair could otherwise drift
+/// apart unnoticed.
 fn certified_for(
     backend: &TsserverEngineBackend,
     bound: &BoundProject,
     snap: &PublishSnapshot,
 ) -> CertifiedTypeEngineBinding {
-    CertifiedTypeEngineBinding::certify(bound, &backend.serving_identity(), snap.input_basis())
-        .expect("an observed handshake certifies")
+    CertifiedTypeEngineBinding::certify(
+        bound,
+        &backend.serving_identity(),
+        backend.serving_lease(),
+        snap.input_basis(),
+    )
+    .expect("an observed handshake certifies")
 }
 
 fn h16(s: &str) -> [u8; 16] {
@@ -218,8 +224,8 @@ fn a_superseded_snapshot_never_reaches_the_store_write() {
     );
 }
 
-/// The serving session rotates independently of any snapshot change, so an
-/// unchanged snapshot under a rotated session is a different publish — refused
+/// The membership lease rotates independently of any snapshot change, so an
+/// unchanged snapshot under a rotated lease is a different publish — refused
 /// at the same place, and equally absent from the manifest.
 #[test]
 fn a_rotated_serving_session_never_reaches_the_store_write() {
@@ -240,16 +246,17 @@ fn a_rotated_serving_session_never_reaches_the_store_write() {
         fs_generation: 1,
     };
     let certified = certified_for(&backend, &witness, &snap);
-    // The membership ledger rotates its session generation (the transition every
-    // ownership move drives); the snapshot itself does not move with it.
+    // The membership ledger rotates its session lease (the transition every
+    // ownership move drives); the serving identity's editor-session
+    // (spawn) generation and the snapshot itself do not move with it.
     backend.membership_ledger().advance_session();
 
     let error = backend
         .publish_snapshot(&certified, snap.clone())
         .expect_err("a rotated serving session is refused before the store write");
     assert!(
-        format!("{error:?}").contains("serving session rotated"),
-        "the refusal names the rotated session: {error:?}"
+        format!("{error:?}").contains("membership lease rotated"),
+        "the refusal names the rotated lease: {error:?}"
     );
 
     let store = CarrierPublishStore::open(HOST_VERSION, &ws);
@@ -276,6 +283,103 @@ fn a_rotated_serving_session_never_reaches_the_store_write() {
             .len(),
         1,
         "the re-certified publish warms"
+    );
+}
+
+/// One `provider_uri` in two CONFLICTING rows: both orders compose ONE basis
+/// (the file set is order-insensitive), while the store keys its manifest rows
+/// BY `provider_uri` and resolves two rows for one URI by input order — the
+/// identity-aliasing stale-publication hole. The seam refuses BOTH orders at
+/// the store write; nothing is advertised and no blob is written.
+#[test]
+fn conflicting_provider_rows_never_reach_the_store_write() {
+    let backend = TsserverEngineBackend::new(HOST_VERSION);
+    let user_tree = tempfile::tempdir().expect("tempdir");
+    let ws = user_tree.path().to_string_lossy().to_string();
+    let witness = ensure(&backend, &ws, "d:/ws/tsconfig.json");
+
+    let row_a = file(
+        "d:/ws/src/A.vue.tsx",
+        "d:/ws/src/A.vue",
+        "export const A = 1;",
+        3,
+    );
+    // The conflicting row: the SAME provider_uri, a different source and
+    // different carrier bytes — what the input order would have to silently
+    // resolve.
+    let row_b = file(
+        "d:/ws/src/A.vue.tsx",
+        "d:/ws/src/B.vue",
+        "export const B = 2;",
+        3,
+    );
+    let forward = PublishSnapshot {
+        project: Arc::from("d:/ws/tsconfig.json"),
+        files: vec![row_a.clone(), row_b.clone()],
+        resolution_map_version: 1,
+        fs_generation: 1,
+    };
+    let reversed = PublishSnapshot {
+        files: vec![row_b, row_a],
+        ..forward.clone()
+    };
+    // The aliasing the refusal must close, stated first: both orders are ONE
+    // basis, so the basis alone cannot separate them.
+    assert_eq!(
+        forward.input_basis(),
+        reversed.input_basis(),
+        "file order is not part of a snapshot's identity"
+    );
+    let certified = certified_for(&backend, &witness, &forward);
+
+    for order in [&forward, &reversed] {
+        let error = backend
+            .publish_snapshot(&certified, order.clone())
+            .expect_err("two rows for one provider_uri are refused before the store write");
+        assert!(
+            format!("{error:?}").contains("one provider_uri is one row"),
+            "the refusal names the provider-row collision: {error:?}"
+        );
+    }
+
+    let store = CarrierPublishStore::open(HOST_VERSION, &ws);
+    let manifest = store.current_manifest();
+    let project = manifest.projects.get("d:/ws/tsconfig.json");
+    assert!(
+        project.is_none_or(|entry| entry.ready_files.is_empty()),
+        "a refused publish advertises nothing: {project:?}"
+    );
+    assert!(
+        !store.workspace_dir().join("blobs").exists()
+            || store
+                .workspace_dir()
+                .join("blobs")
+                .read_dir()
+                .is_ok_and(|mut d| d.next().is_none()),
+        "a refused publish writes no blob"
+    );
+}
+
+/// The membership lease is NOT the editor-session generation: rotating the
+/// ledger's lease leaves the serving identity (whose generation slot carries
+/// this publisher's spawn generation) byte-identical, and the refusal above
+/// comes from the LEASE comparison alone.
+#[test]
+fn the_membership_lease_rotation_leaves_the_serving_identity_untouched() {
+    let backend = TsserverEngineBackend::new(HOST_VERSION);
+
+    let before = backend.serving_identity();
+    assert_ne!(
+        before.editor_session_generation,
+        backend.membership_ledger().current_session().value(),
+        "the editor-session generation slot carries the spawn generation, never the \
+         membership lease"
+    );
+    backend.membership_ledger().advance_session();
+    assert_eq!(
+        before,
+        backend.serving_identity(),
+        "a lease rotation is not an editor-session rotation"
     );
 }
 

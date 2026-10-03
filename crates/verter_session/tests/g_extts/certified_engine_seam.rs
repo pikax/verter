@@ -26,7 +26,7 @@ use verter_session::external_ts::{
     EngineSessionFacts, EngineVersion, OpenState, PublishSnapshot, QueryFeature, ScriptKind,
     ServeMode, SnapshotFile, SnapshotRole, SnapshotStructureStamp,
 };
-use verter_session::semantic_capability::CertifiedTypeEngineBinding;
+use verter_session::semantic_capability::{CertifiedTypeEngineBinding, ServingLease};
 
 use super::shared::resolve_with;
 
@@ -124,11 +124,13 @@ fn bound_witness(capabilities: EngineCapabilities) -> BoundProject {
 }
 
 /// Certify over a snapshot's OWN basis — what the publish coordinator does
-/// before it reaches the store.
+/// before it reaches the store. The lease is pinned so an accidental axis
+/// change is always deliberate at a call site.
 fn certify_for(snapshot: &PublishSnapshot) -> CertifiedTypeEngineBinding {
     CertifiedTypeEngineBinding::certify(
         &bound_witness(observed_capabilities("5.9.2")),
         &owned_serving("5.9.2"),
+        ServingLease::new(1),
         snapshot.input_basis(),
     )
     .expect("an observed handshake certifies")
@@ -241,6 +243,42 @@ fn the_snapshot_basis_is_derived_not_named() {
 }
 
 #[test]
+fn conflicting_provider_rows_never_share_one_certified_publication() {
+    // Two CONFLICTING rows for one provider_uri in opposite orders compose the
+    // SAME basis — the file set is order-insensitive — while the store keys its
+    // manifest rows BY provider_uri and resolves two rows for one URI by input
+    // order. Under one identity the two orders would therefore leave different
+    // manifest bytes: the identity-aliasing stale-publication hole. One
+    // provider_uri is one row; a snapshot that says otherwise has no
+    // deterministic publication under ANY basis and is refused in every order,
+    // including the one it was certified over.
+    let mut row_a = snapshot_file("const a = 1;", 7);
+    row_a.source_uri = Arc::from("file:///project/src/A.vue");
+    let mut row_b = snapshot_file("const b = 2;", 7);
+    row_b.source_uri = Arc::from("file:///project/src/B.vue");
+    let forward = snapshot_of(vec![row_a.clone(), row_b.clone()]);
+    let reversed = snapshot_of(vec![row_b, row_a]);
+
+    // The aliasing the refusal must close, stated first: both orders are ONE
+    // basis, so the basis alone cannot separate them.
+    assert_eq!(
+        forward.input_basis(),
+        reversed.input_basis(),
+        "file order is not part of a snapshot's identity"
+    );
+
+    let certified = certify_for(&forward);
+    assert!(
+        !certified.publish_admitted(&forward),
+        "two rows for one provider_uri are refused in the order they were certified over"
+    );
+    assert!(
+        !certified.publish_admitted(&reversed),
+        "and in the reverse order — one provider_uri is one row under any order"
+    );
+}
+
+#[test]
 fn the_certified_project_is_the_project_the_snapshot_publishes_under() {
     // The binding carries the resolved project's identity, and the backend
     // routes on it — so a snapshot published under a project the certification
@@ -263,6 +301,7 @@ fn an_unobserved_engine_never_reaches_the_publication_rule() {
     let refusal = CertifiedTypeEngineBinding::certify(
         &bound_witness(EngineCapabilities::default()),
         &owned_serving("5.9.2"),
+        ServingLease::new(1),
         snapshot.input_basis(),
     );
 
@@ -295,6 +334,7 @@ fn a_locally_declared_version_never_composes_an_engine_observation() {
         CertifiedTypeEngineBinding::certify(
             &bound_witness(capabilities),
             &owned_serving("5.9.2"),
+            ServingLease::new(1),
             snapshot.input_basis(),
         )
         .expect("a declared or reported version certifies")
@@ -323,14 +363,14 @@ fn a_locally_declared_version_never_composes_an_engine_observation() {
 #[test]
 fn a_retained_binding_is_not_admitted_by_a_rotated_serving_session() {
     // The basis cannot express the serving session: a snapshot can sit unchanged
-    // across a ledger session rotation, and the rotation changes what every
-    // published row means. So the binding carries the session it observed, and
-    // the seam re-checks it where the store write happens.
+    // across a session rotation, and the rotation changes what every published
+    // row means. So the binding carries the session it observed, and the seam
+    // re-checks it where the store write happens.
     let snapshot = snapshot_of(vec![snapshot_file("const a = 1;", 7)]);
     let certified = certify_for(&snapshot);
 
     assert!(
-        certified.serving_admitted(&owned_serving("5.9.2")),
+        certified.serving_admitted(&owned_serving("5.9.2"), ServingLease::new(1)),
         "the session the binding was certified under is the one it admits"
     );
 
@@ -343,7 +383,7 @@ fn a_retained_binding_is_not_admitted_by_a_rotated_serving_session() {
         },
     );
     assert!(
-        !certified.serving_admitted(&rotated),
+        !certified.serving_admitted(&rotated, ServingLease::new(1)),
         "a rotated session generation is a different serving session, even over identical \\
          bytes and an identical basis"
     );
@@ -361,8 +401,57 @@ fn a_retained_binding_is_not_admitted_by_a_rotated_serving_session() {
         },
     );
     assert!(
-        !certified.serving_admitted(&repinned),
+        !certified.serving_admitted(&repinned, ServingLease::new(1)),
         "a SHARED session over the same facts is a different serving session"
+    );
+}
+
+#[test]
+fn the_serving_lease_is_its_own_identity_dimension() {
+    // The membership lease is MEMBERSHIP-validity granularity; the
+    // editor-session generation is the attach/spawn generation. The binding
+    // compares the lease as its own typed fact, so the two integer spaces
+    // never merge: a rotated lease refuses a retained binding even when the
+    // serving identity is byte-identical, and an editor generation that
+    // numerically equals a lease value never substitutes for the lease.
+    let snapshot = snapshot_of(vec![snapshot_file("const a = 1;", 7)]);
+    let certified = certify_for(&snapshot);
+
+    // The lease it was certified under admits, over the identity it observed.
+    assert!(certified.serving_admitted(&owned_serving("5.9.2"), ServingLease::new(1)));
+
+    // A rotated lease refuses with the serving identity UNCHANGED: the lease
+    // is not laundered through the identity's editor-generation slot, where a
+    // rotation would otherwise be invisible.
+    assert!(
+        !certified.serving_admitted(&owned_serving("5.9.2"), ServingLease::new(2)),
+        "a rotated membership lease is a different serving session even over an \\
+         unchanged engine identity"
+    );
+
+    // An editor generation that numerically EQUALS the rotated lease value
+    // does not keep the rotated lease admitted: matching integers in the two
+    // spaces are still two different facts.
+    let editor_generation_equal_to_the_rotated_lease = EngineIdentity::for_mode(
+        ServeMode::Owned,
+        &EngineSessionFacts {
+            observed_version: Arc::<str>::from("5.9.2"),
+            wire_pin: 7,
+            editor_session_generation: 2,
+        },
+    );
+    assert!(
+        !certified.serving_admitted(
+            &editor_generation_equal_to_the_rotated_lease,
+            ServingLease::new(2)
+        ),
+        "an editor generation sharing the lease's integer never admits a rotated lease"
+    );
+
+    // The snapshot itself is unaffected: the publication basis did not move.
+    assert!(
+        certified.publish_admitted(&snapshot),
+        "a lease rotation is not a basis change"
     );
 }
 

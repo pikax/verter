@@ -20,19 +20,20 @@
 //! silently returning a degraded result.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use verter_session::external_ts::{
     BoundProject, Diagnostics, DiagnosticsOutcome, EngineBackend, EngineCapabilities, EngineError,
     EngineIdentity, EngineSessionFacts, EngineVersion, EnsureProject, PublishSnapshot, Query,
     QueryOutcome, ServeMode,
 };
-use verter_session::semantic_capability::CertifiedTypeEngineBinding;
+use verter_session::semantic_capability::{CertifiedTypeEngineBinding, ServingLease};
 
 use crate::external_ts::carrier_publish_store::{
     carrier_store_dir_for, default_carrier_store_host_version, CarrierPublishStore, OwnedSetScope,
     OwnedSource, PublishBatch, CARRIER_STORE_WIRE_PIN,
 };
-use crate::external_ts::membership_ledger::{MembershipLedger, ProjectUri};
+use crate::external_ts::membership_ledger::{MembershipLedger, ProjectUri, SessionGen};
 
 /// A per-workspace publish store plus the project URIs ensured under it. The
 /// project set lets `publish_snapshot` (which receives only the project URI on the
@@ -75,14 +76,47 @@ pub struct TsserverEngineBackend {
     /// `carrier_publish_store` manifest), NOT this in-process ledger. Held here so the
     /// reconciler and the store share one ledger per session.
     membership_ledger: Arc<MembershipLedger>,
+    /// This publisher instance's OWNED spawn generation — minted once at
+    /// construction, the same wall-clock-microsecond rendezvous granularity
+    /// the editor side mints for attach-session generations. It is the honest
+    /// occupant of the serving identity's `editor_session_generation` slot
+    /// (which for an OWNED session IS the spawn generation); the membership
+    /// lease NEVER occupies that slot.
+    spawn_generation: u64,
     /// Test-only-armed fault-injection seam for the owner-move stale-owner prune
     /// ([`Self::retract_source_everywhere_except`]). ALWAYS present (one byte), but
     /// ONLY ever armed by the `#[cfg(test)]` [`Self::arm_prune_except_failure`];
     /// production never sets it, so the prune behaviour is unchanged there. When
-    /// armed, the next prune returns `Err` BEFORE any store mutation, exercising the
-    /// `publish_owned_resolved` compensation/rollback path so a partial owner-move never leaves
+    /// armed, the next prune returns `Err` BEFORE any store mutation, exercising
+    /// the `publish_owned_resolved` compensation/rollback path so a partial owner-move never leaves
     /// the cross-process `ready_files` stale or duplicated.
     fail_next_prune_except: std::sync::atomic::AtomicBool,
+}
+
+/// Mint this publisher instance's spawn generation: a wall-clock microsecond
+/// rendezvous witness, the same granularity the editor side mints for its
+/// attach-session generations (monotone-ish across restarts, JSON-safe by
+/// construction). Identifies THIS backend instance for the lifetime of the
+/// process.
+fn mint_spawn_generation() -> u64 {
+    const MAX_JSON_SAFE_INTEGER: u128 = (1_u128 << 53) - 1;
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros().min(MAX_JSON_SAFE_INTEGER) as u64)
+        .unwrap_or(0)
+}
+
+/// The ledger's session lease, retyped as the certification seam's serving
+/// dimension. This conversion is the ONE border between the two types: the
+/// lease stays a `SessionGen` everywhere the ledger is concerned and crosses
+/// into the certified binding only as a [`ServingLease`] — the
+/// editor-session generation (this publisher's spawn generation) never crosses
+/// into the lease's place or vice versa, so the two identity spaces cannot
+/// merge even when their integers coincide.
+impl From<SessionGen> for ServingLease {
+    fn from(session: SessionGen) -> Self {
+        ServingLease::new(session.value())
+    }
 }
 
 impl TsserverEngineBackend {
@@ -106,6 +140,7 @@ impl TsserverEngineBackend {
             host_version,
             stores: dashmap::DashMap::new(),
             membership_ledger: Arc::new(MembershipLedger::with_initial_session()),
+            spawn_generation: mint_spawn_generation(),
             fail_next_prune_except: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -128,9 +163,14 @@ impl TsserverEngineBackend {
     /// wire contract this publisher writes ([`CARRIER_STORE_WIRE_PIN`]) — a
     /// locally authored FORMAT pin whose TypeScript readers mirror the number
     /// as a literal and fail closed on a mismatch, so it is a declared contract
-    /// and not a negotiated observation — and the membership session generation
-    /// the ledger is advertising under right now. A different serving session —
-    /// a new generation, a different wire contract — composes a different
+    /// and not a negotiated observation — and this publisher instance's OWN
+    /// spawn generation (see [`Self::spawn_generation`]), which is what the
+    /// `editor_session_generation` slot means for an OWNED session. The
+    /// membership ledger's session lease is NOT in here: it is its own typed
+    /// dimension ([`Self::serving_lease`]), compared as a [`ServingLease`] at
+    /// the store write, so a lease and an editor generation that share an
+    /// integer never merge into one identity dimension. A different serving
+    /// session — a new spawn, a different wire contract — composes a different
     /// observed profile AND is refused by
     /// [`CertifiedTypeEngineBinding::serving_admitted`] at the store write, so
     /// one session's facts cannot launder into another session's certified
@@ -141,9 +181,18 @@ impl TsserverEngineBackend {
             &EngineSessionFacts {
                 observed_version: Arc::clone(&self.host_version),
                 wire_pin: CARRIER_STORE_WIRE_PIN,
-                editor_session_generation: self.membership_ledger.current_session().value(),
+                editor_session_generation: self.spawn_generation,
             },
         )
+    }
+
+    /// The membership lease the certification seam compares at the store
+    /// write: the ledger's CURRENT session, converted through the one
+    /// `SessionGen` → [`ServingLease`] border. The lease keeps its own type
+    /// end to end — it is never stored in (or compared through) the
+    /// editor-session generation slot of the serving identity.
+    pub(in crate::external_ts) fn serving_lease(&self) -> ServingLease {
+        ServingLease::from(self.membership_ledger.current_session())
     }
 
     /// The carrier-companion provider paths recorded under `project` in the in-process
@@ -390,16 +439,27 @@ impl EngineBackend for TsserverEngineBackend {
         project: &CertifiedTypeEngineBinding,
         snapshot: PublishSnapshot,
     ) -> Result<(), EngineError> {
+        // One provider_uri is one row. The basis hashes the file set
+        // order-insensitively while the store keys its manifest rows BY
+        // provider_uri, so two rows for one URI would publish input-order-decided
+        // bytes under ONE identity — refused wholesale, with the collision
+        // named, BEFORE any store mutation.
+        if let Some(provider_uri) = snapshot.duplicate_provider_uri() {
+            return Err(ensure_failed(&format!(
+                "publish_snapshot: two snapshot rows publish one provider_uri ({provider_uri}) — \
+                 one provider_uri is one row; refused before the store write"
+            )));
+        }
         if !project.publish_admitted(&snapshot) {
             return Err(ensure_failed(
                 "publish_snapshot: the certified binding does not admit this snapshot's basis \
                  (superseded before the store write)",
             ));
         }
-        if !project.serving_admitted(&self.serving_identity()) {
+        if !project.serving_admitted(&self.serving_identity(), self.serving_lease()) {
             return Err(ensure_failed(
-                "publish_snapshot: the serving session rotated past the one the binding was \
-                 certified under (refused before the store write)",
+                "publish_snapshot: the serving session or membership lease rotated past the one \
+                 the binding was certified under (refused before the store write)",
             ));
         }
         // The snapshot's project must match the certified project it is published under.

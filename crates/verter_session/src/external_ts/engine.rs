@@ -362,6 +362,25 @@ impl PublishSnapshot {
     pub fn input_basis(&self) -> InputBasisId {
         InputBasisId::from_canonical(&PublishSnapshotBasis { snapshot: self })
     }
+
+    /// The first `provider_uri` carried by more than one row, if any.
+    ///
+    /// The store keys its published rows BY `provider_uri` (one provider row
+    /// per URI), while [`Self::input_basis`] hashes the file set
+    /// order-insensitively — so two rows for one `provider_uri` compose ONE
+    /// basis whose manifest bytes the input order would decide (last row
+    /// wins). Such a snapshot has no deterministic publication under any
+    /// basis; the publication rule refuses it wholesale (see
+    /// [`CertifiedTypeEngineBinding::publish_admitted`]). One `provider_uri`
+    /// is one row.
+    #[must_use]
+    pub fn duplicate_provider_uri(&self) -> Option<&str> {
+        let mut seen = std::collections::HashSet::with_capacity(self.files.len());
+        self.files
+            .iter()
+            .map(|file| &*file.provider_uri)
+            .find(|provider_uri| !seen.insert(*provider_uri))
+    }
 }
 
 /// `query` request: a single carrier-offset feature query that fails closed on

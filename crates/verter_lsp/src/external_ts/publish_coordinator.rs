@@ -477,12 +477,14 @@ impl CarrierPublishCoordinator {
             fs_generation: 0,
         };
         // Certify over OBSERVED facts only — the engine's negotiated capability
-        // interpretation, the serving session the backend is advertising under, and
-        // this snapshot's own basis. An engine whose handshake never happened is
+        // interpretation, the serving session the backend is advertising under
+        // (identity + membership lease as its own typed dimension), and this
+        // snapshot's own basis. An engine whose handshake never happened is
         // refused here rather than answered under an assumed profile.
         let certified = CertifiedTypeEngineBinding::certify(
             &bound,
             &self.backend.serving_identity(),
+            self.backend.serving_lease(),
             snapshot.input_basis(),
         )
         .map_err(|refusal| CarrierPublishError::Certification(format!("{refusal:?}")))?;

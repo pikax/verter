@@ -113,6 +113,7 @@ fn query_is_not_a_silent_stub() {
     let certified = verter_session::semantic_capability::CertifiedTypeEngineBinding::certify(
         &witness,
         &serving,
+        verter_session::semantic_capability::ServingLease::new(1),
         verter_session::external_ts::PublishSnapshot {
             project: std::sync::Arc::from("file:///ws/tsconfig.json"),
             files: Vec::new(),

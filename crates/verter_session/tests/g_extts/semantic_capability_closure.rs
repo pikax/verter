@@ -13,7 +13,8 @@ use verter_session::external_ts::{
     EngineSessionFacts, QueryFeature, ServeMode,
 };
 use verter_session::semantic_capability::{
-    capability_row, CertificationRefusal, CertifiedTypeEngineBinding, SEMANTIC_CAPABILITY_CATALOG,
+    capability_row, CertificationRefusal, CertifiedTypeEngineBinding, ServingLease,
+    SEMANTIC_CAPABILITY_CATALOG,
 };
 
 use super::shared::resolve_with;
@@ -114,7 +115,7 @@ fn certified_binding_for(
     };
     let witness = BoundProject::from_ensured(&binding.ensure_project_request(), capabilities);
     let basis = InputBasisId::from_canonical(&BasisArgs(basis_args));
-    CertifiedTypeEngineBinding::certify(&witness, serving, basis)
+    CertifiedTypeEngineBinding::certify(&witness, serving, ServingLease::new(1), basis)
 }
 
 struct BasisArgs<'a>(&'a [u8]);
