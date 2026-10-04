@@ -777,6 +777,37 @@ transaction body directly; it must release the lane before entering another lane
 writer. Edits can advance the source while a provider call is pending, so each writer
 also pins the document snapshot and refuses stale recording/admission.
 
+Generation establishment uses the lifecycle lane too. A delivery probe made
+after registration but before `did_open` mints its generation yields; it cannot
+create a second lane. A closed-start compile is current only while the carrier
+stays unregistered (`DocumentRegistry::compile_pin_is_current`), including the
+final check under the provider-path lock. Completion recovery republishes through
+`publish_open_carrier_to_external_ts`, which waits on the same generation-bound
+lane and revalidates it before publishing.
+
+The coordinator maps API-leg contention to `SyncFileOutcome::LaneBusy`, just as
+IDE-leg contention does, so its serial loop preserves the retry budget. Imported
+carrier sync waits for the lane again between legs; the unresolved API helper
+also queues refused work for a later snapshot drain. Open and request repair
+check IDE freshness before rearming or republishing; tsserver checks store
+publication, recorded surfaces and membership rather than companion-buffer bytes.
+
+The provider-free `verter_lsp` library nextest lane runs the regression proofs:
+
+- `document_sync_lane::tests::a_writer_probing_mid_open_yields_instead_of_minting_a_second_lane`
+  pins lane identity across the registration window.
+- `server::server_tests::a_scanner_started_closed_is_refused_when_the_document_opens_after_its_lane_probe`
+  checks the delivery fence after a successful open.
+- `server::server_tests::the_open_carrier_republish_waits_for_the_document_lane`
+  checks completion recovery's publication ordering.
+- `server::server_tests::an_api_leg_yielding_to_an_interactive_request_is_a_lane_yield_not_a_retry`
+  checks the coordinator's API contention disposition.
+- `server::server_tests::did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed`
+  and `server::server_tests::a_tsserver_revision_already_published_is_not_published_again`
+  check freshness, with engine-loss and edit controls.
+- `server::server_tests::an_unresolved_api_leg_waits_its_turn_behind_the_lane_holder`
+  checks that imported unresolved API work survives contention.
+
 IDE delivery completes and commits before API delivery starts. API transactions
 capture source revision, open generation, projection, owner and workspace publication,
 release the document lane for background provider I/O, then try to reacquire it and
