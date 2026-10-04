@@ -38043,6 +38043,14 @@ async fn a_tsserver_revision_already_published_is_not_published_again() {
 /// The completion recovery republishes an OPEN document's companions, which
 /// records and versions its surfaces. It must take the document's lane, so it
 /// cannot supersede a lane holder's recorded surface mid-transaction.
+///
+/// The compile seam is the discriminator, and the reason the proof cannot be a
+/// bare "the future is still pending": an unfenced republish is a long async
+/// future, so it is pending at the first poll whether or not it respects the
+/// lane. The seam is the FIRST point it reaches after the lane, so a republish
+/// that walks past a held lane arrives there at once, while a fenced one cannot
+/// get there at all. The bound below is generous for an in-memory provider and
+/// only has to outlast the mock's own bookkeeping.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_open_carrier_republish_waits_for_the_document_lane() {
     let provider = Arc::new(MockTypeProvider::new());
@@ -38052,6 +38060,7 @@ async fn the_open_carrier_republish_waits_for_the_document_lane() {
     let canonical_id = "/workspace/src/RepublishOnLane.vue";
     install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
     let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    let (arrived, release) = server.pause_next_publish_carrier_after_compile(canonical_id);
     let held = match server.documents.try_delivery_lane(canonical_id) {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
         other => panic!("the open document's lane is free, got {other:?}"),
@@ -38063,6 +38072,13 @@ async fn the_open_carrier_republish_waits_for_the_document_lane() {
         "the republish waits for the lane holder"
     );
     assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), arrived.notified())
+            .await
+            .is_err(),
+        "the republish reached its compile while the lane was held: it wrote an open \
+         document's surface without taking the lane"
+    );
+    assert!(
         server
             .membership_ledger()
             .expect("tsserver has a ledger")
@@ -38070,10 +38086,21 @@ async fn the_open_carrier_republish_waits_for_the_document_lane() {
             .is_none(),
         "nothing was published while the lane was held"
     );
+    // Releasing the holder lets the queued republish reach the seam it could not
+    // reach before, and then publish on its turn.
+    let seam = tokio::spawn({
+        let arrived = Arc::clone(&arrived);
+        async move { arrived.notified().await }
+    });
     drop(held);
+    release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(10), republish)
         .await
         .expect("the republish runs once the lane is released");
+    tokio::time::timeout(std::time::Duration::from_secs(10), seam)
+        .await
+        .expect("the republish reached its compile once the lane was free")
+        .expect("the seam waiter task");
     assert!(
         server
             .membership_ledger()
