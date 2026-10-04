@@ -92,6 +92,7 @@ describe("E2E deadline hierarchy", () => {
       "outOfTreeSettle",
       "outOfTreeStrictDiagnostic",
       "restartEntryDiagnostics",
+      "restartTypeProviderSync",
       "rootExtensionReady",
       "rootTypeProviderSync",
       "startupBenchmarkTiming",

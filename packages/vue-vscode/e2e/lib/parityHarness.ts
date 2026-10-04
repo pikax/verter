@@ -120,11 +120,15 @@ async function closeAllEditors(): Promise<void> {
  * its replayed open is what the server has.)
  *
  * A suite that asserts workspace-wide state (closed-file references, project
- * rename, workspace symbols) must additionally await
- * `ensureTypeProviderSynced()` and say why: the restart invalidated the cached
- * level-2 fact, so that call waits for the new server's own announcement.
+ * rename, workspace symbols) passes `workspaceWide` with the reason: the server
+ * answers those requests only once its configured-project frontier is complete,
+ * so level 2 is awaited too. The restart invalidated the cached level-2 fact,
+ * so that wait is for the new server's own announcement.
  */
-export async function restartParityReady(entry: string): Promise<vscode.TextDocument> {
+export async function restartParityReady(
+  entry: string,
+  options?: { workspaceWide?: string },
+): Promise<vscode.TextDocument> {
   await closeAllEditors();
   // Marked BEFORE the restart: init generations restart at 1, so the previous
   // server's readiness lines would otherwise vouch for the one still booting.
@@ -143,6 +147,9 @@ export async function restartParityReady(entry: string): Promise<vscode.TextDocu
     remaining(),
   );
   await waitForDiagnosticsSettled(doc.uri, { timeoutMs: remaining() });
+  if (options?.workspaceWide) {
+    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+  }
   return doc;
 }
 

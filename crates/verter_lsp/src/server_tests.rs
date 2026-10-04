@@ -30502,6 +30502,87 @@ async fn minting_a_dependency_receipt_releases_the_publication_a_scan_held() {
         .set_workspace_scan_in_progress(false);
 }
 
+/// An isolated edit elsewhere re-currents every rootless receipt without any
+/// import pass minting one; the publication a running workspace scan held for
+/// want of a current receipt is released by that promotion, not at scan end.
+#[tokio::test(flavor = "multi_thread")]
+async fn promoting_a_rootless_receipt_releases_the_publication_a_scan_held() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let id = format!("{}/src/Held.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Held.vue");
+    let source = "<template><p>held</p></template>";
+    std::fs::write(fixture._temp.path().join("src/Held.vue"), source).unwrap();
+    server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".into(),
+        version: 1,
+        text: source.into(),
+    });
+    server.refresh_carrier_dependency_tracking(&id);
+    server.ensure_current_file_synced(&uri).await;
+
+    server.sync_coordinator.set_workspace_scan_in_progress(true);
+    let ticks_before = server.sync_coordinator.dispatch_ticks();
+    server.sync_coordinator.signal_diagnostics_only(
+        id.clone(),
+        uri.to_string(),
+        tokio::time::Instant::now() - std::time::Duration::from_secs(60),
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                !server.sync_coordinator.inbox_contains(&id)
+                    && server.sync_coordinator.dispatch_ticks() > ticks_before
+            },
+            || panic!("the coordinator never dispatched the overdue signal"),
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&uri),
+        "with no current receipt the scan holds the publication back"
+    );
+
+    let key = server
+        .import_sync_freshness_key()
+        .expect("the fixture publishes a resolver snapshot");
+    server
+        .import_sync
+        .record_delivered_with_rootless(id.clone(), key, true);
+
+    let unrelated_uri = workspace_uri(&fixture.root, "src/Unrelated.vue");
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: unrelated_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "<template><p>edited</p></template>".into(),
+            }],
+        },
+    )
+    .await;
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the promoted receipt must release the held publication mid-scan"),
+        )
+        .await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    server
+        .sync_coordinator
+        .set_workspace_scan_in_progress(false);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document() {
     let fixture = watched_dependency_fixture(true).await;

@@ -213,6 +213,16 @@ export const POLL_BUDGETS = {
       "server certifies the entry while its workspace scan is still running, so neither the scan " +
       "nor the replay of every held document is on this path",
   },
+  restartTypeProviderSync: {
+    budgetMs: 45_000,
+    parentTimeoutMs: 90_000,
+    reason:
+      "passed explicitly by `restartParityReady` for a suite that asserts workspace-wide state: " +
+      "level 2 is sent only after the restarted server's whole workspace scan, which runs " +
+      "concurrently with the replay of every document VS Code still holds. CI restarts take " +
+      "15-18s on a healthy runner and 19-36s on a loaded one, so it must not share the cold " +
+      "root handshake's 30s",
+  },
   waitForExtensionReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForTypeProviderSync: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForFileReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -357,12 +367,13 @@ export const POLL_SEQUENCES = {
       "ensureTypeProviderSynced (provider sync), then openReadyCached (file ready) — in series, " +
       "under ONE deadline. At 60s the second and third could be killed before reaching their own.",
   },
-  restartedSuiteSetup: {
-    members: ["restartEntryDiagnostics"],
-    parentTimeoutMs: 60_000,
+  restartedWorkspaceSuiteSetup: {
+    members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
+    parentTimeoutMs: 90_000,
     reason:
-      "a state-sensitive suite's suiteSetup restarts the language server and waits for the NEW " +
-      "server to certify its entry document's diagnostics, under the hook's declared 60s deadline",
+      "a suite that asserts workspace-wide state restarts the language server, waits for the NEW " +
+      "server to certify its entry document, then for its level-2 announcement — in series " +
+      "under the hook's declared 90s deadline",
   },
   restartedProviderOwnedWitnesses: {
     members: [

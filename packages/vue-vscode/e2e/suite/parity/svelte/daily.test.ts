@@ -28,9 +28,11 @@ function onlySvelteParity(ctx: Mocha.Context): void {
 
 suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
-    this.timeout(sequenceParent("restartedSuiteSetup"));
+    this.timeout(sequenceParent("restartedWorkspaceSuiteSetup"));
     onlySvelteParity(this);
-    await restartParityReady("src/App.svelte");
+    await restartParityReady("src/App.svelte", {
+      workspaceWide: "daily reference-count cases need the complete project frontier",
+    });
   });
 
   test("svelte.clean-diagnostics.daily", async function () {
