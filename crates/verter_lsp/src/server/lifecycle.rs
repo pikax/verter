@@ -910,6 +910,8 @@ pub(super) async fn handle_did_change(
                         after_key,
                         frontier_unchanged,
                     );
+                    // No wake here: the change ticket signals the coordinator right
+                    // after, and its loop re-checks held publications on every wake.
                 }
             }
         }

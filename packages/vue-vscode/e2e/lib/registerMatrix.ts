@@ -107,8 +107,12 @@ export function registerMatrixSuite(options: {
 
   suite(options.title, function () {
     suiteSetup(async function () {
-      this.timeout(sequenceParent("restartedSuiteSetup"));
-      await restartParityReady(options.entry);
+      // The matrix carries closed-file `references` cases: the server answers
+      // those only once its project frontier is complete (level 2).
+      this.timeout(sequenceParent("restartedWorkspaceSuiteSetup"));
+      await restartParityReady(options.entry, {
+        workspaceWide: "matrix closed-file references need the complete project frontier",
+      });
     });
 
     for (const c of options.cases) {

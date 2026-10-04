@@ -313,6 +313,9 @@ impl VerterLanguageServer {
                     key,
                     rootless,
                 );
+                // A publication the workspace scan held back for want of this
+                // receipt is owed now, not when the whole scan ends.
+                self.sync_coordinator.dependencies_settled();
             }
         }
     }
@@ -344,17 +347,10 @@ impl VerterLanguageServer {
         DependencyReadiness::NotReady
     }
 
-    /// The workspace `(content_generation, resolver_snapshot_generation)` pair
-    /// that keys the DependencyReady receipt. `None` when no published resolver
-    /// exists yet (bootstrap) — publication then delivers without minting.
+    /// The key the DependencyReady receipt is minted and read under; see
+    /// [`super::dependency_freshness_key`].
     pub(crate) fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
-        let content_generation = self.documents.host().workspace_read().content_generation();
-        let snapshot_generation = {
-            let ws = self.vfs_workspace.read();
-            let ws = ws.as_ref()?;
-            ws.load_published()?.snapshot.generation.0
-        };
-        Some((content_generation, snapshot_generation))
+        super::dependency_freshness_key(&self.documents, &self.vfs_workspace)
     }
 
     /// Run the full publication pass INLINE and await it — TEST-ONLY setup

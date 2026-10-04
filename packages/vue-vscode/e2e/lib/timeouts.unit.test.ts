@@ -91,6 +91,7 @@ describe("E2E deadline hierarchy", () => {
       "externalFileChangeSettle",
       "outOfTreeSettle",
       "outOfTreeStrictDiagnostic",
+      "restartEntryDiagnostics",
       "restartTypeProviderSync",
       "rootExtensionReady",
       "rootTypeProviderSync",
