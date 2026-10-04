@@ -422,6 +422,12 @@ impl VerterLanguageServer {
     /// Handle `$/verter/getAnalysis` request.
     ///
     /// Returns the full analysis snapshot as JSON for a Vue document URI.
+    ///
+    /// A caller asking for this document by name is waiting on it: the
+    /// request is recorded as demand for the document first (see
+    /// [`Self::demand_document`]), so the status it is polled alongside is
+    /// served ahead of unrelated owed work. The analysis response itself is
+    /// unchanged.
     pub async fn get_analysis(
         &self,
         params: GetAnalysisParams,
@@ -433,6 +439,8 @@ impl VerterLanguageServer {
             Ok(u) => u,
             Err(_) => return Ok(None),
         };
+
+        self.demand_document(&parsed_uri).await;
 
         Ok(self.documents.get_analysis_json(&parsed_uri))
     }

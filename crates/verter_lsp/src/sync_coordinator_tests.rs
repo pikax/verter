@@ -3885,8 +3885,9 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
 /// current, the imports its diagnostics read are already in the engine, and it
 /// is certified while the scan is still running. One whose receipt is not
 /// current stays fail-closed — synced, never pulled, never certified — until
-/// the receipt is minted or the scan ends. An edited document is pulled as it
-/// always was.
+/// the receipt is minted or the scan ends. An edited document is held exactly
+/// the same way: the edit changes the document, not whether the dependencies
+/// its diagnostics read have been delivered.
 ///
 /// The scan flag stays raised throughout the first two phases, and level 2 of
 /// the readiness ladder is announced only after it is lowered
@@ -3910,7 +3911,8 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
 
     // `Current` has its dependency closure delivered; `Parked` is waiting on a
     // dependency the scan has not reached; `Unsettled` never gets a receipt
-    // during the scan; `Active` is being edited.
+    // during the scan; `Active` is being edited while its own dependency is
+    // still parked.
     // `Promoted` is made current without any import pass minting it.
     let names = ["Current", "Parked", "Unsettled", "Active", "Promoted"];
     let docs: Vec<(String, Uri)> = names
@@ -3982,21 +3984,23 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
         .await_until(
             || {
                 documents.diagnostics_ready(&docs[0].1)
-                    && documents.diagnostics_ready(active_uri)
                     && handle.diag_tasks_live() == 0
+                    // `Parked`, `Unsettled`, `Promoted` and the edited
+                    // `Active`: each tick has decided, and held.
+                    && handle.dependency_holds() >= 4
             },
             || {
                 panic!(
-                    "a document whose dependencies are current, and the edited one, must be \
-                     certified while the scan is still running"
+                    "a document whose dependencies are current must be certified while the \
+                     scan is still running, and every other one held"
                 )
             },
         )
         .await;
     assert!(handle.workspace_scan_in_progress());
     let calls = provider.calls();
-    assert!(pulled(&calls, "Current") && pulled(&calls, "Active"));
-    for (index, name) in [(1, "Parked"), (2, "Unsettled")] {
+    assert!(pulled(&calls, "Current"));
+    for (index, name) in [(1, "Parked"), (2, "Unsettled"), (3, "Active")] {
         assert!(
             !pulled(&calls, name),
             "{name} has no current dependency receipt and must not be pulled: {calls:?}"
@@ -4022,6 +4026,24 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
         !pulled(&provider.calls(), "Unsettled"),
         "a receipt minted for one document releases only that document"
     );
+    assert!(
+        !documents.diagnostics_ready(active_uri),
+        "the edited document is still held: its own dependency has not settled"
+    );
+
+    // The edited document's dependency settles: it is certified while the scan
+    // still runs and the unrelated `Unsettled` is still held.
+    record_receipt(active_id);
+    handle.dependencies_settled();
+    handle
+        .await_until(
+            || documents.diagnostics_ready(active_uri) && handle.diag_tasks_live() == 0,
+            || panic!("the edited document must be certified once its dependency settles"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(pulled(&provider.calls(), "Active"));
+    assert!(!pulled(&provider.calls(), "Unsettled"));
 
     // A receipt re-currented without a mint (an isolated edit elsewhere promotes
     // it) still releases the publication: the loop re-checks on wake.

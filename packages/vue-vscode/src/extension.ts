@@ -2277,7 +2277,11 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
   if (process.env.VERTER_E2E_TEST) {
     lifetime.add(
       commands.registerCommand("verter._getDiagnosticStatus", async (uri: string) => {
-        const snapshot = await getClient().sendRequest(RequestType.GetStatistics, {});
+        // The per-document request is the demand for it; the statistics poll
+        // that follows is unchanged and carries no document identity.
+        const client = getClient();
+        await client.sendRequest(RequestType.GetAnalysis, { uri });
+        const snapshot = await client.sendRequest(RequestType.GetStatistics, {});
         return snapshot.diagnostics?.[uri];
       }),
       commands.registerCommand("verter._getDecorationState", () => ({

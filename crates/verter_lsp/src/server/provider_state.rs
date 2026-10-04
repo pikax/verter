@@ -803,6 +803,43 @@ impl VerterLanguageServer {
         self.sync_coordinator.touch(canonical_id);
     }
 
+    /// A caller is waiting on this open document — its diagnostics status was
+    /// asked for by name. Record that as the demand an open records, without
+    /// re-running the open: the document moves to the front of the work the
+    /// coordinator still owes it, its dependency publication is enqueued when
+    /// its DependencyReady receipt is not current, and the workspace scanner
+    /// promotes it and the carriers it imports. A document that is not open is
+    /// owed nothing and gets nothing.
+    pub(crate) async fn demand_document(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        self.touch_mru(&canonical_id);
+        let _ = self.dependency_readiness_capture(uri);
+        let import_ids = self
+            .documents
+            .host()
+            .get_script_ingress(&canonical_id)
+            .and_then(|ingress| {
+                super::server_utils::collect_imported_carrier_priority_ids_from_imports_for_publication(
+                    self.documents.language_classifier(),
+                    &ingress.imports,
+                    Some(&canonical_id),
+                    |parent, specifier| {
+                        self.resolve_import_specifier_for_publication(parent, specifier)
+                    },
+                )
+                .ok()
+            })
+            .unwrap_or_default();
+        if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+            scanner.signal_priority(canonical_id);
+            for import_id in import_ids {
+                scanner.signal_priority(import_id);
+            }
+        }
+    }
+
     pub(super) fn queue_snapshot_provider_sync(&self, canonical_id: impl Into<String>) {
         self.pending_snapshot_provider_sync
             .insert(canonical_id.into());

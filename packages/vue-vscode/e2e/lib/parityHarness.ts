@@ -114,10 +114,14 @@ async function closeAllEditors(): Promise<void> {
  * its import closure are current, so neither level 2 of the readiness ladder
  * (`typeProviderSyncComplete`, sent only after the whole scan) nor the replay
  * of every document VS Code still holds stands between the suite and its
- * entry. The entry is opened FIRST, straight after the restart, so its open is
- * the newest the server receives — what its coordinator serves first and what
- * its scanner prioritises. (A document VS Code still holds is not re-opened;
- * its replayed open is what the server has.)
+ * entry. The entry is opened FIRST, straight after the restart. A document VS
+ * Code still holds is not re-opened — its replayed open is all the server has,
+ * and nothing about that open singles it out — so the priority comes from the
+ * diagnostics-status poll instead: `verter._getDiagnosticStatus` first awaits
+ * an existing per-document request for the entry (`getAnalysis {uri}`), which
+ * the server records as demand for it (its owed work served first, its
+ * dependency publication enqueued, the scanner promoting it and its imports),
+ * and only then reads the unchanged statistics.
  *
  * A suite that asserts workspace-wide state (closed-file references, project
  * rename, workspace symbols) passes `workspaceWide` with the reason: the server

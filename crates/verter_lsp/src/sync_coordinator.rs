@@ -147,6 +147,11 @@ pub(crate) struct CoordinatorReceipts {
     /// unless a test widens the moment between a pull's release and its
     /// handle reporting it finished.
     pub(crate) hold_after_slot_release_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic count of publications a workspace scan held back because
+    /// the document's DependencyReady receipt was not current. Incremented in
+    /// the tick that decided the hold, so a dispatch tick that ends after it
+    /// has provably taken that decision.
+    pub(crate) dependency_holds: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,10 +181,6 @@ struct PendingSignal {
     /// a replayed backlog keep overtaking the one document the user is
     /// actually looking at.
     user_received_at: Option<Instant>,
-    /// Whether an EDIT (a `did_change`) is behind this signal, as opposed to an
-    /// open. A restart replays every open editor as an open; only an edit says
-    /// the user is working in THIS document right now.
-    edited: bool,
 }
 
 impl SyncCoordinatorHandle {
@@ -189,19 +190,6 @@ impl SyncCoordinatorHandle {
     /// entry instant, never `Instant::now()` taken at some later point on the
     /// path. The debounce window is measured from it.
     pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
-        self.deposit_user_signal(canonical_id, uri_str, received_at, false);
-    }
-
-    /// The deposit behind [`Self::signal`]. `edited` is written in the SAME
-    /// locked step as the signal itself, so the coordinator can never drain the
-    /// signal without the fact that an edit is behind it.
-    fn deposit_user_signal(
-        &self,
-        canonical_id: String,
-        uri_str: String,
-        received_at: Instant,
-        edited: bool,
-    ) {
         if let Some(documents) = self.documents.upgrade() {
             documents.invalidate_diagnostics(&uri_str);
         }
@@ -219,7 +207,6 @@ impl SyncCoordinatorHandle {
                 // the sync while the user is still typing.
                 pending.received_at = pending.received_at.max(received_at);
                 pending.user_received_at = pending.user_received_at.max(Some(received_at));
-                pending.edited |= edited;
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
@@ -228,7 +215,6 @@ impl SyncCoordinatorHandle {
                 sync_retries_remaining: 1,
                 received_at,
                 user_received_at: Some(received_at),
-                edited,
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
@@ -270,7 +256,6 @@ impl SyncCoordinatorHandle {
                 sync_retries_remaining: 0,
                 received_at,
                 user_received_at: None,
-                edited: false,
             });
         let _ = self.wake_tx.try_send(());
     }
@@ -294,10 +279,10 @@ impl SyncCoordinatorHandle {
         }
     }
 
-    /// A workspace scan started or ended. While one runs, a document the user
-    /// is not EDITING is pulled from the provider only once its own
-    /// DependencyReady receipt is current: the imports its diagnostics depend
-    /// on are then already in the engine, so the scan still publishing
+    /// A workspace scan started or ended. While one runs, a document — opened,
+    /// replayed or being edited alike — is pulled from the provider only once
+    /// its own DependencyReady receipt is current: the imports its diagnostics
+    /// depend on are then already in the engine, so the scan still publishing
     /// unrelated documents cannot change its answer. One whose receipt is not
     /// current is still synced but held back, fail-closed, until the loop
     /// observes the receipt current (every wake re-checks, so a receipt that
@@ -439,6 +424,16 @@ impl SyncCoordinatorHandle {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// TEST-ONLY: publications a running scan has held back for want of a
+    /// current DependencyReady receipt. See
+    /// [`CoordinatorReceipts::dependency_holds`].
+    #[cfg(test)]
+    pub(crate) fn dependency_holds(&self) -> usize {
+        self.receipts
+            .dependency_holds
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     #[cfg(test)]
     pub(crate) fn diags_published_count(&self) -> usize {
         self.receipts
@@ -480,7 +475,7 @@ impl ChangeInFlight {
     /// change was received rather than any later instant on the path.
     pub fn signal(&self, uri_str: String) {
         self.handle
-            .deposit_user_signal(self.canonical_id.clone(), uri_str, self.received_at, true);
+            .signal(self.canonical_id.clone(), uri_str, self.received_at);
     }
 
     /// Deposit a REPUBLISH-only signal for this change, stamped with the same
@@ -767,7 +762,6 @@ fn settle_pull(
                 sync_retries_remaining: 1,
                 received_at,
                 user_received_at: attended,
-                edited: false,
             },
         ));
 }
@@ -801,7 +795,6 @@ fn absorb_inbox(
                     .sync_retries_remaining
                     .max(signal.sync_retries_remaining);
                 pending.user_received_at = pending.user_received_at.max(signal.user_received_at);
-                pending.edited |= signal.edited;
             })
             .or_insert((received_at, signal));
     }
@@ -1065,7 +1058,6 @@ async fn coordinator_loop(
                             uri, requires_sync: false, force_diagnostics: true,
                             sync_retries_remaining: 0, received_at,
                             user_received_at: attended,
-                            edited: false,
                         }));
                 }
             }
@@ -1113,7 +1105,6 @@ async fn coordinator_loop(
                                         sync_retries_remaining: 0,
                                         received_at,
                                         user_received_at: attended,
-                                        edited: false,
                                     },
                                 ));
                         }
@@ -1141,7 +1132,6 @@ async fn coordinator_loop(
                                         sync_retries_remaining: 0,
                                         received_at,
                                         user_received_at: None,
-                                        edited: false,
                                     },
                                 ),
                             );
@@ -1324,7 +1314,6 @@ async fn coordinator_loop(
                                             .saturating_sub(1),
                                         received_at,
                                         user_received_at: signal.user_received_at,
-                                        edited: signal.edited,
                                     },
                                 ),
                             );
@@ -1346,14 +1335,19 @@ async fn coordinator_loop(
 
                     if publish_diagnostics
                         && scanning.load(std::sync::atomic::Ordering::Acquire)
-                        && !signal.edited
                         && !dependencies_current(&deps, &canonical_id)
                     {
                         // Synced above, but the imports its diagnostics read
                         // are not in the engine yet: certifying now would
                         // publish errors the scan is about to retract. Held
-                        // until the receipt is minted or the scan ends.
+                        // until the receipt is minted or the scan ends. An
+                        // edit is no exemption: it changes this document, not
+                        // whether its dependencies have been delivered.
                         publish_diagnostics = false;
+                        #[cfg(test)]
+                        receipts
+                            .dependency_holds
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         awaiting_dependencies.insert(
                             canonical_id.clone(),
                             PendingSignal {
@@ -1560,7 +1554,6 @@ fn arm_open_importer_republish(
                         sync_retries_remaining: 0,
                         received_at,
                         user_received_at: None,
-                        edited: false,
                     },
                 ));
         }
