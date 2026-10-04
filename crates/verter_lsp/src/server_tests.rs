@@ -23971,6 +23971,15 @@ fn narrowed_host_protocol_classification_follows_its_admission() {
         None,
         "an unregistered extension still serves no provider buffer"
     );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "/project/src/Box.svelte"),
+        None,
+        "an unadmitted carrier serves no provider buffer, like an unregistered extension"
+    );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "file:///project/src/Box.svelte"),
+        None
+    );
 }
 
 /// The watcher glob is host-derived: it covers every carrier row of the

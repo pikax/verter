@@ -615,6 +615,10 @@ async fn a_narrowed_admission_governs_both_document_ingress_paths() {
         "an unadmitted carrier's editor languageId must not resolve to its carrier row"
     );
     assert!(
+        registry.get_projection(&uri).is_none(),
+        "an unadmitted carrier must not project as an own-path self-file provider buffer"
+    );
+    assert!(
         registry
             .document_file_language("vue", "/workspace/App.vue")
             .is_framework_carrier(),

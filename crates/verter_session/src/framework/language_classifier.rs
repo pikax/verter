@@ -80,34 +80,63 @@ impl HostLanguageClassifier {
 
     /// Resolve a path to its [`FileLanguage`] row.
     pub fn classify(&self, path: &str) -> FileLanguage {
-        let language = match self.registry.classify_static(path) {
-            StaticClassification::Resolved(language) => language,
-            StaticClassification::Gated(candidate) => {
-                if self.capabilities.is_enabled(&candidate.capability) {
-                    candidate.candidate
-                } else {
-                    candidate.fallback
-                }
-            }
-            StaticClassification::Unknown => FileLanguage::script_ts(),
-        };
-        self.admission_resolved(language)
+        self.classify_unadmitted(path)
+            .map_or_else(FileLanguage::script_ts, |language| {
+                self.admission_resolved(language)
+            })
     }
 
     /// [`Self::classify`] for a path whose extension the registry
-    /// registers; `None` for an unregistered extension (no language row —
-    /// the plain-script catch-all [`Self::classify`] applies is not a
-    /// registration). An unadmitted vertical's extensions stay registered:
-    /// they resolve to the plain-script routing admission projects them to.
+    /// registers AND whose vertical this host admits; `None` for an
+    /// unregistered extension (no language row — the plain-script
+    /// catch-all [`Self::classify`] applies is not a registration) and for
+    /// the carrier extension of an unadmitted vertical, which this host
+    /// routes exactly like an unregistered extension. An unadmitted
+    /// vertical's ADAPTER-MODULE extensions stay registered: they are
+    /// genuine scripts and resolve to the same-dialect plain script
+    /// admission projects them to.
     #[must_use]
     pub fn classify_registered(&self, path: &str) -> Option<FileLanguage> {
-        if matches!(
-            self.registry.classify_static(path),
-            StaticClassification::Unknown
-        ) {
+        let language = self.classify_unadmitted(path)?;
+        if self.is_unadmitted_carrier_row(&language) {
             return None;
         }
-        Some(self.classify(path))
+        Some(self.admission_resolved(language))
+    }
+
+    /// Whether `path` is the CARRIER extension of a framework vertical this
+    /// host does not admit (`.svelte` on a Vue-only host). Such a document
+    /// is no script of any dialect: it serves no provider buffer and no
+    /// provider watch event, exactly like an unregistered extension.
+    #[must_use]
+    pub fn is_unadmitted_carrier(&self, path: &str) -> bool {
+        self.classify_unadmitted(path)
+            .is_some_and(|language| self.is_unadmitted_carrier_row(&language))
+    }
+
+    /// The registry × capability resolution BEFORE the admission
+    /// projection; `None` for an unregistered extension.
+    fn classify_unadmitted(&self, path: &str) -> Option<FileLanguage> {
+        match self.registry.classify_static(path) {
+            StaticClassification::Resolved(language) => Some(language),
+            StaticClassification::Gated(candidate) => {
+                Some(if self.capabilities.is_enabled(&candidate.capability) {
+                    candidate.candidate
+                } else {
+                    candidate.fallback
+                })
+            }
+            StaticClassification::Unknown => None,
+        }
+    }
+
+    /// Whether a pre-admission row is a framework carrier (not an adapter
+    /// module) whose adapter this host does not admit.
+    fn is_unadmitted_carrier_row(&self, language: &FileLanguage) -> bool {
+        language.adapter_script_language().is_none()
+            && language
+                .adapter_id()
+                .is_some_and(|adapter_id| !self.framework.admits(adapter_id))
     }
 
     /// The admission projection of a classified row: a framework carrier
@@ -127,10 +156,8 @@ impl HostLanguageClassifier {
             }
             return language;
         }
-        if let Some(adapter_id) = language.adapter_id() {
-            if !self.framework.admits(adapter_id) {
-                return FileLanguage::script_ts();
-            }
+        if self.is_unadmitted_carrier_row(&language) {
+            return FileLanguage::script_ts();
         }
         language
     }
@@ -354,6 +381,23 @@ mod tests {
             FileLanguage::script(verter_language::ScriptSourceType::js()),
             "an unadmitted adapter module classifies as a plain js script"
         );
+        // The unadmitted carrier is no registered script: registration-aware
+        // consumers (the self-file provider-buffer gate) route it exactly
+        // like an extension with no row, while the unadmitted adapter
+        // module stays a registered plain script.
+        assert_eq!(classifier.classify_registered("/src/Box.svelte"), None);
+        assert!(classifier.is_unadmitted_carrier("/src/Box.svelte"));
+        assert!(!classifier.is_unadmitted_carrier("/src/store.svelte.ts"));
+        assert!(!classifier.is_unadmitted_carrier("/src/App.vue"));
+        assert!(!classifier.is_unadmitted_carrier("/src/README.md"));
+        assert_eq!(
+            classifier.classify_registered("/src/store.svelte.ts"),
+            Some(FileLanguage::script(verter_language::ScriptSourceType::Ts))
+        );
+        assert_eq!(
+            classifier.classify_registered("/src/App.vue"),
+            Some(FileLanguage::vue())
+        );
         // An editor `languageId` naming the unadmitted carrier resolves to
         // no carrier row, so editor ingress falls back to path
         // classification instead of reaching the unadmitted carrier.
@@ -382,6 +426,11 @@ mod tests {
             classifier.classify("/src/Box.svelte"),
             FileLanguage::svelte()
         );
+        assert_eq!(
+            classifier.classify_registered("/src/Box.svelte"),
+            Some(FileLanguage::svelte())
+        );
+        assert!(!classifier.is_unadmitted_carrier("/src/Box.svelte"));
         assert_eq!(
             classifier.classify("/src/store.svelte.ts"),
             FileLanguage::adapter_module(

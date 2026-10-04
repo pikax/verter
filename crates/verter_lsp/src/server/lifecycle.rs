@@ -1266,9 +1266,18 @@ pub(super) async fn handle_did_change_watched_files(
                 importer_closure.extend(ws.affected_canonicals(&canonical_id));
             }
         }
+        // The carrier of a vertical this host does not admit is no script of
+        // any dialect: only the filesystem facts move — no provider event, no
+        // resync — exactly like an extension with no language row.
+        let unadmitted_carrier = server
+            .documents
+            .language_classifier()
+            .is_unadmitted_carrier(&canonical_id);
         // A framework carrier is never a TypeScript file in its own right: the
         // engine only ever sees the companions Verter delivers for it.
-        if carrier_language_for(server.documents.language_classifier(), &canonical_id).is_none() {
+        if !unadmitted_carrier
+            && carrier_language_for(server.documents.language_classifier(), &canonical_id).is_none()
+        {
             provider_changes.push(verter_type_runtime::WatchedFileChange {
                 path: canonical_id.clone(),
                 kind: if event.typ == FileChangeType::DELETED {
@@ -1296,6 +1305,10 @@ pub(super) async fn handle_did_change_watched_files(
             tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
             // Config files also trigger vite dep check below, but the
             // registry rebuild is the primary action.
+        } else if unadmitted_carrier {
+            tracing::debug!(
+                "did_change_watched_files: unadmitted carrier {canonical_id} — disk facts only"
+            );
         } else if carrier_language_for(server.documents.language_classifier(), &canonical_id)
             .is_some()
         {
