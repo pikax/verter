@@ -40,7 +40,7 @@
         },
         {
           "responsibility": "cancellation and retry bookkeeping",
-          "survivingOwner": "crates/verter_scheduler/src/cancellation.rs"
+          "survivingOwner": "crates/verter_execution/src/cancellation.rs"
         }
       ],
       "pins": [

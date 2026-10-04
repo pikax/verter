@@ -111,7 +111,7 @@ impl VerterHost {
             let request_id = self.next_request_id();
             let analysis = self.materialize_analysis_ready(canonical_id);
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_semantic_analysis_record(
                 request_id,
                 canonical_id,

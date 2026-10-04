@@ -101,7 +101,6 @@ extern crate verter_debug_assert;
 pub mod audit_publish;
 pub mod cache_id;
 pub mod caller_kind;
-pub mod cancellation;
 pub mod dag;
 pub mod dedupe_hook;
 pub mod driver;
@@ -111,12 +110,10 @@ pub mod invalidation;
 pub mod job;
 pub mod node;
 pub mod overlay;
-pub mod request_context;
 pub mod scheduler;
 pub mod source_loader;
 pub mod source_root;
 pub mod stage;
-pub mod tasks;
 
 #[cfg(test)]
 #[path = "source_root_tests.rs"]

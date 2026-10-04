@@ -1130,7 +1130,7 @@ export function witness(v: number | string, flag: boolean) {
 /// fresh token answers exactly what a cold host answers, on both bases: a
 /// cancelled attempt never leaves a partial answer behind.
 fn drive_det_05_cancel_and_retry() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     use verter_session::host_flow_return_audit::FlowReturnError;
     let canonical = "/det/cancel.ts";
     let cold_host = build_host(&[(canonical, CANCEL_TS)]);

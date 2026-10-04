@@ -427,7 +427,7 @@ impl VerterHost {
         // submission, and clone it into every batch Request. The
         // scheduler installs it into the source / analysis worker TLS, so
         // fan-out events stay attributable to the outer audited request.
-        let request_context = verter_scheduler::request_context::current_context();
+        let request_context = verter_execution::request_context::current_context();
 
         if self.config.metrics_enabled {
             self.metrics

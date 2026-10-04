@@ -733,7 +733,7 @@ fn cheap_component_meta_record(
             canonical_id,
         )),
         kind: verter_audit::RequestKind::ComponentMeta,
-        parent_request_id: verter_scheduler::request_context::current_request_id()
+        parent_request_id: verter_execution::request_context::current_request_id()
             .map(|id| id.to_string()),
         from_cache: false,
         timings: crate::component_meta_audit::RequestTimingAudit::default(),

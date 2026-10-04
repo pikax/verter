@@ -437,7 +437,7 @@ fn in_flight_dedup_no_panic_no_deps_change() {
 /// continue to apply.
 #[test]
 fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
-    use crate::request_context::OpaqueRequestContext;
+    use verter_execution::request_context::OpaqueRequestContext;
     let mut dag = SchedulerDag::new();
     let target_id = file_stage("/target.vue", 1, FileStageKey::Source);
 

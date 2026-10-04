@@ -42,7 +42,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use verter_span::TsPosition;
 
-use verter_scheduler::cancellation::CancellationToken;
+use verter_execution::cancellation::CancellationToken;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, ProjectBinding, PublishSnapshot, QueryFeature, ScriptKind,
     SnapshotFile, SnapshotRole,

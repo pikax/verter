@@ -3470,6 +3470,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_execution"
+version = "0.0.1-beta.6"
+dependencies = [
+ "parking_lot",
+ "rustc-hash",
+ "smallvec",
+ "verter_debug_assert",
+]
+
+[[package]]
 name = "verter_ffi"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3539,6 +3549,7 @@ dependencies = [
  "verter_css_syntax",
  "verter_debug_assert",
  "verter_diagnostics",
+ "verter_execution",
  "verter_ffi",
  "verter_language",
  "verter_lsp",
@@ -3771,6 +3782,7 @@ dependencies = [
  "smallvec",
  "verter_audit",
  "verter_debug_assert",
+ "verter_execution",
  "verter_language",
  "verter_span",
  "web-time",
@@ -3864,6 +3876,7 @@ dependencies = [
  "verter_compiler",
  "verter_css_syntax",
  "verter_debug_assert",
+ "verter_execution",
  "verter_identity",
  "verter_language",
  "verter_macro_dto",
@@ -4141,6 +4154,7 @@ dependencies = [
  "tracing",
  "verter_audit",
  "verter_debug_assert",
+ "verter_execution",
  "verter_language",
  "verter_parser",
  "verter_scheduler",

@@ -318,7 +318,7 @@ fn cancel_between_stages_stops_the_pump_and_a_re_drive_resumes() {
     // Withdraw after the Source stage by cancelling the adapter's
     // token at the between-stages offer — the embedding runtime's
     // out-of-band withdrawal shape.
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     let hook = Arc::new(CancelTokenAtSecondOffer {
         offers: AtomicUsize::new(0),
         cancellation: cancellation.clone(),
@@ -380,7 +380,7 @@ fn cancel_between_stages_stops_the_pump_and_a_re_drive_resumes() {
 #[derive(Debug)]
 struct CancelTokenAtSecondOffer {
     offers: AtomicUsize,
-    cancellation: verter_scheduler::cancellation::CancellationToken,
+    cancellation: verter_execution::cancellation::CancellationToken,
 }
 
 impl CooperativeYield for CancelTokenAtSecondOffer {
@@ -473,7 +473,7 @@ fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
 /// drive's own token check, not reported at the yield point.
 #[derive(Debug)]
 struct CancelTokenAtFirstOffer {
-    cancellation: verter_scheduler::cancellation::CancellationToken,
+    cancellation: verter_execution::cancellation::CancellationToken,
 }
 
 impl CooperativeYield for CancelTokenAtFirstOffer {
@@ -513,7 +513,7 @@ fn cancellation_observed_before_parking_on_the_driver_is_a_before_drive_stop() {
     });
     scheduler.test_wait_until_dispatch_paused();
 
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     let hook = Arc::new(CancelTokenAtFirstOffer {
         cancellation: cancellation.clone(),
     });

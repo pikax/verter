@@ -37,9 +37,9 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cache_id::SchedulerCacheId;
-use crate::cancellation::CancellationToken;
 use crate::job::{CompletionSender, CompletionState, RequestResult, SchedulerError};
 use crate::stage::{Priority, TargetStage, TaskKind};
+use verter_execution::cancellation::CancellationToken;
 
 /// Artifact blocker-dep registry typed API. The storage stays on
 /// [`SchedulerDag`] (see `artifact_blocker_deps`); the child module
@@ -241,7 +241,7 @@ struct RequestGroup {
     senders: Vec<CompletionSender<RequestResult>>,
     /// First-arrived caller's optional session-side context. Joiner
     /// callers observe this via [`SchedulerDag::winner_context_for`].
-    winner_context: Option<crate::request_context::OpaqueRequestContext>,
+    winner_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 }
 
 impl std::fmt::Debug for RequestGroup {
@@ -275,7 +275,7 @@ impl RequestGroup {
 /// atomic-batch admission paths through one shared mechanism.
 pub struct DedupJoinerEvent {
     canonical: Arc<str>,
-    joiner_context: crate::request_context::OpaqueRequestContext,
+    joiner_context: verter_execution::request_context::OpaqueRequestContext,
     winner_request_id: u64,
     winner_audited: bool,
 }
@@ -329,7 +329,8 @@ pub(in crate::dag) struct DagNode {
     pub(in crate::dag) ready_membership: Option<(Priority, ResourceClass)>,
     /// Optional session-side context propagated by the driver. Carried
     /// as opaque bytes; the dispatch loop reads it when installing TLS.
-    pub(in crate::dag) request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub(in crate::dag) request_context:
+        Option<verter_execution::request_context::OpaqueRequestContext>,
     /// Aggregate job-liveness token. It is independent of the first request
     /// context retained for TLS attribution and is cancelled by DAG terminal
     /// cancellation/reset (or, for scoped cache nodes, loss of all owners).
@@ -477,7 +478,7 @@ pub struct ReadyJob {
     /// never rewrites a node's priority.
     pub priority: Priority,
     pub enqueue_time: Instant,
-    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     /// Aggregate job token created at admission and shared unchanged with the
     /// executor. Never a winner request's private token.
     pub cancellation: CancellationToken,
@@ -1431,7 +1432,7 @@ impl SchedulerDag {
         kind: WorkKind,
         priority: Priority,
         deps: Vec<DepKey>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> Option<SubmissionToken> {
         // STRUCTURAL GATE. A retired generation can never be admitted,
         // whichever caller asks. This is the single admission primitive,
@@ -1734,7 +1735,7 @@ impl SchedulerDag {
         kind: WorkKind,
         priority: Priority,
         deps: Vec<DepKey>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> SubmissionToken {
         self.submit(identity, kind, priority, deps, request_context)
             .expect("test admission refused by the retirement floor")
@@ -2488,7 +2489,7 @@ impl SchedulerDag {
         generation: u64,
         target: TargetStage,
         sender: CompletionSender<RequestResult>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> Option<DedupJoinerEvent> {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
@@ -2791,7 +2792,7 @@ impl SchedulerDag {
         &self,
         canonical: &Arc<str>,
         generation: u64,
-    ) -> Option<crate::request_context::OpaqueRequestContext> {
+    ) -> Option<verter_execution::request_context::OpaqueRequestContext> {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
             generation,

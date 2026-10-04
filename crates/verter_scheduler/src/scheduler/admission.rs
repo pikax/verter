@@ -15,7 +15,7 @@ pub(super) fn admit_work(
     generation: u64,
     task: TaskKind,
     priority: Priority,
-    request_context: Option<crate::request_context::OpaqueRequestContext>,
+    request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 ) -> Option<crate::dag::SubmissionToken> {
     let (identity, kind) = match task {
         // The live `FileStage{Source}` DAG node maps to `Load`; the
@@ -142,7 +142,7 @@ pub(super) struct PreparedRequest {
     pub(super) priority: Priority,
     pub(super) source: Option<Arc<str>>,
     pub(super) sender: CompletionSender<RequestResult>,
-    pub(super) request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub(super) request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     /// Resolved language carried from preparation so the admission core
     /// can perform any language re-home under the DAG lock. Preparation
     /// deliberately does NOT re-home: that advances a published file's
@@ -226,7 +226,7 @@ impl Scheduler {
         file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
         submitted_epoch: u64,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) {
         let request = QueuedRequest {
             file_id,

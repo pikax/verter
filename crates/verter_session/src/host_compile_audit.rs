@@ -322,7 +322,7 @@ impl VerterHost {
                 } else {
                     verter_audit::AuditCaptureState::AuditDisabled
                 };
-                let parent_request_id = verter_scheduler::request_context::current_request_id()
+                let parent_request_id = verter_execution::request_context::current_request_id()
                     .map(|id| id.to_string());
                 let record = noop_compile_record(
                     request_id,
@@ -381,7 +381,7 @@ impl VerterHost {
                 } else {
                     verter_audit::AuditCaptureState::AuditDisabled
                 };
-                let parent_request_id = verter_scheduler::request_context::current_request_id()
+                let parent_request_id = verter_execution::request_context::current_request_id()
                     .map(|id| id.to_string());
                 let record = noop_compile_record(
                     request_id,
@@ -448,7 +448,7 @@ impl VerterHost {
                 verter_audit::AuditCaptureState::AuditDisabled
             };
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -484,7 +484,7 @@ impl VerterHost {
                 verter_audit::AuditCaptureState::AuditDisabled
             };
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             return AuditedResult::ok(
                 rejected,
                 noop_compile_record(
@@ -543,7 +543,7 @@ impl VerterHost {
             };
             let request_id = self.next_request_id();
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_compile_record(
                 request_id,
                 canonical_id,

@@ -44,10 +44,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use verter_execution::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
-use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
 use verter_scheduler::stage::{Priority, TargetStage};

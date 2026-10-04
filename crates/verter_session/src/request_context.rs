@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use verter_scheduler::cancellation::CancellationToken;
-use verter_scheduler::request_context::{
+use verter_execution::cancellation::CancellationToken;
+use verter_execution::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
 
@@ -746,7 +746,7 @@ pub struct RequestContext {
     pub cache_counters: PerRequestCacheCounters,
     /// Optional parent-request id captured at construction time. When
     /// the scheduler's TLS context (via
-    /// [`verter_scheduler::request_context::current_request_id`]) is
+    /// [`verter_execution::request_context::current_request_id`]) is
     /// `Some(parent)` at construction, this slot stores `parent` so
     /// the audit record's `parent_request_id` field is populated.
     /// `None` when the request has no parent (top-level audited
@@ -1368,7 +1368,7 @@ impl RequestContext {
         // the new context records the parent's id so the audit record
         // surfaces parent / child correlation. `None` when no
         // enclosing context is installed.
-        let parent_request_id = verter_scheduler::request_context::current_request_id();
+        let parent_request_id = verter_execution::request_context::current_request_id();
         // Per-request trace_id — uuid v4 string, generated once per
         // request. Propagates through tracing spans the request opens
         // so structured-event consumers (the dispatch / memo / walker
@@ -2187,7 +2187,7 @@ thread_local! {
 /// if present) into TLS and restores the previous slots on drop. Both
 /// the `CURRENT_REQUEST_CONTEXT` and `CURRENT_ACCUMULATOR` TLS slots
 /// also plant the scheduler's `OpaqueRequestContext` so worker-thread
-/// code that reads `verter_scheduler::request_context::current_request_id()`
+/// code that reads `verter_execution::request_context::current_request_id()`
 /// observes this request's id. The same `Arc<RequestContext>` is also
 /// planted as an `Arc<dyn verter_audit::AuditObserver>` into the
 /// substrate's `current_observer()` TLS slot so producers in lower
@@ -2353,7 +2353,7 @@ fn clear_session_and_audit_tls_hook() -> Box<dyn TlsUninstall + Send> {
 /// clear, and the outer request's session + audit TLS would bleed
 /// into the inner stage.
 pub fn install_clear_tls_hook() {
-    let _ = verter_scheduler::request_context::register_clear_tls_hook(
+    let _ = verter_execution::request_context::register_clear_tls_hook(
         clear_session_and_audit_tls_hook,
     );
 }
@@ -2605,7 +2605,7 @@ mod tests {
         {
             // Clear-all guard: every install_tls slot must be empty
             // for the lifetime of this scope.
-            let _clear = verter_scheduler::request_context::AllSlotsClearGuard::clear_all();
+            let _clear = verter_execution::request_context::AllSlotsClearGuard::clear_all();
             assert!(
                 current_request_context().is_none(),
                 "AllSlotsClearGuard must clear session request-context TLS",

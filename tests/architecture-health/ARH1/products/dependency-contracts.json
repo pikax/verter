@@ -58,7 +58,7 @@
       "id": "ARH1-LAYER-1",
       "crate": "crates/verter_scheduler",
       "rule": "scheduler-runtime stays below every orchestration crate: it may depend only on the leaf utility crates",
-      "mayImport": ["verter_audit", "verter_debug_assert", "verter_language", "verter_span"],
+      "mayImport": ["verter_audit", "verter_debug_assert", "verter_execution", "verter_language", "verter_span"],
       "mustNotImport": [
         "verter_session",
         "verter_compiler",
@@ -113,6 +113,7 @@
         "verter_audit",
         "verter_compiler",
         "verter_debug_assert",
+        "verter_execution",
         "verter_identity",
         "verter_language",
         "verter_macro_dto",
@@ -158,18 +159,17 @@
         },
         {
           "responsibility": "cancellation and retry bookkeeping",
-          "survivingOwner": "crates/verter_scheduler/src/cancellation.rs",
+          "survivingOwner": "crates/verter_execution/src/cancellation.rs",
           "evidence": "cancellation.rs module contract: one-shot clonable cancellation latches; dropping a handle cancels its still-pending work"
         }
       ],
       "allowedImportDirection": {
-        "verter": ["verter_audit", "verter_language"],
+        "verter": ["verter_audit", "verter_execution", "verter_language"],
         "external": ["crossbeam_channel", "dashmap", "hotpath", "parking_lot", "web_time"],
         "crateInternal": [
           "audit_publish",
           "cache_id",
           "caller_kind",
-          "cancellation",
           "dag",
           "dedupe_hook",
           "driver",
@@ -178,7 +178,6 @@
           "job",
           "node",
           "overlay",
-          "request_context",
           "source_loader",
           "source_root",
           "stage"
@@ -242,7 +241,7 @@
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
         ],
-        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_scheduler::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
+        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_execution::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias, and crate::module::Item paths like crate::cache_id::SchedulerCacheId fields, crate::execution::pool::SchedulerCpuPool constructor parameters, crate::request_context::RequestContext, crate::audit_publish, crate::dedupe_hook, crate::execution::owner_command and crate::source_root references) are measured, so the declared sets equal the production direction both ways; verter_audit is measured through the module root's production re-export and its inline attribute! paths; cache_id and request_context are production crate-internal roots measured through inline paths (their use-statement imports are test configuration), and execution is the declared crate-internal root for the moved execution adapters (pool, owner_command, executor, host_cpu_pool, cpu_concurrency), measured through both its production use statements and its inline crate::execution:: paths"
       },
       "constructorCapabilities": [
@@ -349,7 +348,7 @@
           "owner": "cancellation.rs",
           "lifetime": "request",
           "evidence": "one-shot latches riding work items; the owning handle trips the token on Drop",
-          "soleOwner": "crates/verter_scheduler/src/cancellation.rs"
+          "soleOwner": "crates/verter_execution/src/cancellation.rs"
         }
       ],
       "minimalPublicSurface": {
@@ -627,7 +626,7 @@
           ]
         },
         {
-          "module": "crates/verter_scheduler/src/cancellation.rs",
+          "module": "crates/verter_execution/src/cancellation.rs",
           "responsibility": "cancellation and retry bookkeeping",
           "stateOwnership": [
             {

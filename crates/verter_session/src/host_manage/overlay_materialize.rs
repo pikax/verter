@@ -315,7 +315,7 @@ impl VerterHost {
         let request = crate::carrier_publication_store::PublicationRequestContext::new(
             crate::carrier_publication_store::AuditRequestId::new(self.next_request_id()),
             crate::carrier_publication_store::PublicationSurface::Overlay,
-            verter_scheduler::cancellation::CancellationToken::default(),
+            verter_execution::cancellation::CancellationToken::default(),
             registered.snapshot_id().clone(),
         );
         let envelope = self

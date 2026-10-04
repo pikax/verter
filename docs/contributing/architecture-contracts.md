@@ -54,7 +54,7 @@ Responsibility split among cohesive modules:
   `crates/verter_scheduler/src/execution/pool.rs`.
 - Batch coordination: `crates/verter_scheduler/src/driver.rs` (owns all
   admission and ordering policy, drains the `SubmissionInbox`).
-- Cancellation and retry bookkeeping: `crates/verter_scheduler/src/cancellation.rs`
+- Cancellation and retry bookkeeping: `crates/verter_execution/src/cancellation.rs`
   (one-shot clonable latches; dropping a handle cancels its pending work).
 - Snapshot-epoch source authority: `crates/verter_scheduler/src/source_root.rs`.
 

@@ -576,7 +576,7 @@ fn partiality_projection_does_not_change_admission_or_warmth() {
 /// it causes, both legs fail the typed-`Cancelled` assertion.
 #[test]
 fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     for (filter, capture) in [
         (
             verter_audit::AuditConsumerFilter::allow_all(),
@@ -653,7 +653,7 @@ fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
 /// value.
 #[test]
 fn a_pre_cancelled_request_answers_cancelled_over_a_warm_answer() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     let host = build_host(false);
     let ident = identity(CANONICAL, "makeThing");
     let cold = host.get_flow_return_type_with_audit(&ident, whole());

@@ -48,7 +48,7 @@ struct CancellationOwnerState {
 /// token becomes cancelled once it has had at least one owner and no attached,
 /// uncancelled owner remains.
 #[derive(Debug)]
-pub(crate) struct CancellationOwner {
+pub struct CancellationOwner {
     state: Arc<CancellationOwnerState>,
 }
 
@@ -68,7 +68,7 @@ impl CancellationToken {
     /// its registered request owners. An ownerless internal job remains live;
     /// after the first registration, loss/cancellation of every owner trips
     /// the one-shot token.
-    pub(crate) fn aggregate() -> Self {
+    pub fn aggregate() -> Self {
         Self {
             state: Arc::new(CancellationState {
                 cancelled: AtomicBool::new(false),
@@ -82,10 +82,7 @@ impl CancellationToken {
 
     /// Attach one request token to this aggregate job token. `None` denotes
     /// an uncancellable owner that stays live until the registration drops.
-    pub(crate) fn register_owner(
-        &self,
-        request: Option<CancellationToken>,
-    ) -> Option<CancellationOwner> {
+    pub fn register_owner(&self, request: Option<CancellationToken>) -> Option<CancellationOwner> {
         let owners = self
             .state
             .owners

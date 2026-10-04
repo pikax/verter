@@ -753,7 +753,7 @@ impl VerterHost {
             view_epoch: identity.input_pin.view_epoch,
             snapshot_pin_id: identity.input_pin.snapshot_pin_id,
             priority: Priority::Interactive,
-            request_context: verter_scheduler::request_context::current_context(),
+            request_context: verter_execution::request_context::current_context(),
         };
 
         let output = match self

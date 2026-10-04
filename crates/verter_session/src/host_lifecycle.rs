@@ -1179,7 +1179,7 @@ impl VerterHost {
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
                 file_language: None,
-                request_context: verter_scheduler::request_context::current_context(),
+                request_context: verter_execution::request_context::current_context(),
             },
         ) {
             crate::cooperative_scheduler::CooperativeSubmit::Submitted(handle) => handle,

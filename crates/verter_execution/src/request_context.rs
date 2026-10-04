@@ -11,7 +11,7 @@
 //! Lifecycle:
 //!
 //! 1. The session wraps its concrete `RequestContext` in an
-//!    [`OpaqueRequestContext`] and attaches it to a [`crate::scheduler::Request`].
+//!    [`OpaqueRequestContext`] and attaches it to a scheduler `Request`.
 //! 2. When the request admits, the driver installs the context into the
 //!    worker's TLS via [`OpaqueContextGuard::install`] before running the
 //!    stage closure. The guard's RAII `Drop` clears TLS on both the
@@ -176,8 +176,8 @@ impl OpaqueRequestContext {
     /// `on_dedup_joiner` / `record_cache_event` callbacks are
     /// no-ops. Used by tests that need to assert which submitter's
     /// context survived a dedup join.
-    #[cfg(test)]
-    pub(crate) fn test_only(request_id: u64) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_only(request_id: u64) -> Self {
         struct TestOnlyCtx {
             id: u64,
         }

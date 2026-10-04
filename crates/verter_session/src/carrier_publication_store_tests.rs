@@ -88,7 +88,7 @@ fn request(
     PublicationRequestContext::new(
         AuditRequestId::new(id),
         PublicationSurface::ProjectionHost,
-        verter_scheduler::cancellation::CancellationToken::new(),
+        verter_execution::cancellation::CancellationToken::new(),
         accepted.source().snapshot_id().clone(),
     )
 }
@@ -422,7 +422,7 @@ fn waiter_cancellation_detaches_without_cancelling_authority_owned_leader() {
     });
     entered.wait();
 
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     let waiter_store = Arc::clone(&store);
     let waiter_accepted = accepted.clone();
     let waiter_cancellation = cancellation.clone();
@@ -937,7 +937,7 @@ fn cancelled_request_never_enters_a_publication_lane() {
         Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
     );
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     cancellation.cancel();
     let outcome = store.publish_or_get(
         &accepted,

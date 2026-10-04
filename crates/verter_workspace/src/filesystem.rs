@@ -153,7 +153,7 @@ fn emit_vfs_read_event(
         cache_hit,
         bytes_read,
         read_ns,
-        request_id: verter_scheduler::request_context::current_request_id(),
+        request_id: verter_execution::request_context::current_request_id(),
         thread_id: std::thread::current().id(),
     };
     for (_, sink) in registered.iter() {
@@ -1661,7 +1661,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         // Per-file `read_ns` capture is gated on the active request's
         // `audit_timing_capture` flag — when `false`, the zero-cost
         // path skips the `Instant::now()` calls entirely.
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
         let started = if timing_on {
             Some(std::time::Instant::now())
         } else {

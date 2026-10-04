@@ -379,8 +379,8 @@ pub struct CancellationCheckpoint {
     _private: (),
 }
 impl CancellationCheckpoint {
-    pub(crate) fn token(self) -> Option<verter_scheduler::cancellation::CancellationToken> {
-        let job = verter_scheduler::cancellation::current_job_cancellation_token();
+    pub(crate) fn token(self) -> Option<verter_execution::cancellation::CancellationToken> {
+        let job = verter_execution::cancellation::current_job_cancellation_token();
         if job
             .as_ref()
             .is_some_and(|token| token.has_registered_owners())

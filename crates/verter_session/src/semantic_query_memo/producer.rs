@@ -376,19 +376,19 @@ impl SemanticGraphStore {
         //    read validates strictly for this claimant's view.
         if let Some(hit) = self.get_validated_value_prepared(prepared, ctx, capture) {
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
+            if let Some(sched_ctx) = verter_execution::request_context::current_context() {
                 sched_ctx
                     .0
-                    .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
+                    .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
             }
             return Claim::Read(hit);
         }
         if !attempt.miss_recorded {
             // One miss per logical claim, however many attempts it takes.
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_scheduler::request_context::current_context() {
+            if let Some(ctx) = verter_execution::request_context::current_context() {
                 ctx.0
-                    .record_cache_event(verter_scheduler::request_context::CacheEventKind::Miss);
+                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
             }
             attempt.miss_recorded = true;
         }
@@ -400,9 +400,9 @@ impl SemanticGraphStore {
             self.stats
                 .same_path_sentinel_returns
                 .fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_scheduler::request_context::current_context() {
+            if let Some(ctx) = verter_execution::request_context::current_context() {
                 ctx.0.record_cache_event(
-                    verter_scheduler::request_context::CacheEventKind::Sentinel,
+                    verter_execution::request_context::CacheEventKind::Sentinel,
                 );
             }
             return Claim::Recursive(Recursion::SamePath);
@@ -538,9 +538,9 @@ impl Subscription<'_> {
             .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
         // Every cooperative wait return counts; a retry may count again.
         store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
-        if let Some(ctx) = verter_scheduler::request_context::current_context() {
+        if let Some(ctx) = verter_execution::request_context::current_context() {
             ctx.0
-                .record_cache_event(verter_scheduler::request_context::CacheEventKind::JoinedWait);
+                .record_cache_event(verter_execution::request_context::CacheEventKind::JoinedWait);
         }
         if ctx.is_cancelled() {
             drop(state);

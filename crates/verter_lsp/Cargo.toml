@@ -25,6 +25,7 @@ hotpath = ["verter_session/hotpath", "verter_diagnostics/hotpath"]
 test-support = []
 
 [dependencies]
+verter_execution = { path = "../verter_execution" }
 futures-util = "0.3.32"
 verter_debug_assert = { workspace = true }
 verter_session = { path = "../verter_session" }

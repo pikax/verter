@@ -37,11 +37,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_scheduler::execution::owner_command::OwnerCommand;
-use verter_scheduler::execution::pool::SchedulerIoPool;
-use verter_scheduler::request_context::{
+use verter_execution::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
+use verter_scheduler::execution::owner_command::OwnerCommand;
+use verter_scheduler::execution::pool::SchedulerIoPool;
 use verter_session::request_context::{
     current_request_context, RequestContext, RequestContextGuard,
 };
@@ -184,7 +184,7 @@ fn opaque_context_guard_install_does_not_recurse() {
 
     // If install had recursed, control would never reach this point.
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         Some(84),
         "scheduler-side TLS slot must hold the installed context's request id",
     );
@@ -346,7 +346,7 @@ fn scheduler_worker_without_context_observes_no_session_context() {
 /// Outer-thread → worker propagation: install a session-side
 /// `RequestContextGuard` on the test thread, capture the active
 /// scheduler-side `OpaqueRequestContext` via
-/// `verter_scheduler::request_context::current_context()`, hand it to
+/// `verter_execution::request_context::current_context()`, hand it to
 /// the worker via the `run_on_io_worker_with_context` harness, and
 /// assert the worker sees the SAME `request_id` on both the
 /// scheduler-side and session-side TLS slots. Mirrors the production
@@ -360,7 +360,7 @@ fn outer_session_guard_propagates_through_pool_submission() {
 
     // Capture the now-active scheduler-side opaque context, just like
     // the scheduler's `winner_ctx.or_else(...)` plumbing does.
-    let opaque = verter_scheduler::request_context::current_context()
+    let opaque = verter_execution::request_context::current_context()
         .expect("RequestContextGuard::install populates the scheduler TLS slot");
 
     let observed_session_id = Arc::new(AtomicU64::new(0));
@@ -372,7 +372,7 @@ fn outer_session_guard_propagates_through_pool_submission() {
         if let Some(ctx) = current_request_context() {
             session_clone.store(ctx.request_id, Ordering::SeqCst);
         }
-        if let Some(id) = verter_scheduler::request_context::current_request_id() {
+        if let Some(id) = verter_execution::request_context::current_request_id() {
             scheduler_clone.store(id, Ordering::SeqCst);
         }
     });

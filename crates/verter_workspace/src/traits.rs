@@ -1141,11 +1141,11 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// lifecycle is honored. The trait method itself is purely a
     /// producer: it does not enter the active-request registry.
     /// Per-request id is read from
-    /// [`verter_scheduler::request_context::current_request_id`]
+    /// [`verter_execution::request_context::current_request_id`]
     /// so a registration installed by the host will already be
     /// visible when the trait method runs.
     fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
-        let request_id = verter_scheduler::request_context::current_request_id().unwrap_or(0);
+        let request_id = verter_execution::request_context::current_request_id().unwrap_or(0);
         let (canonical_id, target_identity) = match &op {
             WorkspaceOp::AuditResolve { from, .. } => (
                 from.clone(),

@@ -44,7 +44,6 @@ use web_time::Instant;
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 
-use crate::cancellation::{CancellationOwner, CancellationToken};
 use crate::dag::{
     profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
     FileStageKey, Hash16, PinId, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
@@ -57,6 +56,7 @@ use crate::job::{
 };
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
+use verter_execution::cancellation::{CancellationOwner, CancellationToken};
 use verter_language::FileLanguage;
 
 use crate::source_loader::SourceLoader;
@@ -167,7 +167,7 @@ pub struct Request {
     /// existing group, and installs the context into worker TLS
     /// around each stage closure so `current_request_id()` returns a
     /// meaningful value while the job runs.
-    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 }
 
 /// Typed admission parameters for one synchronous borrowed cache-node
@@ -186,7 +186,7 @@ pub struct ScopedCacheNodeRequest {
     /// Scheduling priority used by normal DAG lane admission.
     pub priority: Priority,
     /// Optional per-request context used for cancellation and TLS attribution.
-    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 }
 
 impl ScopedCacheNodeRequest {
@@ -2348,7 +2348,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    impl crate::request_context::RequestContextLike for ScopedTestContext {
+    impl verter_execution::request_context::RequestContextLike for ScopedTestContext {
         fn request_id(&self) -> u64 {
             self.id
         }
@@ -2363,11 +2363,13 @@ mod tests {
 
         fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {}
 
-        fn record_cache_event(&self, _: crate::request_context::CacheEventKind) {}
+        fn record_cache_event(&self, _: verter_execution::request_context::CacheEventKind) {}
 
-        fn install_tls(self: Arc<Self>) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+        fn install_tls(
+            self: Arc<Self>,
+        ) -> Box<dyn verter_execution::request_context::TlsUninstall + Send> {
             struct Noop;
-            impl crate::request_context::TlsUninstall for Noop {
+            impl verter_execution::request_context::TlsUninstall for Noop {
                 fn uninstall(self: Box<Self>) {}
             }
             Box::new(Noop)
@@ -2378,7 +2380,7 @@ mod tests {
     fn scoped_test_context(
         id: u64,
     ) -> (
-        crate::request_context::OpaqueRequestContext,
+        verter_execution::request_context::OpaqueRequestContext,
         CancellationToken,
     ) {
         let cancellation = CancellationToken::new();
@@ -2387,8 +2389,8 @@ mod tests {
             cancellation: cancellation.clone(),
         });
         (
-            crate::request_context::OpaqueRequestContext(
-                context as Arc<dyn crate::request_context::RequestContextLike>,
+            verter_execution::request_context::OpaqueRequestContext(
+                context as Arc<dyn verter_execution::request_context::RequestContextLike>,
             ),
             cancellation,
         )
@@ -2396,7 +2398,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn scoped_test_request(
-        request_context: crate::request_context::OpaqueRequestContext,
+        request_context: verter_execution::request_context::OpaqueRequestContext,
     ) -> ScopedCacheNodeRequest {
         ScopedCacheNodeRequest {
             cache_id: crate::cache_id::SchedulerCacheId(0x51FC),
@@ -6080,11 +6082,11 @@ mod tests {
     // Scheduler request context + worker TLS install
     // ──────────────────────────────────────────────────────────────────
 
-    use crate::request_context::{
-        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
-    };
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Mutex as StdMutex;
+    use verter_execution::request_context::{
+        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
 
     /// Test-only implementation of `RequestContextLike` that captures
     /// the observations each probe wants to assert on:
@@ -6115,7 +6117,7 @@ mod tests {
         }
     }
 
-    struct TestGuardBox(#[allow(dead_code)] crate::request_context::OpaqueContextGuard);
+    struct TestGuardBox(#[allow(dead_code)] verter_execution::request_context::OpaqueContextGuard);
     impl TlsUninstall for TestGuardBox {
         fn uninstall(self: Box<Self>) {}
     }
@@ -6141,9 +6143,9 @@ mod tests {
         }
         fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-            let guard = crate::request_context::OpaqueContextGuard::install(OpaqueRequestContext(
-                self as Arc<dyn RequestContextLike>,
-            ));
+            let guard = verter_execution::request_context::OpaqueContextGuard::install(
+                OpaqueRequestContext(self as Arc<dyn RequestContextLike>),
+            );
             Box::new(TestGuardBox(guard))
         }
     }
@@ -6180,7 +6182,7 @@ mod tests {
             content: Arc<str>,
             generation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.source_observed.store(id, AtomicOrdering::SeqCst);
             Ok(SourceSnapshot::new_empty(content, generation))
         }
@@ -6190,7 +6192,7 @@ mod tests {
             _source: &SourceSnapshot,
             generation: u64,
         ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.analysis_observed.store(id, AtomicOrdering::SeqCst);
             if self.panic_on_analysis.load(AtomicOrdering::SeqCst) {
                 panic!("probe executor panic_on_analysis");
@@ -6205,7 +6207,7 @@ mod tests {
             profile_hash: u64,
             generation: u64,
         ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.artifact_observed.store(id, AtomicOrdering::SeqCst);
             Ok(ArtifactSnapshot {
                 generation,
@@ -6594,7 +6596,7 @@ mod tests {
                 content: Arc<str>,
                 generation: u64,
             ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == DEP {
                     self.dep_source_observed.store(id, AtomicOrdering::SeqCst);
                 }
@@ -6606,7 +6608,7 @@ mod tests {
                 _source: &SourceSnapshot,
                 generation: u64,
             ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == PARENT {
                     self.parent_analysis_observed
                         .store(id, AtomicOrdering::SeqCst);
@@ -6705,7 +6707,7 @@ mod tests {
                     .trim_end_matches(".vue")
                     .parse::<usize>()
                     .unwrap_or(0);
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 self.slots[idx].store(id, AtomicOrdering::SeqCst);
                 Ok(AnalysisSnapshot::new_empty(generation))
             }
@@ -13857,7 +13859,7 @@ mod tests {
                 }
             } else if canonical == "/b.vue" {
                 // Inner execution: record the observed TLS id.
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 inner_observed_for_hook.store(id, MOrd::SeqCst);
             }
         });
@@ -13997,7 +13999,7 @@ mod tests {
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
             fn record_cache_event(&self, _e: CacheEventKind) {}
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-                let ctx_guard = crate::request_context::OpaqueContextGuard::install(
+                let ctx_guard = verter_execution::request_context::OpaqueContextGuard::install(
                     OpaqueRequestContext(Arc::clone(&self) as Arc<dyn RequestContextLike>),
                 );
                 let observer_guard = verter_audit::observer::install_observer(Arc::clone(
@@ -14011,7 +14013,7 @@ mod tests {
             }
         }
         struct BothGuards {
-            _ctx: crate::request_context::OpaqueContextGuard,
+            _ctx: verter_execution::request_context::OpaqueContextGuard,
             _obs: verter_audit::observer::ObserverGuard,
         }
         impl TlsUninstall for BothGuards {
@@ -14176,7 +14178,7 @@ mod tests {
             } else if canonical == "/b.vue" {
                 // Inner execution: record the observed TLS state
                 // for each install_tls slot. 0 means cleared.
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 inner_observed_for_hook.store(id as i64, MOrd::SeqCst);
                 // Audit observer slot must also be cleared on the
                 // inline-execute None-winner_ctx path. A non-None
@@ -14272,11 +14274,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn all_slots_clear_guard_clears_scheduler_opaque_slot_and_restores_on_drop() {
-        use crate::request_context::{
+        use std::sync::atomic::AtomicU64;
+        use verter_execution::request_context::{
             AllSlotsClearGuard, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
             TlsUninstall,
         };
-        use std::sync::atomic::AtomicU64;
 
         struct DummyCtx {
             id: u64,
@@ -14289,7 +14291,11 @@ mod tests {
                 false
             }
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
-            fn record_cache_event(&self, _event: crate::request_context::CacheEventKind) {}
+            fn record_cache_event(
+                &self,
+                _event: verter_execution::request_context::CacheEventKind,
+            ) {
+            }
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 struct NoopUninstall;
                 impl TlsUninstall for NoopUninstall {
@@ -14304,7 +14310,7 @@ mod tests {
         let _outer =
             OpaqueContextGuard::install(OpaqueRequestContext(ctx as Arc<dyn RequestContextLike>));
         assert_eq!(
-            crate::request_context::current_request_id(),
+            verter_execution::request_context::current_request_id(),
             Some(12345),
             "outer install must show in scheduler opaque slot",
         );
@@ -14312,14 +14318,14 @@ mod tests {
         {
             let _clear = AllSlotsClearGuard::clear_all();
             assert_eq!(
-                crate::request_context::current_request_id(),
+                verter_execution::request_context::current_request_id(),
                 None,
                 "AllSlotsClearGuard must clear scheduler opaque slot while alive",
             );
         }
 
         assert_eq!(
-            crate::request_context::current_request_id(),
+            verter_execution::request_context::current_request_id(),
             Some(12345),
             "AllSlotsClearGuard drop must restore prior scheduler opaque slot",
         );
@@ -15165,7 +15171,7 @@ mod tests {
             try_lock_succeeded: Arc<std::sync::atomic::AtomicBool>,
             fire_count: Arc<std::sync::atomic::AtomicU64>,
         }
-        impl crate::request_context::RequestContextLike for LockProbeCtx {
+        impl verter_execution::request_context::RequestContextLike for LockProbeCtx {
             fn request_id(&self) -> u64 {
                 self.id
             }
@@ -15184,12 +15190,16 @@ mod tests {
                 self.try_lock_succeeded
                     .store(got.is_some(), std::sync::atomic::Ordering::SeqCst);
             }
-            fn record_cache_event(&self, _event: crate::request_context::CacheEventKind) {}
+            fn record_cache_event(
+                &self,
+                _event: verter_execution::request_context::CacheEventKind,
+            ) {
+            }
             fn install_tls(
                 self: Arc<Self>,
-            ) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+            ) -> Box<dyn verter_execution::request_context::TlsUninstall + Send> {
                 struct NoopUninstall;
-                impl crate::request_context::TlsUninstall for NoopUninstall {
+                impl verter_execution::request_context::TlsUninstall for NoopUninstall {
                     fn uninstall(self: Box<Self>) {}
                 }
                 Box::new(NoopUninstall)
@@ -15206,14 +15216,14 @@ mod tests {
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fire_count: Arc::clone(&fire_count),
         })
-            as Arc<dyn crate::request_context::RequestContextLike>);
+            as Arc<dyn verter_execution::request_context::RequestContextLike>);
         let joiner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
             id: 2,
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fire_count: Arc::clone(&fire_count),
         })
-            as Arc<dyn crate::request_context::RequestContextLike>);
+            as Arc<dyn verter_execution::request_context::RequestContextLike>);
 
         let reqs = vec![
             Request {

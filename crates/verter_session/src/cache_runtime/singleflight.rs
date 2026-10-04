@@ -105,7 +105,7 @@
 //!   - **Stats / metrics**: callers maintain their own counters around
 //!     the call site.
 //!   - **Request-context cache events**: callers record events as needed
-//!     via `verter_scheduler::request_context`.
+//!     via `verter_execution::request_context`.
 //!   - **Retry budgets**: when a publish is skipped (post-compute
 //!     revalidation fails), the caller decides whether to retry, sleep,
 //!     or give up.

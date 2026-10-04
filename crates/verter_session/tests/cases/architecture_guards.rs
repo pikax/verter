@@ -8124,7 +8124,7 @@ fn audit_no_hot_loop_instrumentation_self_test_rejects_emit_names() {
 /// `verter_scheduler/` is also out of scope: it documents
 /// `current_request_context` in module-level comments but the
 /// scheduler does not call it (the scheduler crate's own TLS
-/// accessor is `verter_scheduler::request_context::current_request_id`).
+/// accessor is `verter_execution::request_context::current_request_id`).
 ///
 /// In-scope crates (the 5 lower-crate consumers of audit):
 ///

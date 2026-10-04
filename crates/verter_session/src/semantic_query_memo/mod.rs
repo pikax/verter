@@ -86,7 +86,7 @@ pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
-pub(crate) use verter_scheduler::tasks::ExecutionTask;
+pub(crate) use verter_execution::tasks::ExecutionTask;
 
 mod producer;
 mod stats;
@@ -1153,7 +1153,7 @@ impl SemanticGraphStore {
         let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
         let mut evicted = 0usize;
         {
-            let timing_on = verter_scheduler::request_context::current_timing_enabled();
+            let timing_on = verter_execution::request_context::current_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
 
             // Drain the per-canonical `(family, slot) → registered fact
@@ -2135,9 +2135,9 @@ impl SemanticGraphStore {
 
         // Per-context cache-event attribution (Hit). Same as the slow
         // path's step-1 warm branch, single TLS lookup.
-        if let Some(ctx) = verter_scheduler::request_context::current_context() {
+        if let Some(ctx) = verter_execution::request_context::current_context() {
             ctx.0
-                .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
+                .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
         }
 
         // cfg-test dispatch recording (warm). Same as the slow path's

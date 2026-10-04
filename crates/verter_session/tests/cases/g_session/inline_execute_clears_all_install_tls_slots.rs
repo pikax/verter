@@ -31,12 +31,12 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering as MOrd};
 use std::sync::Arc;
 
 use verter_audit::current_observer;
+use verter_execution::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::caller_kind::CallerKind;
 use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::job::CompletionState;
 use verter_scheduler::node::{AnalysisSnapshot, SourceSnapshot};
-use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
 use verter_scheduler::stage::{Priority, TargetStage};

@@ -33,6 +33,10 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // Zero-dependency debug_assert!/debug_assert_eq!/debug_assert_ne! entry
     // point; sits below every crate that uses it.
     "verter_debug_assert",
+    // Scheduler-independent execution primitives (task identity and wait
+    // graph, cancellation, opaque request-context propagation); depends on
+    // nothing above the leaf utilities.
+    "verter_execution",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[

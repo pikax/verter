@@ -16,7 +16,7 @@
 //! `compile_with_audit`, `resolve_type_with_audit`, …) sniffs the
 //! installed TLS slot at construction time and records the MCP
 //! request's id as its `parent_request_id`. The shared scheduler-side
-//! TLS mechanism (`verter_scheduler::request_context::current_request_id`)
+//! TLS mechanism (`verter_execution::request_context::current_request_id`)
 //! is the propagation channel; this wrapper does not need to thread
 //! the id explicitly.
 //!
@@ -120,7 +120,7 @@ impl VerterHost {
             let request_id = self.next_request_id();
             let outcome = f(self);
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_mcp_record(
                 request_id,
                 canonical_id,

@@ -119,7 +119,7 @@ impl VerterHost {
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         demand: ReturnProjectionDemand,
-        cancellation: verter_scheduler::cancellation::CancellationToken,
+        cancellation: verter_execution::cancellation::CancellationToken,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         self.flow_return_with_audit(function, demand, Some(cancellation))
     }
@@ -128,7 +128,7 @@ impl VerterHost {
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         demand: ReturnProjectionDemand,
-        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+        cancellation: Option<verter_execution::cancellation::CancellationToken>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         self.flow_return_request(function, cancellation, |dispatch| {
             let key = dispatch.flow_return_key_with_demand(function, demand);
@@ -166,7 +166,7 @@ impl VerterHost {
     pub(crate) fn flow_return_request(
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
-        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+        cancellation: Option<verter_execution::cancellation::CancellationToken>,
         run: impl FnOnce(&ProjectSemanticDispatch<'_>) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();

@@ -36,7 +36,7 @@ impl VerterHost {
     ///    registry sees the slot for the duration of the
     ///    workspace traversal.
     /// 4. Installs the request-context guard so
-    ///    [`verter_scheduler::request_context::current_request_id`]
+    ///    [`verter_execution::request_context::current_request_id`]
     ///    returns the fresh id while
     ///    [`WorkspaceAccess::audit_op`] runs.
     /// 5. Calls `workspace.audit_op(op)` to walk live workspace

@@ -46,7 +46,7 @@ fn workspace_root() -> PathBuf {
 
 /// Files that must carry module-scoped `#![deny(missing_docs)]`.
 const DOC_DENY_FILES: &[&str] = &[
-    "crates/verter_scheduler/src/request_context.rs",
+    "crates/verter_execution/src/request_context.rs",
     "crates/verter_session/src/request_context.rs",
     "crates/verter_session/src/audited_request.rs",
     "crates/verter_session/src/component_meta_audit/mod.rs",

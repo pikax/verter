@@ -1275,7 +1275,7 @@ test("ARH1-hotspot-coverage dirty twin: an authority owner that is not a cohesiv
   const a2 = hotspot(wrongResponsibility, SCHEDULER).authority.find(
     (x) => x.responsibility === "batch coordination",
   );
-  a2.survivingOwner = "crates/verter_scheduler/src/cancellation.rs";
+  a2.survivingOwner = "crates/verter_execution/src/cancellation.rs";
   result = validate(wrongResponsibility, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(

@@ -3,13 +3,13 @@
 //! The task model — generation-qualified task ids, the wait-for graph and
 //! its cycle refusal, producer ownership by task rather than by thread, and
 //! the synchronous entry adapter — is the shared scheduler substrate
-//! ([`verter_scheduler::tasks`]). What is semantic is the producer: a
+//! ([`verter_execution::tasks`]). What is semantic is the producer: a
 //! semantic producer is one prepared query identity, and same-path
 //! recursion is a property of the task, not of a thread — a demand is
 //! same-path exactly when the demanding task already has a producer open
 //! for the same full key.
 
-pub(super) use verter_scheduler::tasks::{
+pub(super) use verter_execution::tasks::{
     ExecutionScope, ExecutionTask, OpenProducer, TaskId, TaskRegistry, WaitCycle,
 };
 

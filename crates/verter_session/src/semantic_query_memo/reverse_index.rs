@@ -59,7 +59,7 @@ pub(super) fn register_reverse_index(
     dispatch_dep_signature: &DepSignature,
     admission_seq: u64,
 ) {
-    let timing_on = verter_scheduler::request_context::current_timing_enabled();
+    let timing_on = verter_execution::request_context::current_timing_enabled();
     let registered_facts = Arc::clone(&read_set_signature.facts);
     let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
     for populated in populated_slots {

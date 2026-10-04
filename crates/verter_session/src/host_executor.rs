@@ -282,7 +282,7 @@ impl HostStageExecutor {
         // on `HostSourceData` keeps its existing semantics; the audit
         // ledger push happens only when timing capture is on AND a
         // request context is installed.
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
 
         #[cfg(test)]
         let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.host_instance.get());
@@ -359,7 +359,7 @@ impl HostStageExecutor {
                 let request = crate::carrier_publication_store::PublicationRequestContext::new(
                     crate::carrier_publication_store::AuditRequestId::new(generation),
                     crate::carrier_publication_store::PublicationSurface::ProjectionHost,
-                    verter_scheduler::cancellation::current_job_cancellation_token()
+                    verter_execution::cancellation::current_job_cancellation_token()
                         .unwrap_or_default(),
                     registered.snapshot_id().clone(),
                 );

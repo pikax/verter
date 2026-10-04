@@ -115,12 +115,12 @@ impl PreparedKeyHandle {
     }
 }
 
-impl verter_scheduler::tasks::ProducerIdentity for PreparedQueryIdentity {
+impl verter_execution::tasks::ProducerIdentity for PreparedQueryIdentity {
     fn producer_hash(&self) -> u64 {
         self.cached_hash
     }
 
-    fn same_producer(&self, other: &dyn verter_scheduler::tasks::ProducerIdentity) -> bool {
+    fn same_producer(&self, other: &dyn verter_execution::tasks::ProducerIdentity) -> bool {
         other.downcast_ref::<Self>().is_some_and(|other| {
             std::ptr::eq(self, other)
                 || (self.cached_hash == other.cached_hash && self.key == other.key)
@@ -131,19 +131,19 @@ impl verter_scheduler::tasks::ProducerIdentity for PreparedQueryIdentity {
 impl PreparedKeyHandle {
     /// This handle as the producer a task opens: a refcount bump, never a
     /// new allocation.
-    pub(super) fn as_task_producer(&self) -> Arc<dyn verter_scheduler::tasks::ProducerIdentity> {
-        Arc::clone(&self.0) as Arc<dyn verter_scheduler::tasks::ProducerIdentity>
+    pub(super) fn as_task_producer(&self) -> Arc<dyn verter_execution::tasks::ProducerIdentity> {
+        Arc::clone(&self.0) as Arc<dyn verter_execution::tasks::ProducerIdentity>
     }
 
     /// This handle as a producer identity to match against.
-    pub(super) fn as_task_producer_ref(&self) -> &dyn verter_scheduler::tasks::ProducerIdentity {
+    pub(super) fn as_task_producer_ref(&self) -> &dyn verter_execution::tasks::ProducerIdentity {
         self.0.as_ref()
     }
 
     /// Whether `producer` is the semantic producer for exactly `key`, whose
     /// prepared hash is `key_hash`.
     pub(super) fn producer_matches_key(
-        producer: &dyn verter_scheduler::tasks::ProducerIdentity,
+        producer: &dyn verter_execution::tasks::ProducerIdentity,
         key: &SemanticQueryKey,
         key_hash: u64,
     ) -> bool {

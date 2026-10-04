@@ -2049,7 +2049,7 @@ fn a_tripped_demand_discovers_no_further_callee() {
 #[test]
 fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
     use crate::host_flow_return_audit::FlowReturnError;
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
 
     let source = sibling_chains(4, 8);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {

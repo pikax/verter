@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use verter_scheduler::request_context::RequestContextLike;
+use verter_execution::request_context::RequestContextLike;
 use verter_session::request_context::{
     current_request_budget, RequestContext, RequestContextGuard,
 };

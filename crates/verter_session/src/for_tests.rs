@@ -870,7 +870,7 @@ pub mod signature_kernel_bench_support {
         }
 
         thread_local! {
-            static CANCEL_AT_FAMILY: RefCell<Option<(verter_scheduler::cancellation::CancellationToken, usize)>> =
+            static CANCEL_AT_FAMILY: RefCell<Option<(verter_execution::cancellation::CancellationToken, usize)>> =
                 const { RefCell::new(None) };
         }
 
@@ -880,7 +880,7 @@ pub mod signature_kernel_bench_support {
         /// boundary — is the first to observe it. A test cancels a request at
         /// a chosen point of its work this way, without a second thread.
         pub fn cancel_at_family_entry(
-            token: verter_scheduler::cancellation::CancellationToken,
+            token: verter_execution::cancellation::CancellationToken,
             nth: usize,
         ) -> impl Drop {
             struct Disarm;

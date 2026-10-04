@@ -578,7 +578,7 @@ impl NodeArena {
         // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
         let (id, is_miss, write_wait_ns) = {
-            let timing_on = verter_scheduler::request_context::current_timing_enabled();
+            let timing_on = verter_execution::request_context::current_timing_enabled();
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             let lock_start = if timing_on {
@@ -806,7 +806,7 @@ impl NodeArena {
         }
         // Drop the dedup entries FIRST, shard by shard, so no intern can
         // hit a released node once its payload is gone.
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
         let mut per_shard: Vec<Vec<(u64, SemanticNodeId)>> = vec![Vec::new(); NUM_SHARDS];
         for (id, fingerprint) in &released {
             per_shard[(fingerprint & SHARD_MASK) as usize].push((*fingerprint, *id));
@@ -866,7 +866,7 @@ impl NodeArena {
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
         for shard in self.shards.iter() {
             let lock_start = if timing_on {
                 Some(Instant::now())
