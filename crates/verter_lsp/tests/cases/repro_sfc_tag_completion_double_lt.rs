@@ -49,6 +49,7 @@ fn root_items_at(source: &str, cursor_offset: usize) -> Vec<CompletionItem> {
         .offset_to_position(cursor_offset as u32)
         .expect("cursor offset must map to a position");
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,

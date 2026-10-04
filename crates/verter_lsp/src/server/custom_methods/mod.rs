@@ -232,7 +232,9 @@ impl VerterLanguageServer {
         // Handle framework CARRIER (`.vue`, `.svelte`, …) changes from the
         // file watcher. These are files not open in the editor — re-sync to
         // the type provider.
-        if crate::server::carrier_language_for(&params.uri).is_some() {
+        if crate::server::carrier_language_for(self.documents.language_classifier(), &params.uri)
+            .is_some()
+        {
             match params.change_type.as_str() {
                 "create" | "update" => {
                     self.resync_background_carrier_file(&canonical_id).await;
@@ -372,6 +374,7 @@ impl VerterLanguageServer {
             .preferred_specifier(&canonical_target, &canonical_dropped);
 
         let edit = crate::features::document_drop_edit::document_drop_edit(
+            self.documents.language_classifier(),
             &params.dropped_uri,
             &params.position,
             &doc.source,
@@ -827,6 +830,7 @@ impl VerterLanguageServer {
                             let resolved_normalized =
                                 verter_span::path::canonicalize_path(&resolved);
                             let matches = import_resolved_matches_target(
+                                self.documents.language_classifier(),
                                 &resolved_normalized,
                                 &target_normalized,
                             );

@@ -753,13 +753,15 @@ pub(crate) fn owner_provider_path_config(
 /// head (line 0) so it is always placed even before the projection
 /// materialises. `None` for a non-`.svelte` file or a usable install (no false
 /// positive).
-pub(crate) fn svelte_package_diagnostic(canonical_id: &str, source: &str) -> Option<Diagnostic> {
-    // Carrier classification routes through the language registry (the single
-    // static classification authority) — never a hand-matched extension literal.
-    let is_svelte = verter_session::LanguageRegistry::global()
-        .classify_static(canonical_id)
-        .static_resolution()
-        .is_svelte();
+pub(crate) fn svelte_package_diagnostic(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    canonical_id: &str,
+    source: &str,
+) -> Option<Diagnostic> {
+    // Carrier classification routes through the serving host's classifier —
+    // never a hand-matched extension literal, and never for a Svelte file the
+    // host's framework admission excludes.
+    let is_svelte = classifier.classify(canonical_id).is_svelte();
     if !is_svelte {
         return None;
     }
@@ -880,8 +882,12 @@ mod tests {
         );
 
         // …and the diagnostic must name THAT install, not the healthy root one.
-        let diag = svelte_package_diagnostic(&doc.to_string_lossy(), "<div/>")
-            .expect("the carrier declined, so the user must be told");
+        let diag = svelte_package_diagnostic(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            &doc.to_string_lossy(),
+            "<div/>",
+        )
+        .expect("the carrier declined, so the user must be told");
         assert_eq!(
             diag.code,
             Some(NumberOrString::String(
@@ -917,7 +923,12 @@ mod tests {
             "the carrier binds the healthy nested install"
         );
         assert!(
-            svelte_package_diagnostic(&doc.to_string_lossy(), "<div/>").is_none(),
+            svelte_package_diagnostic(
+                &verter_session::framework::HostLanguageClassifier::default(),
+                &doc.to_string_lossy(),
+                "<div/>"
+            )
+            .is_none(),
             "the carrier bound an install, so the user must NOT be warned"
         );
     }
@@ -932,8 +943,12 @@ mod tests {
         let svelte_dir = install_svelte(tmp.path(), NO_ELEMENTS_SVELTE_MANIFEST);
         let root = tmp.path().to_string_lossy().into_owned();
 
-        let diag = svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div>hi</div>")
-            .expect("an unusable svelte install must be reported to the user");
+        let diag = svelte_package_diagnostic(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            &format!("{root}/App.svelte"),
+            "<div>hi</div>",
+        )
+        .expect("an unusable svelte install must be reported to the user");
         assert_eq!(
             diag.code,
             Some(NumberOrString::String(
@@ -961,8 +976,12 @@ mod tests {
         install_svelte(tmp.path(), SVELTE_4_MANIFEST);
         let root = tmp.path().to_string_lossy().into_owned();
 
-        let diag = svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>")
-            .expect("an unsupported svelte major must be reported");
+        let diag = svelte_package_diagnostic(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            &format!("{root}/App.svelte"),
+            "<div/>",
+        )
+        .expect("an unsupported svelte major must be reported");
         assert_eq!(
             diag.code,
             Some(NumberOrString::String(
@@ -1025,7 +1044,12 @@ mod tests {
         let carrier = carrier_path_in(tmp.path());
 
         assert!(
-            svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>").is_none(),
+            svelte_package_diagnostic(
+                &verter_session::framework::HostLanguageClassifier::default(),
+                &format!("{root}/App.svelte"),
+                "<div/>"
+            )
+            .is_none(),
             "a usable install emits NO diagnostic"
         );
         let injected = inject_svelte_paths(serde_json::Value::Null, &root);
@@ -1148,8 +1172,12 @@ mod tests {
     fn svelte_package_missing_diagnostic_emitted_when_owner_has_no_svelte() {
         // A `.svelte` file in a workspace WITHOUT `svelte` gets the
         // typed `svelte-package-missing` diagnostic on the source file.
-        let diag = svelte_package_diagnostic("/nonexistent-workspace/App.svelte", "<div>hi</div>")
-            .expect("diagnostic present");
+        let diag = svelte_package_diagnostic(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            "/nonexistent-workspace/App.svelte",
+            "<div>hi</div>",
+        )
+        .expect("diagnostic present");
         assert_eq!(
             diag.code,
             Some(NumberOrString::String("svelte-package-missing".to_string())),
@@ -1168,7 +1196,12 @@ mod tests {
         install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
         let root = tmp.path().to_string_lossy().to_string();
         assert!(
-            svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>").is_none(),
+            svelte_package_diagnostic(
+                &verter_session::framework::HostLanguageClassifier::default(),
+                &format!("{root}/App.svelte"),
+                "<div/>"
+            )
+            .is_none(),
             "no diagnostic when svelte is installed"
         );
     }
@@ -1177,7 +1210,12 @@ mod tests {
     fn svelte_package_missing_diagnostic_absent_for_non_svelte_file() {
         // A non-`.svelte` file never gets the diagnostic, even with no svelte.
         assert!(
-            svelte_package_diagnostic("/nonexistent/App.vue", "x").is_none(),
+            svelte_package_diagnostic(
+                &verter_session::framework::HostLanguageClassifier::default(),
+                "/nonexistent/App.vue",
+                "x"
+            )
+            .is_none(),
             "no diagnostic for a non-.svelte file"
         );
     }

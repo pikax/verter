@@ -222,6 +222,15 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
         init_options.get("frameworks").is_none(),
         "the shared init-options builder must drop `frameworks`: {init_options:?}"
     );
+    // The first-party VS Code extension still sends its manifest-derived
+    // `frameworks` carrier list. The server reads no such key — framework
+    // admission is the construction-time `--frameworks` flag — so the
+    // handshake must succeed with it present rather than reject the client.
+    let mut init_options = init_options;
+    init_options
+        .as_object_mut()
+        .expect("the shared builder emits an options object")
+        .insert("frameworks".to_string(), json!(["vue", "svelte"]));
 
     // ── Spawn the real binary over stdio ────────────────────────────────────
     // stderr is discarded (`Stdio::null()`) rather than piped: the test never

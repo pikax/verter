@@ -170,8 +170,11 @@ pub(super) fn ownership_changed_during_rename_error() -> tower_lsp_server::jsonr
 /// template analysis does not model markup occurrences would inherit
 /// `Enumerated` and must declare itself here (or, better, in that column) when it
 /// lands.
-fn markup_occurrence_inventory(canonical_id: &str) -> MarkupOccurrenceInventory {
-    match carrier_language_for(canonical_id) {
+fn markup_occurrence_inventory(
+    classifier: &verter_session::framework::HostLanguageClassifier,
+    canonical_id: &str,
+) -> MarkupOccurrenceInventory {
+    match carrier_language_for(classifier, canonical_id) {
         Some(language) if language.is_svelte() => MarkupOccurrenceInventory::NotModelled,
         Some(_) => MarkupOccurrenceInventory::Enumerated,
         None => MarkupOccurrenceInventory::NotModelled,
@@ -283,8 +286,9 @@ impl RenameTargetResolution {
         let (target, conservative_svelte_authored_ranges) = (|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
-            let is_svelte = carrier_language_for(&doc.canonical_id)
-                .is_some_and(|language| language.is_svelte());
+            let is_svelte =
+                carrier_language_for(server.documents.language_classifier(), &doc.canonical_id)
+                    .is_some_and(|language| language.is_svelte());
             let svelte_script_facts = is_svelte.then(|| {
                 server
                     .documents
@@ -357,8 +361,10 @@ impl RenameTargetResolution {
             // THE ONE grant of the markup conjunct. The classifier leaves it
             // ungranted (fail-closed); this owner knows the file's carrier and so
             // is the only place that can assert the capability.
-            if markup_occurrence_inventory(&doc.canonical_id)
-                == MarkupOccurrenceInventory::Enumerated
+            if markup_occurrence_inventory(
+                server.documents.language_classifier(),
+                &doc.canonical_id,
+            ) == MarkupOccurrenceInventory::Enumerated
             {
                 target.grant_markup_occurrence_enumeration();
             }

@@ -1023,6 +1023,14 @@ pub struct NapiHostConfig {
     /// the runtime opt-in — previously that feature had to be compiled
     /// in; now it is a per-host construction choice.
     pub metricsEnabled: Option<bool>,
+    /// Framework verticals this host admits, by the exact names the
+    /// composed capability catalog spells (`"vue"`, `"svelte"`).
+    /// `None`/absent admits every composed vertical. An unknown,
+    /// duplicated, or empty list rejects construction with the
+    /// actionable diagnostic — the same validator the language-server
+    /// and WebAssembly carriers use, so an invalid combination cannot
+    /// reach a request.
+    pub frameworks: Option<Vec<String>>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -1041,6 +1049,26 @@ impl From<NapiHostConfig> for FfiHostConfig {
             metrics_enabled: n.metricsEnabled,
         }
     }
+}
+
+/// Apply the NAPI framework-admission option onto a converted host
+/// config — the typed-options half of this carrier's construction.
+///
+/// `None` keeps the default admission (every composed vertical). `Some`
+/// validates through the ONE shared session validator
+/// ([`host::framework::FrameworkOptions::admitting_names`]) and maps a
+/// rejection to the carrier error with the diagnostic verbatim, so the
+/// NAPI surface accepts exactly the names, defaults, and rejections the
+/// other carriers do.
+fn apply_framework_options(
+    host_config: &mut host::HostConfig,
+    frameworks: Option<&[String]>,
+) -> Result<()> {
+    if let Some(names) = frameworks {
+        host_config.framework =
+            host::framework::FrameworkOptions::admitting_names(names).map_err(ffi_err)?;
+    }
+    Ok(())
 }
 
 fn scheduler_config_from_napi(
@@ -2357,10 +2385,13 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
+        let frameworks = config.frameworks.clone();
         let ffi_config: FfiHostConfig = config.into();
+        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, frameworks.as_deref())?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone_with_scheduler_config(
-                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+                host_config,
                 scheduler_config,
             )),
         })
@@ -2378,8 +2409,10 @@ impl NapiVerterHost {
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
+        let frameworks = config.frameworks.clone();
         let ffi_config: FfiHostConfig = config.into();
-        let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, frameworks.as_deref())?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_with_scheduler_config(
                 host_config,
@@ -5435,5 +5468,72 @@ defineProps<{ value: Unsafe }>()
             vec!["count".to_string(), "title".to_string()],
             "runtime-object defineProps members must publish through the NAPI wire round-trip, got: {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod framework_options_carrier_tests {
+    use super::*;
+
+    /// The NAPI carrier's `frameworks` option funnels through the ONE
+    /// shared session validator: a valid admission narrows the
+    /// constructed host, keeping the equivalent configuration
+    /// semantics of the native carrier.
+    #[test]
+    fn napi_frameworks_option_narrows_the_constructed_host() {
+        let carrier_extensions = NapiVerterHost::new(Some(NapiHostConfig {
+            frameworks: Some(vec!["vue".to_string()]),
+            ..NapiHostConfig::default()
+        }))
+        .map(|host| {
+            host.inner
+                .language_classifier()
+                .carrier_extensions()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .expect("the Vue vertical is a composed framework");
+        assert_eq!(
+            carrier_extensions,
+            vec!["vue".to_string()],
+            "the NAPI-constructed host narrows with the admitted set"
+        );
+    }
+
+    /// An invalid combination rejects construction with the shared
+    /// actionable diagnostic — the same message the other carriers
+    /// surface, naming the request and the supported set.
+    #[test]
+    fn napi_frameworks_option_rejects_unknown_names_with_the_shared_diagnostic() {
+        let message = match NapiVerterHost::new(Some(NapiHostConfig {
+            frameworks: Some(vec!["react".to_string()]),
+            ..NapiHostConfig::default()
+        })) {
+            Ok(_) => panic!("react is not a composed vertical — construction must reject it"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("'react'") && message.contains("svelte, vue"),
+            "the carrier surfaces the shared diagnostic verbatim: {message}"
+        );
+    }
+
+    /// Absent frameworks keeps the default admission (every composed
+    /// vertical) — the None case must not narrow or widen anything.
+    #[test]
+    fn napi_frameworks_option_absent_keeps_the_default_admission() {
+        let mut extensions = NapiVerterHost::new(None)
+            .map(|host| {
+                host.inner
+                    .language_classifier()
+                    .carrier_extensions()
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .expect("default construction");
+        extensions.sort_unstable();
+        assert_eq!(extensions, vec!["svelte", "vue"]);
     }
 }

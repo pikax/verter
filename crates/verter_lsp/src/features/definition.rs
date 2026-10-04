@@ -45,6 +45,7 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 /// letting the type provider handle it (it can navigate to the exact symbol).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn definition_at_position(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     position: &Position,
     source: &str,
     blocks: &[CarrierBlockView],
@@ -194,7 +195,10 @@ pub fn definition_at_position(
                         }
                         // Default import of .vue file: the local name won't match script
                         // bindings, so retry with "default" which handles Vue SFC exports.
-                        if crate::server::is_default_export_component_carrier(canonical_id) {
+                        if crate::server::is_default_export_component_carrier(
+                            classifier,
+                            canonical_id,
+                        ) {
                             if let Some(result) = try_precise_cross_file(
                                 canonical_id,
                                 "default",
@@ -215,7 +219,8 @@ pub fn definition_at_position(
                         ) {
                             return Some(result);
                         }
-                        if crate::server::is_default_export_component_carrier(&resolved) {
+                        if crate::server::is_default_export_component_carrier(classifier, &resolved)
+                        {
                             if let Some(result) = try_precise_cross_file(
                                 &resolved,
                                 "default",
@@ -368,7 +373,9 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if crate::server::is_default_export_component_carrier(cid) {
+                                        if crate::server::is_default_export_component_carrier(
+                                            classifier, cid,
+                                        ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 cid,
                                                 "default",
@@ -391,7 +398,7 @@ pub fn definition_at_position(
                                             return Some(result);
                                         }
                                         if crate::server::is_default_export_component_carrier(
-                                            &resolved,
+                                            classifier, &resolved,
                                         ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 &resolved,
@@ -460,7 +467,10 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if crate::server::is_default_export_component_carrier(canonical_id) {
+                            if crate::server::is_default_export_component_carrier(
+                                classifier,
+                                canonical_id,
+                            ) {
                                 if let Some(result) = try_precise_cross_file(
                                     canonical_id,
                                     "default",
@@ -482,7 +492,9 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if crate::server::is_default_export_component_carrier(&resolved) {
+                            if crate::server::is_default_export_component_carrier(
+                                classifier, &resolved,
+                            ) {
                                 if let Some(result) = try_precise_cross_file(
                                     &resolved,
                                     "default",

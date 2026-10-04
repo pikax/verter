@@ -184,6 +184,60 @@ struct WasmDependencyResolution {
     possible_canonical_ids: Option<Vec<String>>,
 }
 
+/// The WASM carrier's host-config wire form: the shared FFI fields plus
+/// the typed framework admission, parsed from one config object.
+///
+/// `FfiHostConfig` does not deny unknown fields, so the flattened form
+/// accepts exactly the object the FFI carrier accepts and reads the
+/// additional `frameworks` key without a second deserialization pass.
+#[derive(serde::Deserialize, Default)]
+struct WasmHostConfigWire {
+    #[serde(flatten)]
+    ffi: FfiHostConfig,
+    frameworks: Option<Vec<String>>,
+}
+
+/// Apply the WASM `frameworks` option onto a converted host config —
+/// the typed-options half of this carrier's construction.
+///
+/// `None` keeps the default admission (every composed vertical). `Some`
+/// validates through the ONE shared session validator
+/// ([`host::framework::FrameworkOptions::admitting_names`]), so this
+/// carrier accepts exactly the names, defaults, and rejections the
+/// native and NAPI carriers do; the diagnostic travels as the error
+/// string verbatim.
+fn apply_framework_names(
+    host_config: &mut host::HostConfig,
+    frameworks: Option<Vec<String>>,
+) -> Result<(), String> {
+    if let Some(names) = frameworks {
+        host_config.framework =
+            host::framework::FrameworkOptions::admitting_names(names).map_err(|error| {
+                format!("Invalid host input: framework admission rejected: {error}")
+            })?;
+    }
+    Ok(())
+}
+
+/// Convert a WASM constructor's config value into a host config,
+/// applying the typed framework admission from the same object.
+fn wasm_host_config(config: JsValue) -> Result<host::HostConfig, JsValue> {
+    let wire: WasmHostConfigWire = if config.is_undefined() || config.is_null() {
+        WasmHostConfigWire::default()
+    } else {
+        parse_wasm_input(config)?
+    };
+    host_config_from_wire(wire).map_err(|error| JsValue::from_str(&error))
+}
+
+/// The decoded half of [`wasm_host_config`]: the shared FFI conversion
+/// followed by the typed framework admission read off the same object.
+fn host_config_from_wire(wire: WasmHostConfigWire) -> Result<host::HostConfig, String> {
+    let mut host_config = ffi_config_to_host(wire.ffi).map_err(|error| error.to_string())?;
+    apply_framework_names(&mut host_config, wire.frameworks)?;
+    Ok(host_config)
+}
+
 /// Run a closure, converting any panic into a `JsValue` error.
 /// Prevents Rust panics from crashing the WASM runtime and poisoning
 /// RefCell borrow state.
@@ -541,15 +595,9 @@ impl WasmVerterHost {
     /// unrecognised `compileErrorPolicy` string).
     #[wasm_bindgen(constructor)]
     pub fn new(config: JsValue) -> Result<WasmVerterHost, JsValue> {
-        let ffi_config = if config.is_undefined() || config.is_null() {
-            FfiHostConfig::default()
-        } else {
-            parse_wasm_input::<FfiHostConfig>(config)?
-        };
+        let host_config = wasm_host_config(config)?;
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
-                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            )),
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(host_config)),
             input_snapshots: std::sync::Mutex::new(input_snapshot::InputSnapshotStore::new()),
         })
     }
@@ -2278,12 +2326,7 @@ impl WasmMetaProject {
     #[wasm_bindgen(constructor)]
     pub fn new(config: JsValue) -> Result<WasmMetaProject, JsValue> {
         catch_panic(AssertUnwindSafe(|| {
-            let ffi_config: FfiHostConfig = if config.is_null() || config.is_undefined() {
-                FfiHostConfig::default()
-            } else {
-                parse_wasm_input(config)?
-            };
-            let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+            let host_config = wasm_host_config(config)?;
             Ok(WasmMetaProject {
                 inner: std::sync::Arc::new(
                     host::component_meta_host::ComponentMetaHost::new_standalone(host_config),
@@ -2553,5 +2596,117 @@ impl WasmMetaSession {
         self.inner
             .as_ref()
             .is_none_or(|session| session.is_closed())
+    }
+}
+
+/// The WASM carrier's `frameworks` option, decoded from the same config
+/// object the constructors receive: the key is read off the flattened FFI
+/// config and funnelled through the ONE shared session validator, so this
+/// carrier narrows and rejects exactly like the native and NAPI carriers.
+#[cfg(test)]
+mod framework_options_carrier_tests {
+    use super::*;
+
+    fn host_over(config: serde_json::Value) -> std::result::Result<host::VerterHost, String> {
+        let wire: WasmHostConfigWire =
+            serde_json::from_value(config).map_err(|error| error.to_string())?;
+        Ok(host::VerterHost::new_standalone(host_config_from_wire(
+            wire,
+        )?))
+    }
+
+    fn sorted_carrier_extensions(host: &host::VerterHost) -> Vec<String> {
+        let mut extensions: Vec<String> = host
+            .language_classifier()
+            .carrier_extensions()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        extensions.sort_unstable();
+        extensions
+    }
+
+    #[test]
+    fn wasm_frameworks_key_narrows_the_constructed_host() {
+        let host = host_over(serde_json::json!({ "frameworks": ["vue"], "devMode": true }))
+            .expect("the Vue vertical is composed");
+        assert_eq!(sorted_carrier_extensions(&host), vec!["vue"]);
+        assert!(
+            host.config().dev_mode,
+            "the shared FFI fields still decode beside the frameworks key"
+        );
+    }
+
+    #[test]
+    fn wasm_frameworks_key_rejects_unknown_names_with_the_shared_diagnostic() {
+        let Err(error) = host_over(serde_json::json!({ "frameworks": ["react"] })) else {
+            panic!("react is not a composed vertical");
+        };
+        assert!(
+            error.contains("'react'") && error.contains("svelte, vue"),
+            "the carrier surfaces the shared diagnostic verbatim: {error}"
+        );
+    }
+
+    #[test]
+    fn wasm_config_without_frameworks_keeps_the_default_admission() {
+        let host = host_over(serde_json::json!({})).expect("default construction");
+        assert_eq!(sorted_carrier_extensions(&host), vec!["svelte", "vue"]);
+    }
+}
+
+/// The same option reached the way a browser reaches it: a plain JS config
+/// object handed to the generated constructors, so the JS-to-WASM decode
+/// and each constructor's use of it are what is exercised.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod framework_options_js_constructor_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn js_config(json: &str) -> JsValue {
+        js_sys::JSON::parse(json).expect("the fixture is valid JSON")
+    }
+
+    fn sorted_carrier_extensions(host: &host::VerterHost) -> Vec<String> {
+        let mut extensions: Vec<String> = host
+            .language_classifier()
+            .carrier_extensions()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        extensions.sort_unstable();
+        extensions
+    }
+
+    #[wasm_bindgen_test]
+    fn host_constructor_narrows_with_the_js_frameworks_key() {
+        let host = WasmVerterHost::new(js_config(r#"{"frameworks":["vue"]}"#))
+            .expect("the Vue vertical is composed");
+        assert_eq!(sorted_carrier_extensions(&host.inner), vec!["vue"]);
+
+        let default_host = WasmVerterHost::new(js_config("{}")).expect("default construction");
+        assert_eq!(
+            sorted_carrier_extensions(&default_host.inner),
+            vec!["svelte", "vue"]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn host_constructor_rejects_an_unknown_js_framework_name() {
+        let Err(error) = WasmVerterHost::new(js_config(r#"{"frameworks":["react"]}"#)) else {
+            panic!("react is not a composed vertical");
+        };
+        let error = error.as_string().expect("the rejection is a string");
+        assert!(error.contains("'react'"), "{error}");
+    }
+
+    #[wasm_bindgen_test]
+    fn meta_project_constructor_narrows_with_the_js_frameworks_key() {
+        let project = WasmMetaProject::new(js_config(r#"{"frameworks":["svelte"]}"#))
+            .expect("the Svelte vertical is composed");
+        assert_eq!(
+            sorted_carrier_extensions(project.inner.host()),
+            vec!["svelte"]
+        );
     }
 }

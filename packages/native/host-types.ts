@@ -129,6 +129,16 @@ export interface HostConfig {
    * Default: false.
    */
   metricsEnabled?: boolean;
+  /**
+   * Framework verticals this host admits, by the exact names the composed
+   * capability catalog spells (`"vue"`, `"svelte"`). `undefined` (default)
+   * admits every composed vertical. An unknown, duplicated, or empty list
+   * rejects construction with an actionable diagnostic naming the request
+   * and the supported set — the same validator the language-server and
+   * WebAssembly carriers use. Fixed for the host's lifetime; a different
+   * admission is a different host.
+   */
+  frameworks?: string[];
 }
 
 export interface HostIdeProjectConfig {

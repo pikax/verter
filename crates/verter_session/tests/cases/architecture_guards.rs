@@ -20287,6 +20287,7 @@ fn host_carrier_grammar_registration_is_catalog_composed() {
     }
     assert!(
         region.contains("HostServices::built_in()")
+            || region.contains("HostServices::composed(")
             || region.contains("FrameworkCapabilityCatalog::built_in()"),
         "the host must seed its grammar authority from the composed framework services:\n{region}"
     );

@@ -933,7 +933,7 @@ impl VerterLanguageServer {
         if self.carrier_publish_coordinator.is_none() {
             return false;
         }
-        if carrier_language_for(canonical_id).is_none() {
+        if carrier_language_for(self.documents.language_classifier(), canonical_id).is_none() {
             return false;
         }
         self.documents.host().ensure_loaded(canonical_id);
@@ -1167,6 +1167,7 @@ impl VerterLanguageServer {
     ) {
         let reader = LspProjectResolverReader::new(&self.documents);
         let Some(prepared) = prepare_non_carrier_provider_sync(
+            self.documents.language_classifier(),
             Some(snapshot),
             &reader,
             canonical_id,
@@ -1308,6 +1309,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default();
 
             let Some(prepared) = prepare_non_carrier_provider_sync(
+                self.documents.language_classifier(),
                 Some(snapshot),
                 &reader,
                 &canonical_id,
@@ -1508,7 +1510,7 @@ impl VerterLanguageServer {
         // a genuinely later request observes the advanced sequence and may
         // retry unchanged bytes unless they carry a deterministic verdict.
         let projectionless_carrier = self.documents.get_projection(uri).is_none()
-            && carrier_language_for(&canonical_id).is_some();
+            && carrier_language_for(self.documents.language_classifier(), &canonical_id).is_some();
         if projectionless_carrier
             && (!self.projectionless_carrier_repair_is_owed(uri)
                 || repair_lease.repair_sequence() != observed_repair_sequence)
@@ -1779,7 +1781,9 @@ impl VerterLanguageServer {
                 // projects its IDE virtual path through the carrier-generic
                 // derivation (`Foo.svelte` → `Foo.svelte.tsx`), never a
                 // hardcoded `.vue` suffix.
-                if carrier_language_for(&canonical_id).is_none() {
+                if carrier_language_for(self.documents.language_classifier(), &canonical_id)
+                    .is_none()
+                {
                     return;
                 }
                 (
@@ -2304,7 +2308,7 @@ impl VerterLanguageServer {
         else {
             return false;
         };
-        carrier_language_for(&canonical_id).is_some()
+        carrier_language_for(self.documents.language_classifier(), &canonical_id).is_some()
             && !self
                 .documents
                 .carrier_ide_compile_has_content_verdict(&canonical_id, &source)
@@ -2588,7 +2592,10 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return false;
         };
-        let Some(file_language) = super::server_utils::self_file_language_for(&canonical_id) else {
+        let Some(file_language) = super::server_utils::self_file_language_for(
+            self.documents.language_classifier(),
+            &canonical_id,
+        ) else {
             return false;
         };
         let Some(sync) = &self.project_sync else {
@@ -2683,7 +2690,7 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<String> {
-        carrier_language_for(canonical_id)
+        carrier_language_for(self.documents.language_classifier(), canonical_id)
             .is_some()
             .then(|| verter_semantic::resolver_core::carrier_api_provider_path(canonical_id))
     }
@@ -2993,9 +3000,13 @@ impl VerterLanguageServer {
                 provider_ide_path_for_source(&snapshot.resolver, &canonical, is_jsx)
             })
             .or_else(|| {
-                carrier_language_for(&canonical).is_some().then(|| {
-                    verter_semantic::resolver_core::carrier_ide_provider_path(&canonical, is_jsx)
-                })
+                carrier_language_for(self.documents.language_classifier(), &canonical)
+                    .is_some()
+                    .then(|| {
+                        verter_semantic::resolver_core::carrier_ide_provider_path(
+                            &canonical, is_jsx,
+                        )
+                    })
             })
     }
 
