@@ -691,6 +691,49 @@ fn a_failed_reference_frame_is_a_reference_failure_even_with_no_comparison() {
         .expect("a reference failure is a protocol failure, not an applicability mismatch");
 }
 
+/// The third `comparison = none` answer: a producer that DID emit a reference.
+/// The manifest has no comparator to judge it with, so the frame cannot be
+/// judged as pass or as an owned skip — it is the protocol breaking, and the
+/// same reference failure the failed-producer arm reports.
+#[test]
+fn a_produced_reference_frame_is_a_reference_failure_with_no_comparison() {
+    let manifest = svelte_manifest();
+    let mut run = ProbeRun::new(
+        SVELTE_CASE,
+        vec![RequestedEntry {
+            canonical_id: SVELTE_CASE.to_string(),
+            source: String::new(),
+            request_digest: String::new(),
+        }],
+    );
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Compile));
+    let _ = run.ingest_frame(compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Reference));
+    let _ = run.ingest_frame(reference_frame(
+        SVELTE_CASE,
+        vec![ReferenceResult::Produced {
+            code: MODULE.to_string(),
+        }],
+    ));
+    let observation = run
+        .finish(&manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::ReferenceFailure),
+        "a produced reference this manifest cannot compare is not an owned skip",
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Route).class(),
+        Some(C::Pass),
+        "the completed compile measurement survives an uncomparable reference",
+    );
+    manifest
+        .check_applicability(&observation)
+        .expect("an uncomparable reference is a protocol failure, not an applicability mismatch");
+}
+
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
