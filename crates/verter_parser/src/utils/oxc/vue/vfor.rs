@@ -169,7 +169,7 @@ impl<'a> VForWithBindings<'a> {
 fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) {
     match expr {
         Expression::Identifier(ident) => {
-            locals.push(ident.span.into());
+            locals.push(verter_span::Span::new(ident.span.start, ident.span.end));
         }
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
@@ -179,7 +179,8 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
                         // For non-shorthand: { foo: bar } → bar is the binding
                         if p.shorthand {
                             if let PropertyKey::StaticIdentifier(ident) = &p.key {
-                                locals.push(ident.span.into());
+                                locals
+                                    .push(verter_span::Span::new(ident.span.start, ident.span.end));
                             }
                         } else {
                             collect_vfor_left_local_spans(&p.value, locals);
@@ -218,11 +219,11 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
             // Handle default values like `item = defaultValue`
             use oxc_ast::ast::{AssignmentTarget, SimpleAssignmentTarget};
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = &assign.left {
-                locals.push(id.span.into());
+                locals.push(verter_span::Span::new(id.span.start, id.span.end));
             } else if let Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) =
                 assign.left.as_simple_assignment_target()
             {
-                locals.push(id.span.into());
+                locals.push(verter_span::Span::new(id.span.start, id.span.end));
             }
         }
         _ => {}

@@ -20,7 +20,7 @@ use crate::common::Span;
 pub fn collect_pattern_binding_spans(pattern: &BindingPattern<'_>, out: &mut Vec<Span>) {
     match pattern {
         BindingPattern::BindingIdentifier(ident) => {
-            out.push(Span::from(ident.span));
+            out.push(Span::new(ident.span.start, ident.span.end));
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
@@ -60,13 +60,13 @@ pub fn collect_import_binding_spans(import: &ImportDeclaration<'_>, out: &mut Ve
                     if s.import_kind.is_type() {
                         continue;
                     }
-                    out.push(Span::from(s.local.span));
+                    out.push(Span::new(s.local.span.start, s.local.span.end));
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                    out.push(Span::from(s.local.span));
+                    out.push(Span::new(s.local.span.start, s.local.span.end));
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                    out.push(Span::from(s.local.span));
+                    out.push(Span::new(s.local.span.start, s.local.span.end));
                 }
             }
         }
@@ -78,9 +78,15 @@ pub fn collect_import_binding_spans(import: &ImportDeclaration<'_>, out: &mut Ve
 /// Type-only declarations (`type` aliases, `interface`s) bind nothing.
 pub fn declaration_binding_span(stmt: &Statement<'_>) -> Option<Span> {
     match stmt {
-        Statement::FunctionDeclaration(func) => func.id.as_ref().map(|id| Span::from(id.span)),
-        Statement::ClassDeclaration(class) => class.id.as_ref().map(|id| Span::from(id.span)),
-        Statement::TSEnumDeclaration(e) => Some(Span::from(e.id.span)),
+        Statement::FunctionDeclaration(func) => func
+            .id
+            .as_ref()
+            .map(|id| Span::new(id.span.start, id.span.end)),
+        Statement::ClassDeclaration(class) => class
+            .id
+            .as_ref()
+            .map(|id| Span::new(id.span.start, id.span.end)),
+        Statement::TSEnumDeclaration(e) => Some(Span::new(e.id.span.start, e.id.span.end)),
         _ => None,
     }
 }

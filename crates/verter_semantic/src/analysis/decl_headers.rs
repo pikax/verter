@@ -950,16 +950,16 @@ fn index_top_level_statement(
                         .entry(ctx.key("default"))
                         .or_insert_with(|| ValueDeclHeader {
                             kind: ValueDeclKind::Const,
-                            span: export.span.into(),
-                            name_span: export.span.into(),
+                            span: verter_span::Span::new(export.span.start, export.span.end),
+                            name_span: verter_span::Span::new(export.span.start, export.span.end),
                             object_member_headers: object_literal_member_headers(expr, ctx.source),
                             contributors: Vec::new(),
                         });
                     push_contributor(
                         &mut entry.contributors,
                         ctx,
-                        export.span.into(),
-                        export.span.into(),
+                        verter_span::Span::new(export.span.start, export.span.end),
+                        verter_span::Span::new(export.span.start, export.span.end),
                     );
                 }
             }
@@ -1041,8 +1041,8 @@ fn index_enum(
         .enum_headers
         .entry(ctx.key(name))
         .or_insert_with(|| EnumDeclHeader {
-            span: enum_decl.span.into(),
-            name_span: enum_decl.id.span.into(),
+            span: verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
+            name_span: verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
             member_names: Vec::new(),
             member_positions: Vec::new(),
             contributors: Vec::new(),
@@ -1062,8 +1062,8 @@ fn index_enum(
     push_contributor(
         &mut entry.contributors,
         ctx,
-        enum_decl.span.into(),
-        enum_decl.id.span.into(),
+        verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
+        verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
     );
 
     // Dual-space RESOLUTION headers (mirrors `index_class`): an `enum` is
@@ -1082,8 +1082,8 @@ fn index_enum(
         &mut index.type_headers,
         name,
         TypeDeclKind::Alias,
-        enum_decl.span.into(),
-        enum_decl.id.span.into(),
+        verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
+        verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
         Vec::new(),
         Vec::new(),
         &[],
@@ -1094,8 +1094,8 @@ fn index_enum(
         .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Enum,
-            span: enum_decl.span.into(),
-            name_span: enum_decl.id.span.into(),
+            span: verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
+            name_span: verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
             object_member_headers: Vec::new(),
             contributors: Vec::new(),
         });
@@ -1103,8 +1103,8 @@ fn index_enum(
     push_contributor(
         &mut value_entry.contributors,
         ctx,
-        enum_decl.span.into(),
-        enum_decl.id.span.into(),
+        verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
+        verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
     );
 }
 
@@ -1194,7 +1194,7 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for HeaderNamespaces<'_, '_> {
         self.index.namespace_blocks.push(NamespaceBlockRecord {
             owner: self.ctx.anchor.owner,
             qualified_name: self.path.name().to_owned(),
-            span: decl.span.into(),
+            span: verter_span::Span::new(decl.span.start, decl.span.end),
             instantiated: false,
         });
         let implicit_export = match &decl.body {
@@ -1404,8 +1404,8 @@ fn index_type_alias(
         table,
         name,
         TypeDeclKind::Alias,
-        decl.span.into(),
-        decl.id.span.into(),
+        verter_span::Span::new(decl.span.start, decl.span.end),
+        verter_span::Span::new(decl.id.span.start, decl.id.span.end),
         params,
         members,
         &[],
@@ -1431,8 +1431,8 @@ fn index_interface(
         table,
         name,
         TypeDeclKind::Interface,
-        decl.span.into(),
-        decl.id.span.into(),
+        verter_span::Span::new(decl.span.start, decl.span.end),
+        verter_span::Span::new(decl.id.span.start, decl.id.span.end),
         params,
         members,
         &ignored_heritage_arms,
@@ -1533,7 +1533,7 @@ fn index_class_field_value(
         crate::analysis::type_eval_build::class_field_value_name(name, prop),
         prop.value.as_ref(),
     ) {
-        let span: Span = value.span().into();
+        let span: Span = verter_span::Span::new(value.span().start, value.span().end);
         let entry = index
             .value_headers
             .entry(ctx.key(&field_name))
@@ -1579,7 +1579,7 @@ fn index_named_class(
             crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
         })
     {
-        let span: Span = heritage.span().into();
+        let span: Span = verter_span::Span::new(heritage.span().start, heritage.span().end);
         let entry = index
             .value_headers
             .entry(ctx.key(&crate::analysis::type_eval_build::class_heritage_value_name(name)))
@@ -1651,8 +1651,8 @@ fn index_named_class(
         &mut index.type_headers,
         name,
         TypeDeclKind::Class,
-        decl.span.into(),
-        id.span.into(),
+        verter_span::Span::new(decl.span.start, decl.span.end),
+        verter_span::Span::new(id.span.start, id.span.end),
         params,
         instance_members,
         &[],
@@ -1664,14 +1664,14 @@ fn index_named_class(
         .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Class,
-            span: decl.span.into(),
-            name_span: id.span.into(),
+            span: verter_span::Span::new(decl.span.start, decl.span.end),
+            name_span: verter_span::Span::new(id.span.start, id.span.end),
             object_member_headers: Vec::new(),
             contributors: Vec::new(),
         });
     entry.kind = ValueDeclKind::Class;
-    entry.span = decl.span.into();
-    entry.name_span = id.span.into();
+    entry.span = verter_span::Span::new(decl.span.start, decl.span.end);
+    entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
     for header in static_members {
         if !entry
             .object_member_headers
@@ -1684,8 +1684,8 @@ fn index_named_class(
     push_contributor(
         &mut entry.contributors,
         ctx,
-        decl.span.into(),
-        id.span.into(),
+        verter_span::Span::new(decl.span.start, decl.span.end),
+        verter_span::Span::new(id.span.start, id.span.end),
     );
 }
 
@@ -1721,21 +1721,21 @@ fn index_function_in(
         .entry(ctx.key(&key))
         .or_insert_with(|| ValueDeclHeader {
             kind,
-            span: func.span.into(),
-            name_span: id.span.into(),
+            span: verter_span::Span::new(func.span.start, func.span.end),
+            name_span: verter_span::Span::new(id.span.start, id.span.end),
             object_member_headers: Vec::new(),
             contributors: Vec::new(),
         });
     // Last contributor wins for the representative kind/spans (matching
     // `ValueDeclGroup::primary`).
     entry.kind = kind;
-    entry.span = func.span.into();
-    entry.name_span = id.span.into();
+    entry.span = verter_span::Span::new(func.span.start, func.span.end);
+    entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
     push_contributor(
         &mut entry.contributors,
         ctx,
-        func.span.into(),
-        id.span.into(),
+        verter_span::Span::new(func.span.start, func.span.end),
+        verter_span::Span::new(id.span.start, id.span.end),
     );
 }
 
@@ -1795,14 +1795,14 @@ fn index_variable(
         .entry(ctx.key(&key))
         .or_insert_with(|| ValueDeclHeader {
             kind: var_kind,
-            span: decl.span.into(),
-            name_span: id.span.into(),
+            span: verter_span::Span::new(decl.span.start, decl.span.end),
+            name_span: verter_span::Span::new(id.span.start, id.span.end),
             object_member_headers: Vec::new(),
             contributors: Vec::new(),
         });
     entry.kind = var_kind;
-    entry.span = decl.span.into();
-    entry.name_span = id.span.into();
+    entry.span = verter_span::Span::new(decl.span.start, decl.span.end);
+    entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
     for header in members {
         if !entry
             .object_member_headers
@@ -1815,8 +1815,8 @@ fn index_variable(
     push_contributor(
         &mut entry.contributors,
         ctx,
-        decl.span.into(),
-        id.span.into(),
+        verter_span::Span::new(decl.span.start, decl.span.end),
+        verter_span::Span::new(id.span.start, id.span.end),
     );
 }
 
@@ -1880,19 +1880,19 @@ fn index_destructured_variable(
             .entry(ctx.key(&key))
             .or_insert_with(|| ValueDeclHeader {
                 kind: var_kind,
-                span: decl.span.into(),
-                name_span: id.span.into(),
+                span: verter_span::Span::new(decl.span.start, decl.span.end),
+                name_span: verter_span::Span::new(id.span.start, id.span.end),
                 object_member_headers: Vec::new(),
                 contributors: Vec::new(),
             });
         entry.kind = var_kind;
-        entry.span = decl.span.into();
-        entry.name_span = id.span.into();
+        entry.span = verter_span::Span::new(decl.span.start, decl.span.end);
+        entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
         push_contributor(
             &mut entry.contributors,
             ctx,
-            decl.span.into(),
-            id.span.into(),
+            verter_span::Span::new(decl.span.start, decl.span.end),
+            verter_span::Span::new(id.span.start, id.span.end),
         );
     }
 }
@@ -2022,8 +2022,14 @@ fn type_param_headers(decl: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<Type
         .iter()
         .map(|param| TypeParamHeader {
             name: param.name.name.to_string(),
-            constraint_span: param.constraint.as_ref().map(|c| c.span().into()),
-            default_span: param.default.as_ref().map(|d| d.span().into()),
+            constraint_span: param
+                .constraint
+                .as_ref()
+                .map(|c| verter_span::Span::new(c.span().start, c.span().end)),
+            default_span: param
+                .default
+                .as_ref()
+                .map(|d| verter_span::Span::new(d.span().start, d.span().end)),
         })
         .collect()
 }

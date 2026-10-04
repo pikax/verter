@@ -502,7 +502,10 @@ fn bind_clone(
     let mut wrapper_directives = oxc_allocator::Vec::new_in(&ast);
     for directive in &program.directives {
         let cloned = directive.clone_in(allocator);
-        let owner = owners.owner_of_span(directive.span.into());
+        let owner = owners.owner_of_span(verter_span::Span::new(
+            directive.span.start,
+            directive.span.end,
+        ));
         if instance_owner.is_some()
             && matches!(owner, Some(owner) if owner.kind() == TopLevelOwnerKind::Instance)
         {
@@ -777,7 +780,7 @@ impl<'a> Visit<'a> for ReferenceCollector {
     fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
         if let Some(reference_id) = ident.reference_id.get() {
             self.references.insert(
-                ident.span.into(),
+                verter_span::Span::new(ident.span.start, ident.span.end),
                 ReferenceEntry {
                     name: ident.name.as_str().to_string(),
                     reference_id,
@@ -815,7 +818,10 @@ pub(crate) fn resolve_constructor_binding(
     verter_type_expr::ConstructorBindingEntry {
         identity: verter_type_expr::RuntimeConstructorIdentity::classify(ident.name.as_str()),
         resolution: index
-            .resolve_value_identifier(ident.span.into(), StartScope::ProgramRoot)
+            .resolve_value_identifier(
+                verter_span::Span::new(ident.span.start, ident.span.end),
+                StartScope::ProgramRoot,
+            )
             .into(),
     }
 }

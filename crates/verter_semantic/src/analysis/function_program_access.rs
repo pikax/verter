@@ -16,7 +16,7 @@ fn named(identifier: &IdentifierReference<'_>, kind: FunctionWriteKind) -> Funct
     FunctionWriteTarget::Binding {
         reference: FunctionReferenceRecord {
             name: Arc::from(identifier.name.as_str()),
-            span: identifier.span.into(),
+            span: verter_span::Span::new(identifier.span.start, identifier.span.end),
             binding: FunctionReferenceBinding::Free,
             read_role: None,
             path: Arc::from([]),
@@ -46,7 +46,7 @@ pub(crate) fn static_member_reference(
                 path.reverse();
                 return Some(FunctionReferenceRecord {
                     name: Arc::from(identifier.name.as_str()),
-                    span: identifier.span.into(),
+                    span: verter_span::Span::new(identifier.span.start, identifier.span.end),
                     binding: FunctionReferenceBinding::Free,
                     read_role: Some(FunctionReadRole::Value),
                     path: path.into(),
@@ -68,7 +68,7 @@ fn expression_target(
     mut kind: FunctionWriteKind,
     mut asserted: bool,
 ) -> Option<FunctionWriteTarget> {
-    let span = expression.span().into();
+    let span = verter_span::Span::new(expression.span().start, expression.span().end);
     loop {
         expression = match expression {
             Expression::Identifier(_) if asserted && kind == FunctionWriteKind::Whole => {
@@ -371,14 +371,17 @@ impl<'a> oxc_ast_visit::Visit<'a> for EscapingAssignments {
     }
 
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-        if self.pure_writes.contains(&verter_span::Span::from(it.span)) {
+        if self
+            .pure_writes
+            .contains(&verter_span::Span::new(it.span.start, it.span.end))
+        {
             return;
         }
         let scope = self.current();
         self.reads.push((
             FunctionReferenceRecord {
                 name: Arc::from(it.name.as_str()),
-                span: it.span.into(),
+                span: verter_span::Span::new(it.span.start, it.span.end),
                 binding: FunctionReferenceBinding::Free,
                 read_role: Some(FunctionReadRole::Value),
                 path: Arc::from([]),

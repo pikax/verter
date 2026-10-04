@@ -405,7 +405,7 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
             typedefs.push(JsdocTypedef {
                 name: name.to_string(),
                 attached_to: comment.attached_to,
-                comment_span: comment.span.into(),
+                comment_span: verter_span::Span::new(comment.span.start, comment.span.end),
                 name_span,
                 body,
                 dependencies,
@@ -482,7 +482,7 @@ pub fn collect_jsdoc_typedef_name_records(
             names.push(JsdocTypedefName {
                 name: name.to_string(),
                 attached_to: comment.attached_to,
-                comment_span: comment.span.into(),
+                comment_span: verter_span::Span::new(comment.span.start, comment.span.end),
                 name_span,
             });
         }

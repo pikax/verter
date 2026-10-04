@@ -115,7 +115,7 @@ pub fn process_setup_statement<'a>(
                     .first()
                     .and_then(|d| extract_binding_name(&d.id));
                 items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                    span: Span::from(var_decl.span),
+                    span: Span::new(var_decl.span.start, var_decl.span.end),
                     name,
                     kind: TypeDeclarationKind::TypeAlias,
                 }));
@@ -130,7 +130,7 @@ pub fn process_setup_statement<'a>(
             if func.declare {
                 let name = func.id.as_ref().map(|id| id.name.as_str());
                 items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                    span: Span::from(func.span),
+                    span: Span::new(func.span.start, func.span.end),
                     name,
                     kind: TypeDeclarationKind::TypeAlias,
                 }));
@@ -145,16 +145,16 @@ pub fn process_setup_statement<'a>(
             if class.declare {
                 let name = class.id.as_ref().map(|id| id.name.as_str());
                 items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                    span: Span::from(class.span),
+                    span: Span::new(class.span.start, class.span.end),
                     name,
                     kind: TypeDeclarationKind::TypeAlias,
                 }));
             } else if setup_ctx.should_track_declarations() {
                 if let Some(id) = &class.id {
                     items.push(ScriptItem::Declaration(ScriptDeclaration {
-                        span: Span::from(class.span),
+                        span: Span::new(class.span.start, class.span.end),
                         name: Some(id.name.as_str()),
-                        name_span: Some(Span::from(id.span)),
+                        name_span: Some(Span::new(id.span.start, id.span.end)),
                         kind: DeclarationKind::Class,
                         is_ref_like: false,
                         callable: None,
@@ -208,7 +208,7 @@ pub fn process_setup_statement<'a>(
             if for_of.r#await {
                 setup_ctx.is_async = true;
                 items.push(ScriptItem::Async(ScriptAsync {
-                    span: Span::from(for_of.span),
+                    span: Span::new(for_of.span.start, for_of.span.end),
                     arg_span: None,
                     kind: AsyncKind::ForAwaitOf,
                 }));
@@ -261,14 +261,14 @@ pub fn process_setup_statement<'a>(
         // Errors in setup mode
         Statement::ExportDefaultDeclaration(export) => {
             errors.push(ScriptError {
-                span: Span::from(export.span),
+                span: Span::new(export.span.start, export.span.end),
                 message: ScriptErrorKind::ExportDefaultInSetup,
             });
         }
 
         Statement::ReturnStatement(ret) => {
             errors.push(ScriptError {
-                span: Span::from(ret.span),
+                span: Span::new(ret.span.start, ret.span.end),
                 message: ScriptErrorKind::ReturnInSetup,
             });
         }
@@ -278,7 +278,7 @@ pub fn process_setup_statement<'a>(
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             // Use export's outer span so `export` keyword is also removed
-            let export_span = Span::from(export.span);
+            let export_span = Span::new(export.span.start, export.span.end);
             match decl {
                 Declaration::TSTypeAliasDeclaration(alias) => {
                     items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
@@ -309,7 +309,7 @@ pub fn process_setup_statement<'a>(
         // TypeScript-only declarations - need to be moved outside the component
         Statement::TSTypeAliasDeclaration(type_alias) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: Span::from(type_alias.span),
+                span: Span::new(type_alias.span.start, type_alias.span.end),
                 name: Some(type_alias.id.name.as_str()),
                 kind: TypeDeclarationKind::TypeAlias,
             }));
@@ -317,7 +317,7 @@ pub fn process_setup_statement<'a>(
 
         Statement::TSInterfaceDeclaration(interface) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: Span::from(interface.span),
+                span: Span::new(interface.span.start, interface.span.end),
                 name: Some(interface.id.name.as_str()),
                 kind: TypeDeclarationKind::Interface,
             }));
@@ -325,7 +325,7 @@ pub fn process_setup_statement<'a>(
 
         Statement::TSEnumDeclaration(ts_enum) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: Span::from(ts_enum.span),
+                span: Span::new(ts_enum.span.start, ts_enum.span.end),
                 name: Some(ts_enum.id.name.as_str()),
                 kind: TypeDeclarationKind::Enum,
             }));
@@ -333,14 +333,14 @@ pub fn process_setup_statement<'a>(
 
         Statement::TSNamespaceDeclaration(module) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: Span::from(module.span),
+                span: Span::new(module.span.start, module.span.end),
                 name: Some(module.id.name.as_str()),
                 kind: TypeDeclarationKind::Module,
             }));
         }
         Statement::TSExternalModuleDeclaration(module) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: Span::from(module.span),
+                span: Span::new(module.span.start, module.span.end),
                 name: Some(module.id.value.as_str()),
                 kind: TypeDeclarationKind::Module,
             }));
@@ -380,7 +380,7 @@ fn process_variable_declaration<'a>(
         VariableDeclarationKind::AwaitUsing => {
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
-                span: Span::from(var_decl.span),
+                span: Span::new(var_decl.span.start, var_decl.span.end),
                 arg_span: None,
                 kind: AsyncKind::AwaitUsing,
             }));
@@ -404,8 +404,8 @@ fn process_variable_declaration<'a>(
             // Build declarator info for macro
             let macro_declarator = Some(MacroDeclarator {
                 name: extract_binding_name(&declarator.id),
-                binding_span: Span::from(declarator.id.span()),
-                statement_span: Span::from(var_decl.span),
+                binding_span: Span::new(declarator.id.span().start, declarator.id.span().end),
+                statement_span: Span::new(var_decl.span.start, var_decl.span.end),
             });
 
             // Check if init is a macro call
@@ -424,10 +424,12 @@ fn process_variable_declaration<'a>(
                     .init
                     .as_ref()
                     .and_then(callable_shape_of_initializer),
-                declarator
-                    .type_annotation
-                    .as_ref()
-                    .map(|annotation| Span::from(annotation.type_annotation.span())),
+                declarator.type_annotation.as_ref().map(|annotation| {
+                    Span::new(
+                        annotation.type_annotation.span().start,
+                        annotation.type_annotation.span().end,
+                    )
+                }),
                 items,
             );
         }
@@ -459,9 +461,9 @@ fn process_function_declaration<'a>(
             };
 
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: Span::from(func.span),
+                span: Span::new(func.span.start, func.span.end),
                 name: Some(id.name.as_str()),
-                name_span: Some(Span::from(id.span)),
+                name_span: Some(Span::new(id.span.start, id.span.end)),
                 kind,
                 is_ref_like: false,
                 callable: Some(callable_shape(&func.params, func.return_type.as_deref())),
@@ -503,8 +505,11 @@ fn check_expression_for_async<'a>(
         Expression::AwaitExpression(await_expr) => {
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
-                span: Span::from(await_expr.span),
-                arg_span: Some(Span::from(await_expr.argument.span())),
+                span: Span::new(await_expr.span.start, await_expr.span.end),
+                arg_span: Some(Span::new(
+                    await_expr.argument.span().start,
+                    await_expr.argument.span().end,
+                )),
                 kind: AsyncKind::AwaitExpression,
             }));
             // Also check the argument
@@ -648,7 +653,7 @@ pub fn parse_macro_call<'a>(
     };
 
     let kind = detect_macro_kind(name)?;
-    let span = Span::from(call.span);
+    let span = Span::new(call.span.start, call.span.end);
 
     // Extract type parameters if present
     let type_params = call
@@ -705,7 +710,10 @@ pub fn parse_macro_call<'a>(
                     let Expression::StringLiteral(literal) = arg.as_expression()? else {
                         return None;
                     };
-                    Some((literal.value.as_str(), Span::from(literal.span)))
+                    Some((
+                        literal.value.as_str(),
+                        Span::new(literal.span.start, literal.span.end),
+                    ))
                 })
                 .map_or((None, None), |(name, span)| (Some(name), Some(span)));
 
@@ -713,7 +721,7 @@ pub fn parse_macro_call<'a>(
             let options_idx = if name.is_some() { 1 } else { 0 };
             let options_span = call.arguments.get(options_idx).and_then(|arg| {
                 if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
-                    Some(Span::from(obj.span))
+                    Some(Span::new(obj.span.start, obj.span.end))
                 } else {
                     None
                 }
@@ -747,7 +755,10 @@ pub fn parse_macro_call<'a>(
                                     .type_arguments
                                     .as_ref()
                                     .map(|tp| extract_type_params(tp, ctx));
-                                return Some((Some(Span::from(inner.span)), inner_type_params));
+                                return Some((
+                                    Some(Span::new(inner.span.start, inner.span.end)),
+                                    inner_type_params,
+                                ));
                             }
                         }
                     }
@@ -763,7 +774,7 @@ pub fn parse_macro_call<'a>(
                 .arguments
                 .get(1)
                 .and_then(|arg| arg.as_expression())
-                .map(|expr| Span::from(expr.span()));
+                .map(|expr| Span::new(expr.span().start, expr.span().end));
 
             Some(ScriptMacro::WithDefaults {
                 span,
@@ -1034,7 +1045,7 @@ fn extract_prop_type_annotation<'ast, 'expr>(
     type_args
         .params
         .first()
-        .map(|ty: &TSType<'_>| (ty, Span::from(ty.span())))
+        .map(|ty: &TSType<'_>| (ty, Span::new(ty.span().start, ty.span().end)))
 }
 
 fn extend_parameter_type_dependencies(
@@ -1164,7 +1175,7 @@ fn extract_object_arg<'a>(
                     let value_span = if p.shorthand {
                         None
                     } else {
-                        Some(Span::from(p.value.span()))
+                        Some(Span::new(p.value.span().start, p.value.span().end))
                     };
 
                     let (
@@ -1207,7 +1218,7 @@ fn extract_object_arg<'a>(
                     properties.push(MacroProperty {
                         name,
                         name_span,
-                        property_span: Span::from(p.span),
+                        property_span: Span::new(p.span.start, p.span.end),
                         value_span,
                         is_method: p.method,
                         callable: callable_shape_of_initializer(&p.value),
@@ -1228,7 +1239,7 @@ fn extract_object_arg<'a>(
     }
 
     MacroObjectArg {
-        span: Span::from(obj.span),
+        span: Span::new(obj.span.start, obj.span.end),
         properties,
         has_spread,
         static_eligibility: MacroObjectStaticEligibility::from_shape(
@@ -1250,19 +1261,19 @@ fn extract_array_arg<'a>(arr: &ArrayExpression<'a>) -> MacroArrayArg<'a> {
         .iter()
         .filter_map(|elem| match elem {
             ArrayExpressionElement::SpreadElement(s) => Some(MacroArrayElement {
-                span: Span::from(s.span),
+                span: Span::new(s.span.start, s.span.end),
                 name: None,
             }),
             ArrayExpressionElement::Elision(_) => None,
             _ => elem.as_expression().map(|e| MacroArrayElement {
-                span: Span::from(e.span()),
+                span: Span::new(e.span().start, e.span().end),
                 name: array_element_literal_name(e),
             }),
         })
         .collect();
 
     MacroArrayArg {
-        span: Span::from(arr.span),
+        span: Span::new(arr.span.start, arr.span.end),
         elements,
     }
 }
@@ -1405,8 +1416,12 @@ fn extract_property_key<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> Option<(&'a str, Span)> {
     match key {
-        PropertyKey::StaticIdentifier(id) => Some((id.name.as_str(), Span::from(id.span))),
-        PropertyKey::StringLiteral(s) => Some((s.value.as_str(), Span::from(s.span))),
+        PropertyKey::StaticIdentifier(id) => {
+            Some((id.name.as_str(), Span::new(id.span.start, id.span.end)))
+        }
+        PropertyKey::StringLiteral(s) => {
+            Some((s.value.as_str(), Span::new(s.span.start, s.span.end)))
+        }
         PropertyKey::NumericLiteral(n) => {
             // For numeric keys, we'd need to convert to string
             // For now, skip these as they're rare in Vue macros
@@ -1429,9 +1444,9 @@ fn collect_declarations_from_pattern<'a>(
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: Span::from(id.span),
+                span: Span::new(id.span.start, id.span.end),
                 name: Some(id.name.as_str()),
-                name_span: Some(Span::from(id.span)),
+                name_span: Some(Span::new(id.span.start, id.span.end)),
                 kind,
                 is_ref_like,
                 callable,
@@ -1486,7 +1501,7 @@ pub fn check_expression_for_usage<'a>(
     match expr {
         // Track await expressions for before/after context
         Expression::AwaitExpression(await_expr) => {
-            usage_ctx.record_await(Span::from(await_expr.span));
+            usage_ctx.record_await(Span::new(await_expr.span.start, await_expr.span.end));
             // Also check the argument for Vue API calls
             check_expression_for_usage(&await_expr.argument, ctx, usage_ctx, None);
         }
@@ -1557,7 +1572,7 @@ fn collect_api_usage<'a>(
     usage_ctx: &mut UsageCollector<'a>,
     binding_span: Option<Span>,
 ) {
-    let span = Span::from(call.span);
+    let span = Span::new(call.span.start, call.span.end);
 
     match kind.category() {
         VueApiCategory::DependencyInjection => {
@@ -1622,7 +1637,7 @@ fn extract_provide_usage<'a>(
         .arguments
         .get(1)
         .and_then(|a| a.as_expression())
-        .map(|e| Span::from(e.span()))?;
+        .map(|e| Span::new(e.span().start, e.span().end))?;
 
     Some(ProvideUsage {
         span,
@@ -1662,15 +1677,15 @@ fn extract_provide_key<'a>(
 ) -> Option<ProvideKey> {
     match expr {
         Expression::StringLiteral(s) => Some(ProvideKey {
-            span: Span::from(s.span),
+            span: Span::new(s.span.start, s.span.end),
             kind: ProvideKeyKind::StringLiteral,
         }),
         Expression::Identifier(id) => Some(ProvideKey {
-            span: Span::from(id.span),
+            span: Span::new(id.span.start, id.span.end),
             kind: ProvideKeyKind::Symbol,
         }),
         _ => Some(ProvideKey {
-            span: Span::from(expr.span()),
+            span: Span::new(expr.span().start, expr.span().end),
             kind: ProvideKeyKind::Dynamic,
         }),
     }
@@ -1691,7 +1706,7 @@ fn collect_reactivity_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| Span::from(e.span()));
+                .map(|e| Span::new(e.span().start, e.span().end));
 
             usage_ctx.record_reactive(ReactiveStateUsage {
                 kind: reactive_kind,
@@ -1716,7 +1731,7 @@ fn collect_lifecycle_usage<'a>(
             .arguments
             .first()
             .and_then(|a| a.as_expression())
-            .map(|e| Span::from(e.span()))
+            .map(|e| Span::new(e.span().start, e.span().end))
             .unwrap_or(span);
 
         usage_ctx.record_lifecycle(LifecycleUsage {
@@ -1742,14 +1757,14 @@ fn collect_watcher_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| vec![Span::from(e.span())])
+                .map(|e| vec![Span::new(e.span().start, e.span().end)])
                 .unwrap_or_default();
 
             let callback_span = call
                 .arguments
                 .get(1)
                 .and_then(|a| a.as_expression())
-                .map(|e| Span::from(e.span()))
+                .map(|e| Span::new(e.span().start, e.span().end))
                 .unwrap_or(span);
 
             (callback_span, source_spans)
@@ -1760,7 +1775,7 @@ fn collect_watcher_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| Span::from(e.span()))
+                .map(|e| Span::new(e.span().start, e.span().end))
                 .unwrap_or(span);
 
             (callback_span, Vec::new())
@@ -1791,7 +1806,7 @@ fn collect_template_util_usage<'a>(
             .and_then(|a| a.as_expression())
             .and_then(|e| {
                 if let Expression::StringLiteral(s) = e {
-                    Some(Span::from(s.span))
+                    Some(Span::new(s.span.start, s.span.end))
                 } else {
                     None
                 }
@@ -1875,15 +1890,21 @@ fn callable_shape<'a>(
                     _ => None,
                 },
                 optional: param.optional || param.initializer.is_some(),
-                type_span: param
-                    .type_annotation
-                    .as_ref()
-                    .map(|annotation| Span::from(annotation.type_annotation.span())),
+                type_span: param.type_annotation.as_ref().map(|annotation| {
+                    Span::new(
+                        annotation.type_annotation.span().start,
+                        annotation.type_annotation.span().end,
+                    )
+                }),
             })
             .collect(),
         has_rest: params.rest.is_some(),
-        return_type_span: return_type
-            .map(|annotation| Span::from(annotation.type_annotation.span())),
+        return_type_span: return_type.map(|annotation| {
+            Span::new(
+                annotation.type_annotation.span().start,
+                annotation.type_annotation.span().end,
+            )
+        }),
     }
 }
 

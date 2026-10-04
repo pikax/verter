@@ -2617,7 +2617,7 @@ fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
     authored_call_site(
         &call.arguments,
         call.type_arguments.is_some(),
-        call.span.into(),
+        verter_span::Span::new(call.span.start, call.span.end),
     )
 }
 
@@ -2709,7 +2709,7 @@ fn construct_site(new: &oxc_ast::ast::NewExpression<'_>) -> SliceCallSite {
     authored_call_site(
         &new.arguments,
         new.type_arguments.is_some(),
-        new.span.into(),
+        verter_span::Span::new(new.span.start, new.span.end),
     )
 }
 
@@ -2720,7 +2720,7 @@ fn tagged_template_site(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) -> 
         u32::try_from(tagged.quasi.expressions.len() + 1).unwrap_or(u32::MAX),
         false,
         tagged.type_arguments.is_some(),
-        tagged.span.into(),
+        verter_span::Span::new(tagged.span.start, tagged.span.end),
     )
 }
 
@@ -4596,10 +4596,10 @@ fn modelled_pattern_bindings(
                 let mut identifiers = Vec::new();
                 collect_pattern_identifier_spans(&it.id, &mut identifiers);
                 for span in identifiers {
-                    if let Some(binding) = self
-                        .bindings
-                        .declaration_at_span(FrameSpan::rebase(self.anchor, span.into()))
-                    {
+                    if let Some(binding) = self.bindings.declaration_at_span(FrameSpan::rebase(
+                        self.anchor,
+                        verter_span::Span::new(span.start, span.end),
+                    )) {
                         self.out.insert(binding);
                     }
                 }
@@ -4636,9 +4636,10 @@ fn modelled_pattern_bindings(
             let mut identifiers = Vec::new();
             collect_pattern_identifier_spans(pattern, &mut identifiers);
             for span in identifiers {
-                if let Some(binding) =
-                    bindings.declaration_at_span(FrameSpan::rebase(anchor, span.into()))
-                {
+                if let Some(binding) = bindings.declaration_at_span(FrameSpan::rebase(
+                    anchor,
+                    verter_span::Span::new(span.start, span.end),
+                )) {
                     collector.out.insert(binding);
                 }
             }
@@ -6333,7 +6334,7 @@ fn signature_parameter_bindings(
 
 /// Rebase a LIVE source span onto a function's own anchor.
 fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
-    FrameSpan::rebase(anchor, span.into())
+    FrameSpan::rebase(anchor, verter_span::Span::new(span.start, span.end))
 }
 
 /// The static member path of a chain rooted at `this` (`this.a.b` is
@@ -6532,8 +6533,10 @@ fn lower_params(
                         _ => return None,
                     };
                     Some(SliceDestructuredElement {
-                        binding: bindings
-                            .declaration_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
+                        binding: bindings.declaration_at_span(FrameSpan::rebase(
+                            anchor,
+                            verter_span::Span::new(binding_span.start, binding_span.end),
+                        ))?,
                         name: binding,
                         key,
                         has_default,
@@ -6586,9 +6589,9 @@ fn lower_params(
         };
         out.push(SliceParam {
             binding: match &param.pattern {
-                BindingPattern::BindingIdentifier(id) => {
-                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
-                }
+                BindingPattern::BindingIdentifier(id) => bindings.declaration_at_span(
+                    FrameSpan::rebase(anchor, verter_span::Span::new(id.span.start, id.span.end)),
+                ),
                 _ => None,
             },
             name,
@@ -6616,9 +6619,9 @@ fn lower_params(
         ty.add_shadowed(extra);
         out.push(SliceParam {
             binding: match &rest.rest.argument {
-                BindingPattern::BindingIdentifier(id) => {
-                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
-                }
+                BindingPattern::BindingIdentifier(id) => bindings.declaration_at_span(
+                    FrameSpan::rebase(anchor, verter_span::Span::new(id.span.start, id.span.end)),
+                ),
                 _ => None,
             },
             name,
@@ -7461,7 +7464,10 @@ impl<'a> Visit<'a> for SelectedAnnotationFinder<'_> {
         {
             self.found = Some(declarator.type_annotation.as_ref().map(|annotation| {
                 let ty = lower_ts_type(&annotation.type_annotation, self.source);
-                let span = FrameSpan::rebase(self.locator.gate.anchor, self.target.into());
+                let span = FrameSpan::rebase(
+                    self.locator.gate.anchor,
+                    verter_span::Span::new(self.target.start, self.target.end),
+                );
                 GatedType {
                     shadowed: self
                         .locator
@@ -8384,10 +8390,10 @@ impl<'a> Lowerer<'a> {
         loop_span: FrameSpan,
     ) -> bool {
         use verter_semantic::analysis::function_program::FunctionWriteTarget;
-        let Some(nested) = self
-            .index
-            .nested_at(self.bindings.function(), node_span(node).into())
-        else {
+        let Some(nested) = self.index.nested_at(self.bindings.function(), {
+            let span = node_span(node);
+            verter_span::Span::new(span.start, span.end)
+        }) else {
             return false;
         };
         let nested = nested.entry();
@@ -8711,7 +8717,7 @@ impl<'a> Lowerer<'a> {
         let span = statement.span();
         self.control
             .iter()
-            .find(|region| region.span == span.into())
+            .find(|region| region.span == verter_span::Span::new(span.start, span.end))
             .is_none_or(|region| region.has_return)
     }
 
@@ -10919,7 +10925,8 @@ impl<'a> Lowerer<'a> {
             return GuardDisposition::Unexpressible;
         }
         if receiver.is_none() && arguments.iter().all(Option::is_none) {
-            self.non_narrowing_call_spans.insert(call.span.into());
+            self.non_narrowing_call_spans
+                .insert(verter_span::Span::new(call.span.start, call.span.end));
             return GuardDisposition::NoNarrowing;
         }
         let callee_is_reference = matches!(
@@ -10943,7 +10950,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         let callee = self.lower_expr(&call.callee, ExprMode::Return);
-        self.predicate_guard_call_spans.insert(call.span.into());
+        self.predicate_guard_call_spans
+            .insert(verter_span::Span::new(call.span.start, call.span.end));
         GuardDisposition::modeled(SliceGuard::CallPredicate {
             callee: Box::new(callee),
             site: call_site(call),
@@ -11970,7 +11978,7 @@ impl<'a> Lowerer<'a> {
         let Some(subject) = self.narrow_subject_of(argument) else {
             return SliceGuard::None;
         };
-        let span: verter_span::Span = call.span.into();
+        let span: verter_span::Span = verter_span::Span::new(call.span.start, call.span.end);
         self.predicate_guard_call_spans.insert(span);
         SliceGuard::TypePredicate {
             subject,
@@ -12012,7 +12020,7 @@ impl<'a> Lowerer<'a> {
                     .and_then(|argument| self.narrow_subject_of(argument))
             })
             .collect();
-        let span: verter_span::Span = call.span.into();
+        let span: verter_span::Span = verter_span::Span::new(call.span.start, call.span.end);
         self.predicate_guard_call_spans.insert(span);
         SliceGuard::CalleePredicate {
             callee,
@@ -12679,7 +12687,8 @@ impl<'a> Lowerer<'a> {
     ) -> SliceStatement {
         match self.effect_callee(call) {
             EffectCallee::Inert => {
-                self.decided_above_call_spans.push(call.span.into());
+                self.decided_above_call_spans
+                    .push(verter_span::Span::new(call.span.start, call.span.end));
                 SliceStatement::ThrowPoint
             }
             EffectCallee::Settle(callee) => SliceStatement::Block(SliceRegion {
@@ -13303,7 +13312,8 @@ impl<'a> Lowerer<'a> {
                     // statements' contributions the checker drops.
                     None => match self.statement_call_effect(call) {
                         StatementCallEffect::Inert => {
-                            self.decided_above_call_spans.push(call.span.into());
+                            self.decided_above_call_spans
+                                .push(verter_span::Span::new(call.span.start, call.span.end));
                             SliceStatement::ThrowPoint
                         }
                         StatementCallEffect::NeverReturns => SliceStatement::Throw,
@@ -13314,7 +13324,10 @@ impl<'a> Lowerer<'a> {
                         StatementCallEffect::Unprovable => {
                             match self.lower_callee_effect_statement(call) {
                                 Some(effect) => {
-                                    self.decided_above_call_spans.push(call.span.into());
+                                    self.decided_above_call_spans.push(verter_span::Span::new(
+                                        call.span.start,
+                                        call.span.end,
+                                    ));
                                     effect
                                 }
                                 None => self.effect_callee_statement(call),
@@ -13588,7 +13601,7 @@ impl<'a> Lowerer<'a> {
             Some(SliceAssertion {
                 subject,
                 target,
-                call: call.span.into(),
+                call: verter_span::Span::new(call.span.start, call.span.end),
             })
         });
         if assertion.is_none()
@@ -14859,11 +14872,9 @@ impl<'a> Lowerer<'a> {
             // trailing implementation of its overload group) is a
             // Flow obligation edge — the fixed point's mutual
             // recursion discharges through it.
-            if let Some(direct) = self
-                .direct_calls
-                .iter()
-                .find(|direct| direct.span == call.span.into())
-            {
+            if let Some(direct) = self.direct_calls.iter().find(|direct| {
+                direct.span == verter_span::Span::new(call.span.start, call.span.end)
+            }) {
                 return SliceExpr::Call(
                     SliceCall::Direct(direct.target.clone()),
                     call_site(call),
@@ -15457,7 +15468,7 @@ impl<'a> Lowerer<'a> {
                     values.push(SliceExpr::MemberOf {
                         object: Box::new(object),
                         member: Arc::from(member.property.name.as_str()),
-                        span: member.span.into(),
+                        span: verter_span::Span::new(member.span.start, member.span.end),
                     });
                 }
                 Task::CallArguments(frame) => {
@@ -16295,7 +16306,8 @@ impl<'a> Lowerer<'a> {
             else {
                 return EvolvingLowering::NotEvolving;
             };
-            self.decided_above_call_spans.push(call.span.into());
+            self.decided_above_call_spans
+                .push(verter_span::Span::new(call.span.start, call.span.end));
             let arguments = call.arguments.iter().map(|argument| match argument {
                 oxc_ast::ast::Argument::SpreadElement(spread) => (&spread.argument, true),
                 other => (other.to_expression(), false),
@@ -17099,8 +17111,8 @@ impl<'a> Lowerer<'a> {
             ObjectEntryKind::Set => Some(verter_type_expr::ObjectMethodKind::Set),
         };
         let spans = verter_type_expr::MemberSpans {
-            declaration: Some(p.span.into()),
-            name: Some(p.key.span().into()),
+            declaration: Some(verter_span::Span::new(p.span.start, p.span.end)),
+            name: Some(verter_span::Span::new(p.key.span().start, p.key.span().end)),
             type_annotation: None,
         };
         // A member value OUTSIDE the demand selection never
@@ -17354,7 +17366,10 @@ impl<'a> Lowerer<'a> {
         // frame-lowered arguments, [`Self::lower_call_arguments`]); the
         // arguments it recorded the first time are the same, and lowering
         // them again from every enclosing call doubled the work per level.
-        if self.call_arguments.contains_key(&call.span.into()) {
+        if self
+            .call_arguments
+            .contains_key(&verter_span::Span::new(call.span.start, call.span.end))
+        {
             return None;
         }
         let mark = self.side_channel_mark();
@@ -17415,8 +17430,10 @@ impl<'a> Lowerer<'a> {
         self.control_test_gap = frame.mark.control_test_gap;
         if !side_channel {
             let recorded = std::mem::take(&mut frame.recorded);
-            self.call_arguments
-                .insert(call.span.into(), Arc::from(recorded.into_boxed_slice()));
+            self.call_arguments.insert(
+                verter_span::Span::new(call.span.start, call.span.end),
+                Arc::from(recorded.into_boxed_slice()),
+            );
         }
         None
     }
@@ -17596,7 +17613,12 @@ impl<'a> Lowerer<'a> {
             ),
             Some(ObjectThisMember::Getter(target)) => SliceExpr::Call(
                 SliceCall::Direct(target),
-                SliceCallSite::new(0, false, false, span.into()),
+                SliceCallSite::new(
+                    0,
+                    false,
+                    false,
+                    verter_span::Span::new(span.start, span.end),
+                ),
                 SliceCallArguments::none(),
             ),
             // Any other member of a static `this` — an annotated or
@@ -17780,7 +17802,10 @@ impl<'a> Lowerer<'a> {
             return false;
         };
         self.index
-            .nested_at(gate.bindings.function(), function.span.into())
+            .nested_at(
+                gate.bindings.function(),
+                verter_span::Span::new(function.span.start, function.span.end),
+            )
             .is_some_and(|entry| &entry.entry().key == self.bindings.function())
     }
 
@@ -17794,10 +17819,10 @@ impl<'a> Lowerer<'a> {
         own_frame: bool,
     ) -> SliceExpr {
         let node = FunctionNode::Function(function);
-        let Some(entry) = self
-            .index
-            .nested_at(gate.bindings.function(), node_span(&node).into())
-        else {
+        let Some(entry) = self.index.nested_at(gate.bindings.function(), {
+            let span = node_span(&node);
+            verter_span::Span::new(span.start, span.end)
+        }) else {
             return SliceExpr::UnmodeledBinding;
         };
         let entry = entry.entry();
@@ -17806,7 +17831,7 @@ impl<'a> Lowerer<'a> {
                 gate: Arc::clone(gate),
                 region: gate.skeleton.innermost_region_containing(FrameSpan::rebase(
                     gate.anchor,
-                    function.span.into(),
+                    verter_span::Span::new(function.span.start, function.span.end),
                 )),
             })),
         };
@@ -17889,10 +17914,10 @@ impl<'a> Lowerer<'a> {
         invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
     ) -> SliceExpr {
         let member_this = self.member_this.take();
-        let Some(entry) = self
-            .index
-            .nested_at(self.bindings.function(), node_span(node).into())
-        else {
+        let Some(entry) = self.index.nested_at(self.bindings.function(), {
+            let span = node_span(node);
+            verter_span::Span::new(span.start, span.end)
+        }) else {
             return SliceExpr::UnmodeledBinding;
         };
         let entry = entry.entry();
@@ -18253,7 +18278,8 @@ impl<'a> Lowerer<'a> {
             // The route admits at most one call, the terminal element;
             // the callee route itself holds none (only computed keys,
             // which the scanner reaches as ordinary expressions).
-            self.decided_above_call_spans.push(call.span.into());
+            self.decided_above_call_spans
+                .push(verter_span::Span::new(call.span.start, call.span.end));
             self.walks.with_node_stack(call.callee.span(), || {
                 scanner.visit_expression(&call.callee)
             });
@@ -18302,7 +18328,7 @@ impl<'a> Lowerer<'a> {
             ArmEntered::Call(call) => {
                 let assertion = self.entered_assertion(call);
                 if assertion.is_some() {
-                    spans.push(call.span.into());
+                    spans.push(verter_span::Span::new(call.span.start, call.span.end));
                 }
                 assertion.map(assertion_statement).into_iter().collect()
             }
@@ -18365,8 +18391,9 @@ impl<'a> Lowerer<'a> {
         // conditional narrows nothing that follows: decided.
         for call in &scanner.joined_away {
             if self.entered_assertion(call).is_some() {
-                applied.push(call.span.into());
-                self.decided_above_call_spans.push(call.span.into());
+                applied.push(verter_span::Span::new(call.span.start, call.span.end));
+                self.decided_above_call_spans
+                    .push(verter_span::Span::new(call.span.start, call.span.end));
             }
         }
         let not_applied = |call: &ControlCall| match call {
@@ -18858,7 +18885,10 @@ impl<'a> Visit<'a> for AssignmentExtent {
         if self.found.is_some() {
             return;
         }
-        let span = FrameSpan::rebase(self.anchor, it.span().into());
+        let span = FrameSpan::rebase(
+            self.anchor,
+            verter_span::Span::new(it.span().start, it.span().end),
+        );
         if !span.contains(self.write) {
             return;
         }
@@ -18894,7 +18924,10 @@ impl<'a> Visit<'a> for AssignmentExtent {
         if self.found.is_some() {
             return;
         }
-        let span = FrameSpan::rebase(self.anchor, expression.span().into());
+        let span = FrameSpan::rebase(
+            self.anchor,
+            verter_span::Span::new(expression.span().start, expression.span().end),
+        );
         if !span.contains(self.write) {
             return;
         }
@@ -18970,8 +19003,10 @@ struct DeclaredCallEffects {
 
 impl DeclaredCallEffects {
     fn names(&self, span: oxc_span::Span) -> bool {
-        self.names
-            .contains(&FrameSpan::rebase(self.anchor, span.into()))
+        self.names.contains(&FrameSpan::rebase(
+            self.anchor,
+            verter_span::Span::new(span.start, span.end),
+        ))
     }
 }
 
@@ -19277,7 +19312,7 @@ impl ControlCall {
             }
         }
         ControlCall::Call {
-            span: call.span.into(),
+            span: verter_span::Span::new(call.span.start, call.span.end),
             callee,
             assertion_subject_roots,
         }
@@ -19798,7 +19833,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             }
         }
         if self.nested_frame_nesting > 0 {
-            self.decided.push(call.span.into());
+            self.decided
+                .push(verter_span::Span::new(call.span.start, call.span.end));
         } else if self.comma_discarded_calls.contains(&call.span) {
             self.discarded.push(ControlCall::of_call(call));
         } else if self.control_nesting > 0 {
@@ -19808,19 +19844,30 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         {
             self.discarded.push(ControlCall::of_call(call));
         } else {
-            self.unentered.push(call.span.into());
+            self.unentered
+                .push(verter_span::Span::new(call.span.start, call.span.end));
         }
         walk::walk_call_expression(self, call);
     }
     fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
         if self.nested_frame_nesting > 0 {
-            self.decided.push(new.span.into());
+            self.decided
+                .push(verter_span::Span::new(new.span.start, new.span.end));
         } else if self.control_nesting > 0 {
-            self.control.push(ControlCall::Construct(new.span.into()));
+            self.control
+                .push(ControlCall::Construct(verter_span::Span::new(
+                    new.span.start,
+                    new.span.end,
+                )));
         } else if self.void_nesting > 0 {
-            self.unentered.push(new.span.into());
+            self.unentered
+                .push(verter_span::Span::new(new.span.start, new.span.end));
         } else {
-            self.discarded.push(ControlCall::Construct(new.span.into()));
+            self.discarded
+                .push(ControlCall::Construct(verter_span::Span::new(
+                    new.span.start,
+                    new.span.end,
+                )));
         }
         walk::walk_new_expression(self, new);
     }
@@ -19829,15 +19876,23 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         tagged: &oxc_ast::ast::TaggedTemplateExpression<'a>,
     ) {
         if self.nested_frame_nesting > 0 {
-            self.decided.push(tagged.span.into());
+            self.decided
+                .push(verter_span::Span::new(tagged.span.start, tagged.span.end));
         } else if self.control_nesting > 0 {
             self.control
-                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+                .push(ControlCall::TaggedTemplate(verter_span::Span::new(
+                    tagged.span.start,
+                    tagged.span.end,
+                )));
         } else if self.void_nesting > 0 {
-            self.unentered.push(tagged.span.into());
+            self.unentered
+                .push(verter_span::Span::new(tagged.span.start, tagged.span.end));
         } else {
             self.discarded
-                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+                .push(ControlCall::TaggedTemplate(verter_span::Span::new(
+                    tagged.span.start,
+                    tagged.span.end,
+                )));
         }
         walk::walk_tagged_template_expression(self, tagged);
     }

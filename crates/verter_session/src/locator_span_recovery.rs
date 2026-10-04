@@ -102,29 +102,45 @@ pub(crate) fn recover_member_spans_from_program(
         .ok_or(SpanRecoveryError::AuthoredOriginUnresolved)?;
     match member {
         LocatedMember::Signature(TSSignature::TSPropertySignature(prop)) => Ok(MemberSpans {
-            declaration: Some(prop.span.into()),
-            name: Some(prop.key.span().into()),
-            type_annotation: prop
-                .type_annotation
-                .as_ref()
-                .map(|ta| ta.type_annotation.span().into()),
+            declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+            name: Some(verter_span::Span::new(
+                prop.key.span().start,
+                prop.key.span().end,
+            )),
+            type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                verter_span::Span::new(
+                    ta.type_annotation.span().start,
+                    ta.type_annotation.span().end,
+                )
+            }),
         }),
         LocatedMember::Signature(TSSignature::TSMethodSignature(method)) => Ok(MemberSpans {
-            declaration: Some(method.span.into()),
-            name: Some(method.key.span().into()),
+            declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+            name: Some(verter_span::Span::new(
+                method.key.span().start,
+                method.key.span().end,
+            )),
             type_annotation: None,
         }),
         LocatedMember::ClassElement(ClassElement::PropertyDefinition(prop)) => Ok(MemberSpans {
-            declaration: Some(prop.span.into()),
-            name: Some(prop.key.span().into()),
-            type_annotation: prop
-                .type_annotation
-                .as_ref()
-                .map(|ta| ta.type_annotation.span().into()),
+            declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+            name: Some(verter_span::Span::new(
+                prop.key.span().start,
+                prop.key.span().end,
+            )),
+            type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                verter_span::Span::new(
+                    ta.type_annotation.span().start,
+                    ta.type_annotation.span().end,
+                )
+            }),
         }),
         LocatedMember::ClassElement(ClassElement::MethodDefinition(method)) => Ok(MemberSpans {
-            declaration: Some(method.span.into()),
-            name: Some(method.key.span().into()),
+            declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+            name: Some(verter_span::Span::new(
+                method.key.span().start,
+                method.key.span().end,
+            )),
             type_annotation: None,
         }),
         // Any other located form is an unhandled authored origin — fail closed.
@@ -149,9 +165,15 @@ pub(crate) fn recover_index_signature_spans_from_program(
         .ok_or(SpanRecoveryError::AuthoredOriginUnresolved)?;
     match member {
         LocatedMember::Signature(TSSignature::TSIndexSignature(idx)) => Ok(IndexSignatureSpans {
-            declaration: Some(idx.span.into()),
-            key: Some(idx.parameter.span.into()),
-            value: Some(idx.type_annotation.type_annotation.span().into()),
+            declaration: Some(verter_span::Span::new(idx.span.start, idx.span.end)),
+            key: Some(verter_span::Span::new(
+                idx.parameter.span.start,
+                idx.parameter.span.end,
+            )),
+            value: Some(verter_span::Span::new(
+                idx.type_annotation.type_annotation.span().start,
+                idx.type_annotation.type_annotation.span().end,
+            )),
         }),
         _ => Err(SpanRecoveryError::AuthoredOriginUnresolved),
     }
@@ -299,9 +321,14 @@ fn positional_param_spans(
     params: &oxc_ast::ast::FormalParameters<'_>,
 ) -> Vec<Span> {
     this_param
-        .map(|this| Span::from(this.span))
+        .map(|this| Span::new(this.span.start, this.span.end))
         .into_iter()
-        .chain(params.items.iter().map(|param| Span::from(param.span)))
+        .chain(
+            params
+                .items
+                .iter()
+                .map(|param| Span::new(param.span.start, param.span.end)),
+        )
         .collect()
 }
 
@@ -471,10 +498,17 @@ fn tstype_function_type<'a>(ty: &'a TSType<'a>) -> Option<&'a TSFunctionType<'a>
 /// The span facts of a standalone `TSFunctionType`.
 fn ts_function_type_facts(func: &TSFunctionType<'_>) -> FunctionSpanFacts {
     FunctionSpanFacts {
-        signature_span: func.span.into(),
-        return_type_span: Some(func.return_type.type_annotation.span().into()),
+        signature_span: verter_span::Span::new(func.span.start, func.span.end),
+        return_type_span: Some(verter_span::Span::new(
+            func.return_type.type_annotation.span().start,
+            func.return_type.type_annotation.span().end,
+        )),
         param_spans: positional_param_spans(func.this_param.as_deref(), &func.params),
-        rest_param_span: func.params.rest.as_ref().map(|r| r.span.into()),
+        rest_param_span: func
+            .params
+            .rest
+            .as_ref()
+            .map(|r| verter_span::Span::new(r.span.start, r.span.end)),
     }
 }
 
@@ -485,17 +519,26 @@ fn located_member_function_facts(member: LocatedMember<'_>) -> Option<FunctionSp
         LocatedMember::Signature(sig) => signature_function_facts(sig),
         LocatedMember::ClassElement(ClassElement::MethodDefinition(method)) => {
             Some(FunctionSpanFacts {
-                signature_span: method.value.span.into(),
-                return_type_span: method
-                    .value
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature_span: verter_span::Span::new(
+                    method.value.span.start,
+                    method.value.span.end,
+                ),
+                return_type_span: method.value.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
                 param_spans: positional_param_spans(
                     method.value.this_param.as_deref(),
                     &method.value.params,
                 ),
-                rest_param_span: method.value.params.rest.as_ref().map(|r| r.span.into()),
+                rest_param_span: method
+                    .value
+                    .params
+                    .rest
+                    .as_ref()
+                    .map(|r| verter_span::Span::new(r.span.start, r.span.end)),
             })
         }
         _ => None,
@@ -506,31 +549,49 @@ fn located_member_function_facts(member: LocatedMember<'_>) -> Option<FunctionSp
 fn signature_function_facts(sig: &TSSignature<'_>) -> Option<FunctionSpanFacts> {
     match sig {
         TSSignature::TSMethodSignature(method) => Some(FunctionSpanFacts {
-            signature_span: method.span.into(),
-            return_type_span: method
-                .return_type
-                .as_ref()
-                .map(|rt| rt.type_annotation.span().into()),
+            signature_span: verter_span::Span::new(method.span.start, method.span.end),
+            return_type_span: method.return_type.as_ref().map(|rt| {
+                verter_span::Span::new(
+                    rt.type_annotation.span().start,
+                    rt.type_annotation.span().end,
+                )
+            }),
             param_spans: positional_param_spans(method.this_param.as_deref(), &method.params),
-            rest_param_span: method.params.rest.as_ref().map(|r| r.span.into()),
+            rest_param_span: method
+                .params
+                .rest
+                .as_ref()
+                .map(|r| verter_span::Span::new(r.span.start, r.span.end)),
         }),
         TSSignature::TSCallSignatureDeclaration(call) => Some(FunctionSpanFacts {
-            signature_span: call.span.into(),
-            return_type_span: call
-                .return_type
-                .as_ref()
-                .map(|rt| rt.type_annotation.span().into()),
+            signature_span: verter_span::Span::new(call.span.start, call.span.end),
+            return_type_span: call.return_type.as_ref().map(|rt| {
+                verter_span::Span::new(
+                    rt.type_annotation.span().start,
+                    rt.type_annotation.span().end,
+                )
+            }),
             param_spans: positional_param_spans(call.this_param.as_deref(), &call.params),
-            rest_param_span: call.params.rest.as_ref().map(|r| r.span.into()),
+            rest_param_span: call
+                .params
+                .rest
+                .as_ref()
+                .map(|r| verter_span::Span::new(r.span.start, r.span.end)),
         }),
         TSSignature::TSConstructSignatureDeclaration(ctor) => Some(FunctionSpanFacts {
-            signature_span: ctor.span.into(),
-            return_type_span: ctor
-                .return_type
-                .as_ref()
-                .map(|rt| rt.type_annotation.span().into()),
+            signature_span: verter_span::Span::new(ctor.span.start, ctor.span.end),
+            return_type_span: ctor.return_type.as_ref().map(|rt| {
+                verter_span::Span::new(
+                    rt.type_annotation.span().start,
+                    rt.type_annotation.span().end,
+                )
+            }),
             param_spans: positional_param_spans(None, &ctor.params),
-            rest_param_span: ctor.params.rest.as_ref().map(|r| r.span.into()),
+            rest_param_span: ctor
+                .params
+                .rest
+                .as_ref()
+                .map(|r| verter_span::Span::new(r.span.start, r.span.end)),
         }),
         _ => None,
     }

@@ -55,7 +55,10 @@ pub(crate) fn extract_export_signatures_from_program(
                     let local_name = spec.local.name().to_string();
                     let hash_input = format!("reexport:{}:{}", source.value, name);
                     let local_span = if spec.local.name() != spec.exported.name() {
-                        Some(spec.local.span().into())
+                        Some(verter_span::Span::new(
+                            spec.local.span().start,
+                            spec.local.span().end,
+                        ))
                     } else {
                         None
                     };
@@ -63,7 +66,10 @@ pub(crate) fn extract_export_signatures_from_program(
                         name,
                         declaration_hash: hash_16(hash_input.as_bytes()),
                         is_type: decl.export_kind.is_type(),
-                        span: spec.exported.span().into(),
+                        span: verter_span::Span::new(
+                            spec.exported.span().start,
+                            spec.exported.span().end,
+                        ),
                         reexport_source: Some(source.value.to_string()),
                         reexport_local: Some(local_name),
                         local_span,
@@ -82,7 +88,10 @@ pub(crate) fn extract_export_signatures_from_program(
                         hash_16(hash_input.as_bytes())
                     };
                     let local_span = if spec.local.name() != spec.exported.name() {
-                        Some(spec.local.span().into())
+                        Some(verter_span::Span::new(
+                            spec.local.span().start,
+                            spec.local.span().end,
+                        ))
                     } else {
                         None
                     };
@@ -90,7 +99,10 @@ pub(crate) fn extract_export_signatures_from_program(
                         name,
                         declaration_hash: hash,
                         is_type: decl.export_kind.is_type(),
-                        span: spec.exported.span().into(),
+                        span: verter_span::Span::new(
+                            spec.exported.span().start,
+                            spec.exported.span().end,
+                        ),
                         reexport_source: None,
                         reexport_local: None,
                         local_span,
@@ -122,7 +134,7 @@ pub(crate) fn extract_export_signatures_from_program(
                     name: "default".to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
-                    span: target_span.into(),
+                    span: verter_span::Span::new(target_span.start, target_span.end),
                     reexport_source: None,
                     reexport_local: None,
                     local_span: None,
@@ -134,7 +146,7 @@ pub(crate) fn extract_export_signatures_from_program(
                     name: "*".to_string(),
                     declaration_hash: hash_16(hash_input.as_bytes()),
                     is_type: decl.export_kind.is_type(),
-                    span: decl.span.into(),
+                    span: verter_span::Span::new(decl.span.start, decl.span.end),
                     reexport_source: Some(decl.source.value.to_string()),
                     reexport_local: Some("*".to_string()),
                     local_span: None,
@@ -179,7 +191,7 @@ fn extract_declaration_signatures(
                     name: id.name.to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
-                    span: id.span.into(),
+                    span: verter_span::Span::new(id.span.start, id.span.end),
                     reexport_source: None,
                     reexport_local: None,
                     local_span: None,
@@ -194,7 +206,7 @@ fn extract_declaration_signatures(
                     name: id.name.to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
-                    span: id.span.into(),
+                    span: verter_span::Span::new(id.span.start, id.span.end),
                     reexport_source: None,
                     reexport_local: None,
                     local_span: None,
@@ -208,7 +220,7 @@ fn extract_declaration_signatures(
                 name: iface.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
-                span: iface.id.span.into(),
+                span: verter_span::Span::new(iface.id.span.start, iface.id.span.end),
                 reexport_source: None,
                 reexport_local: None,
                 local_span: None,
@@ -221,7 +233,7 @@ fn extract_declaration_signatures(
                 name: alias.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
-                span: alias.id.span.into(),
+                span: verter_span::Span::new(alias.id.span.start, alias.id.span.end),
                 reexport_source: None,
                 reexport_local: None,
                 local_span: None,
@@ -234,7 +246,7 @@ fn extract_declaration_signatures(
                 name: en.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: false,
-                span: en.id.span.into(),
+                span: verter_span::Span::new(en.id.span.start, en.id.span.end),
                 reexport_source: None,
                 reexport_local: None,
                 local_span: None,
@@ -254,7 +266,7 @@ fn binding_name(pattern: &BindingPattern<'_>) -> Option<String> {
 /// Extract the identifier span from a binding pattern.
 fn binding_id_span(pattern: &BindingPattern<'_>) -> Span {
     match pattern {
-        BindingPattern::BindingIdentifier(id) => id.span.into(),
+        BindingPattern::BindingIdentifier(id) => verter_span::Span::new(id.span.start, id.span.end),
         _ => Span::default(),
     }
 }

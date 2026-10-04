@@ -40,9 +40,9 @@
 //! reason to exist is that the comparison must not be writable. They are gone.
 //!
 //! [`verter_span::RelativeSpan`] cannot serve this: its fields are PUBLIC (so a
-//! mixed comparison compiles), it has a `new(start, end)` constructor and a
-//! `From<oxc_span::Span>` that rebases NOTHING — an absolute offset wearing the
-//! relative type is exactly one call away. That is correct for its own users,
+//! mixed comparison compiles) and it has a `new(start, end)` constructor that
+//! rebases NOTHING — an absolute offset wearing the relative type is exactly
+//! one call away. That is correct for its own users,
 //! where the sub-parser's spans are already content-relative and the type only
 //! records which base they belong to; it is the opposite of what this rail
 //! needs, which is a type whose ONLY inhabitants have been rebased.

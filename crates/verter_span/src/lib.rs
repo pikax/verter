@@ -64,7 +64,7 @@ impl Span {
         self.end.saturating_sub(self.start)
     }
 
-    /// Alias for `len()` — compatible with `oxc_span::Span`.
+    /// Alias for `len()`, matching the `size()` spelling AST spans use.
     #[inline]
     pub fn size(&self) -> u32 {
         self.len()
@@ -116,16 +116,6 @@ impl Span {
     }
 }
 
-impl From<oxc_span::Span> for Span {
-    #[inline]
-    fn from(span: oxc_span::Span) -> Self {
-        Self {
-            start: span.start,
-            end: span.end,
-        }
-    }
-}
-
 // ======================== RelativeSpan ========================
 
 /// Byte offset span relative to some base (expression start, style block content, script block).
@@ -170,16 +160,6 @@ impl RelativeSpan {
         Span {
             start: self.start + base,
             end: self.end + base,
-        }
-    }
-}
-
-impl From<oxc_span::Span> for RelativeSpan {
-    #[inline]
-    fn from(span: oxc_span::Span) -> Self {
-        Self {
-            start: span.start,
-            end: span.end,
         }
     }
 }
@@ -464,7 +444,7 @@ mod tests {
     #[test]
     fn span_from_oxc() {
         let oxc = oxc_span::Span::new(5, 15);
-        let s: Span = oxc.into();
+        let s = Span::new(oxc.start, oxc.end);
         assert_eq!(s.start, 5);
         assert_eq!(s.end, 15);
     }
@@ -513,7 +493,7 @@ mod tests {
     #[test]
     fn relative_span_from_oxc() {
         let oxc = oxc_span::Span::new(3, 8);
-        let r: RelativeSpan = oxc.into();
+        let r = RelativeSpan::new(oxc.start, oxc.end);
         assert_eq!(r.start, 3);
         assert_eq!(r.end, 8);
     }

@@ -409,8 +409,8 @@ fn build_script_analysis_inner(
                     ModuleReferenceSyntax::StaticImport,
                     ModuleReferenceSemantics::Import,
                     decl.import_kind.is_type(),
-                    decl.span.into(),
-                    decl.source.span.into(),
+                    verter_span::Span::new(decl.span.start, decl.span.end),
+                    verter_span::Span::new(decl.source.span.start, decl.source.span.end),
                     content,
                     decl.source.value.as_str(),
                 ));
@@ -423,8 +423,8 @@ fn build_script_analysis_inner(
                     ModuleReferenceSyntax::ExportFrom,
                     ModuleReferenceSemantics::Import,
                     decl.export_kind.is_type(),
-                    decl.span.into(),
-                    source.span.into(),
+                    verter_span::Span::new(decl.span.start, decl.span.end),
+                    verter_span::Span::new(source.span.start, source.span.end),
                     content,
                     source.value.as_str(),
                 ));
@@ -461,8 +461,8 @@ fn build_script_analysis_inner(
                     ModuleReferenceSyntax::ExportFrom,
                     ModuleReferenceSemantics::Import,
                     false,
-                    decl.span.into(),
-                    decl.source.span.into(),
+                    verter_span::Span::new(decl.span.start, decl.span.end),
+                    verter_span::Span::new(decl.source.span.start, decl.source.span.end),
                     content,
                     decl.source.value.as_str(),
                 ));
@@ -549,7 +549,7 @@ fn build_script_analysis_inner(
                             reactivity_kind,
                             type_annotation,
                             initializer,
-                            span: id.span.into(),
+                            span: verter_span::Span::new(id.span.start, id.span.end),
                             used_in_script: false,
                             used_in_style: false,
                         });
@@ -637,7 +637,7 @@ fn build_script_analysis_inner(
                         reactivity_kind: ReactivityKind::None,
                         type_annotation: None,
                         initializer: None,
-                        span: id.span.into(),
+                        span: verter_span::Span::new(id.span.start, id.span.end),
                         used_in_script: false,
                         used_in_style: false,
                     });
@@ -653,7 +653,7 @@ fn build_script_analysis_inner(
                         reactivity_kind: ReactivityKind::None,
                         type_annotation: None,
                         initializer: None,
-                        span: id.span.into(),
+                        span: verter_span::Span::new(id.span.start, id.span.end),
                         used_in_script: false,
                         used_in_style: false,
                     });
@@ -823,8 +823,11 @@ fn build_script_ingress_only(
                     ModuleReferenceSyntax::StaticImport,
                     ModuleReferenceSemantics::Import,
                     declaration.import_kind.is_type(),
-                    declaration.span.into(),
-                    declaration.source.span.into(),
+                    verter_span::Span::new(declaration.span.start, declaration.span.end),
+                    verter_span::Span::new(
+                        declaration.source.span.start,
+                        declaration.source.span.end,
+                    ),
                     content,
                     declaration.source.value.as_str(),
                 ));
@@ -835,8 +838,8 @@ fn build_script_ingress_only(
                     ModuleReferenceSyntax::ExportFrom,
                     ModuleReferenceSemantics::Import,
                     declaration.export_kind.is_type(),
-                    declaration.span.into(),
-                    source.span.into(),
+                    verter_span::Span::new(declaration.span.start, declaration.span.end),
+                    verter_span::Span::new(source.span.start, source.span.end),
                     content,
                     source.value.as_str(),
                 ));
@@ -856,8 +859,11 @@ fn build_script_ingress_only(
                     ModuleReferenceSyntax::ExportFrom,
                     ModuleReferenceSemantics::Import,
                     false,
-                    declaration.span.into(),
-                    declaration.source.span.into(),
+                    verter_span::Span::new(declaration.span.start, declaration.span.end),
+                    verter_span::Span::new(
+                        declaration.source.span.start,
+                        declaration.source.span.end,
+                    ),
                     content,
                     declaration.source.value.as_str(),
                 ));
@@ -1077,8 +1083,8 @@ impl ModuleReferenceCollector<'_, '_> {
                 self.module_references.push(build_dynamic_module_reference(
                     ModuleReferenceSyntax::DynamicImport,
                     ModuleReferenceSemantics::Import,
-                    import.span.into(),
-                    import.source.span().into(),
+                    verter_span::Span::new(import.span.start, import.span.end),
+                    verter_span::Span::new(import.source.span().start, import.source.span().end),
                     &import.source,
                     self.content,
                     self.const_string_values,
@@ -1094,8 +1100,8 @@ impl ModuleReferenceCollector<'_, '_> {
                             self.module_references.push(build_dynamic_module_reference(
                                 ModuleReferenceSyntax::RequireCall,
                                 ModuleReferenceSemantics::Require,
-                                call.span.into(),
-                                source.span().into(),
+                                verter_span::Span::new(call.span.start, call.span.end),
+                                verter_span::Span::new(source.span().start, source.span().end),
                                 source,
                                 self.content,
                                 self.const_string_values,
@@ -1477,7 +1483,7 @@ fn extract_destructured_binding_leaves(
                     reactivity_kind,
                     type_annotation: None,
                     initializer: initializer.clone(),
-                    span: id.span.into(),
+                    span: verter_span::Span::new(id.span.start, id.span.end),
                     used_in_script: false,
                     used_in_style: false,
                 });
@@ -1809,7 +1815,7 @@ fn try_extract_vue_api_call(
                 let callback_params = extract_callback_params(call, api);
                 vue_api_calls.push(VueApiCallSite {
                     api,
-                    span: call.span.into(),
+                    span: verter_span::Span::new(call.span.start, call.span.end),
                     arg_value,
                     has_type_params: call.type_arguments.is_some(),
                     is_async_callback,
@@ -1871,7 +1877,7 @@ fn extract_callback_params(
                 }
                 Some(VueApiCallbackParam {
                     name: id.name.to_string(),
-                    span: id.span.into(),
+                    span: verter_span::Span::new(id.span.start, id.span.end),
                     inferred_type: None, // Will be populated later
                 })
             } else {
@@ -1942,9 +1948,10 @@ fn try_extract_dom_query(expr: &Expression<'_>, dom_query_calls: &mut Vec<DomQue
         None => return,
     };
     let (selector_text, arg_span) = match arg.as_expression() {
-        Some(Expression::StringLiteral(s)) => {
-            (s.value.to_string(), verter_span::Span::from(s.span))
-        }
+        Some(Expression::StringLiteral(s)) => (
+            s.value.to_string(),
+            verter_span::Span::new(s.span.start, s.span.end),
+        ),
         _ => return,
     };
 
@@ -1967,7 +1974,7 @@ fn try_extract_dom_query(expr: &Expression<'_>, dom_query_calls: &mut Vec<DomQue
         kind,
         selector_text,
         parsed,
-        span: call.span.into(),
+        span: verter_span::Span::new(call.span.start, call.span.end),
         arg_span,
     });
 }
@@ -2041,7 +2048,7 @@ fn try_extract_css_var_manipulation(
         kind,
         var_name,
         value_expr,
-        span: call.span.into(),
+        span: verter_span::Span::new(call.span.start, call.span.end),
     });
 }
 /// The first `await` in source order, found depth-first from an explicit
@@ -2302,7 +2309,9 @@ fn extract_function_params(content: &str, params: &FormalParameters<'_>) -> Vec<
         let has_default = param.initializer.is_some();
 
         let span = match &param.pattern {
-            BindingPattern::BindingIdentifier(id) => id.span.into(),
+            BindingPattern::BindingIdentifier(id) => {
+                verter_span::Span::new(id.span.start, id.span.end)
+            }
             _ => verter_span::Span::new(param.span.start, param.span.end),
         };
         out.push(FunctionParam {
@@ -2902,7 +2911,7 @@ fn collect_declaration_entries(
                     content,
                     d.id.name.to_string(),
                     LocalDeclarationKind::Type,
-                    d.span.into(),
+                    verter_span::Span::new(d.span.start, d.span.end),
                 )]
             }
             Declaration::TSTypeAliasDeclaration(d) => {
@@ -2910,7 +2919,7 @@ fn collect_declaration_entries(
                     content,
                     d.id.name.to_string(),
                     LocalDeclarationKind::Type,
-                    d.span.into(),
+                    verter_span::Span::new(d.span.start, d.span.end),
                 )]
             }
             Declaration::TSEnumDeclaration(d) => {
@@ -2918,7 +2927,7 @@ fn collect_declaration_entries(
                     content,
                     d.id.name.to_string(),
                     LocalDeclarationKind::TypeAndValue,
-                    d.span.into(),
+                    verter_span::Span::new(d.span.start, d.span.end),
                 )]
             }
             Declaration::ClassDeclaration(d) => {
@@ -2927,7 +2936,7 @@ fn collect_declaration_entries(
                         content,
                         id.name.to_string(),
                         LocalDeclarationKind::TypeAndValue,
-                        d.span.into(),
+                        verter_span::Span::new(d.span.start, d.span.end),
                     )]
                 } else {
                     vec![]
@@ -2939,7 +2948,7 @@ fn collect_declaration_entries(
                         content,
                         id.name.to_string(),
                         LocalDeclarationKind::Value,
-                        d.span.into(),
+                        verter_span::Span::new(d.span.start, d.span.end),
                     )]
                 } else {
                     vec![]
@@ -2953,7 +2962,7 @@ fn collect_declaration_entries(
                             content,
                             id.name.to_string(),
                             LocalDeclarationKind::Value,
-                            declarator.span.into(),
+                            verter_span::Span::new(declarator.span.start, declarator.span.end),
                         ));
                     }
                 }
@@ -2977,19 +2986,19 @@ fn collect_declaration_entries(
                 content,
                 d.id.name.to_string(),
                 LocalDeclarationKind::Type,
-                d.span.into(),
+                verter_span::Span::new(d.span.start, d.span.end),
             )],
             Statement::TSTypeAliasDeclaration(d) => vec![entry_from_span(
                 content,
                 d.id.name.to_string(),
                 LocalDeclarationKind::Type,
-                d.span.into(),
+                verter_span::Span::new(d.span.start, d.span.end),
             )],
             Statement::TSEnumDeclaration(d) => vec![entry_from_span(
                 content,
                 d.id.name.to_string(),
                 LocalDeclarationKind::TypeAndValue,
-                d.span.into(),
+                verter_span::Span::new(d.span.start, d.span.end),
             )],
             Statement::ClassDeclaration(d) => {
                 d.id.as_ref()
@@ -2998,7 +3007,7 @@ fn collect_declaration_entries(
                             content,
                             id.name.to_string(),
                             LocalDeclarationKind::TypeAndValue,
-                            d.span.into(),
+                            verter_span::Span::new(d.span.start, d.span.end),
                         )]
                     })
                     .unwrap_or_default()
@@ -3010,7 +3019,7 @@ fn collect_declaration_entries(
                             content,
                             id.name.to_string(),
                             LocalDeclarationKind::Value,
-                            d.span.into(),
+                            verter_span::Span::new(d.span.start, d.span.end),
                         )]
                     })
                     .unwrap_or_default()
@@ -3024,7 +3033,7 @@ fn collect_declaration_entries(
                             content,
                             id.name.to_string(),
                             LocalDeclarationKind::Value,
-                            declarator.span.into(),
+                            verter_span::Span::new(declarator.span.start, declarator.span.end),
                         ))
                     } else {
                         None
@@ -3040,7 +3049,7 @@ fn collect_declaration_entries(
                         content,
                         d.id.name.to_string(),
                         LocalDeclarationKind::Type,
-                        d.span.into(),
+                        verter_span::Span::new(d.span.start, d.span.end),
                     )]
                 }
                 ExportDefaultDeclarationKind::ClassDeclaration(d) => {
@@ -3050,7 +3059,7 @@ fn collect_declaration_entries(
                                 content,
                                 id.name.to_string(),
                                 LocalDeclarationKind::TypeAndValue,
-                                d.span.into(),
+                                verter_span::Span::new(d.span.start, d.span.end),
                             )]
                         })
                         .unwrap_or_default()
@@ -3062,7 +3071,7 @@ fn collect_declaration_entries(
                                 content,
                                 id.name.to_string(),
                                 LocalDeclarationKind::Value,
-                                d.span.into(),
+                                verter_span::Span::new(d.span.start, d.span.end),
                             )]
                         })
                         .unwrap_or_default()
@@ -3078,7 +3087,7 @@ fn collect_declaration_entries(
     for (statement_index, stmt) in program.body.iter().enumerate() {
         let owner = owners.statement(statement_index).owner;
         let items = extract_from_statement(content, stmt);
-        let statement_span = Span::from(stmt.span());
+        let statement_span = Span::new(stmt.span().start, stmt.span().end);
         let statement_span = extend_declaration_span_to_leading_jsdoc(
             statement_span,
             statement_span.start,
@@ -3571,7 +3580,8 @@ fn collect_usages<'w, 'a>(
                         let name = ident.name.as_str();
                         if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
                             // Don't track references at the declaration span itself
-                            let ident_span: Span = ident.span.into();
+                            let ident_span: Span =
+                                verter_span::Span::new(ident.span.start, ident.span.end);
                             if let Some(&decl_span) = binding_spans.get(name) {
                                 if ident_span == decl_span {
                                     continue;
@@ -3605,7 +3615,8 @@ fn collect_usages<'w, 'a>(
                                 let name = ident.name.as_str();
                                 if binding_names.contains(name) && !is_shadowed(name, shadow_stack)
                                 {
-                                    let ident_span: Span = ident.span.into();
+                                    let ident_span: Span =
+                                        verter_span::Span::new(ident.span.start, ident.span.end);
                                     let usage_kind = match target_ctx {
                                         UsageContext::AssignTarget => ScriptUsageKind::Write,
                                         UsageContext::UpdateTarget => ScriptUsageKind::ReadWrite,
@@ -3634,7 +3645,7 @@ fn collect_usages<'w, 'a>(
                             if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
                                 occurrences.push(ScriptBindingOccurrence {
                                     name: name.to_string(),
-                                    span: ident.span.into(),
+                                    span: verter_span::Span::new(ident.span.start, ident.span.end),
                                     usage_kind: ScriptUsageKind::ReadWrite,
                                 });
                             }
@@ -3828,7 +3839,7 @@ fn collect_usages<'w, 'a>(
                     if binding_names.contains(name) && !is_shadowed(name, shadow_stack) {
                         occurrences.push(ScriptBindingOccurrence {
                             name: name.to_string(),
-                            span: ident.span.into(),
+                            span: verter_span::Span::new(ident.span.start, ident.span.end),
                             usage_kind: ScriptUsageKind::Write,
                         });
                     }

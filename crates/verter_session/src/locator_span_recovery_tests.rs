@@ -289,10 +289,14 @@ fn recovers_class_member_spans_across_visibilities() {
                 .body
                 .iter()
                 .filter_map(|el| match el {
-                    ClassElement::PropertyDefinition(p) => {
-                        Some((p.span.into(), p.key.span().into()))
-                    }
-                    ClassElement::MethodDefinition(m) => Some((m.span.into(), m.key.span().into())),
+                    ClassElement::PropertyDefinition(p) => Some((
+                        verter_span::Span::new(p.span.start, p.span.end),
+                        verter_span::Span::new(p.key.span().start, p.key.span().end),
+                    )),
+                    ClassElement::MethodDefinition(m) => Some((
+                        verter_span::Span::new(m.span.start, m.span.end),
+                        verter_span::Span::new(m.key.span().start, m.key.span().end),
+                    )),
                     _ => None,
                 })
                 .collect()

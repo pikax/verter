@@ -2791,7 +2791,10 @@ fn collect_named_class(
                             sig.return_type.map(Arc::new),
                             sig.type_parameters,
                             FunctionSpans {
-                                signature: Some(arrow.span.into()),
+                                signature: Some(verter_span::Span::new(
+                                    arrow.span.start,
+                                    arrow.span.end,
+                                )),
                                 return_type: None,
                             },
                         );
@@ -2822,7 +2825,10 @@ fn collect_named_class(
                             sig.return_type.map(Arc::new),
                             sig.type_parameters,
                             FunctionSpans {
-                                signature: Some(func.span.into()),
+                                signature: Some(verter_span::Span::new(
+                                    func.span.start,
+                                    func.span.end,
+                                )),
                                 return_type: None,
                             },
                         );
@@ -2904,12 +2910,17 @@ fn collect_named_class(
                         .unwrap_or_else(|| implicit_property_type(decl, prop, source))
                 });
                 let spans = MemberSpans {
-                    declaration: Some(prop.span.into()),
-                    name: Some(prop.key.span().into()),
-                    type_annotation: prop
-                        .type_annotation
-                        .as_ref()
-                        .map(|ta| ta.type_annotation.span().into()),
+                    declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                    name: Some(verter_span::Span::new(
+                        prop.key.span().start,
+                        prop.key.span().end,
+                    )),
+                    type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                        verter_span::Span::new(
+                            ta.type_annotation.span().start,
+                            ta.type_annotation.span().end,
+                        )
+                    }),
                 };
                 let member =
                     ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
@@ -2977,16 +2988,26 @@ fn collect_named_class(
                         &mut member_overload_ordinals,
                     );
                     let fn_spans = FunctionSpans {
-                        signature: Some(method.value.span.into()),
-                        return_type: method
-                            .value
-                            .return_type
-                            .as_ref()
-                            .map(|rt| rt.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            method.value.span.start,
+                            method.value.span.end,
+                        )),
+                        return_type: method.value.return_type.as_ref().map(|rt| {
+                            verter_span::Span::new(
+                                rt.type_annotation.span().start,
+                                rt.type_annotation.span().end,
+                            )
+                        }),
                     };
                     let member_spans = MemberSpans {
-                        declaration: Some(method.span.into()),
-                        name: Some(method.key.span().into()),
+                        declaration: Some(verter_span::Span::new(
+                            method.span.start,
+                            method.span.end,
+                        )),
+                        name: Some(verter_span::Span::new(
+                            method.key.span().start,
+                            method.key.span().end,
+                        )),
                         type_annotation: None,
                     };
                     let mut function_expr = FunctionExpr::with_spans(
@@ -3042,12 +3063,22 @@ fn collect_named_class(
                                 parameter.readonly,
                                 visibility_from_ts_accessibility(parameter.accessibility),
                                 MemberSpans {
-                                    declaration: Some(parameter.span.into()),
-                                    name: Some(identifier.span.into()),
-                                    type_annotation: parameter
-                                        .type_annotation
-                                        .as_ref()
-                                        .map(|annotation| annotation.type_annotation.span().into()),
+                                    declaration: Some(verter_span::Span::new(
+                                        parameter.span.start,
+                                        parameter.span.end,
+                                    )),
+                                    name: Some(verter_span::Span::new(
+                                        identifier.span.start,
+                                        identifier.span.end,
+                                    )),
+                                    type_annotation: parameter.type_annotation.as_ref().map(
+                                        |annotation| {
+                                            verter_span::Span::new(
+                                                annotation.type_annotation.span().start,
+                                                annotation.type_annotation.span().end,
+                                            )
+                                        },
+                                    ),
                                 },
                             ),
                         ));
@@ -3062,12 +3093,16 @@ fn collect_named_class(
                         ctor_sigs.push((
                             extract_function_signature(&method.value, source),
                             FunctionSpans {
-                                signature: Some(method.span.into()),
-                                return_type: method
-                                    .value
-                                    .return_type
-                                    .as_ref()
-                                    .map(|rt| rt.type_annotation.span().into()),
+                                signature: Some(verter_span::Span::new(
+                                    method.span.start,
+                                    method.span.end,
+                                )),
+                                return_type: method.value.return_type.as_ref().map(|rt| {
+                                    verter_span::Span::new(
+                                        rt.type_annotation.span().start,
+                                        rt.type_annotation.span().end,
+                                    )
+                                }),
                             },
                             method.value.body.is_some(),
                         ));
@@ -3083,16 +3118,26 @@ fn collect_named_class(
                         &mut member_overload_ordinals,
                     );
                     let fn_spans = FunctionSpans {
-                        signature: Some(method.value.span.into()),
-                        return_type: method
-                            .value
-                            .return_type
-                            .as_ref()
-                            .map(|rt| rt.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            method.value.span.start,
+                            method.value.span.end,
+                        )),
+                        return_type: method.value.return_type.as_ref().map(|rt| {
+                            verter_span::Span::new(
+                                rt.type_annotation.span().start,
+                                rt.type_annotation.span().end,
+                            )
+                        }),
                     };
                     let member_spans = MemberSpans {
-                        declaration: Some(method.span.into()),
-                        name: Some(method.key.span().into()),
+                        declaration: Some(verter_span::Span::new(
+                            method.span.start,
+                            method.span.end,
+                        )),
+                        name: Some(verter_span::Span::new(
+                            method.key.span().start,
+                            method.key.span().end,
+                        )),
                         type_annotation: None,
                     };
                     let mut function_expr = FunctionExpr::with_spans(
@@ -5539,12 +5584,17 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
             let spans = MemberSpans {
-                declaration: Some(prop.span.into()),
-                name: Some(prop.key.span().into()),
-                type_annotation: prop
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| ta.type_annotation.span().into()),
+                declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                name: Some(verter_span::Span::new(
+                    prop.key.span().start,
+                    prop.key.span().end,
+                )),
+                type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                    verter_span::Span::new(
+                        ta.type_annotation.span().start,
+                        ta.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::Property(
                 verter_type_expr::ObjectProperty::with_key_spans_public(
@@ -5574,15 +5624,20 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(method.span.into()),
-                return_type: method
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                return_type: method.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             let member_spans = MemberSpans {
-                declaration: Some(method.span.into()),
-                name: Some(method.key.span().into()),
+                declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                name: Some(verter_span::Span::new(
+                    method.key.span().start,
+                    method.key.span().end,
+                )),
                 type_annotation: None,
             };
             Some(ObjectMember::Method(
@@ -5616,11 +5671,13 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(call.span.into()),
-                return_type: call
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(call.span.start, call.span.end)),
+                return_type: call.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::CallSignature(
                 FunctionExpr::with_spans(
@@ -5637,13 +5694,16 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             let (key_name, key_type, key_span) = (
                 param.name.to_string(),
                 lower_ts_type(&param.type_annotation.type_annotation, source),
-                Some(param.span.into()),
+                Some(verter_span::Span::new(param.span.start, param.span.end)),
             );
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
             let spans = IndexSignatureSpans {
-                declaration: Some(idx.span.into()),
+                declaration: Some(verter_span::Span::new(idx.span.start, idx.span.end)),
                 key: key_span,
-                value: Some(idx.type_annotation.type_annotation.span().into()),
+                value: Some(verter_span::Span::new(
+                    idx.type_annotation.type_annotation.span().start,
+                    idx.type_annotation.type_annotation.span().end,
+                )),
             };
             Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
@@ -5665,11 +5725,13 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(ctor.span.into()),
-                return_type: ctor
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                return_type: ctor.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
                 params,
@@ -5695,7 +5757,7 @@ fn lower_this_param(this: &TSThisParameter<'_>, source: &str) -> FunctionParam {
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
         false,
         false,
-        Some(this.span.into()),
+        Some(verter_span::Span::new(this.span.start, this.span.end)),
         this.type_annotation.is_some(),
     )
 }
@@ -5750,7 +5812,7 @@ fn lower_function_params_without_initializer_inference(
             ty,
             param.optional || param.initializer.is_some(),
             false,
-            Some(param.span.into()),
+            Some(verter_span::Span::new(param.span.start, param.span.end)),
             has_ts_annotation,
         );
         parameter.is_parameter_property =
@@ -5773,7 +5835,7 @@ fn lower_function_params_without_initializer_inference(
             ty,
             false,
             true,
-            Some(rest.span.into()),
+            Some(verter_span::Span::new(rest.span.start, rest.span.end)),
             has_ts_annotation,
         ));
     }
@@ -6802,11 +6864,16 @@ fn indexed_value_step<'a>(
                     signature.return_type.map(Arc::new),
                     signature.type_parameters,
                     FunctionSpans {
-                        signature: Some(function.span.into()),
-                        return_type: function
-                            .return_type
-                            .as_ref()
-                            .map(|annotation| annotation.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            function.span.start,
+                            function.span.end,
+                        )),
+                        return_type: function.return_type.as_ref().map(|annotation| {
+                            verter_span::Span::new(
+                                annotation.type_annotation.span().start,
+                                annotation.type_annotation.span().end,
+                            )
+                        }),
                     },
                 )
                 .with_predicate(signature.predicate),

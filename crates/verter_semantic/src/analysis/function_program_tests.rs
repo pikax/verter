@@ -148,7 +148,10 @@ fn nested_value_frames_have_exact_indexed_locators() {
     for entry in index.entries.iter() {
         let resolved = resolve_function_node(&parsed.program, &entry.locator)
             .expect("indexed locator resolves");
-        assert_eq!(verter_span::Span::from(resolved.node.span()), entry.span);
+        assert_eq!(
+            verter_span::Span::new(resolved.node.span().start, resolved.node.span().end),
+            entry.span
+        );
     }
     for pair in index.entries.windows(2) {
         assert_eq!(pair[1].lexical_parent.as_deref(), Some(&pair[0].key));
@@ -1495,7 +1498,10 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
         );
         for call in entry.call_sites.iter() {
             assert_eq!(
-                verter_span::Span::from(nodes.call(call.span).unwrap().span),
+                {
+                    let span = nodes.call(call.span).unwrap().span;
+                    verter_span::Span::new(span.start, span.end)
+                },
                 call.span
             );
         }

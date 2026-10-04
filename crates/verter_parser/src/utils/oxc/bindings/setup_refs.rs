@@ -302,7 +302,7 @@ impl<'a, 'b> SetupRefCollector<'a, 'b> {
             // v-slot variables) by name; globals are retained for liveness.
             RefSink::Spans { ignored, spans } => {
                 if !ignored.contains(name.as_bytes()) {
-                    spans.insert(span.into());
+                    spans.insert(verter_span::Span::new(span.start, span.end));
                 }
             }
         }

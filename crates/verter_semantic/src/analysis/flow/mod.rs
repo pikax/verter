@@ -1045,7 +1045,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             kind: function_body_kind(function.r#async, function.generator),
             statements: &body.statements,
             expression_body: None,
-            body_span: body.span.into(),
+            body_span: verter_span::Span::new(body.span.start, body.span.end),
             anchor: function.span.start,
             self_binding: None,
         })
@@ -1072,7 +1072,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
                 .get_function_body()
                 .map_or(&[], |body| &body.statements),
             expression_body: arrow.get_expression(),
-            body_span: arrow.body.span().into(),
+            body_span: verter_span::Span::new(arrow.body.span().start, arrow.body.span().end),
             anchor: arrow.span.start,
             self_binding: None,
         }
@@ -1088,7 +1088,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             kind: FunctionBodyKind::Plain,
             statements: &[],
             expression_body: Some(expression),
-            body_span: span.into(),
+            body_span: verter_span::Span::new(span.start, span.end),
             anchor: span.start,
             self_binding: None,
         }
@@ -1407,7 +1407,7 @@ fn build_body_skeleton_contained(
         builder.push_binding(
             self_binding.name.as_str(),
             SkeletonBindingKind::NestedFunction,
-            self_binding.span.into(),
+            verter_span::Span::new(self_binding.span.start, self_binding.span.end),
             None,
             false,
         );
@@ -1417,7 +1417,10 @@ fn build_body_skeleton_contained(
     }
     if let Some(expression) = source.expression_body {
         let argument = builder.open_root_site(expression);
-        builder.push_implicit_return(argument, expression.span().into());
+        builder.push_implicit_return(
+            argument,
+            verter_span::Span::new(expression.span().start, expression.span().end),
+        );
         return builder.finish();
     }
     for statement in source.statements {
@@ -1672,7 +1675,11 @@ impl<'entry> SkeletonBuilder<'entry> {
         expression: &Expression<'_>,
         parent: Option<SkeletonExprSiteId>,
     ) -> SkeletonExprSiteId {
-        self.open_site_at(expression, parent, expression.span().into())
+        self.open_site_at(
+            expression,
+            parent,
+            verter_span::Span::new(expression.span().start, expression.span().end),
+        )
     }
 
     fn open_site_at(
@@ -1968,7 +1975,7 @@ impl<'entry> SkeletonBuilder<'entry> {
     ) -> SkeletonExprSiteId {
         let callee = self.extract_callee(expression);
         let root_span = crate::analysis::function_program::access::expression_root(expression)
-            .map(|root| self.frame_span(root.span.into()));
+            .map(|root| self.frame_span(verter_span::Span::new(root.span.start, root.span.end)));
         let site = self.footprint_site(span);
         let span = self.frame_span(span);
         self.sites[site.index()].calls.push(SkeletonCall {
@@ -2127,15 +2134,21 @@ impl<'entry> SkeletonBuilder<'entry> {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
                 let name = self.intern(identifier.name.as_str());
                 if compound_read {
-                    self.push_read(name, identifier.span.into());
+                    self.push_read(
+                        name,
+                        verter_span::Span::new(identifier.span.start, identifier.span.end),
+                    );
                 }
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
                     Arc::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
-                    identifier.span.into(),
-                    Some(identifier.span.into()),
+                    verter_span::Span::new(identifier.span.start, identifier.span.end),
+                    Some(verter_span::Span::new(
+                        identifier.span.start,
+                        identifier.span.end,
+                    )),
                 );
             }
             AssignmentTarget::StaticMemberExpression(member) => {
@@ -2193,8 +2206,11 @@ impl<'entry> SkeletonBuilder<'entry> {
                                 Arc::from(Vec::new().into_boxed_slice()),
                                 SkeletonWriteCertainty::Definite,
                                 value,
-                                identifier.span.into(),
-                                Some(identifier.binding.span.into()),
+                                verter_span::Span::new(identifier.span.start, identifier.span.end),
+                                Some(verter_span::Span::new(
+                                    identifier.binding.span.start,
+                                    identifier.binding.span.end,
+                                )),
                             );
                         }
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
@@ -2297,14 +2313,20 @@ impl<'entry> SkeletonBuilder<'entry> {
         match root {
             Some(identifier) => {
                 let name = self.intern(identifier.name.as_str());
-                self.push_read(name, identifier.span.into());
+                self.push_read(
+                    name,
+                    verter_span::Span::new(identifier.span.start, identifier.span.end),
+                );
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
                     path,
                     certainty,
                     value,
                     write_span,
-                    Some(identifier.span.into()),
+                    Some(verter_span::Span::new(
+                        identifier.span.start,
+                        identifier.span.end,
+                    )),
                 );
             }
             None => {
@@ -2337,7 +2359,10 @@ impl<'entry> SkeletonBuilder<'entry> {
             wrapped_assignment_target(expression, asserted)
         {
             let name = self.intern(identifier.name.as_str());
-            self.push_read(name, identifier.span.into());
+            self.push_read(
+                name,
+                verter_span::Span::new(identifier.span.start, identifier.span.end),
+            );
             return;
         }
         match unwrap_expression_carriers(expression) {
@@ -2348,8 +2373,11 @@ impl<'entry> SkeletonBuilder<'entry> {
                     Arc::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
-                    identifier.span.into(),
-                    Some(identifier.span.into()),
+                    verter_span::Span::new(identifier.span.start, identifier.span.end),
+                    Some(verter_span::Span::new(
+                        identifier.span.start,
+                        identifier.span.end,
+                    )),
                 );
             }
             Expression::StaticMemberExpression(member) => {
@@ -2367,7 +2395,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                     Arc::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
-                    other.span().into(),
+                    verter_span::Span::new(other.span().start, other.span().end),
                     None,
                 );
                 self.visit_expression(other);
@@ -2460,11 +2488,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     // Nested function / arrow / class bodies are their own frames.
     fn visit_function(&mut self, it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {
-        self.push_nested_callable(it.span.into());
+        self.push_nested_callable(verter_span::Span::new(it.span.start, it.span.end));
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        self.push_nested_callable(it.span.into());
+        self.push_nested_callable(verter_span::Span::new(it.span.start, it.span.end));
     }
 
     // A class expression is itself a callable (its constructor) and
@@ -2487,7 +2515,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     // static block keeps its own lexical scope and stays unwalked.
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
         if class_runs_unserved_code(it) {
-            self.push_unserved_callable(it.span.into());
+            self.push_unserved_callable(verter_span::Span::new(it.span.start, it.span.end));
         }
         self.class_values += 1;
         self.visit_decorators(&it.decorators);
@@ -2502,7 +2530,10 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                         self.visit_property_key(&method.key);
                     }
                     if method.value.body.is_some() {
-                        self.push_nested_callable(method.value.span.into());
+                        self.push_nested_callable(verter_span::Span::new(
+                            method.value.span.start,
+                            method.value.span.end,
+                        ));
                     }
                 }
                 oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
@@ -2537,7 +2568,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     self.push_binding(
                         id.name.as_str(),
                         SkeletonBindingKind::NestedFunction,
-                        id.span.into(),
+                        verter_span::Span::new(id.span.start, id.span.end),
                         None,
                         false,
                     );
@@ -2553,7 +2584,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     self.push_binding(
                         id.name.as_str(),
                         SkeletonBindingKind::Class,
-                        id.span.into(),
+                        verter_span::Span::new(id.span.start, id.span.end),
                         None,
                         false,
                     );
@@ -2568,7 +2599,10 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 self.push_binding(
                     enum_declaration.id.name.as_str(),
                     SkeletonBindingKind::Enum,
-                    enum_declaration.id.span.into(),
+                    verter_span::Span::new(
+                        enum_declaration.id.span.start,
+                        enum_declaration.id.span.end,
+                    ),
                     None,
                     false,
                 );
@@ -2578,7 +2612,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 self.push_binding(
                     module.id.name.as_str(),
                     SkeletonBindingKind::Namespace,
-                    module.id.span.into(),
+                    verter_span::Span::new(module.id.span.start, module.id.span.end),
                     None,
                     false,
                 );
@@ -2591,7 +2625,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 self.push_binding(
                     import_equals.id.name.as_str(),
                     SkeletonBindingKind::ImportEquals,
-                    import_equals.id.span.into(),
+                    verter_span::Span::new(import_equals.id.span.start, import_equals.id.span.end),
                     None,
                     false,
                 );
@@ -2608,7 +2642,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 self.push_binding(
                     alias.id.name.as_str(),
                     SkeletonBindingKind::TypeAlias,
-                    alias.id.span.into(),
+                    verter_span::Span::new(alias.id.span.start, alias.id.span.end),
                     None,
                     false,
                 );
@@ -2617,7 +2651,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 self.push_binding(
                     interface.id.name.as_str(),
                     SkeletonBindingKind::Interface,
-                    interface.id.span.into(),
+                    verter_span::Span::new(interface.id.span.start, interface.id.span.end),
                     None,
                     false,
                 );
@@ -2627,7 +2661,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'a>) {
-        self.open_region(SkeletonRegionKind::Block, it.span.into(), None);
+        self.open_region(
+            SkeletonRegionKind::Block,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         self.visit_statement_list(&it.body);
         self.close_region();
     }
@@ -2636,7 +2674,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         let condition = self.open_root_site(&it.test);
         self.open_region(
             SkeletonRegionKind::IfConsequent,
-            it.consequent.span().into(),
+            verter_span::Span::new(it.consequent.span().start, it.consequent.span().end),
             Some(condition),
         );
         self.visit_statement(&it.consequent);
@@ -2644,7 +2682,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         if let Some(alternate) = it.alternate.as_ref() {
             self.open_region(
                 SkeletonRegionKind::IfAlternate,
-                alternate.span().into(),
+                verter_span::Span::new(alternate.span().start, alternate.span().end),
                 Some(condition),
             );
             self.visit_statement(alternate);
@@ -2653,7 +2691,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_while_statement(&mut self, it: &oxc_ast::ast::WhileStatement<'a>) {
-        let region = self.open_region(SkeletonRegionKind::Loop, it.span.into(), None);
+        let region = self.open_region(
+            SkeletonRegionKind::Loop,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         let condition = self.open_root_site(&it.test);
         self.regions[region].control_input = Some(condition);
         self.visit_statement(&it.body);
@@ -2661,7 +2703,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_do_while_statement(&mut self, it: &oxc_ast::ast::DoWhileStatement<'a>) {
-        let region = self.open_region(SkeletonRegionKind::Loop, it.span.into(), None);
+        let region = self.open_region(
+            SkeletonRegionKind::Loop,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         let condition = self.open_root_site(&it.test);
         self.regions[region].control_input = Some(condition);
         self.visit_statement(&it.body);
@@ -2669,7 +2715,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_for_statement(&mut self, it: &oxc_ast::ast::ForStatement<'a>) {
-        let region = self.open_region(SkeletonRegionKind::Loop, it.span.into(), None);
+        let region = self.open_region(
+            SkeletonRegionKind::Loop,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         if let Some(init) = it.init.as_ref() {
             match init {
                 oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration) => {
@@ -2694,7 +2744,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'a>) {
-        self.open_region(SkeletonRegionKind::Loop, it.span.into(), None);
+        self.open_region(
+            SkeletonRegionKind::Loop,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         let source = self.open_root_site(&it.right);
         self.record_for_left(&it.left, source);
         self.visit_statement(&it.body);
@@ -2702,7 +2756,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'a>) {
-        self.open_region(SkeletonRegionKind::Loop, it.span.into(), None);
+        self.open_region(
+            SkeletonRegionKind::Loop,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         let source = self.open_root_site(&it.right);
         self.record_for_left(&it.left, source);
         self.visit_statement(&it.body);
@@ -2710,11 +2768,19 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_switch_statement(&mut self, it: &oxc_ast::ast::SwitchStatement<'a>) {
-        let region = self.open_region(SkeletonRegionKind::Switch, it.span.into(), None);
+        let region = self.open_region(
+            SkeletonRegionKind::Switch,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         let discriminant = self.open_root_site(&it.discriminant);
         self.regions[region].control_input = Some(discriminant);
         for case in &it.cases {
-            self.open_region(SkeletonRegionKind::SwitchCase, case.span.into(), None);
+            self.open_region(
+                SkeletonRegionKind::SwitchCase,
+                verter_span::Span::new(case.span.start, case.span.end),
+                None,
+            );
             if let Some(test) = case.test.as_ref() {
                 self.open_root_site(test);
             }
@@ -2725,11 +2791,19 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_try_statement(&mut self, it: &oxc_ast::ast::TryStatement<'a>) {
-        self.open_region(SkeletonRegionKind::TryBlock, it.block.span.into(), None);
+        self.open_region(
+            SkeletonRegionKind::TryBlock,
+            verter_span::Span::new(it.block.span.start, it.block.span.end),
+            None,
+        );
         self.visit_statement_list(&it.block.body);
         self.close_region();
         if let Some(handler) = it.handler.as_ref() {
-            self.open_region(SkeletonRegionKind::CatchClause, handler.span.into(), None);
+            self.open_region(
+                SkeletonRegionKind::CatchClause,
+                verter_span::Span::new(handler.span.start, handler.span.end),
+                None,
+            );
             if let Some(param) = handler.param.as_ref() {
                 self.collect_declarator_pattern(
                     &param.pattern,
@@ -2744,7 +2818,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         if let Some(finalizer) = it.finalizer.as_ref() {
             self.open_region(
                 SkeletonRegionKind::FinallyBlock,
-                finalizer.span.into(),
+                verter_span::Span::new(finalizer.span.start, finalizer.span.end),
                 None,
             );
             self.visit_statement_list(&finalizer.body);
@@ -2753,7 +2827,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_labeled_statement(&mut self, it: &oxc_ast::ast::LabeledStatement<'a>) {
-        self.open_region(SkeletonRegionKind::LabeledBody, it.span.into(), None);
+        self.open_region(
+            SkeletonRegionKind::LabeledBody,
+            verter_span::Span::new(it.span.start, it.span.end),
+            None,
+        );
         self.visit_statement(&it.body);
         self.close_region();
     }
@@ -2766,7 +2844,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             .argument
             .as_ref()
             .map(|argument| self.open_root_site(argument));
-        let span = self.frame_span(it.span.into());
+        let span = self.frame_span(verter_span::Span::new(it.span.start, it.span.end));
         self.return_sites.push(SkeletonReturnSite {
             ordinal: u32::try_from(self.return_sites.len()).unwrap_or(u32::MAX),
             region: self.current_region(),
@@ -2807,10 +2885,12 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 .init
                 .as_ref()
                 .map(|init| self.open_root_site(init));
-            let annotation_span = declarator
-                .type_annotation
-                .as_ref()
-                .map(|annotation| self.frame_span(annotation.span.into()));
+            let annotation_span = declarator.type_annotation.as_ref().map(|annotation| {
+                self.frame_span(verter_span::Span::new(
+                    annotation.span.start,
+                    annotation.span.end,
+                ))
+            });
             self.collect_declarator_pattern(&declarator.id, kind, initializer, annotation_span);
             if declarator.type_annotation.is_none()
                 && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
@@ -2857,7 +2937,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
         let name = self.intern(it.name.as_str());
-        self.push_read(name, it.span.into());
+        self.push_read(name, verter_span::Span::new(it.span.start, it.span.end));
     }
 
     fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
@@ -2886,11 +2966,15 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         // becomes its own child site so its property footprint stays
         // path-precise.
         let parent = self.current_site();
-        self.open_object_site(it, parent, it.span.into());
+        self.open_object_site(
+            it,
+            parent,
+            verter_span::Span::new(it.span.start, it.span.end),
+        );
     }
 
     fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
-        let scoped = self.ensure_site_scope(it.span.into());
+        let scoped = self.ensure_site_scope(verter_span::Span::new(it.span.start, it.span.end));
         let containing = self
             .current_site()
             .expect("assignment scope guarantees a current site");
@@ -2902,7 +2986,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             evolving_array_element_write_root(it).filter(|(_, root)| self.evolving_reference(root))
         {
             let name = self.intern(root.name.as_str());
-            self.push_read(name, root.span.into());
+            self.push_read(name, verter_span::Span::new(root.span.start, root.span.end));
             let index = self.open_site(&member.expression, Some(containing));
             let value = self.open_site(&it.right, Some(containing));
             let path: Arc<[SkeletonPathSegment]> =
@@ -2912,16 +2996,16 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 Arc::clone(&path),
                 SkeletonWriteCertainty::Definite,
                 Some(value),
-                member.span.into(),
-                Some(root.span.into()),
+                verter_span::Span::new(member.span.start, member.span.end),
+                Some(verter_span::Span::new(root.span.start, root.span.end)),
             );
             self.push_write(
                 SkeletonWriteTarget::Named(name),
                 path,
                 SkeletonWriteCertainty::Optional,
                 Some(index),
-                member.span.into(),
-                Some(root.span.into()),
+                verter_span::Span::new(member.span.start, member.span.end),
+                Some(verter_span::Span::new(root.span.start, root.span.end)),
             );
             if scoped {
                 self.site_stack.pop();
@@ -2943,20 +3027,26 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
-        let scoped = self.ensure_site_scope(it.span.into());
+        let scoped = self.ensure_site_scope(verter_span::Span::new(it.span.start, it.span.end));
         // `x++`, `x!++` and `(x)++` alike read and write the binding.
         let binding = simple_assignment_target_binding(&it.argument);
         match (&it.argument, binding) {
             (_, Some(identifier)) => {
                 let name = self.intern(identifier.name.as_str());
-                self.push_read(name, identifier.span.into());
+                self.push_read(
+                    name,
+                    verter_span::Span::new(identifier.span.start, identifier.span.end),
+                );
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
                     Arc::from(Vec::new().into_boxed_slice()),
                     SkeletonWriteCertainty::Definite,
                     None,
-                    it.span.into(),
-                    Some(identifier.span.into()),
+                    verter_span::Span::new(it.span.start, it.span.end),
+                    Some(verter_span::Span::new(
+                        identifier.span.start,
+                        identifier.span.end,
+                    )),
                 );
             }
             (SimpleAssignmentTarget::StaticMemberExpression(member), None) => {
@@ -3020,9 +3110,13 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
-        let site = self.push_call(&it.callee, false, it.span.into());
+        let site = self.push_call(
+            &it.callee,
+            false,
+            verter_span::Span::new(it.span.start, it.span.end),
+        );
         crate::analysis::type_eval_build::for_each_indexed_call_source_type_query(it, |query| {
-            let span = self.frame_span(query.span.into());
+            let span = self.frame_span(verter_span::Span::new(query.span.start, query.span.end));
             self.sites[site.index()]
                 .source_type_queries
                 .push(SkeletonSourceTypeQuery {
@@ -3050,8 +3144,8 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
                     SkeletonWriteCertainty::Definite,
                     Some(value),
-                    it.span.into(),
-                    Some(root.span.into()),
+                    verter_span::Span::new(it.span.start, it.span.end),
+                    Some(verter_span::Span::new(root.span.start, root.span.end)),
                 );
             }
             return;
@@ -3060,7 +3154,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_new_expression(&mut self, it: &oxc_ast::ast::NewExpression<'a>) {
-        self.push_call(&it.callee, true, it.span.into());
+        self.push_call(
+            &it.callee,
+            true,
+            verter_span::Span::new(it.span.start, it.span.end),
+        );
         walk::walk_new_expression(self, it);
     }
 
@@ -3069,7 +3167,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         &mut self,
         it: &oxc_ast::ast::TaggedTemplateExpression<'a>,
     ) {
-        self.push_call(&it.tag, false, it.span.into());
+        self.push_call(
+            &it.tag,
+            false,
+            verter_span::Span::new(it.span.start, it.span.end),
+        );
         walk::walk_tagged_template_expression(self, it);
     }
 }
@@ -3088,7 +3190,7 @@ impl SkeletonBuilder<'_> {
             Some(binding) => binding.evolving_array,
             None => self
                 .captured_evolving_references
-                .contains(&verter_span::Span::from(root.span)),
+                .contains(&verter_span::Span::new(root.span.start, root.span.end)),
         }
     }
 
@@ -3111,10 +3213,13 @@ impl SkeletonBuilder<'_> {
                         self.bindings.last_mut().unwrap().pattern_sites =
                             Arc::clone(&pattern_sites);
                         if !destructured {
-                            let annotation_span = declarator
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| self.frame_span(annotation.span.into()));
+                            let annotation_span =
+                                declarator.type_annotation.as_ref().map(|annotation| {
+                                    self.frame_span(verter_span::Span::new(
+                                        annotation.span.start,
+                                        annotation.span.end,
+                                    ))
+                                });
                             self.bindings.last_mut().unwrap().annotation_span = annotation_span;
                         }
                         let region = self.current_region();
@@ -3332,9 +3437,13 @@ enum MemberRef<'a, 'ast> {
 impl MemberRef<'_, '_> {
     fn span(&self) -> verter_span::Span {
         match self {
-            MemberRef::Static(member) => member.span.into(),
-            MemberRef::Computed(member) => member.span.into(),
-            MemberRef::Private(member) => member.span.into(),
+            MemberRef::Static(member) => verter_span::Span::new(member.span.start, member.span.end),
+            MemberRef::Computed(member) => {
+                verter_span::Span::new(member.span.start, member.span.end)
+            }
+            MemberRef::Private(member) => {
+                verter_span::Span::new(member.span.start, member.span.end)
+            }
         }
     }
 }
@@ -3378,7 +3487,7 @@ fn collect_binding_pattern<'a, 'ast>(
         BindingPattern::BindingIdentifier(identifier) => {
             identifiers.push((
                 identifier.name.to_string(),
-                identifier.span.into(),
+                verter_span::Span::new(identifier.span.start, identifier.span.end),
                 destructured,
             ));
         }

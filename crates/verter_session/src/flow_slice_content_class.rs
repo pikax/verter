@@ -232,12 +232,20 @@ impl<'s> Lowerer<'s> {
                         visibility: class_member_visibility(&property.key, property.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
-                            declaration: Some(property.span.into()),
-                            name: Some(property.key.span().into()),
-                            type_annotation: property
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| annotation.type_annotation.span().into()),
+                            declaration: Some(verter_span::Span::new(
+                                property.span.start,
+                                property.span.end,
+                            )),
+                            name: Some(verter_span::Span::new(
+                                property.key.span().start,
+                                property.key.span().end,
+                            )),
+                            type_annotation: property.type_annotation.as_ref().map(|annotation| {
+                                verter_span::Span::new(
+                                    annotation.type_annotation.span().start,
+                                    annotation.type_annotation.span().end,
+                                )
+                            }),
                         },
                         value,
                     }));
@@ -277,12 +285,20 @@ impl<'s> Lowerer<'s> {
                         visibility: class_member_visibility(&property.key, property.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
-                            declaration: Some(property.span.into()),
-                            name: Some(property.key.span().into()),
-                            type_annotation: property
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| annotation.type_annotation.span().into()),
+                            declaration: Some(verter_span::Span::new(
+                                property.span.start,
+                                property.span.end,
+                            )),
+                            name: Some(verter_span::Span::new(
+                                property.key.span().start,
+                                property.key.span().end,
+                            )),
+                            type_annotation: property.type_annotation.as_ref().map(|annotation| {
+                                verter_span::Span::new(
+                                    annotation.type_annotation.span().start,
+                                    annotation.type_annotation.span().end,
+                                )
+                            }),
                         },
                         value,
                     }));
@@ -493,8 +509,11 @@ impl<'s> Lowerer<'s> {
                     visibility: class_member_visibility(&first.key, first.accessibility),
                     method_kind: None,
                     spans: verter_type_expr::MemberSpans {
-                        declaration: Some(first.span.into()),
-                        name: Some(first.key.span().into()),
+                        declaration: Some(verter_span::Span::new(first.span.start, first.span.end)),
+                        name: Some(verter_span::Span::new(
+                            first.key.span().start,
+                            first.key.span().end,
+                        )),
                         type_annotation: None,
                     },
                     value,
@@ -542,8 +561,14 @@ impl<'s> Lowerer<'s> {
                         visibility: class_member_visibility(&method.key, method.accessibility),
                         method_kind: Some(verter_type_expr::ObjectMethodKind::Method),
                         spans: verter_type_expr::MemberSpans {
-                            declaration: Some(method.span.into()),
-                            name: Some(method.key.span().into()),
+                            declaration: Some(verter_span::Span::new(
+                                method.span.start,
+                                method.span.end,
+                            )),
+                            name: Some(verter_span::Span::new(
+                                method.key.span().start,
+                                method.key.span().end,
+                            )),
                             type_annotation: None,
                         },
                         value,
@@ -655,12 +680,20 @@ impl<'s> Lowerer<'s> {
                         visibility: accessibility_visibility(parameter.accessibility),
                         method_kind: None,
                         spans: verter_type_expr::MemberSpans {
-                            declaration: Some(parameter.span.into()),
-                            name: Some(parameter.pattern.span().into()),
-                            type_annotation: parameter
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| annotation.type_annotation.span().into()),
+                            declaration: Some(verter_span::Span::new(
+                                parameter.span.start,
+                                parameter.span.end,
+                            )),
+                            name: Some(verter_span::Span::new(
+                                parameter.pattern.span().start,
+                                parameter.pattern.span().end,
+                            )),
+                            type_annotation: parameter.type_annotation.as_ref().map(|annotation| {
+                                verter_span::Span::new(
+                                    annotation.type_annotation.span().start,
+                                    annotation.type_annotation.span().end,
+                                )
+                            }),
                         },
                         value: SliceClassMemberValue::Declared(ty.clone()),
                     }));
@@ -732,11 +765,16 @@ impl<'s> Lowerer<'s> {
             Some(Arc::new(return_type)),
             type_parameters,
             verter_type_expr::FunctionSpans {
-                signature: Some(function.span.into()),
-                return_type: function
-                    .return_type
-                    .as_ref()
-                    .map(|annotation| annotation.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(
+                    function.span.start,
+                    function.span.end,
+                )),
+                return_type: function.return_type.as_ref().map(|annotation| {
+                    verter_span::Span::new(
+                        annotation.type_annotation.span().start,
+                        annotation.type_annotation.span().end,
+                    )
+                }),
             },
         );
         signature.predicate = predicate;

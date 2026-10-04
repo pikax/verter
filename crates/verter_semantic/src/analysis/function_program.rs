@@ -1033,7 +1033,10 @@ impl<'a> Visit<'a> for ClassSyntaxCollector {
     fn visit_class(&mut self, class: &Class<'a>) {
         let mut members = Vec::with_capacity(class.body.body.len());
         for element in &class.body.body {
-            members.push(element.span().into());
+            members.push(verter_span::Span::new(
+                element.span().start,
+                element.span().end,
+            ));
             if let oxc_ast::ast::ClassElement::MethodDefinition(method) = element {
                 if method.kind == MethodDefinitionKind::Constructor {
                     members.extend(
@@ -1047,13 +1050,15 @@ impl<'a> Visit<'a> for ClassSyntaxCollector {
                                     || parameter.readonly
                                     || parameter.r#override
                             })
-                            .map(|parameter| verter_span::Span::from(parameter.span)),
+                            .map(|parameter| {
+                                verter_span::Span::new(parameter.span.start, parameter.span.end)
+                            }),
                     );
                 }
             }
         }
         self.classes.push(ClassSyntaxRecord {
-            span: class.span.into(),
+            span: verter_span::Span::new(class.span.start, class.span.end),
             expression: class.r#type == oxc_ast::ast::ClassType::ClassExpression,
             has_heritage: class.heritage.is_some(),
             members: Arc::from(members.into_boxed_slice()),
@@ -1452,7 +1457,7 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
         );
         let span = node.span();
         nested.insert((span.start, span.end), part);
-        let span: verter_span::Span = span.into();
+        let span: verter_span::Span = verter_span::Span::new(span.start, span.end);
         // A span outside the source is a MISS, never the empty string's
         // hash: hashing `b""` gives every out-of-range entry the same
         // constant and silently retires the exact-content axis for all of
@@ -2942,7 +2947,7 @@ fn discover_variable_declaration<'ast>(
                     canonical_id: Arc::clone(&ctx.canonical_id),
                     offset: init.span().start,
                 },
-                span: init.span().into(),
+                span: verter_span::Span::new(init.span().start, init.span().end),
                 locator: FunctionBodyLocator {
                     contributor: anchor,
                     descent: base_descent.clone(),
@@ -3084,7 +3089,7 @@ fn effect_callee(callee: &Expression<'_>) -> FunctionEffectCallee {
 
 fn call_site_record(call: &CallExpression<'_>) -> FunctionCallSiteRecord {
     FunctionCallSiteRecord {
-        span: call.span.into(),
+        span: verter_span::Span::new(call.span.start, call.span.end),
         callee: effect_callee(&call.callee),
         target: None,
         args: Arc::from(
@@ -3099,7 +3104,7 @@ fn call_site_record(call: &CallExpression<'_>) -> FunctionCallSiteRecord {
 
 fn new_site_record(call: &oxc_ast::ast::NewExpression<'_>) -> FunctionCallSiteRecord {
     FunctionCallSiteRecord {
-        span: call.span.into(),
+        span: verter_span::Span::new(call.span.start, call.span.end),
         callee: effect_callee(&call.callee),
         target: None,
         args: Arc::from(
@@ -3184,7 +3189,7 @@ fn discover_top_level_call_arg_positions<'ast>(
             });
             discover_top_level_callable(
                 node,
-                expression.span().into(),
+                verter_span::Span::new(expression.span().start, expression.span().end),
                 declaration_name,
                 contributor,
                 descent,
@@ -3261,7 +3266,7 @@ fn discover_variable_declaration_ns<'ast>(
                     canonical_id: Arc::clone(&ctx.canonical_id),
                     offset: init.span().start,
                 },
-                span: init.span().into(),
+                span: verter_span::Span::new(init.span().start, init.span().end),
                 locator: FunctionBodyLocator {
                     contributor: anchor,
                     descent: base.clone(),
@@ -3340,7 +3345,7 @@ fn discover_class_heritage_expression<'ast>(
             canonical_id: Arc::clone(&ctx.canonical_id),
             offset: heritage.span().start,
         },
-        span: heritage.span().into(),
+        span: verter_span::Span::new(heritage.span().start, heritage.span().end),
         locator: FunctionBodyLocator {
             contributor: anchor,
             descent,
@@ -3484,7 +3489,7 @@ fn discover_class_members<'ast>(
                             canonical_id: Arc::clone(&ctx.canonical_id),
                             offset: value.span().start,
                         },
-                        span: value.span().into(),
+                        span: verter_span::Span::new(value.span().start, value.span().end),
                         locator: FunctionBodyLocator {
                             contributor: anchor,
                             descent: descent.clone(),
@@ -3808,7 +3813,7 @@ fn discover_nested_callable<'ast>(
     FunctionBodyLocator,
     FunctionBodyRef<'ast>,
 )> {
-    let span: verter_span::Span = node.span().into();
+    let span: verter_span::Span = verter_span::Span::new(node.span().start, node.span().end);
     let (params, body) = match &node {
         FunctionNode::Function(func) => {
             let body = func.body.as_ref()?;
@@ -4162,11 +4167,10 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         FunctionProgramEntry {
             key,
             span: frame_span,
-            body_span: node
-                .body()
-                .expect("indexed functions have a body")
-                .span()
-                .into(),
+            body_span: {
+                let span = node.body().expect("indexed functions have a body").span();
+                verter_span::Span::new(span.start, span.end)
+            },
             locator,
             params,
             bindings: Arc::from(bindings.into_boxed_slice()),
@@ -4322,7 +4326,7 @@ impl InventoryVisitor<'_, '_> {
         bindings.push(FunctionBindingRecord {
             name: Arc::from(id.name.as_str()),
             kind,
-            span: id.span.into(),
+            span: verter_span::Span::new(id.span.start, id.span.end),
             scope_span,
             evolving_array: false,
         });
@@ -4380,7 +4384,7 @@ impl InventoryVisitor<'_, '_> {
                 {
                     self.out.push(FunctionTypeQuery {
                         name: Arc::from(id.name.as_str()),
-                        span: id.span.into(),
+                        span: verter_span::Span::new(id.span.start, id.span.end),
                         binding: FunctionReferenceBinding::Free,
                         position: self.position,
                     });
@@ -4402,7 +4406,7 @@ impl InventoryVisitor<'_, '_> {
     ) {
         self.references.push(FunctionReferenceRecord {
             name: Arc::from(id.name.as_str()),
-            span: id.span.into(),
+            span: verter_span::Span::new(id.span.start, id.span.end),
             binding: FunctionReferenceBinding::Free,
             read_role: role,
             path: Arc::from([]),
@@ -4448,9 +4452,9 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         self.visit_binding_pattern(&it.id);
         if let Some(annotation) = &it.type_annotation {
             let position = match &it.id {
-                BindingPattern::BindingIdentifier(id) => {
-                    FunctionTypeQueryPosition::Declarator(id.span.into())
-                }
+                BindingPattern::BindingIdentifier(id) => FunctionTypeQueryPosition::Declarator(
+                    verter_span::Span::new(id.span.start, id.span.end),
+                ),
                 _ => FunctionTypeQueryPosition::Expression,
             };
             self.visit_type_queries(&annotation.type_annotation, position);
@@ -4495,7 +4499,10 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_function(it, flags);
-            self.record_parameter_callable(it.span.into(), escaping);
+            self.record_parameter_callable(
+                verter_span::Span::new(it.span.start, it.span.end),
+                escaping,
+            );
         }
     }
 
@@ -4504,7 +4511,10 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         if self.in_parameter_list {
             let mut escaping = access::EscapingAssignments::default();
             escaping.visit_arrow_function_expression(it);
-            self.record_parameter_callable(it.span.into(), escaping);
+            self.record_parameter_callable(
+                verter_span::Span::new(it.span.start, it.span.end),
+                escaping,
+            );
         }
     }
 
@@ -4534,8 +4544,8 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                 evaluated.unmodeled_bindings.push(FunctionBindingRecord {
                     name: Arc::from(id.name.as_str()),
                     kind: FunctionBindingKind::Class,
-                    span: id.span.into(),
-                    scope_span: class.span.into(),
+                    span: verter_span::Span::new(id.span.start, id.span.end),
+                    scope_span: verter_span::Span::new(class.span.start, class.span.end),
                     evolving_array: false,
                 });
             }
@@ -4547,8 +4557,11 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         for element in &class.body.body {
             match element {
                 oxc_ast::ast::ClassElement::StaticBlock(block) => {
-                    evaluated.class_local_scope = Some(block.span.into());
-                    evaluated.scope_stack.push(block.span.into());
+                    evaluated.class_local_scope =
+                        Some(verter_span::Span::new(block.span.start, block.span.end));
+                    evaluated
+                        .scope_stack
+                        .push(verter_span::Span::new(block.span.start, block.span.end));
                     for statement in &block.body {
                         evaluated.visit_statement(statement);
                     }
@@ -4590,12 +4603,13 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     }
 
     fn visit_catch_clause(&mut self, clause: &oxc_ast::ast::CatchClause<'a>) {
-        self.scope_stack.push(clause.span.into());
+        self.scope_stack
+            .push(verter_span::Span::new(clause.span.start, clause.span.end));
         if let Some(param) = &clause.param {
             self.record_pattern(
                 &param.pattern,
                 FunctionBindingKind::CatchParam,
-                clause.span.into(),
+                verter_span::Span::new(clause.span.start, clause.span.end),
             );
         }
         walk::walk_catch_clause(self, clause);
@@ -4646,13 +4660,14 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             self.control.push(FunctionControlRegion {
                 kind,
                 has_return: false,
-                span: it.span().into(),
+                span: verter_span::Span::new(it.span().start, it.span().end),
             });
             self.control_stack.push(self.control.len() - 1);
             // Every one of these constructs also opens a lexical scope
             // for the `const` / `let` / nested function declarations it
             // contains.
-            self.scope_stack.push(it.span().into());
+            self.scope_stack
+                .push(verter_span::Span::new(it.span().start, it.span().end));
         }
         let previous_control = self.control_input;
         self.control_input = match it {
@@ -4720,7 +4735,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         self.return_sites.push(FunctionReturnSite {
             ordinal: u32::try_from(self.return_sites.len()).unwrap_or(u32::MAX),
             has_argument: it.argument.is_some(),
-            span: it.span.into(),
+            span: verter_span::Span::new(it.span.start, it.span.end),
         });
         walk::walk_return_statement(self, it);
     }
@@ -4740,7 +4755,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
 
     fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
         self.writes.push(FunctionWriteRecord {
-            span: it.span.into(),
+            span: verter_span::Span::new(it.span.start, it.span.end),
             targets: access::assignment_targets(&it.left).into(),
         });
         let previous = self.compound_target_read;
@@ -4753,7 +4768,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         self.writes.push(FunctionWriteRecord {
-            span: it.span.into(),
+            span: verter_span::Span::new(it.span.start, it.span.end),
             targets: access::simple_assignment_target(&it.argument)
                 .into_iter()
                 .collect(),
@@ -4788,7 +4803,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'a>) {
         if let Some(target) = it.left.as_assignment_target() {
             self.writes.push(FunctionWriteRecord {
-                span: it.left.span().into(),
+                span: verter_span::Span::new(it.left.span().start, it.left.span().end),
                 targets: access::assignment_targets(target).into(),
             });
         }
@@ -4798,7 +4813,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'a>) {
         if let Some(target) = it.left.as_assignment_target() {
             self.writes.push(FunctionWriteRecord {
-                span: it.left.span().into(),
+                span: verter_span::Span::new(it.left.span().start, it.left.span().end),
                 targets: access::assignment_targets(target).into(),
             });
         }
@@ -4809,14 +4824,14 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         super::type_eval_build::for_each_indexed_call_source_type_query(it, |query| {
             self.source_type_queries.push(FunctionSourceTypeQuery {
                 name: Arc::from(query.name.as_str()),
-                span: query.span.into(),
+                span: verter_span::Span::new(query.span.start, query.span.end),
                 binding: FunctionReferenceBinding::Free,
             });
         });
         let call = self.alloc(it);
         if let Some(addresses) = &mut self.call_addresses {
             addresses
-                .entry(it.span.into())
+                .entry(verter_span::Span::new(it.span.start, it.span.end))
                 .or_insert(IndexedCallSite::Call(call));
         }
         let callee = match &it.callee {
@@ -4834,7 +4849,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             _ => FunctionEffectCallee::Other,
         };
         self.effects.push(FunctionEffectRecord {
-            span: it.span.into(),
+            span: verter_span::Span::new(it.span.start, it.span.end),
             callee,
         });
         let previous = self.read_role;
@@ -4847,7 +4862,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         let construct = self.alloc(it);
         if let Some(addresses) = &mut self.call_addresses {
             addresses
-                .entry(it.span.into())
+                .entry(verter_span::Span::new(it.span.start, it.span.end))
                 .or_insert(IndexedCallSite::Construct(construct));
         }
         let previous = self.read_role;
@@ -4863,7 +4878,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         let tagged = self.alloc(it);
         if let Some(addresses) = &mut self.call_addresses {
             addresses
-                .entry(it.span.into())
+                .entry(verter_span::Span::new(it.span.start, it.span.end))
                 .or_insert(IndexedCallSite::TaggedTemplate(tagged));
         }
         let previous = self.read_role;
