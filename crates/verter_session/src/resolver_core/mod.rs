@@ -476,8 +476,7 @@ pub trait StoreView {
     /// (skip the call if the host's `current_store_view_epoch` no
     /// longer matches the base view's `mutation_epoch`) — keeping
     /// the trait off the concrete `VerterHost` type to preserve the
-    /// resolver-context seal (architecture guard
-    /// `no_concrete_verter_host_in_seal_scope`).
+    /// request-port boundary (the six ports in `request_ports`).
     ///
     /// Implementers writing into a per-request overlay must:
     /// - Insert `whole_hash` into the overlay's `whole_hashes` map

@@ -1424,9 +1424,10 @@ impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
 ///   `app_config_proof_overflow_refusals` advances.
 ///
 /// Resolver-tier producer that takes `&dyn ResolverContext` to stay
-/// inside the seal contract (`no_concrete_verter_host_in_seal_scope`
-/// arch guard). Integration tests reach this via the
-/// crate-public wrapper
+/// inside the request-port contract (the six ports in
+/// `resolver_core::request_ports`, whose compile-contract fixtures prove a
+/// request cannot reach ambient host state). Integration tests reach this
+/// via the crate-public wrapper
 /// [`crate::for_tests::app_config_no_override_proof_get_or_compute_for_tests`].
 ///
 /// The ComponentConfig theme-variant fast-path resolver (a future

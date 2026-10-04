@@ -39,9 +39,10 @@ an observed record keeps its original source identity across edits.
 `EnginePolicy`. Its static `FlowCx`, `RelationCx`, and `InferenceTxn` views use
 generic demand drivers and selected arena operations. Request-local `MemoRead`
 and `MemoPublish` coordinate fact validation and publication; durable storage
-does not invoke source services or evaluate types. The
-`no_concrete_verter_host_in_seal_scope` guard permits concrete host access only
-in exact lifecycle owners and selected private source-adapter regions. The
+does not invoke source services or evaluate types. The six request-bound ports in `resolver_core::request_ports` are the
+resolver-tier boundary: each returns owned records or typed demands and none
+returns a host, store or config handle, so only their implementations reach
+ambient host state. The
 session feature-variants compile-contract lane proves each actual port cannot
 expose ambient host/worker/store state. See the type-resolution
 [ownership reference](../type-resolution/references/relation-ownership.md).

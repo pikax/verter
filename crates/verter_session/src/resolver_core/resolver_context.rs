@@ -767,6 +767,29 @@ pub(crate) trait RequestBoundLifecycle {
 /// against the view built at their request boundary.
 pub struct RequestBoundAdapter<L>(pub(super) L);
 
+/// Compile-time witness for the request-port boundary: the engine carrier
+/// holds exactly the request lifecycle, so no ambient host, store or config
+/// field can be added to it. The destructuring pattern is exhaustive, which
+/// makes a new field a build error here instead of leaving a name-keyed
+/// source scanner to notice it (CLAUDE.md:500).
+#[cfg(test)]
+mod adapter_field_set_witness {
+    use super::RequestBoundAdapter;
+
+    /// Exhaustive over the carrier's field set — adding a field breaks the
+    /// build.
+    fn lifecycle_only<L>(adapter: RequestBoundAdapter<L>) -> L {
+        let RequestBoundAdapter(lifecycle) = adapter;
+        lifecycle
+    }
+
+    #[test]
+    fn engine_carrier_carries_no_ambient_field() {
+        fn accepts_projection<L>(_: fn(RequestBoundAdapter<L>) -> L) {}
+        accepts_projection::<u8>(lifecycle_only::<u8>);
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl<L> RequestBoundAdapter<L> {
     pub(crate) fn has_session_view_for_tests(&self) -> bool

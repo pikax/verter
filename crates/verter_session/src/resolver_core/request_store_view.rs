@@ -578,8 +578,8 @@ impl CanonicalCompletionOverlay {
     /// (the host-tier prepared-decl-bundle materialiser holds the
     /// concrete `&VerterHost` and the base view, and can short-circuit
     /// before invoking this overlay write). Keeping `host` out of the
-    /// resolver-tier API surface preserves the resolver-context seal
-    /// (`no_concrete_verter_host_in_seal_scope` architecture guard).
+    /// resolver-tier API surface preserves the request-port boundary (the
+    /// six ports in `request_ports`, none of which returns a host handle).
     pub(crate) fn complete_route_canonical(
         &self,
         canonical: &str,
@@ -1635,9 +1635,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // path. The epoch guard lives at
         // the producer-side call site (where the concrete host is
         // available) so this trait method stays off the
-        // `VerterHost` type and the resolver-context seal
-        // (`no_concrete_verter_host_in_seal_scope` architecture
-        // guard) keeps holding.
+        // `VerterHost` type and the request-port boundary keeps holding.
         self.overlay
             .complete_route_canonical(canonical, whole_hash, route_hash);
     }
