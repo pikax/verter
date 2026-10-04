@@ -93,6 +93,7 @@ pub mod external_ts_sync;
 pub mod features;
 pub mod heap_in_use;
 pub mod interaction_trace;
+pub mod outbound;
 pub mod provider_surface_store;
 pub mod provider_sync;
 pub mod resync_singleflight;

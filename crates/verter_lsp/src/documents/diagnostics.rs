@@ -427,13 +427,14 @@ impl DocumentRegistry {
     /// Publish one result, racing the client enqueue against this URI's
     /// cancellation.
     ///
-    /// The enqueue is bounded by the client channel, and a client that stops
-    /// draining it suspends the send for as long as it likes. NOTHING the document
-    /// lifecycle needs is held across that await: the fence is the synchronous
-    /// claim/cancel slot, not a mutex the close has to wait on, so a close, open or
-    /// change never queues behind a stalled consumer. A close instead CANCELS the
-    /// suspended enqueue, and the abandoned payload never reaches the client — the
-    /// same stale-publication guarantee, without the stranding.
+    /// The enqueue goes through the bounded [`crate::outbound::ReplaceableLane`],
+    /// and a client that stops draining it suspends the send for as long as it
+    /// likes. NOTHING the document lifecycle needs is held across that await: the
+    /// fence is the synchronous claim/cancel slot, not a mutex the close has to
+    /// wait on, so a close, open or change never queues behind a stalled consumer.
+    /// A close instead CANCELS the suspended enqueue, which withdraws the payload
+    /// from the lane, so it never reaches the client — the same stale-publication
+    /// guarantee, without the stranding.
     pub(crate) async fn publish_diagnostics(
         &self,
         client: &Client,
@@ -460,16 +461,22 @@ impl DocumentRegistry {
             return;
         };
 
+        let params = tower_lsp_server::ls_types::PublishDiagnosticsParams::new(
+            uri.clone(),
+            diagnostics,
+            Some(publication.basis.snapshot.version),
+        );
         let sent = tokio::select! {
             // Cancellation wins a tie: a close that has already taken the URI must
-            // never have its result committed as a receipt.
+            // never have its result committed as a receipt. Losing the race drops
+            // the lane offer, which withdraws a payload the transport has not taken.
             biased;
             _ = cancelled => false,
-            () = client.publish_diagnostics(
-                uri.clone(),
-                diagnostics,
-                Some(publication.basis.snapshot.version),
-            ) => true,
+            delivery = self.diagnostics_outbound.publish_diagnostics(
+                client,
+                publication.epoch.0,
+                params,
+            ) => delivery == crate::outbound::Delivery::Delivered,
         };
         // Releasing our own slot is also how a cancelled publisher reports that the
         // URI moved on: the slot it registered is gone.
@@ -719,6 +726,134 @@ mod tests {
             documents.claim_outbound_send(&uri, &newer).is_some(),
             "the current publication may claim the slot it owns"
         );
+    }
+
+    fn diagnostic(message: &str) -> Vec<Diagnostic> {
+        vec![Diagnostic::new_simple(
+            tower_lsp_server::ls_types::Range::default(),
+            message.into(),
+        )]
+    }
+
+    /// Read the wire until `uri` receives `last`, returning every diagnostics
+    /// message `uri` received on the way, in order.
+    async fn diagnostics_for_until(
+        wire: &mut tower_lsp_server::ClientSocket,
+        uri: &Uri,
+        last: &str,
+    ) -> Vec<String> {
+        use futures_util::StreamExt as _;
+        let mut received = Vec::new();
+        while let Some(message) = wire.next().await {
+            if message.method() != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let params: tower_lsp_server::ls_types::PublishDiagnosticsParams =
+                serde_json::from_value(message.params().cloned().expect("params"))
+                    .expect("publishDiagnostics params decode");
+            if params.uri != *uri {
+                continue;
+            }
+            let text = params
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let done = text == last;
+            received.push(text);
+            if done {
+                return received;
+            }
+        }
+        panic!("the wire closed before {last} reached the client: {received:?}");
+    }
+
+    /// A publication cancelled while its send is suspended behind a slow client
+    /// never reaches that client.
+    ///
+    /// The client transport stops draining (the editor is not reading), so one
+    /// document's sends back up and a second document's publication waits behind
+    /// them. That waiting publication is then superseded. The cancelled payload
+    /// must be withdrawn — not merely abandoned by its publisher while it stays
+    /// queued — so once the client resumes reading it receives only the newer
+    /// diagnostics for that document.
+    ///
+    /// Discriminating: a send that enqueues its payload into the transport the
+    /// moment it is first polled and is then cancelled by dropping the future
+    /// leaves the payload queued, and the client reads `stale` before `fresh`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_superseded_behind_a_slow_client_never_reaches_it() {
+        let (client, mut wire) = crate::test_utils::initialized_client_with_socket().await;
+        let client = client
+            .get()
+            .expect("handshake populated the client")
+            .clone();
+        let documents = registry();
+        let busy: Uri = "file:///workspace/Busy.vue".parse().unwrap();
+        let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+        open(&documents, &busy);
+        open(&documents, &edited);
+
+        // The first send fills the transport's buffered slot; the second waits
+        // behind it because nobody is reading the wire.
+        let first = documents.begin_diagnostics_publication(&busy).unwrap();
+        documents
+            .publish_diagnostics(&client, &busy, &first, diagnostic("busy-1"), true, None)
+            .await;
+        let second = documents.begin_diagnostics_publication(&busy).unwrap();
+        let second_send = documents.publish_diagnostics(
+            &client,
+            &busy,
+            &second,
+            diagnostic("busy-2"),
+            true,
+            None,
+        );
+        tokio::pin!(second_send);
+        assert!(futures_util::poll!(&mut second_send).is_pending());
+
+        let stale = documents.begin_diagnostics_publication(&edited).unwrap();
+        let stale_send = documents.publish_diagnostics(
+            &client,
+            &edited,
+            &stale,
+            diagnostic("stale"),
+            true,
+            None,
+        );
+        tokio::pin!(stale_send);
+        assert!(
+            futures_util::poll!(&mut stale_send).is_pending(),
+            "the slow client keeps the publication waiting"
+        );
+        // An edit supersedes the waiting publication; its publisher observes the
+        // cancellation and returns without a receipt.
+        let fresh = documents.begin_diagnostics_publication(&edited).unwrap();
+        stale_send.await;
+
+        let fresh_send = documents.publish_diagnostics(
+            &client,
+            &edited,
+            &fresh,
+            diagnostic("fresh"),
+            true,
+            None,
+        );
+        let (received, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(
+                diagnostics_for_until(&mut wire, &edited, "fresh"),
+                fresh_send
+            )
+        })
+        .await
+        .expect("the resumed client receives the newest diagnostics");
+        assert_eq!(
+            received,
+            vec!["fresh".to_string()],
+            "the superseded payload must never reach the client"
+        );
+        assert!(documents.diagnostics_ready(&edited));
     }
 
     #[test]

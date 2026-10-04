@@ -1,0 +1,49 @@
+{
+  "node": "WSP3",
+  "kind": "implementation",
+  "finalOwner": "expansion.workspace-responsiveness",
+  "products": [
+    "OutboundBudget with separate control, response and replaceable-notification accounting (crates/verter_lsp/src/outbound/mod.rs)",
+    "Per-document versioned replacement coalescer: ReplaceableLane, the only route publishDiagnostics takes to the client (crates/verter_lsp/src/outbound/mod.rs, consumed by DocumentRegistry::publish_diagnostics)",
+    "Backpressure and slow-client recovery evidence (crates/verter_lsp/tests/cases/outbound_slow_client.rs)"
+  ],
+  "retiredRoute": "DocumentRegistry::publish_diagnostics handing payloads straight to the tower client channel, where a cancelled send left its payload queued and the queue grew by one payload per cancelled publication",
+  "preservedOwners": [
+    "semantic algorithms",
+    "project resolution",
+    "format/lint logic",
+    "TypeScript projection",
+    "edit transactions",
+    "diagnostics epoch/receipt fence (DocumentRegistry)"
+  ],
+  "cases": [
+    {
+      "id": "WSP3-AC1",
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (lane high-water within budget under a stalled reader and edit storm; every document ends on its newest complete set, never older-after-newer) + crates/verter_lsp/src/outbound/tests.rs + documents::diagnostics::tests::a_send_superseded_behind_a_slow_client_never_reaches_it"
+    },
+    {
+      "id": "WSP3-AC2",
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs ($/cancelRequest error and shutdown result arrive behind only what the transport already held, not behind the diagnostics backlog)"
+    },
+    {
+      "id": "WSP3-AC3",
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (large response delivered whole to a client without partial-result support) + outbound::tests::a_payload_larger_than_the_byte_budget_is_delivered_whole; the server emits no standard partial results"
+    },
+    {
+      "id": "WSP3-AC-OWNER",
+      "binding": "ReplaceableLane is the single replaceable-notification writer; DocumentRegistry::publish_diagnostics is its only producer; no dual live writer"
+    },
+    {
+      "id": "WSP3-AC-BASIS",
+      "binding": "publication incrementality unchanged at the semantic layer (same epoch/receipt fence); the lane only removes superseded payloads, so the delivered final set equals a fresh publication of the newest epoch (outbound_slow_client asserts each document ends on its newest complete set)"
+    },
+    {
+      "id": "WSP3-AC-RESOURCE",
+      "binding": "work-count evidence only: lane high-water and per-document delivered counts are asserted in tests; outbound bytes per run, client application/paint, provider process cost and retained memory are unavailable on the landing worker and are not reported as numbers"
+    },
+    {
+      "id": "WSP3-AC-EXPOSURE",
+      "binding": "not applicable: no new protocol operation is introduced; transport policy only"
+    }
+  ]
+}

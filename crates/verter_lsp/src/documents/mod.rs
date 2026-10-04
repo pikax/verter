@@ -50,6 +50,10 @@ pub struct DocumentRegistry {
     documents: DashMap<String, DocumentState>,
     diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
     diagnostics_refresh_tx: tokio::sync::broadcast::Sender<DiagnosticsRefresh>,
+    /// The bounded replacement lane every diagnostics publication reaches the
+    /// client through, so a slow client retains at most one pending payload per
+    /// document and never receives a superseded one.
+    diagnostics_outbound: crate::outbound::ReplaceableLane,
     next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
@@ -542,6 +546,9 @@ impl DocumentRegistry {
             documents: DashMap::new(),
             diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
             diagnostics_refresh_tx,
+            diagnostics_outbound: crate::outbound::ReplaceableLane::new(
+                crate::outbound::OutboundBudget::DEFAULT,
+            ),
             next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,

@@ -18,12 +18,12 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt as _;
-use tokio::sync::{Notify, OnceCell, Semaphore};
-use tower_lsp_server::Client;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
 };
+use crate::test_utils::initialized_client_with_socket;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol::{
     CompletionResolveData, CompletionResolveResult, ResolvedTextEdit,
@@ -585,53 +585,6 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
 // fallback for carriers whose generated units are not admitted to their
 // owning project, so the fallback's notifier — not its lifecycle — is what
 // keeps that attestation truthful on the wire.
-
-/// A handshake-only `LanguageServer` so a real
-/// [`tower_lsp_server::Client`](Client) with its outgoing socket exists
-/// in-process for the wire tests below.
-struct HandshakeOnlyServer;
-
-impl tower_lsp_server::LanguageServer for HandshakeOnlyServer {
-    async fn initialize(
-        &self,
-        _params: tower_lsp_server::ls_types::InitializeParams,
-    ) -> Result<tower_lsp_server::ls_types::InitializeResult, tower_lsp_server::jsonrpc::Error>
-    {
-        Ok(tower_lsp_server::ls_types::InitializeResult::default())
-    }
-
-    async fn shutdown(&self) -> Result<(), tower_lsp_server::jsonrpc::Error> {
-        Ok(())
-    }
-}
-
-/// Drive one real [`Client`] through a completed handshake and return it with
-/// the outgoing socket the editor would read. Structural start announcements
-/// are suppressed by the client until the server is initialized, so the
-/// handshake is part of the fixture, not optional setup. The socket is the
-/// undrained server→client stream: every notification the client sends lands
-/// there, in order.
-async fn initialized_client_with_socket() -> (Arc<OnceCell<Client>>, tower_lsp_server::ClientSocket)
-{
-    let client_cell: Arc<OnceCell<Client>> = Arc::new(OnceCell::new());
-    let cell_for_init = Arc::clone(&client_cell);
-    let (mut service, socket) = tower_lsp_server::LspService::new(move |client| {
-        let _ = cell_for_init.set(client);
-        HandshakeOnlyServer
-    });
-    use tower_service::Service as _;
-    let params = serde_json::to_value(tower_lsp_server::ls_types::InitializeParams::default())
-        .expect("initialize params serialize");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .params(params)
-        .id(1)
-        .finish();
-    futures_util::future::poll_fn(|cx| service.poll_ready(cx))
-        .await
-        .expect("the service accepts the handshake");
-    let _ = service.call(initialize).await;
-    (client_cell, socket)
-}
 
 /// The shared route's managed fallback: the engine's INITIAL start must stay
 /// off the `$/verter/typeProviderStarted` wire (the attested promise), while a
