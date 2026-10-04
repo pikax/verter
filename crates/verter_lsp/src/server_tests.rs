@@ -30443,6 +30443,65 @@ async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_
     assert_eq!(fixture.sync_complete.lock().len(), announced_before);
 }
 
+/// The import-dependency publication that mints a document's DependencyReady
+/// receipt is what releases the publication a running workspace scan held back
+/// for want of it: the document is certified while the scan flag is still up.
+#[tokio::test(flavor = "multi_thread")]
+async fn minting_a_dependency_receipt_releases_the_publication_a_scan_held() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let id = format!("{}/src/Held.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Held.vue");
+    let source = "<script setup lang=\"ts\">\nimport { value } from './helper';\n</script>\n<template>{{ value }}</template>";
+    std::fs::write(fixture._temp.path().join("src/Held.vue"), source).unwrap();
+    server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".into(),
+        version: 1,
+        text: source.into(),
+    });
+    server.refresh_carrier_dependency_tracking(&id);
+    server.ensure_current_file_synced(&uri).await;
+
+    server.sync_coordinator.set_workspace_scan_in_progress(true);
+    let ticks_before = server.sync_coordinator.dispatch_ticks();
+    server.sync_coordinator.signal_diagnostics_only(
+        id.clone(),
+        uri.to_string(),
+        tokio::time::Instant::now() - std::time::Duration::from_secs(60),
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                !server.sync_coordinator.inbox_contains(&id)
+                    && server.sync_coordinator.dispatch_ticks() > ticks_before
+            },
+            || panic!("the coordinator never dispatched the overdue signal"),
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&uri),
+        "with no current receipt the scan holds the publication back"
+    );
+
+    server.publish_import_dependencies_settled(&uri).await;
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the minted receipt must release the held publication mid-scan"),
+        )
+        .await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    server
+        .sync_coordinator
+        .set_workspace_scan_in_progress(false);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document() {
     let fixture = watched_dependency_fixture(true).await;

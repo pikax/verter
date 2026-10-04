@@ -315,7 +315,7 @@ impl VerterLanguageServer {
                 );
                 // A publication the workspace scan held back for want of this
                 // receipt is owed now, not when the whole scan ends.
-                self.sync_coordinator.dependencies_settled(canonical_id);
+                self.sync_coordinator.dependencies_settled();
             }
         }
     }

@@ -910,6 +910,10 @@ pub(super) async fn handle_did_change(
                         after_key,
                         frontier_unchanged,
                     );
+                    // Receipts re-currented here are minted by no import pass; a
+                    // publication the workspace scan held for want of one is
+                    // owed now.
+                    server.sync_coordinator.dependencies_settled();
                 }
             }
         }

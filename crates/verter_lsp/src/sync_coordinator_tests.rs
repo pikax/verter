@@ -3911,7 +3911,8 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
     // `Current` has its dependency closure delivered; `Parked` is waiting on a
     // dependency the scan has not reached; `Unsettled` never gets a receipt
     // during the scan; `Active` is being edited.
-    let names = ["Current", "Parked", "Unsettled", "Active"];
+    // `Promoted` is made current without any import pass minting it.
+    let names = ["Current", "Parked", "Unsettled", "Active", "Promoted"];
     let docs: Vec<(String, Uri)> = names
         .iter()
         .map(|name| {
@@ -3946,7 +3947,7 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
     record_receipt(&docs[0].0);
 
     let overdue = Instant::now() - Duration::from_secs(60);
-    for (index, (canonical_id, uri)) in docs[..3].iter().enumerate() {
+    for (index, (canonical_id, uri)) in docs[..3].iter().chain(&docs[4..]).enumerate() {
         handle.signal(
             canonical_id.clone(),
             uri.as_str().to_string(),
@@ -4009,7 +4010,7 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
     // The parked dependency is delivered: `Parked` is certified at once, while
     // the scan still runs and `Unsettled` is still held.
     record_receipt(&docs[1].0);
-    handle.dependencies_settled(&docs[1].0);
+    handle.dependencies_settled();
     handle
         .await_until(
             || documents.diagnostics_ready(&docs[1].1) && handle.diag_tasks_live() == 0,
@@ -4022,6 +4023,23 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
         "a receipt minted for one document releases only that document"
     );
 
+    // A receipt re-currented without a mint (an isolated edit elsewhere promotes
+    // it) still releases the publication: the loop re-checks on wake.
+    assert!(
+        !documents.diagnostics_ready(&docs[4].1),
+        "Promoted is held until its receipt is current"
+    );
+    record_receipt(&docs[4].0);
+    handle.dependencies_settled();
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[4].1) && handle.diag_tasks_live() == 0,
+            || panic!("a receipt that became current without a mint must release the hold"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(!pulled(&provider.calls(), "Unsettled"));
+
     // The scan ends: whatever it still held is released with no re-arm signal.
     handle.set_workspace_scan_in_progress(false);
     handle
@@ -4033,6 +4051,44 @@ async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_
             || panic!("every open document is certified once the scan has ended"),
         )
         .await;
+}
+
+/// A route with no type provider publishes only Verter's own diagnostics, which
+/// read no scan-mutated provider state: a non-edited document is certified
+/// while the workspace scan is still running, with no receipt to wait for.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_workspace_scan_a_providerless_document_publishes_without_a_receipt() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Plain.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>\n".to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the document must be open");
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let cached_verter_diags = Arc::clone(&deps.cached_verter_diags);
+    deps.needs_provider_sync.insert(canonical_id.clone());
+    let handle = spawn_sync_coordinator(deps);
+    handle.set_workspace_scan_in_progress(true);
+    handle.signal(
+        canonical_id,
+        uri.as_str().to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    await_publish_for_version(
+        &handle,
+        &cached_verter_diags,
+        uri.as_str(),
+        1,
+        "a provider-less document during a scan",
+    )
+    .await;
+    assert!(handle.workspace_scan_in_progress());
 }
 
 /// Background re-arms (the post-scan sweep re-arms every open document at once)
@@ -6229,7 +6285,6 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
             changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             scanning: Arc::default(),
-            settled_dependencies: Arc::default(),
         },
         deps,
         receipts.clone(),

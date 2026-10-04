@@ -9,7 +9,7 @@
 //! diagnostics and publishes them via push. Push diagnostics stay visible during
 //! typing — VS Code automatically adjusts their positions as the document changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
@@ -93,9 +93,6 @@ struct CanonicalChangeState {
 type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState>>>;
 /// When the user last turned to each open document without editing it.
 type TouchTracker = Arc<parking_lot::Mutex<HashMap<String, Instant>>>;
-/// Documents whose DependencyReady receipt was minted since the coordinator
-/// last looked. See [`SyncCoordinatorHandle::dependencies_settled`].
-type SettledDependencies = Arc<parking_lot::Mutex<HashSet<String>>>;
 
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
@@ -112,8 +109,6 @@ pub struct SyncCoordinatorHandle {
     touches: TouchTracker,
     /// Whether a workspace scan is currently publishing into the provider.
     scanning: Arc<std::sync::atomic::AtomicBool>,
-    /// Receipts minted while the scan holds publications back.
-    settled_dependencies: SettledDependencies,
     /// TEST-ONLY: the coordinator's own progress receipts.
     #[cfg(test)]
     pub(crate) receipts: CoordinatorReceipts,
@@ -304,8 +299,11 @@ impl SyncCoordinatorHandle {
     /// DependencyReady receipt is current: the imports its diagnostics depend
     /// on are then already in the engine, so the scan still publishing
     /// unrelated documents cannot change its answer. One whose receipt is not
-    /// current is still synced but held back, fail-closed, until the receipt is
-    /// minted ([`Self::dependencies_settled`]) or the scan ends.
+    /// current is still synced but held back, fail-closed, until the loop
+    /// observes the receipt current (every wake re-checks, so a receipt that
+    /// became current without a mint, e.g. re-currented by an isolated edit
+    /// elsewhere, releases it too) or the scan ends. A route with no type
+    /// provider has no receipt and holds nothing.
     pub fn set_workspace_scan_in_progress(&self, scanning: bool) {
         self.scanning
             .store(scanning, std::sync::atomic::Ordering::Release);
@@ -317,18 +315,13 @@ impl SyncCoordinatorHandle {
         self.scanning.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// `canonical_id`'s DependencyReady receipt was just minted. A
-    /// publication the scan held back for want of it is released; anything
-    /// else ignores the call. Outside a scan nothing is ever held back, and a
-    /// scan that ends releases everything it held.
-    pub fn dependencies_settled(&self, canonical_id: &str) {
-        if !self.workspace_scan_in_progress() {
-            return;
+    /// A DependencyReady receipt was just minted: wake the loop so a
+    /// publication the scan held back for want of it is re-examined now rather
+    /// than at the next unrelated wake. Outside a scan nothing is held back.
+    pub fn dependencies_settled(&self) {
+        if self.workspace_scan_in_progress() {
+            let _ = self.wake_tx.try_send(());
         }
-        self.settled_dependencies
-            .lock()
-            .insert(canonical_id.to_string());
-        let _ = self.wake_tx.try_send(());
     }
 
     /// The user turned to this document without editing it (an interactive
@@ -353,7 +346,6 @@ impl SyncCoordinatorHandle {
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 scanning: Arc::default(),
-                settled_dependencies: Arc::default(),
                 receipts: CoordinatorReceipts::default(),
             },
             wake_rx,
@@ -606,7 +598,6 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let touches: TouchTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let scanning: Arc<std::sync::atomic::AtomicBool> = Arc::default();
-    let settled_dependencies: SettledDependencies = Arc::default();
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     let diagnostics_refresh_rx = deps.documents.subscribe_diagnostics_refresh();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
@@ -621,7 +612,6 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
             changes: Arc::clone(&changes),
             touches: Arc::clone(&touches),
             scanning: Arc::clone(&scanning),
-            settled_dependencies: Arc::clone(&settled_dependencies),
         },
         Arc::new(deps),
         #[cfg(test)]
@@ -634,7 +624,6 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         changes,
         touches,
         scanning,
-        settled_dependencies,
         #[cfg(test)]
         receipts,
     }
@@ -646,7 +635,6 @@ struct CoordinatorShared {
     changes: ChangeTracker,
     touches: TouchTracker,
     scanning: Arc<std::sync::atomic::AtomicBool>,
-    settled_dependencies: SettledDependencies,
 }
 
 /// One in-flight provider pull, named by the task that runs it. Dropping it —
@@ -829,24 +817,23 @@ fn dependencies_current(deps: &SyncCoordinatorDeps, canonical_id: &str) -> bool 
             .is_current(canonical_id, &deps.documents, &deps.vfs_workspace)
 }
 
-/// Return held publications to the pending map: those whose receipt has since
-/// been minted, or all of them once the scan has ended. Each keeps its original
-/// receipt instant, so it is due at once and keeps its place in the ordering.
+/// Return held publications to the pending map: those whose receipt is current
+/// now, or all of them once the scan has ended. A released publication that
+/// already has a pending entry coalesces into it (forcing diagnostics and
+/// keeping that entry's newer instant, sync need and user attention), so it
+/// waits out that entry's debounce; otherwise it keeps its original receipt
+/// instant and is due at once.
 fn release_held_publications(
     scanning: bool,
-    settled: &parking_lot::Mutex<HashSet<String>>,
+    deps: &SyncCoordinatorDeps,
     held: &mut HashMap<String, PendingSignal>,
     pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
 ) {
-    let settled = std::mem::take(&mut *settled.lock());
-    let released: Vec<String> = if scanning {
-        settled
-            .into_iter()
-            .filter(|canonical_id| held.contains_key(canonical_id))
-            .collect()
-    } else {
-        held.keys().cloned().collect()
-    };
+    let released: Vec<String> = held
+        .keys()
+        .filter(|canonical_id| !scanning || dependencies_current(deps, canonical_id))
+        .cloned()
+        .collect();
     for canonical_id in released {
         let Some(signal) = held.remove(&canonical_id) else {
             continue;
@@ -885,7 +872,6 @@ async fn coordinator_loop(
         changes,
         touches,
         scanning,
-        settled_dependencies,
     } = shared;
     let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
@@ -980,7 +966,7 @@ async fn coordinator_loop(
     loop {
         release_held_publications(
             scanning.load(std::sync::atomic::Ordering::Acquire),
-            &settled_dependencies,
+            &deps,
             &mut awaiting_dependencies,
             &mut pending_files,
         );
