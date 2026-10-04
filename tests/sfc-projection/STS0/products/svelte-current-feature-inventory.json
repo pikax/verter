@@ -43,7 +43,7 @@
       "id": "svelte-benchmarks",
       "path": "crates/verter_validation_probe/manifest/svelte.toml",
       "role": "pinned-svelte-benchmarks-case-inventory; deterministic smoke slice selected; adapter at crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
-      "recordedRows": 70
+      "recordedRows": 2520
     }
   ],
   "selectedMembers": [
@@ -339,6 +339,18 @@
       "id": "svelte-benchmarks-Comp00019",
       "population": "svelte-benchmarks",
       "caseId": "svelte/fixtures/20/Comp00019.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-1000-repeated-Comp00000",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/1000-repeated/Comp00000.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-1000-repeated-Comp00001",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/1000-repeated/Comp00001.svelte",
       "owner": "component-function-shape"
     }
   ],
