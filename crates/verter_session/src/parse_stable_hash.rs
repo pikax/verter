@@ -78,6 +78,13 @@ const SEP: u8 = 0u8;
 pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
 }
+/// The same hash, computed from a request-input record rather than the
+/// canonical artifact. The request-input carrier is the port-shaped
+/// projection of the artifact, so the two must agree; the only caller is
+/// the fact-validation proof surface, which is compiled only under `test` /
+/// `test-support`. A shipped (no test-support) build — the wasm32 lane among
+/// them — therefore has no reader.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compute_parse_stable_hash_inputs(
     indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,
 ) -> Hash16 {

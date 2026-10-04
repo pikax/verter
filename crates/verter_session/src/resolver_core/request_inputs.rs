@@ -43,6 +43,14 @@ pub struct IndexedInputRecord {
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     pub(crate) script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
     pub(crate) snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    /// The owner's `interface AppConfig` shallow flag, mirrored from the
+    /// artifact onto the request-input record. The authoritative copy is
+    /// [`crate::project_type_store::IndexedReady::declares_interface_app_config`];
+    /// this mirror exists for the port-shaped consumers, whose only readers
+    /// today are the fact-validation proof surfaces (compiled under `test` /
+    /// `test-support`). A shipped build therefore carries no reader, so the
+    /// mirror is compiled out rather than left as write-only storage.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) declares_interface_app_config: bool,
     route_surface_hash: OnceLock<Option<crate::types::Hash16>>,
     source_parse_identity: OnceLock<Option<verter_language::ParseKey>>,
@@ -94,6 +102,7 @@ impl crate::project_type_store::IndexedReady {
             framework_parse: self.framework_parse.clone(),
             script_analysis: self.script_analysis.clone(),
             snapshot: Arc::clone(&self.snapshot),
+            #[cfg(any(test, feature = "test-support"))]
             declares_interface_app_config: self.declares_interface_app_config,
             route_surface_hash: OnceLock::new(),
             source_parse_identity: {

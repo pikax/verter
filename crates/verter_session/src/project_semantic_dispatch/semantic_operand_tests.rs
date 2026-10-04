@@ -1686,7 +1686,7 @@ fn content_edit_invalidates_unchanged_locator_identity() {
         &mint(&fresh_dispatch, whole("Owned")),
         ProjectionMode::Expanded,
     );
-    let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, fresh)
+    let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&fresh_dispatch, fresh)
         .expect("fresh result must render");
     assert_eq!(incremental.text, fresh.text);
     assert_eq!(incremental.degraded, fresh.degraded);

@@ -97,6 +97,26 @@ pub trait IndexedInputs {
     /// `note_non_cacheable_read_fan_out` chokepoint flag).
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
 
+    /// The canonical's post-parse artifact read through the **base-store**
+    /// pin rather than the request view's overlay-priority read.
+    ///
+    /// [`Self::ensure_indexed_ready_serve`] is the resolver-tier accessor: it
+    /// materialises the candidate the CALLING request must see, so a session
+    /// request resolves an overlay-priority candidate. Span materialisation at
+    /// the consumer boundary is the one documented exception: published member
+    /// JSDoc is sliced from `IndexedReady.raw_source` through this accessor, so
+    /// the published text is frozen against the base-store artifact and is NOT
+    /// re-pointed at a request view's overlay candidate. The read stays
+    /// content-pinned per canonical (no `get_any` fallback) and returns the
+    /// same owned [`IndexedInputServe`] record, so it adds no borrow and no
+    /// ambient host surface to the trait.
+    ///
+    /// Only the span-slicing primitive
+    /// (`typeinfo::framework_surface::vue_exec::slice_canonical_span`) reads
+    /// through it; every resolver-tier semantic read keeps using
+    /// [`Self::ensure_indexed_ready_serve`].
+    fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
+
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>>;
@@ -377,6 +397,12 @@ pub trait Cancellation {
     fn cancellation_checkpoint(&self) -> CancellationCheckpoint {
         CancellationCheckpoint { _private: () }
     }
+    /// The live token, when the request lifecycle owns one. It is part of the
+    /// port's cancellation surface — a port consumer that needs to hand the
+    /// token to a scheduler task must not reach for the host — and the
+    /// checkpoint form below is the only reader today, so a shipped build has
+    /// no caller of this accessor.
+    #[allow(dead_code)]
     fn cancellation_token(&self) -> Option<verter_scheduler::cancellation::CancellationToken> {
         self.cancellation_checkpoint().token()
     }
@@ -623,6 +649,12 @@ pub trait OwnedLowering {
         name: &str,
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts>;
 
+    /// The owner's `TypeDecl` with its body already lowered — the port's
+    /// eager type-body demand. It is part of the declared lowering surface
+    /// (its value-decl twin `lowered_value_decl` is the read path in use);
+    /// no production call site needs the type-body form yet, so a shipped
+    /// build has no reader.
+    #[allow(dead_code)]
     fn lowered_type_decl(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
@@ -653,6 +685,11 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<super::shallow_file_state::ClassifiedTypeDeps>>;
+    /// The owner's raw-source surfaces in one `SymbolSpace` — the port's
+    /// escape-free read for the syntactic symbol inventory. It is part of
+    /// the declared lowering surface; no production call site needs it yet,
+    /// so a shipped build has no reader.
+    #[allow(dead_code)]
     fn raw_source_surfaces(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,

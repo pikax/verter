@@ -10,7 +10,18 @@ use crate::component_meta_caches::{
 pub struct EngineBinding {
     pub(super) macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
     pub(super) observers: EngineObservers,
+    // The two fact-validation stores below are part of the binding every
+    // facade construction receives. Their producers
+    // (`app_config_no_override_proof_get_or_compute`,
+    // `produce_binder_identity_facts`) are the fact-validation proof
+    // surface, compiled only under `test` / `test-support`, so a shipped
+    // build (the wasm32 lane among them) wires the handles without a
+    // reader. The wiring is kept unconditional on purpose: the stores are
+    // per-project handles the facade must not silently differ about between
+    // build configurations.
+    #[allow(dead_code)]
     pub(super) app_config_proofs: Arc<crate::app_config_proof_db::AppConfigNoOverrideProofDb>,
+    #[allow(dead_code)]
     pub(super) binder_facts: Arc<crate::binder_identity_facts::BinderIdentityFactsStore>,
     pub(super) graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
     pub(super) flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
@@ -117,6 +128,11 @@ impl EnginePolicy {
 
 /// Selected counters and fault witnesses; these own no query or source service.
 pub(crate) struct EngineObservers {
+    // The overflow counter is read by the unbound-observer fact-tracer
+    // basis, whose only consumer is the fact-validation proof surface
+    // (`test` / `test-support`). A shipped build keeps the counter wired
+    // (every facade owns one) without a reader.
+    #[allow(dead_code)]
     pub(super) overflow: Arc<AtomicU64>,
     pub(super) provenance: Arc<crate::MetaProvenance>,
     pub(super) relation: Arc<crate::host_construction::RelationHostKnobs>,

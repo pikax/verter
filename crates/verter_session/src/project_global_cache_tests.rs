@@ -1028,33 +1028,27 @@ fn request_view_is_absent_from_crate_sources() {
     }
 }
 
-/// Arch-guard: the `ResolverContext` trait MUST expose a
-/// `resolver_store_view()` method that returns a
-/// `HostStoreView<'_>`. This is the explicit-view threading entry
-/// point — the only sanctioned way for resolver-tier code to reach
-/// a store view (R17, R18). Without this accessor the surface
-/// would have no view at all and callers would be tempted to
-/// reintroduce the thread-local globals this rule forbids.
+/// Arch-guard: the `ResolverContext` trait stays dyn-compatible and stays
+/// FREE of an ambient store accessor.
 ///
-/// Extends `request_view_is_absent_from_crate_sources` — that test
-/// asserts the FORBIDDEN thread-local shape is absent; this test
-/// asserts the REPLACEMENT explicit-view shape is present (paired
-/// positive / negative arch-guard).
+/// This guard used to require a `resolver_store_view() -> HostStoreView`
+/// method on the trait as "the explicit-view threading entry point" (R17,
+/// R18). The six-port cutover replaced it: resolver-tier code reaches a view
+/// only through the request-bound adapter's own request view, and
+/// `ResolverContext` exposes no host, store or config at all
+/// (SKR-ENGINE-PORTS-AC1). Requiring the retired ambient accessor would have
+/// re-admitted the surface the cutover removed, so the requirement is gone.
+///
+/// What survives is the compile-time boundary enforcement: the trait is used
+/// as `&dyn ResolverContext`, so its object safety must not regress. The
+/// `assert_obj_safe!(ResolverContext)` static check at the bottom of
+/// `resolver_context.rs` already fails the build; it is cross-checked here so
+/// the guard set surfaces the failure in one place. The FORBIDDEN
+/// thread-local shape is asserted absent by
+/// `request_view_is_absent_from_crate_sources`.
 #[test]
 fn resolver_context_threads_session_view_via_view_accessor() {
     let src = include_str!("resolver_core/resolver_context.rs");
-
-    // The trait must declare `resolver_store_view()` so resolver-tier
-    // callers can construct a store view explicitly — no thread-local
-    // view globals. Match the signature tokens so a future
-    // contributor cannot weaken this to a non-explicit shape.
-    assert!(
-        src.contains("fn resolver_store_view(&self) -> HostStoreView"),
-        "ResolverContext trait must declare \
-         `resolver_store_view(&self) -> HostStoreView` — the explicit \
-         view-threading entry point (R17, R18). Missing declaration in \
-         `crates/verter_session/src/resolver_core/resolver_context.rs`."
-    );
 
     // The trait must NOT regress to a generic / non-dyn-compat
     // shape. The `assert_obj_safe!(ResolverContext)` static check at

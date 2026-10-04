@@ -692,7 +692,7 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
             &mint(&fresh_dispatch, member_value("Owned", 0)),
             ProjectionMode::Expanded,
         );
-        let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, fresh)
+        let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&fresh_dispatch, fresh)
             .expect("fresh force must render");
         assert_eq!(replay.text, fresh.text, "{leg}: recomputed answer diverged");
         assert_eq!(replay.degraded, fresh.degraded);

@@ -280,6 +280,16 @@ impl<'h> FactTracerBasisSource<'h> {
         }
     }
 
+    /// The unbound-observer basis: the only constructor that lets a fact
+    /// tracer sit on observers the host does not own a `HostStoreView` for.
+    ///
+    /// Its consumer is the fact-validation proof surface, which is compiled
+    /// only under `test` / `test-support`, so a shipped (no test-support)
+    /// build — the wasm32 lane among them — has no reader. The constructor
+    /// stays part of the basis surface: it is the shape a caller that
+    /// brings its own observers must build, and gating it on a test
+    /// configuration would make the basis enum's shapes differ per build.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn unbound_observers(
         overflow: &'h std::sync::atomic::AtomicU64,
         #[cfg(test)] forcing: &'h crate::host_test_force::TestForceKnobs,

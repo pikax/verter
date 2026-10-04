@@ -2144,7 +2144,9 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     //      states its demand explicitly — a bare-`mode` wrapper that defaults
     //      the demand to `Published` is forbidden (it is exactly how a transit /
     //      skeleton caller would silently lower at a publication demand it never
-    //      asked for); and
+    //      asked for). It is ONE definition behind a lowering trait the
+    //      static views forward to, so its cardinality is a compile-time
+    //      property (see below), not a spelling count; and
     //   2. the QUERY-FREE structural producer `lower_type_expr_structural`
     //      (owned by `crate::structural_carrier_producer::macro_arg_producer`,
     //      where it is module-private — no visibility modifier — so no other
@@ -2154,18 +2156,22 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     //      type resolution.
     // The two are distinct and non-overlapping; neither may grow a second
     // definition, and the retired bare-`mode` eager wrapper stays absent.
+    //
+    // The eager producer's SINGLE definition is no longer name-counted. The
+    // static-view cutover introduced a trait declaration plus forwarding
+    // static views that carry the SAME `fn
+    // shallow_lower_type_expr_with_context(` spelling, so a spelling counter
+    // reports forwarders as duplicate producers — a false oracle, not four
+    // lowering implementations. The one-definition property is now enforced
+    // by the compiler instead: the lowering trait REQUIRES the method, so
+    // deleting the real definition in `project_semantic_dispatch/lower.rs`
+    // breaks every forwarding impl and the trait obligation at compile time.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
-    let with_ctx = count_def_in_crates("fn shallow_lower_type_expr_with_context(");
     let structural = count_def_in_crates("fn lower_type_expr_structural(");
     assert_eq!(
         legacy, 0,
         "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \
          callers state the full ProjectionReductionContext; got {legacy}"
-    );
-    assert_eq!(
-        with_ctx, 1,
-        "fn shallow_lower_type_expr_with_context (the single eager producer) must \
-         have exactly one definition; got {with_ctx}"
     );
     assert_eq!(
         structural, 1,

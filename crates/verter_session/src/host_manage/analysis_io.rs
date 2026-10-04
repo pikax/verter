@@ -1548,6 +1548,7 @@ impl VerterHost {
     /// admission while still returning the freshly-computed value; it
     /// never lowers under a fabricated all-zero scope hash.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn observe_materialize_scope(
         &self,
         canonical: &str,
@@ -1557,9 +1558,13 @@ impl VerterHost {
         })
     }
 
-    /// Context-threaded core of [`Self::observe_materialize_scope`].
-    /// Request-bound callers reuse their captured view and fact tracer instead
+    /// Context-threaded core of the base-context observation. Request-bound
+    /// callers reuse their captured view and fact tracer instead
     /// of constructing a second base context inside the observation.
+    ///
+    /// This is the production entry: every port implementation routes here.
+    /// The no-context wrapper above it is the test / test-support convenience
+    /// form and is compiled out of a shipped build.
     pub(crate) fn observe_materialize_scope_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,

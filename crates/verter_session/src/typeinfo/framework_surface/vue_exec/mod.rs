@@ -730,11 +730,20 @@ pub(crate) fn navigate_param_to_object_surface(
 /// synthetic span). This is the single source-slicing primitive the normalizers
 /// use to materialize display text from a span at the consumer boundary — it
 /// does NOT re-resolve or re-parse.
+///
+/// The read is the BASE-STORE artifact
+/// ([`crate::resolver_core::request_ports::IndexedInputs::base_indexed_ready_serve`]),
+/// not the request view's overlay-priority candidate: published member JSDoc
+/// must stay byte-identical across an API reshape, so this primitive keeps the
+/// source authority it has always had rather than following whichever candidate
+/// the calling request would resolve.
 pub(super) fn slice_canonical_span(
     ctx: &dyn crate::resolver_core::ResolverContext,
     cspan: &CanonicalSpan,
 ) -> Option<String> {
-    let indexed = ctx.ensure_indexed_ready_serve(cspan.file.as_ref())?.indexed;
+    // `base_indexed_ready_serve` is an `IndexedInputs` port method; the trait
+    // object `&dyn ResolverContext` carries the whole port surface.
+    let indexed = ctx.base_indexed_ready_serve(cspan.file.as_ref())?.indexed;
     let source = Arc::clone(&indexed.raw_source);
     let start = cspan.span.start as usize;
     let end = cspan.span.end as usize;

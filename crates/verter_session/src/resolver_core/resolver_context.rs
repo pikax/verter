@@ -279,6 +279,12 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     #[inline]
+    fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id)
+            .map(|serve| self.source_input_leases.retain(serve))
+    }
+
+    #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
         crate::VerterHost::ensure_loaded(self, canonical_id)
     }
@@ -877,6 +883,21 @@ where
             self.0.complete_canonical(canonical_id);
         }
         result.map(|serve| {
+            self.0
+                .request_view()
+                .overlay()
+                .input_artifacts
+                .retain(serve)
+        })
+    }
+
+    /// Base-store read, deliberately NOT the request view's overlay-priority
+    /// candidate: the consumer-boundary span slicer publishes from the
+    /// base-store artifact, and the request view must not re-point that text
+    /// at an overlay candidate.
+    #[inline]
+    fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        crate::VerterHost::ensure_indexed_ready_serve(self.0.host(), canonical_id).map(|serve| {
             self.0
                 .request_view()
                 .overlay()

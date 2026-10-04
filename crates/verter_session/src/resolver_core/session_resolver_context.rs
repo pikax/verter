@@ -10,6 +10,7 @@ use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, Reque
 use crate::resolver_core::resolver_context::{
     MaterializeScopeObservation, RequestBoundAdapter, RequestBoundLifecycle, ResolverContext,
 };
+#[cfg(any(test, feature = "test-support"))]
 use crate::resolver_store::HostStoreView;
 use crate::session_view::SessionView;
 use crate::types::Hash16;

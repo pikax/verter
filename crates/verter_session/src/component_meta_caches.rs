@@ -82,6 +82,7 @@ use verter_type_expr::TypeExpr;
 use crate::cache_runtime::admission::{CacheEntry, NonAdmissionReason};
 use crate::cache_runtime::node::QueryFlightKey;
 use crate::cache_runtime::singleflight::InflightTable;
+#[cfg(any(test, feature = "test-support"))]
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
