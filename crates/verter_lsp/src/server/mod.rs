@@ -540,6 +540,18 @@ pub struct ServerCore {
     /// the gateway's eventual record.
     #[cfg(test)]
     publish_carrier_after_compile_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause point inside `publish_open_carrier_to_external_ts` after the open
+    /// generation is resolved and BEFORE it takes the document's repair lease.
+    /// A caller that reaches it has therefore been *wiring-proven* onto the
+    /// lane-taking wrapper (the fence) rather than onto the lane-less publish,
+    /// which has no such point. Paired with
+    /// `publish_carrier_after_compile_pause` it gives a test-owned ordering
+    /// protocol: "the recovery arm parked at the fence" and "the recovery arm
+    /// reached the publish's compile" are two mutually exclusive, positively
+    /// observed events, so lane exclusion is a scheduling-independent fact
+    /// instead of a deadline.
+    #[cfg(test)]
+    open_carrier_publish_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -979,6 +991,17 @@ impl VerterLanguageServer {
         Self::pause_next_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
     }
 
+    /// Pause the next `publish_open_carrier_to_external_ts` for `canonical_id`
+    /// at its pre-lease fence point — the positive observation that a caller
+    /// reached the lane-taking wrapper at all.
+    #[cfg(test)]
+    fn pause_next_open_carrier_publish_before_lease(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.open_carrier_publish_before_lease_pause, canonical_id)
+    }
+
     #[cfg(test)]
     fn pause_next_ide_sync_at(
         slot: &parking_lot::Mutex<Option<IdeSyncPausePoint>>,
@@ -1045,6 +1068,12 @@ impl VerterLanguageServer {
     #[cfg(test)]
     async fn maybe_pause_publish_carrier_after_compile(&self, canonical_id: &str) {
         Self::maybe_pause_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
+            .await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_open_carrier_publish_before_lease(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.open_carrier_publish_before_lease_pause, canonical_id)
             .await;
     }
 
@@ -1224,6 +1253,8 @@ impl VerterLanguageServer {
             ide_sync_after_surface_record_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
             publish_carrier_after_compile_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            open_carrier_publish_before_lease_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,

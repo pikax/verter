@@ -522,20 +522,37 @@ fn a_clean_exit_after_compile_is_a_harness_failure_for_an_unregistered_producer_
         )
         .remove(0)
         .expect("the observation is representable");
-    // `comparison = none` makes Structural NOT APPLICABLE for this framework,
-    // so the missing reference frame cannot be reported there. What must not
-    // happen is the probe reporting a clean pass, and it does not: the Route
-    // and Compile terminals are the ones the compile frame earned.
     assert_eq!(
-        observation.terminal(Dimension::Structural),
-        &Terminal::NotApplicable {
-            reason: NotApplicableReason::ComparatorAbsent
-        },
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::HarnessFailure)
     );
     assert_eq!(
         observation.terminal(Dimension::Route).class(),
         Some(C::Pass)
     );
+    assert_eq!(
+        observation.terminal(Dimension::Compile).class(),
+        Some(C::Pass)
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Performance).class(),
+        Some(C::Pass)
+    );
+    let framework_run = FrameworkRun {
+        manifest: &manifest,
+        request_template: request::template_for(Framework::Svelte),
+        selected: vec![SVELTE_CASE.to_string()],
+        observed: vec![ObservedCase {
+            case_id: SVELTE_CASE.to_string(),
+            request_digest: request::request_digest(Framework::Svelte, "fixtures/App.svelte"),
+            elapsed_ns: Some(1_000),
+            observation,
+        }],
+    };
+    let summary = summary::build(Lane::Smoke, &[framework_run]).expect("valid summary");
+    assert_eq!(summary.totals.harness_failures, 1);
+    assert_eq!(summary.totals.passed, 0);
+    assert_eq!(summary.frameworks[0].cases[0].elapsed_ns, Some(1_000));
 }
 
 /// A driver-level exception line is the harness failing, whatever phase it
@@ -629,6 +646,92 @@ fn an_unregistered_producer_is_not_applicable_when_the_manifest_declares_no_comp
     manifest
         .check_applicability(&observation)
         .expect("the observation agrees with the manifest's applicability");
+}
+
+/// `comparison = none` accepts the explicit `inapplicable` frame and nothing
+/// else. A reference producer that failed is a reference failure, so a case
+/// whose comparator is absent can never pass as an owned skip while the
+/// producer's error is recorded nowhere.
+#[test]
+fn a_failed_reference_frame_is_a_reference_failure_even_with_no_comparison() {
+    let manifest = svelte_manifest();
+    let mut run = ProbeRun::new(
+        SVELTE_CASE,
+        vec![RequestedEntry {
+            canonical_id: SVELTE_CASE.to_string(),
+            source: String::new(),
+            request_digest: String::new(),
+        }],
+    );
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Compile));
+    let _ = run.ingest_frame(compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Reference));
+    let _ = run.ingest_frame(reference_frame(
+        SVELTE_CASE,
+        vec![ReferenceResult::Failed {
+            error: "the reference producer exited with code 1".to_string(),
+        }],
+    ));
+    let observation = run
+        .finish(&manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::ReferenceFailure),
+        "a failed reference producer is not an owned skip",
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Route).class(),
+        Some(C::Pass),
+        "the completed compile measurement survives a reference failure",
+    );
+    manifest
+        .check_applicability(&observation)
+        .expect("a reference failure is a protocol failure, not an applicability mismatch");
+}
+
+/// The third `comparison = none` answer: a producer that DID emit a reference.
+/// The manifest has no comparator to judge it with, so the frame cannot be
+/// judged as pass or as an owned skip — it is the protocol breaking, and the
+/// same reference failure the failed-producer arm reports.
+#[test]
+fn a_produced_reference_frame_is_a_reference_failure_with_no_comparison() {
+    let manifest = svelte_manifest();
+    let mut run = ProbeRun::new(
+        SVELTE_CASE,
+        vec![RequestedEntry {
+            canonical_id: SVELTE_CASE.to_string(),
+            source: String::new(),
+            request_digest: String::new(),
+        }],
+    );
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Compile));
+    let _ = run.ingest_frame(compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Reference));
+    let _ = run.ingest_frame(reference_frame(
+        SVELTE_CASE,
+        vec![ReferenceResult::Produced {
+            code: MODULE.to_string(),
+        }],
+    ));
+    let observation = run
+        .finish(&manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::ReferenceFailure),
+        "a produced reference this manifest cannot compare is not an owned skip",
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Route).class(),
+        Some(C::Pass),
+        "the completed compile measurement survives an uncomparable reference",
+    );
+    manifest
+        .check_applicability(&observation)
+        .expect("an uncomparable reference is a protocol failure, not an applicability mismatch");
 }
 
 // ---------------------------------------------------------------------------
@@ -982,6 +1085,12 @@ fn a_svelte_product_that_is_not_a_valid_module_is_malformed_not_a_pass() {
         vec![
             phase(SVELTE_CASE, Phase::Compile),
             compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]),
+            reference_frame(
+                SVELTE_CASE,
+                vec![ReferenceResult::Inapplicable {
+                    inapplicable: "svelte".to_string(),
+                }],
+            ),
         ],
         None,
     );
@@ -1014,6 +1123,12 @@ fn a_svelte_product_that_is_not_a_valid_module_is_malformed_not_a_pass() {
             vec![
                 phase(SVELTE_CASE, Phase::Compile),
                 compile_frame(SVELTE_CASE, vec![entry]),
+                reference_frame(
+                    SVELTE_CASE,
+                    vec![ReferenceResult::Inapplicable {
+                        inapplicable: "svelte".to_string(),
+                    }],
+                ),
             ],
             None,
         );
@@ -1939,6 +2054,36 @@ fn every_committed_manifest_is_valid_bounded_and_fully_classified() {
 #[test]
 fn the_generated_corpus_digests_every_inventoried_case() {
     let manifest = committed_manifest(Framework::Svelte);
+    for directory in [
+        "20",
+        "50",
+        "50-repeated",
+        "200",
+        "200-repeated",
+        "1000",
+        "1000-repeated",
+    ] {
+        let prefix = format!("svelte/fixtures/{directory}/");
+        assert!(
+            manifest
+                .inventory
+                .iter()
+                .any(|case| case.case_id.starts_with(&prefix)),
+            "missing {directory}"
+        );
+    }
+    assert!(
+        manifest
+            .smoke
+            .iter()
+            .filter(|case| case.starts_with("svelte/fixtures/20/"))
+            .count()
+            >= 20
+    );
+    assert!(manifest
+        .smoke
+        .iter()
+        .any(|case| case.contains("-repeated/")));
     for case in &manifest.inventory {
         assert!(
             case.digest.is_some(),
@@ -2030,10 +2175,11 @@ fn only_the_implemented_route_authority_gates() {
     }
 }
 
-/// The lane is table-driven: the workflow declares exactly ONE probe job, and
-/// there is no per-fixture job or per-fixture test definition.
+/// The lane is table-driven: the workflow declares exactly ONE workload
+/// (`probe`) job, alongside the non-required `observe` job that runs capture,
+/// and there is no per-fixture job or per-fixture test definition.
 #[test]
-fn the_workflow_declares_exactly_one_probe_job() {
+fn the_workflow_declares_one_workload_job_and_one_observation_job() {
     let text = workflow_text();
 
     let mut in_jobs = false;
@@ -2055,12 +2201,11 @@ fn the_workflow_declares_exactly_one_probe_job() {
             jobs.push(trimmed.trim_end_matches(':').to_string());
         }
     }
-    // The observation artifact is published by the probe job itself (its
-    // package run already executes the observation test); a second job
-    // re-preparing the same runner for that one test is not declared.
+    // Workload validation remains one shared job; capture cannot add work or
+    // failures to that required job.
     assert_eq!(
         jobs,
-        vec!["probe".to_string()],
+        vec!["probe".to_string(), "observe".to_string()],
         "the workflow declares {jobs:?}"
     );
     assert_eq!(

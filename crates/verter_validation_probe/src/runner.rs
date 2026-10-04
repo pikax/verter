@@ -973,9 +973,6 @@ impl ProbeRun {
         authored: &std::collections::BTreeSet<String>,
         terminal: Option<ProbeOutcomeClass>,
     ) -> DimensionInput {
-        if manifest.comparison == Comparison::None {
-            return DimensionInput::NotApplicable(NotApplicableReason::ComparatorAbsent);
-        }
         let reference_failure =
             |message: String, source: EvidenceSource| DimensionInput::Observed {
                 classes: vec![ProbeOutcomeClass::ReferenceFailure],
@@ -1000,6 +997,27 @@ impl ProbeRun {
                 }],
             };
         };
+        if manifest.comparison == Comparison::None {
+            // `comparison = none` makes the explicit `inapplicable` frame the
+            // chartered positive, not a licence to skip whatever the producer
+            // answered. A producer that failed, or a reference this manifest has
+            // no comparator for, is the protocol breaking — classifying it as an
+            // owned skip would report the break with no failure recorded.
+            return match &reference[position] {
+                ReferenceResult::Inapplicable { .. } => {
+                    DimensionInput::NotApplicable(NotApplicableReason::ComparatorAbsent)
+                }
+                ReferenceResult::Failed { error } => {
+                    reference_failure(error.clone(), EvidenceSource::Reference)
+                }
+                ReferenceResult::Produced { .. } => reference_failure(
+                    "a reference was produced, but this framework's manifest declares \
+                     comparison = none"
+                        .to_string(),
+                    EvidenceSource::Reference,
+                ),
+            };
+        }
         match &reference[position] {
             ReferenceResult::Failed { error } => {
                 reference_failure(error.clone(), EvidenceSource::Reference)
