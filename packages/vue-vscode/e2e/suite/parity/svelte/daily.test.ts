@@ -4,7 +4,12 @@
 import { strict as assert } from "node:assert";
 import * as vscode from "vscode";
 
-import { FIXTURE_NAME, waitForDiagnostics, waitForFileReady } from "../../../helpers";
+import {
+  ensureTypeProviderSynced,
+  FIXTURE_NAME,
+  waitForDiagnostics,
+  waitForFileReady,
+} from "../../../helpers";
 import {
   assertCleanErrors,
   assertCompletionsInclude,
@@ -19,7 +24,7 @@ import {
   settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
-import { sequenceParent } from "../../../lib/timeouts";
+import { pollBudget, sequenceParent } from "../../../lib/timeouts";
 
 function onlySvelteParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "svelte-parity")
@@ -28,9 +33,11 @@ function onlySvelteParity(ctx: Mocha.Context): void {
 
 suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
-    this.timeout(sequenceParent("restartedSuiteSetup"));
+    this.timeout(sequenceParent("restartedWorkspaceSuiteSetup"));
     onlySvelteParity(this);
-    await restartParityReady("src/App.svelte");
+    await restartParityReady("src/App.svelte", {
+      workspaceWide: "daily reference-count cases need the complete project frontier",
+    });
   });
 
   test("svelte.clean-diagnostics.daily", async function () {
@@ -239,6 +246,12 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
 
   test("svelte.references.script-and-markup", async function () {
     onlySvelteParity(this);
+    this.timeout(sequenceParent("restartedWorkspaceReferences"));
+    // The provider-owned witnesses above restart the server in-test, which
+    // invalidates the suite setup's level-2 fact. Closed-file references are
+    // answered only once the new server's project frontier is complete, so
+    // await its own level-2 announcement before counting.
+    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
     try {
       await assertReferenceCountAtLeast(
         { file: "src/DailyBinding.svelte", token: "dailyValue", occurrence: 0 },

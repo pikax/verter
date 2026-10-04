@@ -294,11 +294,16 @@ impl SyncCoordinatorHandle {
         }
     }
 
-    /// A workspace scan started or ended. While one runs, only a document the
-    /// user is EDITING is pulled from the provider: the scan is publishing
-    /// hundreds of documents into the engine, every pull makes it rebuild its
-    /// program against that moving target, and the result is thrown away
-    /// anyway — every open document is re-armed when the scan completes.
+    /// A workspace scan started or ended. While one runs, a document the user
+    /// is not EDITING is pulled from the provider only once its own
+    /// DependencyReady receipt is current: the imports its diagnostics depend
+    /// on are then already in the engine, so the scan still publishing
+    /// unrelated documents cannot change its answer. One whose receipt is not
+    /// current is still synced but held back, fail-closed, until the loop
+    /// observes the receipt current (every wake re-checks, so a receipt that
+    /// became current without a mint, e.g. re-currented by an isolated edit
+    /// elsewhere, releases it too) or the scan ends. A route with no type
+    /// provider has no receipt and holds nothing.
     pub fn set_workspace_scan_in_progress(&self, scanning: bool) {
         self.scanning
             .store(scanning, std::sync::atomic::Ordering::Release);
@@ -308,6 +313,15 @@ impl SyncCoordinatorHandle {
     /// Whether a workspace scan is publishing documents into the engine right now.
     pub fn workspace_scan_in_progress(&self) -> bool {
         self.scanning.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A DependencyReady receipt was just minted: wake the loop so a
+    /// publication the scan held back for want of it is re-examined now rather
+    /// than at the next unrelated wake. Outside a scan nothing is held back.
+    pub fn dependencies_settled(&self) {
+        if self.workspace_scan_in_progress() {
+            let _ = self.wake_tx.try_send(());
+        }
     }
 
     /// The user turned to this document without editing it (an interactive
@@ -540,6 +554,10 @@ pub struct SyncCoordinatorDeps {
     /// non-owned retry disposition), shared with the server so the debounced sync's carrier
     /// commits and non-owned settlements serialize on the ONE barrier map.
     pub carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    /// The DependencyReady receipts the background import publication mints —
+    /// the server's own memo. Read only while a workspace scan runs, to decide
+    /// whether an open document's dependencies are current enough to publish.
+    pub(crate) dependency_receipts: Arc<crate::server::ImportSyncMemo>,
 }
 
 /// Debounce interval: sync fires after [`crate::edit_quiet_window::EDIT_QUIET_WINDOW`]
@@ -789,6 +807,44 @@ fn absorb_inbox(
     }
 }
 
+/// Whether `canonical_id`'s import closure is current enough to publish while a
+/// workspace scan runs. A route with no type provider publishes only Verter's
+/// own diagnostics, which read no provider state.
+fn dependencies_current(deps: &SyncCoordinatorDeps, canonical_id: &str) -> bool {
+    deps.type_provider.is_none()
+        || deps
+            .dependency_receipts
+            .is_current(canonical_id, &deps.documents, &deps.vfs_workspace)
+}
+
+/// Return held publications to the pending map: those whose receipt is current
+/// now, or all of them once the scan has ended. A released publication that
+/// already has a pending entry coalesces into it (forcing diagnostics and
+/// keeping that entry's newer instant, sync need and user attention), so it
+/// waits out that entry's debounce; otherwise it keeps its original receipt
+/// instant and is due at once.
+fn release_held_publications(
+    scanning: bool,
+    deps: &SyncCoordinatorDeps,
+    held: &mut HashMap<String, PendingSignal>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+) {
+    let released: Vec<String> = held
+        .keys()
+        .filter(|canonical_id| !scanning || dependencies_current(deps, canonical_id))
+        .cloned()
+        .collect();
+    for canonical_id in released {
+        let Some(signal) = held.remove(&canonical_id) else {
+            continue;
+        };
+        pending_files
+            .entry(canonical_id)
+            .and_modify(|(_, pending)| pending.force_diagnostics = true)
+            .or_insert((signal.received_at, signal));
+    }
+}
+
 /// Aborts the wrapped task when the guard drops — used for the restart-pulse
 /// listener, whose owner ([`coordinator_loop`]) must stop it on every return
 /// path (see the listener's setup comment).
@@ -827,6 +883,9 @@ async fn coordinator_loop(
     // Documents whose last pull landed incomplete and were re-synced once for
     // it; cleared by the next complete publication.
     let mut incomplete_resyncs: HashMap<String, u8> = HashMap::new();
+    // Publications the workspace scan is holding back until the document's
+    // DependencyReady receipt is current. Bounded by the open set.
+    let mut awaiting_dependencies: HashMap<String, PendingSignal> = HashMap::new();
 
     // A canonical id whose change is still in flight is NOT quiet, so it is
     // excluded from BOTH the deadline computation and the dispatch set. It is
@@ -905,6 +964,12 @@ async fn coordinator_loop(
     }
 
     loop {
+        release_held_publications(
+            scanning.load(std::sync::atomic::Ordering::Acquire),
+            &deps,
+            &mut awaiting_dependencies,
+            &mut pending_files,
+        );
         // Calculate next deadline from pending files. With every pull slot
         // taken nothing is dispatchable, so no timer is armed at all: the loop
         // parks until a slot frees or a signal arrives, instead of spinning on
@@ -1174,6 +1239,8 @@ async fn coordinator_loop(
 
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
+                    // Whatever this tick decides supersedes a held publication.
+                    awaiting_dependencies.remove(&canonical_id);
                     // The touch has done its job once its document is served; what
                     // it said about the user's attention outlives the service.
                     let touched = touch_tracker.lock().remove(&canonical_id);
@@ -1280,9 +1347,22 @@ async fn coordinator_loop(
                     if publish_diagnostics
                         && scanning.load(std::sync::atomic::Ordering::Acquire)
                         && !signal.edited
+                        && !dependencies_current(&deps, &canonical_id)
                     {
-                        // Synced above; pulled by the post-scan re-arm.
+                        // Synced above, but the imports its diagnostics read
+                        // are not in the engine yet: certifying now would
+                        // publish errors the scan is about to retract. Held
+                        // until the receipt is minted or the scan ends.
                         publish_diagnostics = false;
+                        awaiting_dependencies.insert(
+                            canonical_id.clone(),
+                            PendingSignal {
+                                requires_sync: false,
+                                force_diagnostics: true,
+                                sync_retries_remaining: 0,
+                                ..signal.clone()
+                            },
+                        );
                     }
 
                     if publish_diagnostics {

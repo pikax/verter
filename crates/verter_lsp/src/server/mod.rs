@@ -308,7 +308,7 @@ struct CompletionSnapshotPause {
 /// against it. The generation-free driver reservation survives replacement so
 /// an old driver and a new trigger cannot overlap for one canonical identity.
 mod import_sync_state;
-pub(crate) use import_sync_state::ImportSyncMemo;
+pub(crate) use import_sync_state::{dependency_freshness_key, ImportSyncMemo};
 
 #[derive(Clone, Debug)]
 struct ImportedChildContractFreshnessKey {
@@ -1181,6 +1181,10 @@ impl VerterLanguageServer {
         // half carries Verter-owned diagnostics on every route; the
         // provider-sync half no-ops when no in-process provider is connected
         // (editor-owned tsserver plugin serving, verter-only mode).
+        // The DependencyReady receipts: minted by the background import
+        // publication, read by the coordinator while a workspace scan runs.
+        let import_sync = Arc::new(ImportSyncMemo::default());
+
         let sync_coordinator = crate::sync_coordinator::spawn_sync_coordinator(
             crate::sync_coordinator::SyncCoordinatorDeps {
                 documents: Arc::clone(&documents),
@@ -1196,6 +1200,7 @@ impl VerterLanguageServer {
                 type_provider_kind: config.type_provider_kind,
                 carrier_publish_coordinator: carrier_publish_coordinator.clone(),
                 carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+                dependency_receipts: Arc::clone(&import_sync),
             },
         );
 
@@ -1228,7 +1233,7 @@ impl VerterLanguageServer {
             ),
             needs_ide_sync,
             ide_sync_repair_locks,
-            import_sync: Arc::new(ImportSyncMemo::default()),
+            import_sync,
             child_public_contracts: Arc::new(DashMap::new()),
             child_public_contract_failures: Arc::new(DashMap::new()),
             barrel_component_routes: Arc::new(DashMap::new()),

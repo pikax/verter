@@ -189,6 +189,22 @@ use delivered_receipts::{DeliveredReceipts, Mutation as ReceiptMutation};
 
 use super::import_publication::PublicationUrgency;
 
+/// The workspace `(content_generation, resolver_snapshot_generation)` pair
+/// that keys the DependencyReady receipt. `None` when no published resolver
+/// exists yet (bootstrap) — publication then delivers without minting.
+pub(crate) fn dependency_freshness_key(
+    documents: &crate::documents::DocumentRegistry,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
+) -> Option<(u64, u64)> {
+    let content_generation = documents.host().workspace_read().content_generation();
+    let snapshot_generation = {
+        let ws = vfs_workspace.read();
+        let ws = ws.as_ref()?;
+        ws.load_published()?.snapshot.generation.0
+    };
+    Some((content_generation, snapshot_generation))
+}
+
 #[derive(Default)]
 struct PublicationReservationState {
     active: bool,
@@ -237,6 +253,19 @@ impl ImportSyncMemo {
     /// Whether this document's import set was already delivered at `key`.
     pub(crate) fn is_fresh_at(&self, canonical_id: &str, key: (u64, u64)) -> bool {
         self.delivered.is_fresh_at(canonical_id, key)
+    }
+
+    /// Whether this document's DependencyReady receipt is committed for the
+    /// workspace as it is published NOW. `false` at bootstrap, before any
+    /// resolver is published: no receipt can be current then.
+    pub(crate) fn is_current(
+        &self,
+        canonical_id: &str,
+        documents: &crate::documents::DocumentRegistry,
+        vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
+    ) -> bool {
+        dependency_freshness_key(documents, vfs_workspace)
+            .is_some_and(|key| self.is_fresh_at(canonical_id, key))
     }
 
     #[cfg(test)]
