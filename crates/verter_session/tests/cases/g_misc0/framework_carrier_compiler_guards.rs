@@ -220,12 +220,12 @@ fn carrier_descriptors_have_compilers() {
 /// cached shallow state (the pure-render input) and must not emit a loose
 /// event surface.
 ///
-/// The forbidden-implementation-dependency SCAN that used to live here is
-/// retired: it treated any `ProjectSemanticDispatch` spelling as forbidden,
-/// and the projector now legitimately constructs ONE request facade
+/// This guard does not forbid a `ProjectSemanticDispatch` spelling: the
+/// projector legitimately constructs ONE request facade
 /// (`framework/api_projectors/svelte.rs:206-207`) to hand to the shared
-/// framework-surface executor. That scan rejected the sanctioned facade
-/// construction without demonstrating direct evaluation or OXC parsing at
+/// framework-surface executor, and the rendered result is projected from
+/// cached shallow state, never evaluated. What the guard does assert is the
+/// absence of loose event surfaces, direct evaluation and OXC parsing at
 /// render time. The closed-writer boundary itself is enforced where it is
 /// real — `framework_adapter_guards::framework_adapter_ctx_closed_surface`
 /// owns the adapter ctx's closed surface (no resolver, no store view), and

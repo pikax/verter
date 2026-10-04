@@ -716,6 +716,7 @@ impl<
         source.decl_bodies().transient_value_parts_in(owner, name)
     }
 
+    #[cfg(any(test, feature = "oracle-gen"))]
     fn lowered_type_decl(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
@@ -776,6 +777,7 @@ impl<
         };
         source.type_deps_in(owner, name)
     }
+    #[cfg(any(test, feature = "oracle-gen"))]
     fn raw_source_surfaces(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,

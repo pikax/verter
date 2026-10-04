@@ -2492,15 +2492,9 @@ fn no_off_store_host_caches_discriminator_self_test() {
 // Retired — `no_concrete_verter_host_in_seal_scope`
 // ===========================================================================
 //
-// The resolver-tier ambient-host rail used to be a `syn`-scanned source
-// scanner over the seal scope. Carrying it across the six request ports
-// needed exemptions keyed on spelled file paths, trait names and method
-// names, and CLAUDE.md:500 forbids a landed guard that keys on spelled
-// source — landed enforcement is structural, or the residue is accepted
-// uncovered. The scanner, its allowlist and its synthetic self-cases are
-// therefore retired instead of extended.
-//
-// The boundary itself is structural and stays executable:
+// Ambient host, store and config access in resolver-tier code stays barred
+// STRUCTURALLY (CLAUDE.md:500: landed enforcement is structural, never a
+// name-keyed source scanner):
 //
 //   - `resolver_core::request_ports` is the six request-bound port set. Each
 //     port returns owned records or typed demands; none returns a host,
@@ -2510,15 +2504,14 @@ fn no_off_store_host_caches_discriminator_self_test() {
 //     witnesses: a request that tries to reach ambient host state, a private
 //     worker, a workspace or the execution graph fails to compile, and
 //     `engine_ports_actual_host_positive.rs` pins the real port implementor.
-//   - `RequestBoundAdapter`'s field set is pinned by the compile-time
-//     witness in `resolver_core/resolver_context.rs`: it carries exactly the
-//     request lifecycle, so no ambient host/store/config field can be added
-//     to the engine carrier.
+//   - `RequestBoundAdapter`'s carrier field is `pub(super)` and the engine
+//     holds only `&dyn ResolverContext`, so no engine-tier code can name or
+//     read the carrier; `resolver_core/resolver_context.rs` pins the carrier's
+//     field set at compile time.
 //
 // The residual source-spelling rule — a port implementation may reach the
-// host, engine-tier code may not — is review-enforced (the charter's
-// SKR-ENGINE-PORTS-AC1 `git grep` plus its access-site listing), which is
-// where a name-keyed landed scanner could not be.
+// host, engine-tier code may not — is review-enforced, which is where a
+// name-keyed landed scanner could not be.
 
 // ===========================================================================
 // Phase 9b — `no_napi_direct_verter_compiler_emitters`
@@ -12081,15 +12074,14 @@ fn warm_validation_entry_points_require_current_store_view() {
     // driver validates only through that selected request port.
     //
     // Only the request root's own requirement is asserted from this guard.
-    // The memo driver's validation call and the passive final-result DB's
-    // forbidden-token inventory are NOT re-asserted here: both are
-    // name-keyed source spellings of the memo/storage boundary, so they
-    // tracked the port cutover's file moves rather than a capability. The
-    // capability itself is owned elsewhere — a warm entry is only ever
-    // published through a request root that proved currentness
-    // (`CurrentHostStoreView`), and the final-result storage is passive by
-    // construction (it stores the result; it has no fact port to validate
-    // with).
+    // A memo driver's validation call and a passive final-result DB's
+    // forbidden-token inventory are name-keyed source spellings of the
+    // memo/storage boundary rather than a capability, so re-asserting them
+    // here would pin file moves instead of behaviour. The capability itself is
+    // owned elsewhere — a warm entry is only ever published through a request
+    // root that proved currentness (`CurrentHostStoreView`), and the
+    // final-result storage is passive by construction (it stores the result; it
+    // has no fact port to validate with).
     let root =
         read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
     assert!(

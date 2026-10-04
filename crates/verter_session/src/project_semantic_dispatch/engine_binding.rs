@@ -1,7 +1,11 @@
 //! A one-time attachment consumed by the query facade. This carrier has no
 //! resource getters and cannot execute a query or expose the session store.
 
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
+// The overflow counter's only reader is the fact-validation proof surface, so
+// the import follows the field's own gate (see `EngineObservers::overflow`).
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::AtomicU64;
 
 use crate::component_meta_caches::{
     DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
@@ -10,18 +14,17 @@ use crate::component_meta_caches::{
 pub struct EngineBinding {
     pub(super) macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
     pub(super) observers: EngineObservers,
-    // The two fact-validation stores below are part of the binding every
-    // facade construction receives. Their producers
-    // (`app_config_no_override_proof_get_or_compute`,
-    // `produce_binder_identity_facts`) are the fact-validation proof
-    // surface, compiled only under `test` / `test-support`, so a shipped
-    // build (the wasm32 lane among them) wires the handles without a
-    // reader. The wiring is kept unconditional on purpose: the stores are
-    // per-project handles the facade must not silently differ about between
-    // build configurations.
-    #[allow(dead_code)]
+    // The two fact-validation stores below belong to the fact-validation proof
+    // surface: their only producers (`app_config_no_override_proof_get_or_compute`,
+    // `produce_binder_identity_facts`) and their only readers
+    // (`project_semantic_dispatch/memo.rs`) are compiled under
+    // `test` / `test-support`. They carry the SAME gate, so a shipped build
+    // (the wasm32 lane among them) does not hold a per-project store with no
+    // reader, and no proof-state handle changes shape between build
+    // configurations.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) app_config_proofs: Arc<crate::app_config_proof_db::AppConfigNoOverrideProofDb>,
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) binder_facts: Arc<crate::binder_identity_facts::BinderIdentityFactsStore>,
     pub(super) graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
     pub(super) flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
@@ -57,8 +60,12 @@ impl EngineBinding {
     pub(crate) fn new(
         observers: EngineObservers,
         macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
-        app_config_proofs: Arc<crate::app_config_proof_db::AppConfigNoOverrideProofDb>,
-        binder_facts: Arc<crate::binder_identity_facts::BinderIdentityFactsStore>,
+        #[cfg(any(test, feature = "test-support"))] app_config_proofs: Arc<
+            crate::app_config_proof_db::AppConfigNoOverrideProofDb,
+        >,
+        #[cfg(any(test, feature = "test-support"))] binder_facts: Arc<
+            crate::binder_identity_facts::BinderIdentityFactsStore,
+        >,
         graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
         flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
         intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,
@@ -90,7 +97,9 @@ impl EngineBinding {
         Self {
             observers,
             macro_mirrors,
+            #[cfg(any(test, feature = "test-support"))]
             app_config_proofs,
+            #[cfg(any(test, feature = "test-support"))]
             binder_facts,
             graph,
             flow_slice,
@@ -130,9 +139,8 @@ impl EnginePolicy {
 pub(crate) struct EngineObservers {
     // The overflow counter is read by the unbound-observer fact-tracer
     // basis, whose only consumer is the fact-validation proof surface
-    // (`test` / `test-support`). A shipped build keeps the counter wired
-    // (every facade owns one) without a reader.
-    #[allow(dead_code)]
+    // (`test` / `test-support`), so it carries that same gate.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) overflow: Arc<AtomicU64>,
     pub(super) provenance: Arc<crate::MetaProvenance>,
     pub(super) relation: Arc<crate::host_construction::RelationHostKnobs>,
@@ -145,7 +153,7 @@ pub(crate) struct EngineObservers {
 impl EngineObservers {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        overflow: Arc<AtomicU64>,
+        #[cfg(any(test, feature = "test-support"))] overflow: Arc<AtomicU64>,
         provenance: Arc<crate::MetaProvenance>,
         relation: Arc<crate::host_construction::RelationHostKnobs>,
         #[cfg(any(test, feature = "test-support"))] flow: Arc<
@@ -154,6 +162,7 @@ impl EngineObservers {
         #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
     ) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
             overflow,
             provenance,
             relation,

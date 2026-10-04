@@ -767,11 +767,18 @@ pub(crate) trait RequestBoundLifecycle {
 /// against the view built at their request boundary.
 pub struct RequestBoundAdapter<L>(pub(super) L);
 
-/// Compile-time witness for the request-port boundary: the engine carrier
-/// holds exactly the request lifecycle, so no ambient host, store or config
-/// field can be added to it. The destructuring pattern is exhaustive, which
-/// makes a new field a build error here instead of leaving a name-keyed
-/// source scanner to notice it (CLAUDE.md:500).
+/// Compile-time ARITY pin for the request-port carrier: the destructuring
+/// pattern below is exhaustive over [`RequestBoundAdapter`]'s field set, so a
+/// SECOND field on the carrier is a build error here.
+///
+/// What actually holds the "the engine holds no host, store or config field"
+/// boundary is NOT this witness. It is (1) the carrier's single field being
+/// `pub(super)`, so nothing outside this module can name or read it, and (2)
+/// the engine holding only `&dyn ResolverContext` — the sealed super-trait
+/// surface — which gives engine-tier code no path to the carrier at all. The
+/// lifecycle this carrier wraps DOES expose
+/// [`RequestBoundLifecycle::host`], and the adapter's port impls call it: the
+/// host stays on the session side of the adapter, behind the six ports.
 #[cfg(test)]
 mod adapter_field_set_witness {
     use super::RequestBoundAdapter;
@@ -784,7 +791,10 @@ mod adapter_field_set_witness {
     }
 
     #[test]
-    fn engine_carrier_carries_no_ambient_field() {
+    fn adapter_carries_exactly_one_field() {
+        // The value of this test is that it COMPILES: the body asserts
+        // nothing at runtime. See the module doc for the rails that keep
+        // the field out of the engine's reach.
         fn accepts_projection<L>(_: fn(RequestBoundAdapter<L>) -> L) {}
         accepts_projection::<u8>(lifecycle_only::<u8>);
     }

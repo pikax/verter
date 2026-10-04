@@ -578,11 +578,11 @@ pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
 /// navigation layer is a pure PROJECTION over this substrate).
 /// Structural evidence over the source tree.
 ///
-/// The demand producer's own call site is NOT asserted here: it moved
-/// from `binder_identity_facts.rs` into the facade's memo producer
-/// (`project_semantic_dispatch/memo.rs`), so a scan of the former
-/// producer owner for `ensure_indexed_ready_serve` rejects the
-/// ownership migration without testing anything about the substrate.
+/// The demand producer's own call site is NOT asserted here: the demand is
+/// produced by the facade's memo producer
+/// (`project_semantic_dispatch/memo.rs`), so a scan of the substrate module
+/// for `ensure_indexed_ready_serve` would reject the ownership split without
+/// testing anything about the substrate.
 /// The demand-produced-from-the-artifact behaviour is owned
 /// behaviourally by `binder_provenance_served_from_artifact_in_authored_order`
 /// and `binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit`

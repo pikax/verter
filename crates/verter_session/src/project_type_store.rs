@@ -1257,7 +1257,9 @@ impl ProjectTypeStore {
         crate::project_semantic_dispatch::EngineBinding::new(
             observers,
             macro_mirrors,
+            #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.app_config_no_override_proof),
+            #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.binder_identity_facts),
             Arc::clone(&self.semantic_graph),
             Arc::clone(&self.flow_slice),

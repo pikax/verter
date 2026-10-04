@@ -2157,15 +2157,17 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     // The two are distinct and non-overlapping; neither may grow a second
     // definition, and the retired bare-`mode` eager wrapper stays absent.
     //
-    // The eager producer's SINGLE definition is no longer name-counted. The
-    // static-view cutover introduced a trait declaration plus forwarding
-    // static views that carry the SAME `fn
-    // shallow_lower_type_expr_with_context(` spelling, so a spelling counter
-    // reports forwarders as duplicate producers — a false oracle, not four
-    // lowering implementations. The one-definition property is now enforced
-    // by the compiler instead: the lowering trait REQUIRES the method, so
-    // deleting the real definition in `project_semantic_dispatch/lower.rs`
-    // breaks every forwarding impl and the trait obligation at compile time.
+    // The eager producer's cardinality is NOT name-counted.
+    // `FlowDemandDriver` declares
+    // `shallow_lower_type_expr_with_context` and its impls forward to the one
+    // inherent definition in `project_semantic_dispatch/lower.rs`, so a
+    // `fn shallow_lower_type_expr_with_context(` count reports the
+    // declaration plus the forwarders — forwarders are not lowering
+    // implementations, so that count is a false oracle. What the COMPILER
+    // pins here is the delegation: removing or renaming the inherent
+    // definition breaks every forwarding impl and the trait obligation. A
+    // second eager lowering implementation under another type is not caught
+    // by that; the two assertions below are the oracle for this test.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
     let structural = count_def_in_crates("fn lower_type_expr_structural(");
     assert_eq!(

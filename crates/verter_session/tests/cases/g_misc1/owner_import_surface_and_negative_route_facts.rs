@@ -75,10 +75,11 @@ fn owner_import_surface_producer_calls_resolve_imported_type_root_with_facts() {
 /// override is the central rail.
 ///
 /// The whole-signature validation call itself is NOT asserted from
-/// this file: storage is passive now, and the expression lives in the
-/// owner driver (`host_manage/source_owner_import.rs`), so scanning
-/// `owner_import_surface.rs` for it rejected the storage split without
-/// testing anything about the validation. The behavioural coverage is
+/// this file: `owner_import_surface.rs` is passive storage and the
+/// expression lives in the owner driver
+/// (`host_manage/source_owner_import.rs`), so scanning the storage module
+/// for it would reject a storage split without testing anything about the
+/// validation. The behavioural coverage is
 /// unchanged — the fact matrix
 /// (`tests/cases/fact_matrix/owner_import_surface_*.rs`) and
 /// `negative_import_route_tests` drive the real warm-hit /

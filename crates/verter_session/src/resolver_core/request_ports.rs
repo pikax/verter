@@ -111,10 +111,19 @@ pub trait IndexedInputs {
     /// same owned [`IndexedInputServe`] record, so it adds no borrow and no
     /// ambient host surface to the trait.
     ///
+    /// It goes through the SAME host materialisation bridge as
+    /// [`Self::ensure_indexed_ready_serve`], so it publishes and observes
+    /// identically: for a store-published serve the bridge records the
+    /// canonical's parse fact into the active request fact tracer, and a
+    /// fenced serve still flows its status by value.
+    ///
     /// Only the span-slicing primitive
     /// (`typeinfo::framework_surface::vue_exec::slice_canonical_span`) reads
     /// through it; every resolver-tier semantic read keeps using
-    /// [`Self::ensure_indexed_ready_serve`].
+    /// [`Self::ensure_indexed_ready_serve`]. That reader set is ENFORCED, not
+    /// merely documented: `the_base_store_serve_has_exactly_one_reader` in
+    /// `project_global_cache_tests` fails the build if a second call site
+    /// appears anywhere in the crate.
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
@@ -397,15 +406,9 @@ pub trait Cancellation {
     fn cancellation_checkpoint(&self) -> CancellationCheckpoint {
         CancellationCheckpoint { _private: () }
     }
-    /// The live token, when the request lifecycle owns one. It is part of the
-    /// port's cancellation surface — a port consumer that needs to hand the
-    /// token to a scheduler task must not reach for the host — and the
-    /// checkpoint form below is the only reader today, so a shipped build has
-    /// no caller of this accessor.
-    #[allow(dead_code)]
-    fn cancellation_token(&self) -> Option<verter_scheduler::cancellation::CancellationToken> {
-        self.cancellation_checkpoint().token()
-    }
+    /// A port consumer that needs the live token takes it from the checkpoint
+    /// (`cancellation_checkpoint().token()`); the port therefore exposes no
+    /// second, unread cancellation accessor.
     #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
         self.cancellation_checkpoint().is_cancelled()
@@ -650,11 +653,11 @@ pub trait OwnedLowering {
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts>;
 
     /// The owner's `TypeDecl` with its body already lowered — the port's
-    /// eager type-body demand. It is part of the declared lowering surface
-    /// (its value-decl twin `lowered_value_decl` is the read path in use);
-    /// no production call site needs the type-body form yet, so a shipped
-    /// build has no reader.
-    #[allow(dead_code)]
+    /// eager type-body demand. Its value-decl twin `lowered_value_decl` is the
+    /// read path in use. Gated to the `typeinfo::oracle_core` consumer module
+    /// (`#[cfg(any(test, feature = "oracle-gen"))]`, see `typeinfo/mod.rs`),
+    /// so a shipped build carries no unread method on the port contract.
+    #[cfg(any(test, feature = "oracle-gen"))]
     fn lowered_type_decl(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
@@ -686,10 +689,11 @@ pub trait OwnedLowering {
         name: &str,
     ) -> Option<Arc<super::shallow_file_state::ClassifiedTypeDeps>>;
     /// The owner's raw-source surfaces in one `SymbolSpace` — the port's
-    /// escape-free read for the syntactic symbol inventory. It is part of
-    /// the declared lowering surface; no production call site needs it yet,
-    /// so a shipped build has no reader.
-    #[allow(dead_code)]
+    /// escape-free read for the syntactic symbol inventory. Gated to the
+    /// `typeinfo::oracle_core` consumer module
+    /// (`#[cfg(any(test, feature = "oracle-gen"))]`, see `typeinfo/mod.rs`),
+    /// so a shipped build carries no unread method on the port contract.
+    #[cfg(any(test, feature = "oracle-gen"))]
     fn raw_source_surfaces(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,

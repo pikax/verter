@@ -39,18 +39,16 @@
 //! `engine_fact_signature_*` helpers (not the legacy
 //! `engine_dep_signature_for_canonical`).
 //!
-//! The retired third guard (`family_a_warm_hit_uses_fact_validation`)
-//! scanned `component_meta_caches.rs` for the warm-read validation
-//! adapters and the per-cache routing bodies, plus the
-//! `cache_runtime::node` cold-winner revalidators. Those bodies moved to
+//! A third guard here used to scan `component_meta_caches.rs` for the
+//! warm-read validation adapters and the per-cache routing bodies, plus the
+//! `cache_runtime::node` cold-winner revalidators. Those bodies are owned by
 //! the facade's own producers (`project_semantic_dispatch/memo.rs`,
-//! `cache_runtime/node.rs`) and `component_meta_caches.rs` is passive
-//! storage, so the scanner rejected a storage split while proving nothing
-//! about the strict warm-read contract. The contract itself is unchanged
-//! and behaviourally owned by the fact matrix (`tests/cases/fact_matrix/`)
-//! and the warm-hit cases that drive a real warm read against a live store
-//! view; the compiler owns the single-definition property of the shared
-//! adapter bodies.
+//! `cache_runtime/node.rs`) and `component_meta_caches.rs` is passive storage,
+//! so such a scanner would reject a storage split while proving nothing about
+//! the strict warm-read contract. The contract itself is unchanged and
+//! behaviourally owned by the fact matrix (`tests/cases/fact_matrix/`) and the
+//! warm-hit cases that drive a real warm read against a live store view; the
+//! compiler owns the single-definition property of the shared adapter bodies.
 
 use std::fs;
 use std::path::PathBuf;
