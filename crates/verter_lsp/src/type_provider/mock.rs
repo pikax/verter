@@ -204,6 +204,13 @@ mod inner {
         fail_next_definitions: usize,
         /// As `fail_next_definitions`, for `get_type_definition`.
         fail_next_type_definitions: usize,
+        /// As `fail_next_hovers`, for `get_completions`: while > 0, each call
+        /// RECORDS itself and returns `Err` (a transient provider/transport
+        /// failure), decrementing the counter. The ONLY way a completion
+        /// request reaches its bounded-recovery resync — and therefore the
+        /// only way the production recovery arm's document-lane discipline is
+        /// observable at all — so the lane-fence proofs drive it.
+        fail_next_completions: usize,
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
         /// managed tsgo stuck in a busy dispatch loop). Drives the handler
@@ -414,6 +421,15 @@ mod inner {
         pub fn fail_next_type_definitions(&self, count: usize) {
             let mut state = self.state.lock().unwrap();
             state.fail_next_type_definitions = count;
+        }
+
+        /// Script the next `count` `get_completions` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume. This is the seam that makes completion's bounded recovery
+        /// (the resync arm that republishes the open carrier) reachable.
+        pub fn fail_next_completions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_completions = count;
         }
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
@@ -1382,7 +1398,7 @@ mod inner {
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
-            let (items, on_query, block) = {
+            let (items, on_query, block, fail) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetCompletions {
                     path: path.to_string(),
@@ -1407,7 +1423,13 @@ mod inner {
                         .map(|(_, arrived, release)| (arrived, release)),
                     _ => None,
                 };
-                (items, on_query, block)
+                let fail = if state.fail_next_completions > 0 {
+                    state.fail_next_completions -= 1;
+                    true
+                } else {
+                    false
+                };
+                (items, on_query, block, fail)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
@@ -1418,6 +1440,11 @@ mod inner {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
+                }
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient completion failure".to_string(),
+                    ));
                 }
                 Ok(CompletionResult {
                     items,
