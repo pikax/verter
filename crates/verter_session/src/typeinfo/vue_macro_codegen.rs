@@ -155,7 +155,7 @@ pub(crate) fn vue_macro_codegen_schedule_identity(
     vue_macro_codegen_schedule_identity_from_compat(
         canonical.as_ref(),
         demand,
-        ctx.store_view().compat_token(),
+        crate::resolver_core::fact_validation_port::FactValidationView::new(ctx).compat_token(),
     )
 }
 
@@ -400,8 +400,9 @@ enum ProjectionFailure {
 }
 
 struct TscScopeInventory<'a> {
+    lowering: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
     analysis: &'a ScriptAnalysisSnapshot,
-    shallow_state: &'a crate::resolver_core::ShallowFileState,
+    shallow_state: &'a crate::resolver_core::shallow_file_state::ShallowInputRecord,
     raw_source: &'a str,
 }
 
@@ -570,8 +571,7 @@ fn enter_vue_macro_semantic_attempt<'a>(
 ) -> CompileAttempt<'a> {
     CompileAttempt::enter_semantic_for_project(
         owner_canonical,
-        ctx.resolver_store_view()
-            .project_identity_for(owner_canonical),
+        ctx.captured_project_identity_for(owner_canonical),
     )
 }
 
@@ -592,26 +592,9 @@ fn terminal_partial_vue_macro_codegen_output(
     let completeness = ResultCompleteness::partial(completeness_reason);
     crate::request_context::fold_result_completeness(completeness);
 
-    let indexed = ctx.indexed_for_current_content(owner_canonical);
-    let base_source = (indexed.is_none() && ctx.active_session_view().is_none())
-        .then(|| {
-            ctx.host_for_fact_tracer_install()
-                .scheduler_source(owner_canonical)
-        })
-        .flatten();
-    let origin_whole_hash = indexed
-        .as_ref()
-        .map(|indexed| indexed.whole_hash)
-        .or_else(|| base_source.as_ref().map(|source| source.whole_hash));
-    let script_analysis = indexed
-        .as_ref()
-        .and_then(|indexed| indexed.script_analysis.as_ref().map(Arc::clone))
-        .or_else(|| {
-            base_source
-                .as_ref()
-                .and_then(|source| source.downcast_data::<crate::host_executor::HostSourceData>())
-                .map(|data| Arc::clone(&data.parse.script_analysis))
-        });
+    let inventory = ctx.terminal_macro_inventory(owner_canonical);
+    let origin_whole_hash = inventory.origin_whole_hash;
+    let script_analysis = inventory.script_analysis;
     let mut runtime_entries = Vec::new();
     let mut tsc_entries = Vec::new();
     // The terminal rows derive from the SAME sealed semantic plan the
@@ -918,6 +901,7 @@ impl VerterHost {
         };
         let macros = &script_analysis.macros;
         let tsc_scope_inventory = TscScopeInventory {
+            lowering: ctx,
             analysis: script_analysis,
             shallow_state: &serve.indexed.shallow_state,
             raw_source: &serve.indexed.raw_source,
@@ -959,7 +943,6 @@ impl VerterHost {
                     let macro_index_value = macro_index(payload_index);
                     let macro_scope = crate::request_context::ColdComputeCompletenessScope::enter();
                     let outcome = self.project_expose_runtime_object(
-                        ctx,
                         &dispatch,
                         &mut attempt,
                         mac,
@@ -1243,7 +1226,6 @@ impl VerterHost {
                         (TscSpliceText::new(import_form), None)
                     } else {
                         match render_tsc_testing_node(
-                            ctx,
                             dispatch,
                             owner_canonical,
                             member.value,
@@ -1261,16 +1243,11 @@ impl VerterHost {
                         degraded,
                     });
                 }
-                let scope = match tsc_scope_requirements(
-                    mac,
-                    scope_inventory,
-                    ctx,
-                    dispatch,
-                    owner_canonical,
-                ) {
-                    Ok(scope) => scope,
-                    Err(failure) => return failure.tsc(),
-                };
+                let scope =
+                    match tsc_scope_requirements(mac, scope_inventory, dispatch, owner_canonical) {
+                        Ok(scope) => scope,
+                        Err(failure) => return failure.tsc(),
+                    };
                 MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
                     public: TscPublicPropsProjection::AuthoredArgument {
                         anchor: MacroAnchor::MacroArgument {
@@ -1311,7 +1288,6 @@ impl VerterHost {
                     return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).tsc();
                 }
                 let events = match tsc_emit_rows(
-                    ctx,
                     dispatch,
                     owner_canonical,
                     &surface,
@@ -1323,16 +1299,11 @@ impl VerterHost {
                     Ok(events) => events,
                     Err(failure) => return failure.tsc(),
                 };
-                let mut scope = match tsc_scope_requirements(
-                    mac,
-                    scope_inventory,
-                    ctx,
-                    dispatch,
-                    owner_canonical,
-                ) {
-                    Ok(scope) => scope,
-                    Err(failure) => return failure.tsc(),
-                };
+                let mut scope =
+                    match tsc_scope_requirements(mac, scope_inventory, dispatch, owner_canonical) {
+                        Ok(scope) => scope,
+                        Err(failure) => return failure.tsc(),
+                    };
                 // A `defineEmits<E>()` whose type argument is a bare reference to
                 // a type declared in ANOTHER framework-carrier SFC
                 // (`import type { E } from './Child.vue'; defineEmits<E>()`) is
@@ -1356,26 +1327,21 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineModel => {
-                let value_type =
-                    match render_tsc_node(ctx, dispatch, owner_canonical, payload, counters) {
-                        Ok(text) => text,
-                        Err(failure) => return failure.tsc(),
-                    };
+                let value_type = match render_tsc_node(dispatch, owner_canonical, payload, counters)
+                {
+                    Ok(text) => text,
+                    Err(failure) => return failure.tsc(),
+                };
                 let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
                 let optional = mac
                     .prop_fields
                     .first()
                     .is_none_or(|field| field.is_optional);
-                let scope = match tsc_scope_requirements(
-                    mac,
-                    scope_inventory,
-                    ctx,
-                    dispatch,
-                    owner_canonical,
-                ) {
-                    Ok(scope) => scope,
-                    Err(failure) => return failure.tsc(),
-                };
+                let scope =
+                    match tsc_scope_requirements(mac, scope_inventory, dispatch, owner_canonical) {
+                        Ok(scope) => scope,
+                        Err(failure) => return failure.tsc(),
+                    };
                 MacroTscOutcome::Complete(MacroTscProjection::Model(TscModelProjection {
                     name,
                     optional,
@@ -1410,7 +1376,6 @@ impl VerterHost {
     /// authored-syntax-derived type (or `unknown`) for that member.
     fn project_expose_runtime_object(
         &self,
-        ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
         attempt: &mut CompileAttempt<'_>,
         mac: &AnalyzedMacro,
@@ -1488,16 +1453,10 @@ impl VerterHost {
                             // masquerading as `Ok` text, so it needs no
                             // second, textual screen of its own; a genuinely
                             // resolved member is the only `Ok` outcome.
-                            match render_tsc_node(
-                                ctx,
-                                dispatch,
-                                owner_canonical,
-                                render_node,
-                                counters,
-                            ) {
+                            match render_tsc_node(dispatch, owner_canonical, render_node, counters)
+                            {
                                 Ok(text) => {
-                                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
-                                        ctx,
+                                    crate::resolver_core::component_meta_registry::collect_node_ref_names(dispatch,
                                         render_node,
                                         &mut ref_names,
                                     );
@@ -1528,7 +1487,6 @@ impl VerterHost {
             None,
             &type_references,
             scope_inventory,
-            ctx,
             dispatch,
             owner_canonical,
         ) {

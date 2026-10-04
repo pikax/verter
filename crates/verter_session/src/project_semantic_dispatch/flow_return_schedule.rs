@@ -575,20 +575,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Ok(site) = self.flow_slice_demand_site(key) else {
             return Vec::new();
         };
-        let index = site
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .function_program_index();
+        let index = site.source_demand.function_program_index();
         let Some(entry) = frame_entry(&index, key) else {
             return Vec::new();
         };
         if !demands_callees(entry) {
             return Vec::new();
         }
-        let flow_slice = self.ctx.project_type_store().flow_slice();
         let Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) =
-            crate::cache_runtime::lookup(flow_slice.hash_node(), site.slice_key.clone(), self.ctx)
+            self.flow_slice_driver().lookup_hash(site.slice_key.clone())
         else {
             return Vec::new();
         };
@@ -596,9 +591,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             hash_key: site.slice_key,
             slice_hash: planned.hash(),
         };
-        let Some(lowered) =
-            crate::cache_runtime::lookup(flow_slice.lowered_node(), lowered_key, self.ctx)
-        else {
+        let Some(lowered) = self.flow_slice_driver().lookup_lowered(lowered_key) else {
             return Vec::new();
         };
         self.callees_of(key, &index, entry, &lowered)
@@ -878,7 +871,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None => {
                 let payload = self.scope_payload(canonical, owner, scope_payload);
                 crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                    self.ctx, canonical, owner, payload, name,
+                    self.ctx, self, canonical, owner, payload, name,
                 )
                 .and_then(|root| {
                     self.ctx.prepared_value_decl_return_only(
@@ -1064,10 +1057,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if own_signature.type_parameters.len() != frame.normalized_type_args.len() {
             return;
         }
-        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
+        let Some((_serve, source_demand)) = self.ctx.indexed_expression_source(canonical) else {
             return;
         };
-        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
         // The frame's own lexical structure, read only when a composed
         // value's annotation names a binder: a type the frame declares
         // around the value takes the name before the frame's clause does.
@@ -1075,10 +1067,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut frame_declares_type = |name: &str, value: &FunctionProgramEntry| -> bool {
             let skeleton = skeleton.get_or_insert_with(|| {
                 self.flow_slice_demand_site(frame).ok().and_then(|site| {
-                    self.ctx
-                        .project_type_store()
-                        .flow_slice()
-                        .skeleton_for(&site.slice_key_function, self.ctx)
+                    self.flow_slice_driver()
+                        .skeleton_for(&site.slice_key_function)
                 })
             });
             let Some(skeleton) = skeleton.as_ref() else {
@@ -1184,7 +1174,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if callee.type_parameters.is_empty() {
                 continue;
             }
-            let Some(indexed) = decl_bodies.indexed_call_expression_at(call.span) else {
+            let Some(indexed) =
+                source_demand.indexed_call_expression_over_frame_at(call.span, Arc::from([]))
+            else {
                 continue;
             };
             let site = &indexed.call;
@@ -1298,11 +1290,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ordinal. `None` when its served position is not read.
     pub(super) fn own_type_parameter_names(&self, key: &FlowReturnKey) -> Option<Vec<Arc<str>>> {
         let site = self.flow_slice_demand_site(key).ok()?;
-        let index = site
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .function_program_index();
+        let index = site.source_demand.function_program_index();
         let entry = frame_entry(&index, key)?;
         Some(
             entry
@@ -1440,6 +1428,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<FlowFunctionReturnIdentity> {
         let root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self,
             canonical,
             owner,
             scope_payload,

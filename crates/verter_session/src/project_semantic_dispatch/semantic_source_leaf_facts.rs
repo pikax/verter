@@ -28,7 +28,7 @@ impl ProjectSemanticDispatch<'_> {
     /// richer shape — the caller publishes its content-free source instead;
     /// a leaf is the only node class whose fact is complete by itself.
     pub(crate) fn node_leaf_fact(&self, node: SemanticNodeId) -> Option<LeafTypeFact> {
-        match super::node_data_for(self.ctx, node).as_deref() {
+        match super::node_data_for(self.graph(), node).as_deref() {
             Some(SemanticNodeData::Primitive(kind)) => Some(LeafTypeFact::Primitive(
                 super::raise::semantic_primitive_to_primitive_name(*kind),
             )),
@@ -56,7 +56,7 @@ impl ProjectSemanticDispatch<'_> {
     /// projection every publication surface reads — never re-derived
     /// per-surface.
     pub(crate) fn node_leaf_union_fact(&self, node: SemanticNodeId) -> Option<Arc<[LeafTypeFact]>> {
-        let members = match super::node_data_for(self.ctx, node).as_deref() {
+        let members = match super::node_data_for(self.graph(), node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.clone(),
             _ => return None,
         };

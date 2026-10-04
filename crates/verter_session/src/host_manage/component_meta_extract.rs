@@ -139,10 +139,11 @@ fn extract_component_meta_from_inputs(
     resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
     evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-    let resolved_binding_reactivity = resolved_binding_reactivity(ctx, snapshot);
+    let resolved_binding_reactivity = resolved_binding_reactivity(ctx, dispatch, snapshot);
     component_meta_trace_custom!(
         "extract_component_meta",
         format!(
@@ -193,15 +194,7 @@ fn extract_component_meta_from_inputs(
     }
 
     populate_public_instance_sidecar(&mut meta);
-    if let Some(view) = ctx.active_session_view() {
-        if let Some(structure) = host.registered_structure_for_view(&canonical, view) {
-            meta.ordered_sfc_structure = Some(crate::host_resolve::ordered_sfc_structure_analysis(
-                &structure,
-            ));
-        }
-    } else {
-        crate::host_resolve::populate_ordered_sfc_structure(host, &canonical, &mut meta);
-    }
+    meta.ordered_sfc_structure = ctx.ordered_sfc_structure(&canonical);
     meta
 }
 
@@ -244,6 +237,7 @@ fn extract_component_meta_from_inputs(
 /// its binding, per-row and fail-closed.
 pub(crate) fn resolved_binding_reactivity(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     snapshot: &FileAnalysisSnapshot,
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedBindingReactivityInput> {
     use verter_semantic::analysis::types::{BindingInitializer, ReactivityKind};
@@ -292,7 +286,6 @@ pub(crate) fn resolved_binding_reactivity(
         return Vec::new();
     }
 
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let mut rows = Vec::with_capacity(subjects.len());
     for (binding_index, dep_canonical, imported_name) in subjects {
         // Resolve the imported symbol's declaring ROOT through the shared
@@ -310,7 +303,7 @@ pub(crate) fn resolved_binding_reactivity(
         // role vocabulary is published, so nothing locator-bearing can cross FFI.
         let (role, _provenance) =
             crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
-                &dispatch,
+                dispatch,
                 root.canonical_id.as_ref(),
                 root.owner,
                 root.symbol_name.as_ref(),
@@ -346,12 +339,14 @@ pub(crate) fn resolved_binding_reactivity(
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
 pub(crate) fn resolve_ref_to_root_identity(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
     crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
         ctx,
+        dispatch,
         owner_canonical,
         owner,
         None,
@@ -466,6 +461,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
 ) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // ONE full-extract completeness scope spans the WHOLE extract body so every
@@ -481,12 +477,13 @@ pub(crate) fn extract_component_meta_from_resolved(
     // via a scope bubble that could over-suppress an enclosing compute.
     let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     // The macro-DTO surface read (`vue_macro_dtos_with_ctx` ->
-    // `ctx.store_view()`) MUST run under the request-bound `ctx`, not the
+    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MUST run under the request-bound `ctx`, not the
     // bare `&VerterHost` rail (whose `store_view()` panics in a
     // `debug_assertions`-off build). See
     // `tests/cases/g_session/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
+        dispatch,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
     );
@@ -500,6 +497,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
         ctx,
+        dispatch,
     );
     let mut fallthrough_facts = None;
     if include_fallthrough {
@@ -515,6 +513,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             None,
             &mut visiting,
             ctx,
+            dispatch,
         );
         if let Some(resolution) = outcome.resolution {
             fallthrough_facts = Some(resolution.fact_versions.clone());
@@ -536,6 +535,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         canonical.as_str(),
         Some(&resolved.snapshot),
         ctx,
+        dispatch,
     );
     // Merge graph-native slot-binding synthesis diagnostics into the
     // analysis-wide envelope so consumers see one canonical
@@ -573,6 +573,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
 ) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // ONE full-extract completeness scope spans the WHOLE extract body, the
@@ -583,6 +584,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
+        dispatch,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
     );
@@ -596,6 +598,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
         ctx,
+        dispatch,
     );
     let mut visiting = rustc_hash::FxHashSet::default();
     // The outcome carrier centralises the per-call completeness scope: a
@@ -613,6 +616,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
             None,
             &mut visiting,
             ctx,
+            dispatch,
         );
         let facts = if let Some(resolution) = outcome.resolution {
             let facts = resolution.fact_versions.clone();
@@ -640,6 +644,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         canonical.as_str(),
         Some(&resolved.snapshot),
         ctx,
+        dispatch,
     );
     let completeness = crate::request_context::current_cold_compute_completeness();
     extract_scope.discard();
@@ -665,7 +670,13 @@ pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    resolve_ref_to_root_identity(host, owner_canonical, owner, name)
+    resolve_ref_to_root_identity(
+        host,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host),
+        owner_canonical,
+        owner,
+        name,
+    )
 }
 
 #[cfg(test)]

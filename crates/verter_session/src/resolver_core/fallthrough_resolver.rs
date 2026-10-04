@@ -437,15 +437,14 @@ impl FallthroughResolverState {
         ctx: &dyn ResolverContext,
         compute: impl FnOnce() -> (R, Option<(FallthroughNodeKey, FallthroughNodeResult)>),
     ) -> R {
-        let host = ctx.host_for_fact_tracer_install();
-        let supersession_before = host.current_external_supersession_fingerprint();
+        let supersession_before = ctx.current_external_supersession_fingerprint();
         let ((value, candidate), non_cacheable) =
             crate::fact_signature_helpers::with_cacheability_scope(
                 &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
                 |_probe| compute(),
             );
 
-        if !non_cacheable && host.current_external_supersession_fingerprint() == supersession_before
+        if !non_cacheable && ctx.current_external_supersession_fingerprint() == supersession_before
         {
             if let Some((key, result)) = candidate {
                 self.insert_admissible_node(key, result);

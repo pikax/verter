@@ -91,8 +91,8 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
 ) -> Option<A::Out> {
     #[cfg(test)]
     FOLDED_NODES.with(|folded| folded.set(folded.get() + 1));
-    let ctx = dispatch.ctx;
-    let data = node_data_for(ctx, node)?;
+
+    let data = node_data_for(dispatch.graph(), node)?;
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(kind) => {
             alg.primitive(semantic_primitive_to_primitive_name(*kind))
@@ -259,7 +259,8 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.indexed_access(object, index)
         }
         SemanticNodeData::Mapped { mapper, .. } => {
-            let parameter = match node_data_for(ctx, mapper.parameter_node).as_deref() {
+            let parameter = match node_data_for(dispatch.graph(), mapper.parameter_node).as_deref()
+            {
                 Some(SemanticNodeData::TypeParam { display_name, .. }) => {
                     display_name.as_ref().to_string()
                 }
@@ -267,7 +268,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             };
             // The source recurses KeyOf-aware (matching the materializer's
             // explicit KeyOf shell around the mapped source key-space base).
-            let source = match node_data_for(ctx, mapper.key_space)?.as_ref() {
+            let source = match node_data_for(dispatch.graph(), mapper.key_space)?.as_ref() {
                 SemanticNodeData::KeyOf { base } => {
                     let base = fold_node(alg, dispatch, *base, active)?;
                     alg.key_of(base)
@@ -826,7 +827,7 @@ fn is_class_expression_prototype(
         && member.key.as_string() == Some("prototype")
         && member.spans == verter_type_expr::MemberSpans::default()
         && matches!(
-            node_data_for(dispatch.ctx, member.value).as_deref(),
+            node_data_for(dispatch.graph(), member.value).as_deref(),
             Some(SemanticNodeData::ClassExpressionInstance { .. })
         )
 }

@@ -157,7 +157,7 @@ pub(super) fn emit_decl_contribution_order_facts(
     shallow: &ShallowFileState,
     indexed: &IndexedReady,
 ) {
-    let header_index = shallow.decl_bodies().header_index();
+    let header_index = &shallow.headers;
     let mut emit_for =
         |key: &verter_type_expr::DeclBindingKey,
          contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
@@ -210,7 +210,7 @@ pub(super) fn emit_augmentation_contribution_facts(
     registry: &mut FactRegistry,
     shallow: &ShallowFileState,
 ) {
-    let header_index = shallow.decl_bodies().header_index();
+    let header_index = &shallow.headers;
 
     // (scope-kind tag, specifier, owner, name, space, header
     // fingerprint, declaration position) per contribution record. The
@@ -420,7 +420,7 @@ pub(super) fn emit_scope_inventory_facts(registry: &mut FactRegistry, shallow: &
     const AUGMENTATION_TARGET_SET_SALT: &[u8] = b"verter-aug-target-set:v1";
     const NAMESPACE_SCOPE_SET_SALT: &[u8] = b"verter-namespace-scope-set:v1";
 
-    let header_index = shallow.decl_bodies().header_index();
+    let header_index = &shallow.headers;
 
     let mut targets: Vec<(
         verter_semantic::facts::AugmentationScopeKindTag,

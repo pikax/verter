@@ -18,7 +18,6 @@ use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, Macro
 use verter_semantic::analysis::type_expand::ExpandedField;
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
@@ -51,9 +50,9 @@ pub(crate) fn project_slots(
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
     let admitted = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = query_engine.dispatch;
         let payload = match resolve_macro_payload(
-            &dispatch,
+            dispatch,
             owner,
             file,
             macro_index,
@@ -67,7 +66,7 @@ pub(crate) fn project_slots(
         };
 
         let surface = match resolve_payload_surface(
-            &dispatch,
+            dispatch,
             &payload,
             MacroExpansionKind::DefineSlots,
             diag_sink,
@@ -76,9 +75,9 @@ pub(crate) fn project_slots(
             None => return Vec::new(),
         };
 
-        read_surface_member_candidates(ctx, &surface)
+        read_surface_member_candidates(ctx, dispatch, &surface)
             .into_iter()
-            .filter_map(|candidate| admit_published_member(candidate, &cursor, &dispatch))
+            .filter_map(|candidate| admit_published_member(candidate, &cursor, dispatch))
             .collect::<Vec<_>>()
     };
     // Slot fields don't carry a payload-style raw_type per member;

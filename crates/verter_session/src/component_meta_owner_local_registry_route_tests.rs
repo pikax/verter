@@ -96,8 +96,11 @@ fn macro_root_refs_for(
     let published_names = rustc_hash::FxHashSet::default();
     let mut queued_names = rustc_hash::FxHashSet::default();
     let mut output = std::collections::VecDeque::new();
+
+    let fixture_dispatch_0 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     crate::resolver_core::component_meta_registry::collect_component_meta_registry_public_macro_root_refs(
-        host.as_ref(),
+        host.as_ref(),&fixture_dispatch_0,
         canonical,
         &snapshot,
         &published_names,
@@ -114,11 +117,14 @@ fn first_macro_utility_route_for(
     let _ = host
         .get_raw_analysis_snapshot(canonical)
         .expect("component analysis snapshot");
-    let product =
-        crate::structural_carrier_producer::macro_type_arg_hot_ref(host.as_ref(), canonical, 0)
-            .expect("first macro structural type argument");
+    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref())
+        .macro_type_arg_hot_ref(canonical, 0)
+        .expect("first macro structural type argument");
+
+    let fixture_dispatch_1 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     crate::resolver_core::component_meta_registry::component_meta_registry_node_utility_route(
-        host.as_ref(),
+        &fixture_dispatch_1,
         product.hot.node(),
     )
     .expect("first macro must retain its authored Pick route")
@@ -347,8 +353,13 @@ fn public_field_refs_keep_external_indexed_access_routes() {
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
+
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+        host.as_ref() as &dyn ResolverContext,
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
+        &fixture_dispatch_2,
         &producer_scope,
         &analysis,
         Some("Foo"),
@@ -431,8 +442,13 @@ fn owner_local_alias_of_alias_external_import_declines() {
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
+
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+        host.as_ref() as &dyn ResolverContext,
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
+        &fixture_dispatch_3,
         &producer_scope,
         &analysis,
         Some("Foo"),
@@ -478,8 +494,13 @@ fn owner_local_generic_typeparameter_body_declines() {
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
+
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+        host.as_ref() as &dyn ResolverContext,
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
+        &fixture_dispatch_4,
         &producer_scope,
         &analysis,
         Some("T"),

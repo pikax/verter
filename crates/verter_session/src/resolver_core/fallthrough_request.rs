@@ -85,7 +85,7 @@ pub(crate) trait FallthroughRequestHost {
     /// request-bound resolver context (via `from_cold_seed`) so that, on a
     /// non-current seed, the fallthrough resolver's per-element /
     /// per-child / per-root node-cache validation (which reads through
-    /// `ctx.store_view()`) MISSES rather than consuming a stale warm hit.
+    /// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MISSES rather than consuming a stale warm hit.
     /// The fenced cold builder still computes from the seed (the outer
     /// `is_stable` / publish fence rejects promotion of a non-current
     /// result); only its nested probes fail closed.

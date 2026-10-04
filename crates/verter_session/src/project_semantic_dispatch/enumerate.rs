@@ -1219,21 +1219,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Normalise the analysis canonical (matches the lookup used by
         // the signature builder at
         // `fact_signature_helpers::parse_fact_ref_for_observed_current_content`).
-        let analysis_canonical = self.ctx.normalized_analysis_canonical(canonical);
-        let current_key = self.ctx.artifact_key_for_current_content(canonical)?;
-        if current_key.content_hash != observed_hash {
-            return None;
-        }
-        let artifacts = self
-            .ctx
-            .project_type_store()
-            .indexed()
-            .get_artifacts_for_content(
-                analysis_canonical.as_ref(),
-                observed_hash,
-                &current_key.parse_key,
-                &current_key.file_language_id,
-            )?;
         let presence_key = FactKey::MemberPresence {
             exporter: InternedName::from(type_name),
             name: needle.clone(),
@@ -1256,7 +1241,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //   restored without a fact-schema change.
         // - ABSENT (`is_none()`): the member is provably absent regardless of
         //   visibility — refute structurally (`Some(false)`), unchanged.
-        if artifacts.facts.lookup(&presence_key).is_some() {
+        if self
+            .ctx
+            .member_presence_for_observed_content(canonical, observed_hash, presence_key)?
+        {
             None
         } else {
             Some(false)

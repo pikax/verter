@@ -13,6 +13,7 @@
 //! ([`FlowEvaluator::resume_entered`]), entering its next region or
 //! finishing.
 
+use super::FlowDemandDriver;
 use super::*;
 
 /// A statement suspended at a region it entered, with what it resumes
@@ -114,7 +115,7 @@ pub(super) struct LabeledEval<'r> {
     bases: ScopeBases,
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn scope_bases(&self) -> ScopeBases {
         ScopeBases {
             shadow: self.scope_shadows.len(),
@@ -785,7 +786,7 @@ pub(super) struct TryEval<'r> {
     phase: TryPhase,
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Begin one `try` clause's evaluation from `start`: the region to
     /// evaluate is the caller's, and [`Self::finish_try_clause`] reads its
     /// outcome.
@@ -1179,9 +1180,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if let Some(identity) = self.products.identity(&root) {
                         #[cfg(test)]
                         self.dispatch
-                            .ctx
-                            .host_for_fact_tracer_install()
-                            .flow_fault_injection
+                            .observers
+                            .flow
                             .finally_identity_work
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         killed.insert(identity);
@@ -1381,7 +1381,7 @@ enum PassStep<'r> {
     Done(Result<LoopPass, FlowReturnFailure>),
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Begin evaluating a loop statement: its init region first.
     pub(super) fn begin_loop<'r>(
         &mut self,

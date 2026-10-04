@@ -291,10 +291,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             vec![(Arc::clone(&canonical), indexed.whole_hash)];
 
-        let derefed = match indexed
-            .shallow_state
-            .decl_bodies()
-            .deref_locator_body(key.locator())
+        let derefed = match self
+            .ctx
+            .deref_authored_body(&indexed.shallow_state, key.locator())
         {
             Ok(derefed) => derefed,
             // Every deref failure is a typed fail-closed non-result. A GENUINE
@@ -376,7 +375,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 verter_type_expr::locators::LocatorSymbolSpace::Type => bundle
                     .as_ref()
                     .and_then(|bundle| {
-                        match bundle.prepared_type_decls.get_in_for_projection(
+                        match self.ctx.prepared_type_for_projection(bundle,
                             anchor.owner,
                             anchor_symbol.as_ref(),
                         ) {
@@ -432,12 +431,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_type_expr::locators::LocatorSymbolSpace::Value => bundle
                         .as_ref()
                         .and_then(|bundle| {
-                            bundle
-                                .prepare_augmentation_value_decl_in(
+                            self.ctx.prepare_augmentation_value(bundle,
                                     &scope_kind,
                                     anchor.owner,
                                     anchor_symbol.as_ref(),
-                                )
+                                ).into_result()
                                 .ok()
                                 .flatten()
                         })
@@ -445,12 +443,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => bundle
                         .as_ref()
                         .and_then(|bundle| {
-                            bundle
-                                .prepare_augmentation_type_decl_in(
+                            self.ctx.prepare_augmentation_type(bundle,
                                     &scope_kind,
                                     anchor.owner,
                                     anchor_symbol.as_ref(),
-                                )
+                                ).into_result()
                                 .ok()
                                 .flatten()
                         })

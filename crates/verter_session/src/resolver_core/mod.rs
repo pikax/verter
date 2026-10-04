@@ -35,9 +35,12 @@ pub mod vue_default_synth;
 
 pub mod fact_read_set;
 mod fact_tracer_tls;
+pub(crate) mod fact_validation_port;
 pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
+mod owned_lowering_port;
+pub(crate) mod request_ports;
 pub(crate) mod request_store_view;
 pub(crate) mod resolver_context;
 pub(crate) mod reuse;
@@ -473,8 +476,7 @@ pub trait StoreView {
     /// (skip the call if the host's `current_store_view_epoch` no
     /// longer matches the base view's `mutation_epoch`) — keeping
     /// the trait off the concrete `VerterHost` type to preserve the
-    /// resolver-context seal (architecture guard
-    /// `no_concrete_verter_host_in_seal_scope`).
+    /// request-port boundary (the six ports in `request_ports`).
     ///
     /// Implementers writing into a per-request overlay must:
     /// - Insert `whole_hash` into the overlay's `whole_hashes` map
@@ -519,9 +521,9 @@ impl verter_workspace::FactVersionValidator for dyn StoreView + '_ {
 /// `&dyn StoreView` form.
 ///
 /// This lets a generic `view: &V where V: StoreView` validator accept a
-/// `ctx.store_view()` borrow (`&dyn StoreView`) directly — e.g. the
+/// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` borrow (`&dyn StoreView`) directly — e.g. the
 /// fallthrough resolver validates per-element / per-child / per-root
-/// node-cache entries through `self.ctx.store_view()` so the validation
+/// node-cache entries through `&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx)` so the validation
 /// rides the request-bound, currentness-gated `RequestStoreView` rather
 /// than a separately-rebuilt raw `HostStoreView`. Every method just
 /// re-dispatches to the referent.
@@ -5630,3 +5632,5 @@ mod receipt_validation_tests {
         );
     }
 }
+
+pub(crate) mod request_inputs;

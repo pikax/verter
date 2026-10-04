@@ -25,8 +25,7 @@
 //! signal on every outcome arm, success and failure alike.
 
 use verter_session_query::{
-    AuthoredBodyLowering, AuthoredBodyShape, QueryHostAdmission, QueryHostError, QueryHostPort,
-    QueryHostServe,
+    AuthoredBodyLowering, AuthoredBodyShape, QueryHostError, QueryHostPort, QueryHostServe,
 };
 use verter_type_expr::locators::AuthoredBodyLocator;
 
@@ -116,52 +115,14 @@ const _: () = {
 
 impl QueryHostPort for SessionQueryHostPort<'_> {
     fn lower_authored_body(&self, locator: &AuthoredBodyLocator) -> QueryHostServe {
-        // A locator derefs through the memo of its OWN producing canonical;
-        // the anchor names that canonical for every locator kind.
-        let anchor = match locator {
-            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
-            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
-            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
-        };
-        // The single materialization bridge for the canonical post-parse
-        // artifact. `None` = the producing canonical is unknown to the live
-        // view: a transient no-warm non-result on BOTH axes — no serve was
-        // produced, so there is no publication status to map and nothing
-        // derived from this answer may be admitted warm.
-        let Some(serve) = self
-            .ctx
-            .ensure_indexed_ready_serve(anchor.canonical_id.as_ref())
-        else {
-            return QueryHostServe {
-                admission: QueryHostAdmission::ReturnOnly,
-                outcome: Err(QueryHostError::UnknownFile),
-            };
-        };
-        // The serve's by-value publication status IS the port's admission
-        // signal: `store_published == false` marks a FENCED flight that
-        // published nothing — its answers (the lowering AND any genuine
-        // miss derefed against the fenced surface) serve this caller's
-        // read only and must never be admitted warm into a shared cache.
-        // The admission rides the wrapper for BOTH outcome arms; the error
-        // CLASS stays orthogonal and is never reclassified to smuggle the
-        // fence through.
-        let admission = QueryHostAdmission::from_store_published(serve.store_published);
-        let outcome = serve
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .deref_locator_body(locator)
-            .map(neutral_lowering)
-            .map_err(neutral_error);
-        QueryHostServe { admission, outcome }
+        self.ctx.lower_authored_body(locator)
     }
 }
 
 /// Maps the memo's owned deref product onto the port's neutral DTO — a 1:1
 /// structural map (both sides carry the same lower-crate typed IR; the
 /// merged-contributor carrier stays distinct, never an intersection).
-fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
+pub(crate) fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
     AuthoredBodyLowering {
         shape: match derefed.shape {
             DerefedBodyShape::Single(body) => AuthoredBodyShape::Single(body),
@@ -179,7 +140,7 @@ fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
 /// authored-absence pair), the transient no-warm lease signal (never
 /// collapsed into a cacheable miss), and the structural fail-closed
 /// non-results.
-fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
+pub(crate) fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
     match error {
         LocatorBodyDerefError::UnknownSymbol => QueryHostError::UnknownSymbol,
         LocatorBodyDerefError::LeaseMiss => QueryHostError::LeaseMiss,

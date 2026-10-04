@@ -3608,7 +3608,7 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 /// are ENV dimensions, NOT content/version hashes; the slot stays
 /// content-free and the file content version is re-sourced at
 /// value-compute time from
-/// [`ResolverContext::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
+/// [`crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
 /// content hash, or `fact_dep_signature` enters this context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstantiateContext {
@@ -3989,7 +3989,7 @@ impl MacroPayloadContext {
 /// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
 /// content/version hash; the value-root slot stays content-free and the
 /// file content version is re-sourced at value-compute time from
-/// [`ResolverContext::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
+/// [`crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
 /// content hash, or `fact_dep_signature` enters this context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeOfContext {
@@ -4452,10 +4452,7 @@ pub(crate) struct KnownKeyAccessor<'a> {
 impl KnownKeyAccessor<'_> {
     /// The accessor as the one PROPERTY every reader sees: its read value
     /// ([`Self::read_value`]), `readonly` when there is no setter.
-    pub(crate) fn property_member(
-        &self,
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-    ) -> Option<SurfaceMember> {
+    pub(crate) fn property_member(&self, graph: &impl NodeRead) -> Option<SurfaceMember> {
         let value = self.read_value(graph)?;
         let declared = self.getter.or(self.setter)?;
         Some(SurfaceMember {
@@ -4471,10 +4468,7 @@ impl KnownKeyAccessor<'_> {
     /// The accessor's VALUE type as a read sees it: the getter's return,
     /// else the setter's parameter. `None` when the accessor's signature
     /// carries neither.
-    pub(crate) fn read_value(
-        &self,
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-    ) -> Option<SemanticNodeId> {
+    pub(crate) fn read_value(&self, graph: &impl NodeRead) -> Option<SemanticNodeId> {
         if let Some(getter) = self.getter {
             return match graph.node_data(getter.value).as_deref() {
                 Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
@@ -11645,5 +11639,22 @@ mod tests {
             assert_ne!(ResultTaint::Broken(class), ResultTaint::Clean);
             assert_ne!(ResultTaint::Partial(class), ResultTaint::Broken(class));
         }
+    }
+}
+
+/// A static node reader for pure consumers. Missing IDs retain their typed
+/// absence; the capability carries no query acquisition or publication API.
+pub(crate) trait NodeRead {
+    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
+}
+impl<T: NodeRead + ?Sized> NodeRead for Arc<T> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        self.as_ref().node_data(node)
+    }
+}
+
+impl<T: NodeRead + ?Sized> NodeRead for &T {
+    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        (**self).node_data(node)
     }
 }

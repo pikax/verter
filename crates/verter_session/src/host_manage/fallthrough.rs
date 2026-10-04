@@ -461,6 +461,7 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     ) -> Option<crate::types::FallthroughResolution> {
         // Try to reuse an already-cached Expanded resolved state before recomputing.
         // get_component_meta() typically resolves Expanded just before calling fallthrough,
@@ -472,7 +473,12 @@ impl VerterHost {
             let whole_hash = self
                 .current_or_read_whole_hash(canonical_id)
                 .unwrap_or_default();
-            self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash, ctx)?
+            self.compute_component_meta_state_for_fallthrough(
+                canonical_id,
+                whole_hash,
+                ctx,
+                dispatch,
+            )?
         };
         self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
@@ -480,6 +486,7 @@ impl VerterHost {
             prop_type_overrides,
             visiting,
             ctx,
+            dispatch,
         )
     }
 
@@ -503,6 +510,7 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     ) -> FallthroughComputeOutcome {
         let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let resolution = self.compute_fallthrough_surface_from_resolved_state(
@@ -511,6 +519,7 @@ impl VerterHost {
             prop_type_overrides,
             visiting,
             ctx,
+            dispatch,
         );
         let completeness = crate::request_context::current_cold_compute_completeness();
         FallthroughComputeOutcome {
@@ -526,6 +535,7 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     ) -> Option<crate::types::FallthroughResolution> {
         // INTERNAL backstop (install-if-none, NEVER install-always): a direct
         // internal caller of this fallthrough choke with no active request
@@ -544,6 +554,7 @@ impl VerterHost {
         // the exact base or session store view selected at request entry.
         let resolved_macros = resolver_component_meta_resolved_macros(
             ctx,
+            dispatch,
             canonical_id,
             resolved.snapshot.macros.as_ref(),
         );
@@ -581,13 +592,14 @@ impl VerterHost {
             // and `intrinsic_members_for_tag` so they bind to the
             // overlay-aware view rather than rebuild a workspace
             // snapshot inside the cold-compute `with_fact_tracer` scope.
-            // `ctx.store_view()` is ALSO the per-element / per-child /
+            // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child /
             // per-root fallthrough-node cache validation view — it is the
             // currentness-gated `RequestStoreView`, built once, so a
             // non-current cold-seed makes those node-cache validations fail
             // closed (the prior separate raw `live_view` field dropped the
             // currentness flag — the leak this closes).
             ctx,
+            dispatch,
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
         // values + prop overrides.
@@ -795,7 +807,7 @@ impl VerterHost {
             .routed_shallow_state(canonical_id)
             .map(|state| {
                 let mut names_by_owner = rustc_hash::FxHashMap::default();
-                for key in state.decl_bodies().header_index().value_headers.keys() {
+                for key in state.headers.value_headers.keys() {
                     names_by_owner
                         .entry(key.owner)
                         .or_insert_with(rustc_hash::FxHashSet::default)
@@ -897,6 +909,7 @@ impl VerterHost {
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
         if !self.config.generic_root_propagation {
@@ -907,7 +920,7 @@ impl VerterHost {
         let usage = template.components.get(usage_index as usize)?;
         // Bind the engine to the supplied request-bound `ctx` so cache
         // validators inside the engine inherit the overlay-aware view.
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
         let env_ref = eval_env.as_deref();
 
         // Each child prop override is carried as its resolved value NODE
@@ -956,6 +969,7 @@ impl VerterHost {
         has_unknown_spread: bool,
         eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
         use verter_semantic::analysis::component_meta::PartialBranchReason;
@@ -1016,7 +1030,7 @@ impl VerterHost {
             // Bind the engine to the supplied request-bound `ctx` so
             // cache validators inside the engine inherit the overlay-aware
             // view.
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             let env_ref = eval_env.as_deref();
             for directive in spread_directives {
                 let Some(expression) = directive
@@ -1071,6 +1085,7 @@ impl VerterHost {
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
         let Some(template) = snapshot.template.as_deref() else {
@@ -1132,7 +1147,7 @@ impl VerterHost {
         // cache validators inside the engine inherit the overlay-aware
         // view. The evaluated `is=` value resolves to a NODE and its
         // dynamic-root candidates are read in node domain.
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
         candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
             verter_type_expr::TopLevelOwnerId::instance(0),

@@ -713,7 +713,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // node via the rebuild_* fall-through.
                         continue;
                     }
-                    let Some(data) = super::node_data_for(self.ctx, frame.node) else {
+                    let Some(data) = super::node_data_for(self.graph(), frame.node) else {
                         // No graph data — record a self-identity
                         // reduction so callers reading `mapping`
                         // get the raw node.
@@ -1057,7 +1057,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        let Some(data) = super::node_data_for(self.ctx, node) else {
+        let Some(data) = super::node_data_for(self.graph(), node) else {
             return node;
         };
         let mode = context.mode;
@@ -1882,7 +1882,7 @@ fn rebuild_object(
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
-    let data = super::node_data_for(dispatch.ctx, node)?;
+    let data = super::node_data_for(dispatch.graph(), node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
@@ -2696,13 +2696,10 @@ pub(super) fn deref_slot_body(
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) -> Option<TypeExpr> {
     let serve = ctx.ensure_indexed_ready_serve(slot.anchor.canonical_id.as_ref())?;
-    match serve
-        .indexed
-        .shallow_state
-        .decl_bodies()
-        .deref_locator_body(&verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-            slot.clone(),
-        )) {
+    match ctx.deref_authored_body(
+        &serve.indexed.shallow_state,
+        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+    ) {
         Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
             shape: crate::decl_body_memo::DerefedBodyShape::Single(expr),
             ..
@@ -2773,22 +2770,18 @@ fn type_param_shell_node(
     prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
     param: &verter_type_expr::facts::NarrowTypeParam,
 ) -> SemanticNodeId {
-    dispatch
-        .ctx
-        .project_type_store()
-        .semantic_graph()
-        .intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                owner: prepared.root_identity.owner,
-                whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::clone(&prepared.root_identity.symbol_name),
-            },
-            param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
-            constraint: None,
-            default: None,
-            display_name: Arc::from(param.name.as_str()),
-        })
+    dispatch.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+            owner: prepared.root_identity.owner,
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::clone(&prepared.root_identity.symbol_name),
+        },
+        param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
+        constraint: None,
+        default: None,
+        display_name: Arc::from(param.name.as_str()),
+    })
 }
 
 /// Shallow-lower ONE derefed authored body under the escape environment —
@@ -3774,7 +3767,7 @@ impl<'a> OpenWalk<'a> {
         }
         self.budget -= 1;
 
-        let Some(data) = super::node_data_for(ctx, node) else {
+        let Some(data) = super::node_data_for(self.dispatch.graph(), node) else {
             // Unresolved / un-interned node: the KEY-DOMAIN question treats
             // it as open (not provably finite); the
             // outer-generic-reachability question treats it as closed (a
@@ -4079,7 +4072,7 @@ impl<'a> OpenWalk<'a> {
             //      (`{ [K in keyof Foo<T>]: V }` with `T` value-position-only),
             //      so that case SKIPS the fast check and resolves — the resolved
             //      `InstantiationRef` arm then applies the per-argument rule.
-            //   2. RESOLVE the head through the ONE shared dispatch
+            //   2. RESOLVE the head through the ONE shared self
             //      (`resolve_carrier_subject_node` → `resolve_bare_ref_head` /
             //      `resolve_import_type_head`) under a non-publication
             //      `StructuralTransit` context — NOT a second resolver, NOT a

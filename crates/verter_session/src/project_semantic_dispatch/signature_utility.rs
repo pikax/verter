@@ -249,7 +249,7 @@ impl ProjectSemanticDispatch<'_> {
         };
         let mut settled_arms = Vec::with_capacity(arms.len());
         for &arm in arms.iter() {
-            if self.ctx.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 return None;
             }
             settled_arms.push(self.resolve_signature_source_carrier(arm, context));

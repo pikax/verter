@@ -169,8 +169,8 @@ impl VerterHost {
         // reference without re-borrowing at every call site.
         let resolver = &memoised_resolve;
         let any_non_empty = |target: AugmentationTargetKind| {
-            !store
-                .ensure_augmentation_index_populated(&make_key(target), resolver, None)
+            !crate::host_manage::source_augmentation::AugmentationRequestDriver::new(store)
+                .ensure_populated(&make_key(target), resolver, None)
                 .entries
                 .is_empty()
         };

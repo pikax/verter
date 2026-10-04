@@ -71,8 +71,7 @@ pub(crate) use rune_ambient::{
 #[cfg(test)]
 pub(crate) use vue_script_extract::extract_vue_script_content;
 pub(crate) use vue_script_extract::{
-    indexed_script_setup_type_params, ordered_sfc_structure_analysis,
-    populate_ordered_sfc_structure, sfc_script_setup_type_params, template_converter_inputs,
+    ordered_sfc_structure_analysis, sfc_script_setup_type_params, template_converter_inputs,
 };
 
 // Test-only knob: arm the compile-tier producer's fact-injection slot.
@@ -132,3 +131,6 @@ mod host_resolve_creo_tests;
 #[cfg(test)]
 #[path = "../frontier_tests.rs"]
 mod frontier_tests;
+
+#[cfg(test)]
+pub(crate) use vue_script_extract::populate_ordered_sfc_structure;

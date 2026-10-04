@@ -52,19 +52,12 @@
 
 use std::sync::Arc;
 
+use crate::fact_signature_helpers::ReadSetSignature;
+use crate::project_type_store::IndexedReady;
+use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 use dashmap::DashMap;
 use verter_semantic::analysis::type_eval::{AugmentationScopeKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
-#[cfg(any(test, feature = "test-support"))]
-use verter_semantic::facts::SymbolSpace as FactSymbolSpace;
-#[cfg(any(test, feature = "test-support"))]
-use verter_semantic::facts::{FactKey, FactLane};
-
-use crate::fact_signature_helpers::ReadSetSignature;
-#[cfg(any(test, feature = "test-support"))]
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-use crate::project_type_store::IndexedReady;
-use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 
 // ===========================================================================
 // Artifact payload (scope tree + declaration-slot seeds + provenance)
@@ -371,7 +364,13 @@ pub fn project_binder_identity_facts(
     canonical: &str,
     indexed: &IndexedReady,
 ) -> BinderIdentityFacts {
-    let headers = indexed.shallow_state.decl_bodies().header_index();
+    project_binder_identity_facts_inputs(canonical, &indexed.shallow_state)
+}
+pub(crate) fn project_binder_identity_facts_inputs(
+    canonical: &str,
+    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+) -> BinderIdentityFacts {
+    let headers = &shallow.headers;
     let canonical: Arc<str> = Arc::from(canonical);
 
     let mut scopes: Vec<BinderScopeRecord> = Vec::new();
@@ -686,17 +685,6 @@ fn scope_kind_sort_key(kind: &crate::semantic_query::BinderScopeKind) -> (u8, St
     }
 }
 
-/// Map the query-identity symbol space onto the fact-registry symbol
-/// space (same closed three-variant set, distinct nominal types).
-#[cfg(any(test, feature = "test-support"))]
-const fn fact_space(space: SemanticSymbolSpace) -> FactSymbolSpace {
-    match space {
-        SemanticSymbolSpace::Type => FactSymbolSpace::Type,
-        SemanticSymbolSpace::Value => FactSymbolSpace::Value,
-        SemanticSymbolSpace::Namespace => FactSymbolSpace::Namespace,
-    }
-}
-
 // ===========================================================================
 // Producer — demand-produced through the lazy/validated rails
 // ===========================================================================
@@ -723,187 +711,8 @@ pub(crate) fn produce_binder_identity_facts(
     ctx: &dyn crate::resolver_core::ResolverContext,
     canonical: &str,
 ) -> Option<Arc<BinderIdentityFactsEntry>> {
-    let host = ctx.host_for_fact_tracer_install();
-    let serve = ctx.ensure_indexed_ready_serve(canonical)?;
-    let indexed = serve.indexed;
-    let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash(&indexed);
-    let key = BinderIdentityFactsKey {
-        canonical: Arc::from(canonical),
-        parse_stable_hash,
-        parse_env_hash: indexed.parse_env_hash,
-    };
-    let store = host.project_type_store.binder_identity_facts_store();
-    if let Some(entry) = store.get(&key) {
-        if entry
-            .read_set_signature
-            .validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
-        {
-            // A warm hit must BUBBLE the entry's read-set into any
-            // active outer tracer: an enclosing traced computation
-            // admits its own value with THESE binder facts observed, so
-            // it is invalidated when a pinned fact moves (the sibling
-            // `AppConfigNoOverrideProofDb::peek` pattern).
-            crate::fact_signature_helpers::bubble_fact_signature(
-                ctx,
-                &entry.read_set_signature.facts,
-            );
-            return Some(entry);
-        }
-        // Stale under the same key (a recorded fact moved): drop it so
-        // the fresh recompute below wins future warm reads, then fall
-        // through to the cold recompute, which re-pins the signature.
-        store.remove(&key);
-    }
-
-    let indexed_for_body = Arc::clone(&indexed);
-    let canonical_for_body = key.canonical.clone();
-    let cold_body = move || -> (BinderIdentityFacts, bool) {
-        let facts = project_binder_identity_facts(canonical_for_body.as_ref(), &indexed_for_body);
-        // Pin the eager parse-lane facts covering the artifact's
-        // inputs against the OBSERVED content version. All are header
-        // facts — no body-sensitive (`Export` / `LocalDecl` / `Member`)
-        // fact is forced, so production lowers zero declaration bodies.
-        let mut all_pinned = true;
-        let mut pin = |fact_key: FactKey| {
-            match crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
-                ctx,
-                canonical_for_body.as_ref(),
-                indexed_for_body.whole_hash,
-                fact_key,
-                FactLane::Semantic,
-            ) {
-                Some(fact_ref) => {
-                    ctx.observe(crate::resolver_core::FactVersionRef::Parse(fact_ref));
-                }
-                None => {
-                    all_pinned = false;
-                }
-            }
-        };
-        pin(FactKey::SyntacticExportSet);
-        // Whole-file scope-inventory set pins: a NEW augmentation target
-        // (a first `declare module "m" {…}` in a file that had none) or
-        // a new namespace block moves the signature even when the
-        // parse-stable skeleton is unchanged (EMPTY blocks included).
-        pin(FactKey::AugmentationTargetSet);
-        pin(FactKey::NamespaceScopeSet);
-        for seed in facts.decl_slots.iter() {
-            pin(FactKey::MemberShape {
-                exporter: crate::file_artifact_store::InternedName::from(
-                    seed.merged_symbol_name.as_ref(),
-                ),
-                space: fact_space(seed.symbol_space),
-            });
-        }
-        // Order-sensitive contributor-sequence pins for every
-        // file-surface slot (an overload-group reorder or a same-file
-        // declaration swap moves this fact; a comment BETWEEN
-        // declarations does not, so the cosmetic warm rate survives).
-        for record in facts.declaration_order.iter() {
-            pin(FactKey::DeclContributionOrder {
-                name: crate::file_artifact_store::InternedName::from(
-                    record.seed.merged_symbol_name.as_ref(),
-                ),
-                owner: record.seed.owner,
-                space: fact_space(record.seed.symbol_space),
-            });
-        }
-        // Per-record augmentation pins for BOTH `declare module`
-        // and `declare global` contributions (global blocks key on the
-        // `$global` sentinel specifier, the emission's own encoding).
-        for record in facts.augmentation_contributions.iter() {
-            let specifier = match &record.scope_kind {
-                AugmentationScopeKind::Global => {
-                    crate::fact_emission::GLOBAL_AUGMENTATION_TAG.to_string()
-                }
-                AugmentationScopeKind::Module(specifier) => specifier.clone(),
-            };
-            pin(FactKey::ModuleAugmentation {
-                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
-                owner: record.owner,
-                augmented_name: crate::file_artifact_store::InternedName::from(
-                    record.name.as_ref(),
-                ),
-                space: fact_space(record.symbol_space),
-            });
-        }
-        // The per-target contribution SET + ORDER pins, derived from the
-        // shallow walk's BLOCK inventory (every `declare module "X" {…}`
-        // / `declare global {…}` block, EMPTY ones included): an empty
-        // target pins its bare-target hash, so an empty →
-        // first-contribution edit moves a pinned hash even when the
-        // target set itself is unchanged. The scope-kind tag keeps
-        // `declare global {…}` and `declare module "$global" {…}` in
-        // DISTINCT target identities (never string-matched at consumers).
-        let header_index = indexed_for_body.shallow_state.decl_bodies().header_index();
-        let mut augmentation_targets: Vec<(
-            verter_semantic::facts::AugmentationScopeKindTag,
-            String,
-            verter_type_expr::TopLevelOwnerId,
-        )> = Vec::new();
-        for block in &header_index.augmentation_blocks {
-            let (scope_kind_tag, specifier) = match &block.scope {
-                AugmentationScopeKind::Global => (
-                    verter_semantic::facts::AugmentationScopeKindTag::Global,
-                    crate::fact_emission::GLOBAL_AUGMENTATION_TAG.to_string(),
-                ),
-                AugmentationScopeKind::Module(specifier) => (
-                    verter_semantic::facts::AugmentationScopeKindTag::Module,
-                    specifier.clone(),
-                ),
-            };
-            let target = (scope_kind_tag, specifier, block.owner);
-            if !augmentation_targets.contains(&target) {
-                augmentation_targets.push(target);
-            }
-        }
-        for (scope_kind_tag, specifier, owner) in augmentation_targets {
-            pin(FactKey::AugmentationContributionSet {
-                scope_kind_tag,
-                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
-                owner,
-            });
-            pin(FactKey::AugmentationContributionOrder {
-                scope_kind_tag,
-                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
-                owner,
-            });
-        }
-        (facts, all_pinned)
-    };
-    let ((facts, all_pinned), finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
-        cold_body,
-    );
-    let facts = Arc::new(facts);
-    // A fenced serve, an unrecoverable observed-version fact registry,
-    // or a non-cacheable / overflowed read set never enters the shared
-    // store — the fresh artifact is returned without admission.
-    let admissible = serve.store_published && all_pinned;
-    match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) if admissible => {
-            let entry = Arc::new(BinderIdentityFactsEntry {
-                facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
-            });
-            store.insert(key, Arc::clone(&entry));
-            Some(entry)
-        }
-        crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-            Some(Arc::new(BinderIdentityFactsEntry {
-                facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
-            }))
-        }
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
-        | crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-            Some(Arc::new(BinderIdentityFactsEntry {
-                facts,
-                read_set_signature: ReadSetSignature::overflow(),
-            }))
-        }
-    }
+    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+        .produce_binder_identity_facts(canonical)
 }
 
 #[cfg(test)]

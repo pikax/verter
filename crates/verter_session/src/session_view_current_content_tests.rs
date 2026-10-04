@@ -42,6 +42,7 @@
 //! base-scan `content_hash_for` returns the planted stale hash and
 //! every assertion FAILS; against the post-fix tree they PASS.
 
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -520,7 +521,7 @@ fn overlay_materialiser_view_lookups_use_raw_canonical_for_normalised_js() {
 /// `raw_source` / `whole_hash` assertions PASS only post-fix.
 #[test]
 fn overlay_artifact_downstream_reachable_for_normalised_js() {
-    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
 
     // Base `.js` runtime stub.
     const BASE_JS: &str = "export const runtime = 1;\n";
@@ -679,7 +680,7 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
 /// the non-zero-hash assertion PASSES only post-fix.
 #[test]
 fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
-    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
 
     // Base `.js` runtime stub.
     const BASE_JS: &str = "export const runtime = 1;\n";
@@ -868,7 +869,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
 /// post-fix.
 #[test]
 fn shallow_file_state_observes_overlay_for_normalised_js() {
-    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
 
     // Base `.js` runtime stub — no `OverlayOnly` symbol.
     const BASE_JS: &str = "export const runtime = 1;\n";

@@ -6,5 +6,5 @@ error[E0624]: associated function `new` is private
   |
  ::: $WORKSPACE/crates/verter_session/src/cache_runtime/flow_slice_node.rs
   |
-  |     fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
-  |     --------------------------------------------------------------- private associated function defined here
+  |     pub(crate) fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+  |     -------------------------------------------------------------------------- private associated function defined here

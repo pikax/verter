@@ -635,6 +635,7 @@ fn finalize_resolved_type_registry_overlay(
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
 pub(crate) fn build_component_meta_output(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     scope_canonical_id: &str,
     mut analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<crate::meta_resolve::output::ComponentMetaResolutionSeed>,
@@ -674,10 +675,9 @@ pub(crate) fn build_component_meta_output(
 
     // ONE dispatch for the whole output payload; the capability mint and
     // every sealed-carrier unwrap live here, in the terminal sink.
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let cap = MetaResolveProjectorsOutputCap::new(&dispatch);
+    let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let types =
-        materialize_component_meta_output_types(&dispatch, &cap, scope_canonical_id, &analysis)?;
+        materialize_component_meta_output_types(dispatch, &cap, scope_canonical_id, &analysis)?;
     let adapter_id = ctx
         .ensure_indexed_ready_serve(scope_canonical_id)
         .and_then(|serve| {

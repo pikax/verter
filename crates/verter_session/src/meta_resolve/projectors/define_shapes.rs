@@ -63,6 +63,7 @@ pub(crate) fn project_define_macro_shapes(
     _diag_sink: &mut [MacroExpansionDiagnostics],
     purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
 ) {
+    let dispatch = query_engine.dispatch;
     use crate::resolver_core::ComponentMetaResolutionPurpose;
     let ctx = query_engine.ctx;
 
@@ -90,7 +91,7 @@ pub(crate) fn project_define_macro_shapes(
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
                 if let Some(result) =
-                    define_props_shape(ctx, owner_canonical, macro_index, evaluated_types)
+                    define_props_shape(ctx, dispatch, owner_canonical, macro_index, evaluated_types)
                 {
                     evaluated_types.define_props.push(ExpandedMacroProps {
                         macro_index,
@@ -99,7 +100,9 @@ pub(crate) fn project_define_macro_shapes(
                 }
             }
             AnalyzedMacroKind::DefineEmits => {
-                if let Some(result) = define_emits_shape(ctx, owner_canonical, macro_index) {
+                if let Some(result) =
+                    define_emits_shape(ctx, dispatch, owner_canonical, macro_index)
+                {
                     evaluated_types.define_emits.push(ExpandedMacroObjectShape {
                         macro_index,
                         result,
@@ -107,7 +110,9 @@ pub(crate) fn project_define_macro_shapes(
                 }
             }
             AnalyzedMacroKind::DefineSlots => {
-                if let Some(result) = define_slots_shape(ctx, owner_canonical, macro_index) {
+                if let Some(result) =
+                    define_slots_shape(ctx, dispatch, owner_canonical, macro_index)
+                {
                     evaluated_types.define_slots.push(ExpandedMacroObjectShape {
                         macro_index,
                         result,
@@ -146,12 +151,14 @@ pub(crate) fn project_define_macro_shapes(
 /// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineProps,
@@ -160,6 +167,7 @@ fn define_props_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
     );
     // Fold a genuine partial macro surface into the request-result
@@ -235,6 +243,7 @@ fn define_props_shape(
 /// its payload source and publication evidence.
 fn define_emits_shape(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -242,6 +251,7 @@ fn define_emits_shape(
     // emits surface with no events is `Some(empty)`.
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineEmits,
@@ -250,6 +260,7 @@ fn define_emits_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
     );
     dtos_read.observe_partial();
@@ -304,6 +315,7 @@ fn define_emits_shape(
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
 fn define_slots_shape(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -311,6 +323,7 @@ fn define_slots_shape(
     // slots surface with no slot members is `Some(empty)`.
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineSlots,
@@ -319,6 +332,7 @@ fn define_slots_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
     );
     dtos_read.observe_partial();
@@ -359,16 +373,17 @@ fn define_slots_shape(
 /// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
 fn macro_surface_resolves(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
 ) -> bool {
-    ctx.host_for_fact_tracer_install()
-        .resolve_vue_macro_surface_with_ctx(
-            ctx,
-            &dto_request(owner_canonical, macro_index, macro_kind),
-        )
-        .is_some()
+    crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface_with_ctx(
+        ctx,
+        dispatch,
+        &dto_request(owner_canonical, macro_index, macro_kind),
+    )
+    .is_some()
 }
 
 /// FullMetadata DTO request for `(owner, macro_index, kind)`.

@@ -215,8 +215,7 @@ mod inventory_view {
         > {
             self.note_traversal();
             self.shallow
-                .decl_bodies()
-                .header_index()
+                .headers
                 .augmentation_type_headers
                 .iter()
                 .flat_map(|(scope, names)| names.into_iter().map(move |(k, h)| (scope, k, h)))
@@ -233,8 +232,7 @@ mod inventory_view {
         > {
             self.note_traversal();
             self.shallow
-                .decl_bodies()
-                .header_index()
+                .headers
                 .augmentation_value_headers
                 .iter()
                 .flat_map(|(scope, names)| names.into_iter().map(move |(k, h)| (scope, k, h)))
@@ -249,7 +247,7 @@ mod inventory_view {
 
         pub(crate) fn value_header(&self, name: &str) -> Option<&ValueDeclHeader> {
             self.note_point_lookup();
-            self.shallow.decl_bodies().header_index().value_header(name)
+            self.shallow.headers.value_header(name)
         }
 
         pub(crate) fn enum_member_names(&self, name: &str) -> Option<&[String]> {
@@ -546,20 +544,8 @@ impl ShallowLens {
     /// body fingerprint, the lazy body-fact source) shares that one instance.
     pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
-            locals: shallow
-                .decl_bodies()
-                .header_index()
-                .type_headers
-                .keys()
-                .cloned()
-                .collect(),
-            value_locals: shallow
-                .decl_bodies()
-                .header_index()
-                .value_headers
-                .keys()
-                .cloned()
-                .collect(),
+            locals: shallow.headers.type_headers.keys().cloned().collect(),
+            value_locals: shallow.headers.value_headers.keys().cloned().collect(),
             exported: shallow
                 .exports
                 .keys()
@@ -673,13 +659,7 @@ impl RouteLens {
     pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
             canonical_id: shallow.decl_bodies().canonical_id(),
-            type_symbols: shallow
-                .decl_bodies()
-                .header_index()
-                .type_headers
-                .keys()
-                .cloned()
-                .collect(),
+            type_symbols: shallow.headers.type_headers.keys().cloned().collect(),
             import_targets: shallow
                 .owner_import_targets
                 .iter()

@@ -948,6 +948,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         declares_interface_app_config: built.declares_interface_app_config,
         macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
         source_parse_key: crate::project_type_store::SourceParseKey::default(),
+        input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
     };
     let mut moved_env = live_env;
     moved_env[0] = moved_env[0].wrapping_add(1);

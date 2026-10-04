@@ -36,12 +36,21 @@ use crate::host_manage::component_meta_request_impl::{
 };
 use crate::meta_resolve::project_expr_class_a_via_dispatch;
 
-pub(crate) struct HostComponentMetaResolver<'a> {
+/// Declaration-only uses carry `()`; semantic callbacks require the caller's
+/// existing facade and captured private view at the type level.
+pub(crate) struct HostComponentMetaResolver<'a, E = ()> {
     pub(crate) host: &'a VerterHost,
     pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(crate) engine: E,
 }
 
-impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
+pub(crate) struct ComponentMetaSemanticServices<'dispatch, 'request> {
+    pub(crate) dispatch:
+        &'dispatch crate::project_semantic_dispatch::ProjectSemanticDispatch<'request>,
+    pub(crate) session_view: Option<&'request dyn crate::session_view::SessionView>,
+}
+
+impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_, E> {
     fn resolve_export_target(
         &self,
         dep_canonical: &str,
@@ -163,8 +172,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         let header = serve
             .indexed
             .shallow_state
-            .decl_bodies()
-            .header_index()
+            .headers
             .type_header_in(owner, resolved_name)?;
         let kind = match header.kind {
             verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
@@ -184,7 +192,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
     }
 }
 
-impl HostComponentMetaResolver<'_> {
+impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
     /// Shared owner-local macro-root presence gate, decided in NODE DOMAIN.
     ///
     /// Lowers the bare root reference in its exact lexical `owner` at
@@ -214,7 +222,7 @@ impl HostComponentMetaResolver<'_> {
             name: std::sync::Arc::from(root_name),
             type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
         };
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.engine.dispatch;
         let Some(base) = dispatch.lower_type_expr_in_owner_scope_with_mode(
             owner_canonical,
             owner,
@@ -261,7 +269,9 @@ impl HostComponentMetaResolver<'_> {
     }
 }
 
-impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolver<'_> {
+impl crate::resolver_core::ComponentMetaResolverHost
+    for HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>>
+{
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
 
@@ -338,6 +348,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             .host
             .compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
                 self.ctx,
+                self.engine.dispatch,
                 owner_canonical,
                 snapshot,
                 eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
@@ -383,7 +394,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         type_name: &str,
     ) -> Option<bool> {
         let locator = mac.parsed_type_argument.as_ref()?;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.engine.dispatch;
         let payload = dispatch
             .raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
@@ -395,7 +406,8 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             )
             .at_optional_boundary()?;
         Some(node_has_direct_macro_reference(
-            self.ctx,
+            self.engine.dispatch,
+            dispatch.graph(),
             payload.node(),
             type_name,
         ))
@@ -529,13 +541,14 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         // helper collapses to the historical behaviour.
         self.host.resolve_component_meta_native_props_with_view(
             self.ctx,
+            self.engine.dispatch,
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
-            self.ctx.active_session_view(),
+            self.engine.session_view,
         )
     }
 
@@ -550,13 +563,14 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         self.host.resolve_component_meta_macro_surface_with_view(
             self.ctx,
+            self.engine.dispatch,
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
-            self.ctx.active_session_view(),
+            self.engine.session_view,
         )
     }
 
@@ -570,6 +584,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         resolve_jsdoc_block(
             self.host,
             self.ctx,
+            self.engine.dispatch,
             canonical_source,
             span,
             if expanded {
@@ -633,7 +648,8 @@ fn absolutize_macro_payload_locator(
 /// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
 /// may be shared or cyclic).
 fn node_has_direct_macro_reference(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
     needle: &str,
 ) -> bool {
@@ -647,7 +663,7 @@ fn node_has_direct_macro_reference(
         }
         if let Some((name, args)) =
             crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
-                ctx, node,
+                dispatch, node,
             )
         {
             if name == needle {
@@ -656,7 +672,7 @@ fn node_has_direct_macro_reference(
             worklist.extend(args);
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(graph, node) else {
             continue;
         };
         match data.as_ref() {
@@ -761,7 +777,11 @@ pub(crate) fn resolve_type_declaration_with_context(
     owner: verter_type_expr::TopLevelOwnerId,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let resolver = HostComponentMetaResolver { host, ctx };
+    let resolver = HostComponentMetaResolver {
+        host,
+        ctx,
+        engine: (),
+    };
     // Prepared declarations, route results, and the enclosing semantic query
     // already own fact-validated retention. Do not add a second declaration
     // cache here: its old `canonical#name` key had no content identity and was
@@ -790,6 +810,7 @@ pub(crate) fn read_full_source(
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     canonical_source: &str,
     span: verter_span::Span,
     mode: ProjectionMode,
@@ -810,7 +831,17 @@ pub(crate) fn resolve_jsdoc_block(
         description,
         tags: tags
             .into_iter()
-            .map(|tag| map_jsdoc_tag(host, ctx, canonical_source, mode, tracked_deps, tag))
+            .map(|tag| {
+                map_jsdoc_tag(
+                    host,
+                    ctx,
+                    dispatch,
+                    canonical_source,
+                    mode,
+                    tracked_deps,
+                    tag,
+                )
+            })
             .collect(),
     })
 }
@@ -818,6 +849,7 @@ pub(crate) fn resolve_jsdoc_block(
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -826,7 +858,14 @@ pub(crate) fn map_jsdoc_tag(
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ProjectionMode::Expanded {
         raw_type.as_deref().and_then(|raw_type| {
-            resolve_jsdoc_tag_type(host, ctx, canonical_source, raw_type, tracked_deps)
+            resolve_jsdoc_tag_type(
+                host,
+                ctx,
+                dispatch,
+                canonical_source,
+                raw_type,
+                tracked_deps,
+            )
         })
     } else {
         None
@@ -926,6 +965,7 @@ fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
 pub(crate) fn resolve_jsdoc_tag_type(
     _host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -1017,8 +1057,8 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // Route the dispatch helper through the request-bound `ctx`; the
     // `project_expr_class_a_via_dispatch` walk reaches
     // `ctx.prepared_decl_bundle(...)` deeper in the call graph.
-    let resolved =
-        project_expr_class_a_via_dispatch(ctx, canonical_source, &parsed).unwrap_or(parsed);
+    let resolved = project_expr_class_a_via_dispatch(ctx, dispatch, canonical_source, &parsed)
+        .unwrap_or(parsed);
 
     // OUTPUT-BOUNDARY materialisation: the resolved symbolic IR is TRANSIENT
     // producer-local state. Render its display string, capture its wire-node

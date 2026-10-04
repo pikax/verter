@@ -445,6 +445,12 @@ impl ResolvedImportFactsDb {
     /// guessing — the same fail-safe direction as a domain with no
     /// producer at all.
     #[must_use]
+    pub(crate) fn generation_reader(
+        &self,
+    ) -> crate::resolver_core::bracketed_generation::BracketedGenerationRead {
+        self.generation.reader()
+    }
+
     pub(crate) fn stable_generation(&self) -> Option<u64> {
         self.generation.stable()
     }

@@ -346,8 +346,11 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<...>() must resolve a macro surface");
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
+        &fixture_dispatch_0,
         &resolved_vue_surface_for_test(macro_surface.clone()),
     );
 

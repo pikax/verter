@@ -135,6 +135,13 @@ fn main() {
                     | Some("flow_solve_plan_and_spec_no_struct_literal.rs")
                     | Some("flow_solve_plan_and_spec_are_sealed.rs")
                     | Some("retained_flow_slice_constructor_is_private.rs")
+                    | Some("engine_ports_actual_host_positive.rs")
+                    | Some("engine_ports_indexed_input_no_worker.rs")
+                    | Some("engine_ports_owned_lowering_no_memo.rs")
+                    | Some("engine_ports_route_no_worker.rs")
+                    | Some("engine_ports_fact_validation_no_workspace.rs")
+                    | Some("engine_ports_cancellation_no_host.rs")
+                    | Some("engine_ports_execution_no_graph.rs")
             )
         });
     }

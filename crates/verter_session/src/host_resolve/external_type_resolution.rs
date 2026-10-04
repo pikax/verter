@@ -25,6 +25,7 @@ impl VerterHost {
     fn resolve_component_meta_native_props_target_with_view(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -112,6 +113,7 @@ impl VerterHost {
         // un-cached.
         let outcome = crate::resolver_core::component_meta::named_native_props_outcome(
             ctx,
+            dispatch,
             effective_dep_canonical.as_str(),
             effective_owner,
             effective_type_name.as_str(),
@@ -216,8 +218,10 @@ impl VerterHost {
         cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.resolve_component_meta_macro_surface_with_view(
                 ctx,
+                dispatch,
                 owner_canonical,
                 import_source,
                 type_name,
@@ -237,6 +241,7 @@ impl VerterHost {
     pub(crate) fn resolve_component_meta_macro_surface_with_view(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -260,6 +265,7 @@ impl VerterHost {
         let (effective_dep_canonical, effective_owner, effective_type_name, resolution) = self
             .resolve_component_meta_native_props_target_with_view(
                 ctx,
+                dispatch,
                 owner_canonical,
                 import_source,
                 type_name,
@@ -291,8 +297,10 @@ impl VerterHost {
         cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
     ) -> Option<Vec<crate::resolver_core::ResolvedNativeProp>> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.resolve_component_meta_native_props_with_view(
                 ctx,
+                dispatch,
                 owner_canonical,
                 import_source,
                 type_name,
@@ -312,6 +320,7 @@ impl VerterHost {
     pub(crate) fn resolve_component_meta_native_props_with_view(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -322,6 +331,7 @@ impl VerterHost {
     ) -> Option<Vec<crate::resolver_core::ResolvedNativeProp>> {
         self.resolve_component_meta_native_props_target_with_view(
             ctx,
+            dispatch,
             owner_canonical,
             import_source,
             type_name,

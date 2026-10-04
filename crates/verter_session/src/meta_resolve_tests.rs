@@ -249,7 +249,15 @@ defineProps<Props>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = super::HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
 
     let parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -321,7 +329,15 @@ defineProps<{ modelValue?: ModelValue<R> }>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = super::HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -331,7 +347,10 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_0);
 
     host.append_component_meta_registry_entries(
         "/src/App.vue",
@@ -2744,9 +2763,13 @@ export interface Props { a: string }
     let _store_view = project.host().resolver_store_view_read().into_owned_view();
 
     let resolved = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_1 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         resolve_jsdoc_tag_type(
             project.host(),
             ctx,
+            &fixture_dispatch_1,
             "/types.ts",
             "DocType",
             &mut tracked_deps,
@@ -4324,8 +4347,11 @@ defineProps<Slots>()
     // identifies the exported declaration. Treating `ThemeNs` as an ordinary
     // named import misses, and stopping at the barrel loses the terminal
     // source/name. Pin both halves alongside the final-meta assertion.
+
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
         host,
+        &fixture_dispatch_2,
         "/App.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
         None,
@@ -5219,7 +5245,10 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_3);
 
     let result1 = query_engine
         .resolve_imported_registry_symbol(
@@ -5281,7 +5310,10 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
 
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_4);
 
     let resolved = query_engine
         .resolve_imported_registry_symbol(
@@ -5347,7 +5379,15 @@ defineSlots<Slots<T>>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = super::HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -5357,7 +5397,10 @@ defineSlots<Slots<T>>()
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_5);
     let solves_before = 0u32;
 
     host.append_component_meta_registry_entries(
@@ -5465,7 +5508,15 @@ defineSlots<Slots<T>>()
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+        let fixture_dispatch_6 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        host.compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            ctx,
+            &fixture_dispatch_6,
+        )
     })
     .expect("fallthrough-expanded state should resolve");
 
@@ -5541,7 +5592,15 @@ defineExpose({ exposed })
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+        let fixture_dispatch_7 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        host.compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            ctx,
+            &fixture_dispatch_7,
+        )
     })
     .expect("fallthrough-expanded state should resolve");
 
@@ -5680,7 +5739,15 @@ defineEmits<Emits>()
         .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        host.compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, ctx)
+        let fixture_dispatch_8 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        host.compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            ctx,
+            &fixture_dispatch_8,
+        )
     })
     .expect("fallthrough-expanded state should resolve");
 
@@ -5776,7 +5843,15 @@ defineEmits<Emits>()
     host.provenance().reset();
 
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        host.compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, ctx)
+        let fixture_dispatch_9 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        host.compute_component_meta_state_for_fallthrough(
+            "/src/Child.vue",
+            whole_hash,
+            ctx,
+            &fixture_dispatch_9,
+        )
     })
     .expect("fallthrough-expanded state should resolve");
 
@@ -5794,8 +5869,10 @@ defineEmits<Emits>()
         "fallthrough-expanded state should not materialize imported declaration ownership for type-based defineEmits when the evaluated shape already supplies the declared events",
     );
 
+    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
+        &fixture_dispatch_10,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
     );
@@ -5872,7 +5949,15 @@ defineEmits<Emits>()
     host.provenance().reset();
 
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        host.compute_component_meta_state_for_fallthrough("/src/Child.vue", whole_hash, ctx)
+        let fixture_dispatch_11 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        host.compute_component_meta_state_for_fallthrough(
+            "/src/Child.vue",
+            whole_hash,
+            ctx,
+            &fixture_dispatch_11,
+        )
     })
     .expect("fallthrough-expanded state should resolve");
 
@@ -5900,8 +5985,10 @@ defineEmits<Emits>()
         "fallthrough-expanded state should keep the transitive imported defineEmits root off resolved_macros when the owner-local wrapper is sufficient",
     );
 
+    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
+        &fixture_dispatch_12,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
     );
@@ -5988,8 +6075,12 @@ defineProps<Props>()
     // consumed by a setup-script macro; the snapshot macro index still owns one
     // normalized typeinfo DTO.
     let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_13 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::resolver_core::component_meta_resolved_macros(
             ctx,
+            &fixture_dispatch_13,
             "/src/App.vue",
             state.snapshot.macros.as_ref(),
         )
@@ -6060,8 +6151,12 @@ defineSlots<Slots>()
         .compute_component_meta_state("/src/App.vue", ProjectionMode::Expanded, whole_hash)
         .expect("component-meta state");
     let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_14 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::resolver_core::component_meta_resolved_macros(
             ctx,
+            &fixture_dispatch_14,
             "/src/App.vue",
             state.snapshot.macros.as_ref(),
         )
@@ -6100,7 +6195,10 @@ defineProps<{ x: string }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let fixture_dispatch_15 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_15);
 
     // Built-in names should NOT be resolvable
     assert!(
@@ -7272,7 +7370,15 @@ defineEmits<Emits>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = super::HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     let parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         "/src/App.vue",
@@ -7868,7 +7974,11 @@ defineEmits<ConditionalEmits>()
     // exactly the shape that defeated the direct-only branch-merge.
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                payload_node
+            )
+            .as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "fixture precondition: the Navigate-lowered named conditional alias must \
@@ -7881,7 +7991,11 @@ defineEmits<ConditionalEmits>()
         resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
             .expect("the named emit alias carrier must reach its conditional root");
     assert!(matches!(
-        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        crate::project_semantic_dispatch::node_data_for(
+            host.project_type_store().semantic_graph(),
+            conditional_root
+        )
+        .as_deref(),
         Some(SemanticNodeData::Conditional { .. })
     ));
 
@@ -7898,9 +8012,10 @@ defineEmits<ConditionalEmits>()
         "the emits branch-merge must resolve the aliased-conditional \
          payload surface by following the DeclRef carrier to the Conditional root",
     );
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
-        .resolved_for_tests()
-        .expect("a resolvable branch-merge surface reads its members");
+    let members =
+        crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
+            .resolved_for_tests()
+            .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())
@@ -8049,7 +8164,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
         // reasons into the active scope at the discharge, not as a producer
         // side effect.
         let names = surface.recorded().map(|surface| {
-            crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
+            crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
                 .resolved_for_tests()
                 .unwrap_or_default()
                 .iter()
@@ -8214,9 +8329,10 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // positive events publish (`saved` from the closed branch, `loaded`
     // from the open program branch), and the open signal is retained in
     // the diagnostic envelope.
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, surface)
-        .resolved_for_tests()
-        .expect("a resolvable branch-merge surface reads its members");
+    let members =
+        crate::meta_resolve::projectors::read_positive_surface_members(&host, &dispatch, surface)
+            .resolved_for_tests()
+            .expect("a resolvable branch-merge surface reads its members");
     let mut names: Vec<String> = members
         .iter()
         .map(|member| {
@@ -8324,7 +8440,11 @@ defineEmits<EmitChain0>()
     // the Conditional root).
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                payload_node
+            )
+            .as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "fixture precondition: the Navigate-lowered chain head must be a \
@@ -8336,7 +8456,11 @@ defineEmits<EmitChain0>()
         resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
             .expect("the >8-hop named emit alias carrier must reach its conditional root");
     assert!(matches!(
-        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        crate::project_semantic_dispatch::node_data_for(
+            host.project_type_store().semantic_graph(),
+            conditional_root
+        )
+        .as_deref(),
         Some(SemanticNodeData::Conditional { .. })
     ));
 
@@ -8354,9 +8478,10 @@ defineEmits<EmitChain0>()
          to the Conditional root — identity-bounded termination reaches it; the \
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
-        .resolved_for_tests()
-        .expect("a resolvable branch-merge surface reads its members");
+    let members =
+        crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
+            .resolved_for_tests()
+            .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())
@@ -8439,7 +8564,11 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Precondition: the cyclic head is a carrier, not a Conditional.
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, payload_node).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                payload_node
+            )
+            .as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "fixture precondition: CycA must Navigate-lower to a CARRIER, not a \
@@ -8520,8 +8649,11 @@ export type C = { back: A }
                 crate::semantic_query::ProjectionMode::Navigate,
             )
             .expect("Pick<A,'next'> must lower");
+
+        let fixture_dispatch_16 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
-            host,
+            &fixture_dispatch_16,
             "/cycle.ts",
             node,
         )
@@ -8550,8 +8682,6 @@ export type C = { back: A }
 /// `overlay_prop`).
 #[test]
 fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
-    use crate::resolver_core::ResolverContext;
-
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
@@ -8628,9 +8758,15 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
 
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
-    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_hash =
+        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
+            .unwrap_or([0u8; 16]);
+
+    let fixture_dispatch_17 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
+        &fixture_dispatch_17,
         &request_for(overlay_hash),
     )
     .dtos;
@@ -8679,8 +8815,6 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
 /// for the overlay session — the `fresh` assertion fails).
 #[test]
 fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_base() {
-    use crate::resolver_core::ResolverContext;
-
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
@@ -8754,9 +8888,15 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
 
-    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_hash =
+        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
+            .unwrap_or([0u8; 16]);
+
+    let fixture_dispatch_18 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
+        &fixture_dispatch_18,
         &request_for(overlay_hash),
     )
     .dtos;
@@ -8802,12 +8942,10 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
 /// inside the pre-node-domain slot raise path / `navigate_param_to_object_surface`,
 /// so the overlay session's slot bindings were resolved against the BASE
 /// `/slots.ts` and surfaced `old`, not `fresh`. Routing those reads through
-/// `ctx.dispatch()` fixes the leak. Verified by mutation (reverting the slot
+/// the borrowed request facade fixes the leak. Verified by mutation (reverting the slot
 /// helpers to a base context surfaces `old` for the overlay session).
 #[test]
 fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_to_base() {
-    use crate::resolver_core::ResolverContext;
-
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
@@ -8898,9 +9036,15 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
     // overlaid), so the overlay read keys on the same SFC hash — the binding
     // must still reflect the OVERLAY carrier through the ctx-bound resolution.
-    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_hash =
+        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
+            .unwrap_or([0u8; 16]);
+
+    let fixture_dispatch_19 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
+        &fixture_dispatch_19,
         &request_for(overlay_hash),
     )
     .dtos;
@@ -9116,7 +9260,9 @@ const model = defineModel<string>()
     // `project_model` returns `None` without publishing the model surface under
     // the wrong published-surface kind.
     {
-        let mut engine = ComponentMetaQueryEngine::new(host);
+        let fixture_dispatch_20 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_20);
         let wrong_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let mut diag_sink = Vec::new();
         let result = project_model(
@@ -9139,7 +9285,9 @@ const model = defineModel<string>()
     // The correct `Model` cursor is NOT gated by the kind check — it proceeds to
     // resolve + publish the model payload (a present model surface).
     {
-        let mut engine = ComponentMetaQueryEngine::new(host);
+        let fixture_dispatch_20 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_20);
         let model_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Model);
         let mut diag_sink = Vec::new();
         let result = project_model(

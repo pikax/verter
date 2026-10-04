@@ -4,7 +4,7 @@
 //! contextual type instantiated with those inferences types the function's
 //! unannotated parameters, and its body return is read under them.
 
-use super::{FlowEvaluator, Positional};
+use super::{FlowDemandDriver, FlowEvaluator, Positional};
 use crate::flow_slice_content::SliceExpr;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 
@@ -43,7 +43,7 @@ impl ContextualSignature {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// The contextual signature of `contextual`: its one call signature,
     /// read as the checker reads a contextual signature. `None` when it has
     /// none, several, or a generic one.

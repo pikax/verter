@@ -31,7 +31,8 @@ pub(super) fn direct_member_dependency_is_missing(
         if !visited.insert((node, tracked_dependency)) {
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             continue;
         };
         match data.as_ref() {
@@ -228,7 +229,7 @@ fn is_definitely_non_object_root(
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
 
     while visited.insert(subject) {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, subject)
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
         else {
             return false;
         };
@@ -457,7 +458,8 @@ pub(super) fn emits_surface_has_invalid_member(
             else {
                 return false;
             };
-            match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref()
+            {
                 Some(SemanticNodeData::Primitive(kind)) => {
                     !matches!(kind, PrimitiveKind::Any | PrimitiveKind::Unknown)
                 }

@@ -5,10 +5,10 @@ Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.)
 **ShallowFileState** (`shallow_file_state.rs`) is the authoritative shallow symbol/export surface for one imported type file. Keyed by `(canonical_id, whole_hash)`. Contains:
 - `exports` map (exported name -> `ExportTarget`: Local or Reexport)
 - `wildcard_reexports` (`export * from` sources, in declaration order)
-- `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
+- `symbols` (slim locally-declared type headers and content-free member/type-parameter facts)
 - `import_locals` / `import_targets` (import classification for closure)
 
-Populated once through the shared host ensure-path and cached in `FileArtifactStore`. Invalidated when the file's whole-hash changes.
+Populated once through the shared host ensure-path and cached in `FileArtifactStore`. Invalidated when the file's whole-hash changes. The backend state retains its lazy body/dependency memo privately. Engine consumers receive `ShallowInputRecord` header projections through `IndexedInputs` and request demanded bodies and dependency edges through `OwnedLowering`.
 
 **ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
 1. Seed with initial `(canonical_id, exported_name)` pairs
@@ -31,9 +31,10 @@ Populated once through the shared host ensure-path and cached in `FileArtifactSt
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 
 **Host integration:** production route resolution enters through the
-request-bound `ResolverContext`. `ImportedRootDb` is the sole routed-target
-authority; `RouteDb` and current `IndexedReady` shallow facts resolve direct,
-named-reexport, and wildcard-barrel hops. Terminal semantic projection starts
+request-bound `RouteLookup` port. The private source request driver owns the
+routed-target walk; passive `ImportedRootDb` and `RouteDb` slots retain its
+answers. Current indexed shallow facts resolve direct, named-reexport and
+wildcard-barrel hops. Terminal semantic projection starts
 from that routed declaration and executes through `ProjectSemanticDispatch`.
 There is no host adapter that expands parser elements and no second frontier
 after `ImportedRootDb` selects the target.

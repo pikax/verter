@@ -1497,10 +1497,7 @@ fn eager_unresolvable_ref_head_does_not_lower_dead_type_args() {
     // Sanity: /argfile.ts is NOT indexed before the query (upsert does not
     // eagerly index a dependency).
     assert!(
-        dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .project_type_store()
+        host.project_type_store()
             .indexed()
             .get_any("/argfile.ts")
             .is_none(),
@@ -1531,10 +1528,7 @@ fn eager_unresolvable_ref_head_does_not_lower_dead_type_args() {
     // DISCRIMINATING: the dead `ArgT` arg must NOT have been lowered, so
     // /argfile.ts must NOT have been indexed by this query.
     assert!(
-        dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .project_type_store()
+        host.project_type_store()
             .indexed()
             .get_any("/argfile.ts")
             .is_none(),
@@ -1648,10 +1642,7 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
     );
     // The live arg `ArgT` MUST have been lowered → /argfile2.ts indexed.
     assert!(
-        dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .project_type_store()
+        host.project_type_store()
             .indexed()
             .get_any("/argfile2.ts")
             .is_some(),
@@ -1737,9 +1728,9 @@ defineProps<Copy<ImportedProps>>()
         .as_ref()
         .expect("fixture must publish script analysis")
         .macros[macro_index];
-    let product =
-        crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
-            .expect("macro type argument must have a hot carrier");
+    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+        .macro_type_arg_hot_ref(canonical, macro_index)
+        .expect("macro type argument must have a hot carrier");
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
@@ -2024,7 +2015,7 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
         let scope = file_scope(&dispatch, "/consumer.ts");
         let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
 
-        let adapter = super::SessionDispatchHost::new(&host);
+        let adapter = super::SessionDispatchHost::from_facade(&dispatch);
         assert_eq!(
             adapter.resolve_builtin_utility(carrier, local),
             gate,
@@ -2062,7 +2053,7 @@ fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let scope = file_scope(&dispatch, "/plain.ts");
     let carrier = bare_ref_carrier(&dispatch, "Awaited", scope, &[PrimitiveKind::String]);
-    let adapter = super::SessionDispatchHost::new(&host);
+    let adapter = super::SessionDispatchHost::from_facade(&dispatch);
     assert_eq!(
         adapter.resolve_builtin_utility(carrier, "Awaited"),
         super::BuiltinUtilityResolution::Builtin(Some(BuiltinUtility::Awaited)),

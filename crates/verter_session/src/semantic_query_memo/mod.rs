@@ -2290,7 +2290,7 @@ impl SemanticGraphStore {
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
-        let validated_at_generation = ctx.project_type_store().project_generation();
+        let validated_at_generation = ctx.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
             result: result.clone(),
@@ -2529,7 +2529,7 @@ impl SemanticGraphStore {
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
-        let validated_at_generation = ctx.project_type_store().project_generation();
+        let validated_at_generation = ctx.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
             result: match result {

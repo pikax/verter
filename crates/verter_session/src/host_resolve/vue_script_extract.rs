@@ -90,15 +90,6 @@ pub(crate) fn sfc_script_setup_type_params(
 /// `TypeParam` node construction (which selects + validates one parameter
 /// by the stored binding's `(ordinal, name)`) and the macro hot-mirror
 /// seed-frame builder — so the two can never diverge.
-pub(crate) fn indexed_script_setup_type_params(
-    indexed: &crate::project_type_store::IndexedReady,
-) -> Vec<verter_type_expr::TypeParam> {
-    sfc_script_setup_type_params(
-        indexed.raw_source.as_ref(),
-        indexed.framework_parse.as_deref(),
-    )
-}
-
 /// Extract a **position-preserving** script-only source from a Vue SFC string.
 ///
 /// The result is byte-for-byte the SAME LENGTH as `source`: every `<script>` /
@@ -209,6 +200,7 @@ pub(crate) fn build_position_preserving_script_source(
 }
 
 /// Bind schema-8 metadata to the registered content-free structure.
+#[cfg(test)]
 pub(crate) fn populate_ordered_sfc_structure(
     host: &crate::VerterHost,
     canonical_id: &str,

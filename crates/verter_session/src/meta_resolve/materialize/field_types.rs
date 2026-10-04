@@ -28,14 +28,12 @@ fn materializer_context(
 /// sentinels before classifying the root. Mapped carriers publish unless their
 /// value is the typed semantic-miss carrier.
 fn node_root_is_published_operator(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     use crate::project_semantic_dispatch::raise::node_root_is_published_operator_with_dispatch;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    node_root_is_published_operator_with_dispatch(&dispatch, node)
+    node_root_is_published_operator_with_dispatch(dispatch, node)
 }
 
 /// The exact reduction context for an already-lowered member node.
@@ -44,12 +42,12 @@ fn node_root_is_published_operator(
 /// therefore uses `Published(Navigate)`. Other `Navigate` roots remain
 /// structural transit; all other modes publish directly.
 pub(crate) fn node_materialize_reduction_context(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     mode: crate::semantic_query::ProjectionMode,
 ) -> crate::semantic_query::ProjectionReductionContext {
     if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
-        && node_root_is_published_operator(ctx, node)
+        && node_root_is_published_operator(dispatch, node)
     {
         crate::semantic_query::ProjectionReductionContext::published(mode)
     } else {
@@ -60,18 +58,16 @@ pub(crate) fn node_materialize_reduction_context(
 /// Reduce a settled member node through the single semantic dispatch and emit
 /// the complete dependency signature to both active fact channels.
 pub(crate) fn reduce_member_value_graph_native_with_context(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     _scope_canonical_id: &str,
     member_value: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
+    let cap = MetaResolveFieldTypesOutputCap::new(dispatch);
     let materialized = cap.materialize_reduced_output_type_expr(member_value, context);
-    emit_dispatch_dep_signature_facts(ctx, materialized.dep_signature());
+    emit_dispatch_dep_signature_facts(dispatch, materialized.dep_signature());
     materialized
 }
 
@@ -108,6 +104,7 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
     scope_canonical_id: &str,
     root_identity: &crate::semantic_query::DeclIdentity,
 ) -> (bool, Option<crate::semantic_query::DepSignature>) {
+    let dispatch = query_engine.dispatch;
     use std::sync::Arc;
 
     let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
@@ -171,9 +168,7 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
             target.symbol_name.as_ref(),
         )
         .and_then(|locator| {
-            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                query_engine.ctx,
-            );
+            let dispatch = query_engine.dispatch;
             dispatch
                 .raise_authored_locator_to_hot(
                     &locator,
@@ -184,8 +179,7 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
                 .at_optional_boundary()
         })
         .is_some_and(|hot| {
-            crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(
-                query_engine.ctx,
+            crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(dispatch,
                 hot.node(),
             )
         });

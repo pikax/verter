@@ -7,7 +7,6 @@
 
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 
-use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -56,10 +55,10 @@ fn peel_alias_root(
 /// triad. Parity-checked field-for-field against the `TypeExpr` predicates on
 /// `raise(node)`.
 pub(crate) fn classify_node_reduction_gates(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
-    let graph = ctx.project_type_store().semantic_graph();
+    let graph = dispatch.graph();
     // Peel a single `Alias` chain so the root classification reads the underlying
     // carrier kind (the reverse boundary unwraps an `Alias` before raising).
     let root = peel_alias_root(graph, node, 0);

@@ -559,9 +559,10 @@ struct EvaluatedFlowRoot {
 /// The shared demand-site of one flow demand — derived ONCE by
 /// [`ProjectSemanticDispatch::flow_slice_demand_site`] and consumed by both
 /// the demand preparation and the content evaluation.
-struct FlowSliceDemandSite {
+pub(super) struct FlowSliceDemandSite {
+    source_demand: crate::decl_body_memo::IndexedExpressionDemand,
     /// The served indexed state of the function's own file (pinned).
-    indexed: Arc<crate::project_type_store::IndexedReady>,
+    indexed: Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
     /// The function's own file roots.
     self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The content-pinned function identity.
@@ -584,7 +585,7 @@ struct FlowSliceDemandSite {
 /// [`FlowReturnFailure::Missing`], so a caller matching on the failure
 /// alone would classify the transient edge as contained and under-fault
 /// every consumer of an unstable read.
-struct FlowSliceDemandSiteError {
+pub(super) struct FlowSliceDemandSiteError {
     /// The typed no-value failure the evaluation path surfaces.
     failure: FlowReturnFailure,
     /// The roots observed before the failure (empty when the failure
@@ -667,18 +668,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
     ) -> crate::semantic_query::FlowReturnContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         crate::semantic_query::FlowReturnContext {
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity().0,
+            project_identity: self.ctx.host_view_project_identity().0,
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy::from_compiler_options(
-                &host.semantic_compiler_options_for(canonical),
+                &self.ctx.semantic_compiler_options_for(canonical),
             ),
         }
     }
@@ -691,7 +691,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::semantic_query::NullabilityPolicy {
         crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
             self.ctx
-                .host_for_fact_tracer_install()
                 .semantic_compiler_options_for(canonical)
                 .strict_null_checks,
         )
@@ -1365,14 +1364,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         crate::semantic_query::ResolveCallContext {
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity().0,
+            project_identity: self.ctx.host_view_project_identity().0,
             substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
         }
     }
@@ -1814,12 +1812,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(point) => {
-                let serve = self
+                let (_serve, source_demand) = self
                     .ctx
-                    .ensure_indexed_ready_serve(point.canonical_id.as_ref())?;
-                let indexed = serve.indexed;
-                let memo = indexed.shallow_state.decl_bodies();
-                let index = memo.function_program_index();
+                    .indexed_expression_source(point.canonical_id.as_ref())?;
+                let index = source_demand.function_program_index();
                 let record = index.expression(point)?;
                 match &record.source {
                     verter_semantic::analysis::function_program::ProgramExpressionSource::FunctionReturn(source) => {
@@ -1845,7 +1841,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     verter_semantic::analysis::function_program::ProgramExpressionSource::Value
                     | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
-                        let expression = memo.indexed_program_expression_ir(record)?;
+                        let expression = source_demand.indexed_program_expression_ir(record)?;
                         self.evaluate_indexed_value_for_type(
                             point.canonical_id.as_ref(),
                             owner,
@@ -1974,7 +1970,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         callee_arg: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::FlowFunctionReturnIdentity> {
-        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, callee_arg)?;
+        let data = crate::project_semantic_dispatch::node_data_for(self.graph(), callee_arg)?;
         let (value_root, typeof_path) = data.typeof_head()?;
         if !typeof_path.is_empty() {
             return None;
@@ -2072,7 +2068,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// single-member `FlowReturn` demand instead of a whole-signature
     /// composition.
     pub(super) fn is_flow_return_type_member_base(&self, node: SemanticNodeId) -> bool {
-        match crate::project_semantic_dispatch::node_data_for(self.ctx, node) {
+        match crate::project_semantic_dispatch::node_data_for(self.graph(), node) {
             Some(data) => self.is_flow_return_type_member_base_data(&data),
             None => false,
         }
@@ -2228,8 +2224,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     ) -> Option<UtilityClause> {
         let canonical = identity.anchor.canonical_id.as_ref();
-        let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
+        let (_serve, source_demand) = self.ctx.indexed_flow_source(canonical)?;
+        let source_demand = source_demand?;
         let key = verter_semantic::analysis::function_program::FunctionProgramKey {
             declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
                 owner: identity.anchor.owner,
@@ -2239,7 +2235,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             part: identity.function_part.clone(),
             overload_ordinal: identity.overload_ordinal,
         };
-        let index = decl_bodies.function_program_index();
+        let index = source_demand.function_program_index();
         let matched = index.get(&key)?;
         let entry = matched.entry();
         // The lowered clause is demanded at most once, and only for a
@@ -2247,7 +2243,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
         UtilityClause::read_from_program_entry(matched, |ordinal, param| {
             let clause =
-                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(entry));
+                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(entry));
             // Matched by ORDINAL with the name as a cross-check, exactly as
             // the call-site route matches a declared default: a
             // disagreement means the two views are not the same clause,
@@ -2607,9 +2603,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let run = || {
             #[cfg(test)]
             if self
-                .ctx
-                .host_for_fact_tracer_install()
-                .test_force
+                .binding
+                .observers
+                .forcing
                 .force_flow_member_fenced_serve_for_tests
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -2859,9 +2855,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .strip_root_proof
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -3518,9 +3514,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
     ) {
         let mut probe = self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .flow_root_carrier_probe
             .lock()
             .expect("the flow-root carrier probe is never poisoned");
@@ -3549,9 +3545,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn inject_unproven_flow_member_for_tests(&self, root_idx: usize) {
         let key = self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .unproven_flow_member
             .lock()
             .expect("the unproven-member fault slot is never poisoned")
@@ -3564,7 +3560,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let watermark = txn.obligations.pending().pending_len();
             txn.reentry_mut().push_flow_return(key.clone(), watermark)
         };
-        let knobs = &self.ctx.host_for_fact_tracer_install().flow_fault_injection;
+        let knobs = &self.binding.observers.flow;
         let refuse_member = knobs
             .refuse_injected_member_demand
             .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -3645,7 +3641,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
         FlowEvaluationProvenance::new(
             store_identity,
-            self.ctx.project_type_store().project_generation(),
+            self.ctx.current_project_generation(),
             runtime_identity,
             // The sentinel ordinal: no installed demand bears it (ledger
             // ordinals are small counting numbers), so a bare freshness
@@ -3680,15 +3676,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return;
             }
         };
-        let flow_slice = self.ctx.project_type_store().flow_slice();
+        let flow_slice = self.binding.flow_slice.as_ref();
         // The retained structural plan of the ONE cold planning run (the
         // hash node's published outcome) — the demand planner assembles
         // obligations FROM it; it never invokes the slice planner again.
-        let planned = match crate::cache_runtime::lookup(
-            flow_slice.hash_node(),
-            site.slice_key.clone(),
-            self.ctx,
-        ) {
+        let planned = match self.flow_slice_driver().lookup_hash(site.slice_key.clone()) {
             Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) => {
                 planned
             }
@@ -3732,9 +3724,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         #[cfg(any(test, feature = "test-support"))]
         let provenance = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .stale_demand_carrier
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -3750,9 +3742,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let resources = FlowResourcePolicy::default();
         #[cfg(any(test, feature = "test-support"))]
         let resources = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .zero_obligation_budget
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -4085,7 +4077,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let report = FlowDischargeReport::new(entries);
         #[cfg(test)]
         {
-            let knobs = &self.ctx.host_for_fact_tracer_install().flow_fault_injection;
+            let knobs = &self.binding.observers.flow;
             if knobs
                 .observe_product_execution
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -4124,9 +4116,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let carrier = carrier?;
         #[cfg(any(test, feature = "test-support"))]
         let provenance = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .foreign_evaluation_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -4137,9 +4129,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 u64::MAX,
             )
         } else if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .foreign_demand_provenance
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -4161,9 +4153,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let unobserved_convergence;
         #[cfg(any(test, feature = "test-support"))]
         let convergence = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .unobserved_convergence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -4204,9 +4196,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let discharge = match discharge {
             Some(report)
                 if self
-                    .ctx
-                    .host_for_fact_tracer_install()
-                    .flow_fault_injection
+                    .binding
+                    .observers
+                    .flow
                     .drop_last_discharge_claim
                     .load(std::sync::atomic::Ordering::Relaxed)
                     && !report.entries().is_empty() =>
@@ -5277,17 +5269,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
         #[cfg(any(test, feature = "test-support"))]
         let unserved = self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .unserved_demand_site
             .swap(false, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(any(test, feature = "test-support")))]
         let unserved = false;
         let served = (!unserved)
-            .then(|| self.ctx.ensure_indexed_ready_serve(canonical))
+            .then(|| self.ctx.indexed_flow_source(canonical))
             .flatten();
-        let Some(serve) = served else {
+        let Some((serve, source_demand)) = served else {
             // The store did not serve the function's own file. The
             // canonical here came from a RESOLVED declaration slot, so
             // the file was served when that slot was minted: a later
@@ -5305,7 +5297,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let indexed = serve.indexed;
         let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             vec![(Arc::from(canonical), indexed.whole_hash)];
-        let index = indexed.shallow_state.decl_bodies().function_program_index();
+        let source_demand = source_demand.ok_or_else(|| FlowSliceDemandSiteError {
+            failure: FlowReturnFailure::Missing,
+            self_roots: self_roots.clone(),
+            refusal: FlowPlanRefusal::TornView,
+        })?;
+        let index = source_demand.function_program_index();
         // The KEYED lookup, not a scan: a function position is named by
         // its whole program key, and "the first entry that looks close
         // enough" is exactly the shape that hands over the wrong callee.
@@ -5372,6 +5369,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
         };
         Ok(FlowSliceDemandSite {
+            source_demand,
             indexed,
             self_roots,
             slice_key_function,
@@ -5483,7 +5481,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Err(err) => return degraded(err.failure, err.self_roots),
         };
         let FlowSliceDemandSite {
-            indexed,
+            source_demand,
+            indexed: _indexed,
             mut self_roots,
             slice_key_function,
             slice_key,
@@ -5492,7 +5491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
-        let index = indexed.shallow_state.decl_bodies().function_program_index();
+        let index = source_demand.function_program_index();
         // The KEYED lookup, not a scan: a function position is named by
         // its whole program key, and "the first entry that looks close
         // enough" is exactly the shape that hands over the wrong callee.
@@ -5526,59 +5525,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // memo refuses (`ReturnOnly` — the fourth non-admission layer,
         // on top of the planner's typed refusal, the hash node's
         // `ReturnOnly`, and the unaddressable lowered store).
-        let flow_slice = self.ctx.project_type_store().flow_slice();
-        let (planned, lowered) =
-            match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx)
-            {
-                None => {
-                    // The skeleton source could not serve the pinned content
-                    // version (a torn view between the served index and the
-                    // retained snapshot): undecided, never a fabricated slice.
-                    return degraded(FlowReturnFailure::Unresolved, self_roots);
-                }
-                Some(
-                    crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
-                        exceeded,
+        let flow_slice = self.binding.flow_slice.as_ref();
+        let (planned, lowered) = match self.flow_slice_driver().lookup_hash(slice_key.clone()) {
+            None => {
+                // The skeleton source could not serve the pinned content
+                // version (a torn view between the served index and the
+                // retained snapshot): undecided, never a fabricated slice.
+                return degraded(FlowReturnFailure::Unresolved, self_roots);
+            }
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
+                exceeded,
+            )) => {
+                tracing::debug!(
+                    axis = ?exceeded.axis,
+                    limit = exceeded.limit,
+                    observed = exceeded.observed,
+                    "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
+                );
+                crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
+                return degraded(
+                    FlowReturnFailure::Budget(
+                        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
                     ),
-                ) => {
-                    tracing::debug!(
-                        axis = ?exceeded.axis,
-                        limit = exceeded.limit,
-                        observed = exceeded.observed,
-                        "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
-                    );
-                    crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
-                    return degraded(
-                        FlowReturnFailure::Budget(
-                            verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
-                        ),
-                        self_roots,
-                    );
-                }
-                Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
-                    planned,
-                )) => {
-                    // Hash-then-lower: the minted slice identity keys the
-                    // lowered-slice artifact (the key is unconstructible
-                    // without it), and the lowered node lowers ONLY the
-                    // retained plan. A lowered miss on the pinned content is
-                    // a torn view — undecided, never a fabricated slice.
-                    let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
-                        hash_key: slice_key,
-                        slice_hash: planned.hash(),
-                    };
-                    match crate::cache_runtime::lookup(
-                        flow_slice.lowered_node(),
-                        lowered_key,
-                        self.ctx,
-                    ) {
-                        None => {
-                            return degraded(FlowReturnFailure::Unresolved, self_roots);
-                        }
-                        Some(lowered) => (planned, lowered),
+                    self_roots,
+                );
+            }
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) => {
+                // Hash-then-lower: the minted slice identity keys the
+                // lowered-slice artifact (the key is unconstructible
+                // without it), and the lowered node lowers ONLY the
+                // retained plan. A lowered miss on the pinned content is
+                // a torn view — undecided, never a fabricated slice.
+                let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
+                    hash_key: slice_key,
+                    slice_hash: planned.hash(),
+                };
+                match self.flow_slice_driver().lookup_lowered(lowered_key) {
+                    None => {
+                        return degraded(FlowReturnFailure::Unresolved, self_roots);
                     }
+                    Some(lowered) => (planned, lowered),
                 }
-            };
+            }
+        };
         // Each return site the slice plans is a contributor the evaluation
         // joins: the connected demand pays for them before the evaluation
         // runs, so a body answers exactly as far as the demand's work
@@ -5625,18 +5614,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `FunctionBodySkeleton` the plan above resolved its lexical edges
         // against — one binding authority, one build per content version
         // (the graph store memoized it during planning).
-        let Some(skeleton) = flow_slice.skeleton_for(&slice_key_function, self.ctx) else {
+        let Some(skeleton) = self.flow_slice_driver().skeleton_for(&slice_key_function) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
         let Some(bound) = flow_slice.bound_graph_for(&slice_key_function) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let Some(ir) = indexed.shallow_state.decl_bodies().flow_slice_content(
-            entry,
-            selection,
-            &bound,
-            key.context.policy,
-        ) else {
+        let Some(ir) =
+            source_demand.flow_slice_content(entry, selection, &bound, key.context.policy)
+        else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // The frame anchor the skeleton's call footprint was rebased onto
@@ -5839,9 +5825,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let product_budget = FlowProductBudget::for_execution_selection(&execution_selection);
         #[cfg(any(test, feature = "test-support"))]
         let product_budget = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .zero_product_iteration_budget
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -5854,9 +5840,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         #[cfg(any(test, feature = "test-support"))]
         let product_budget = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .zero_product_capacity
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -5908,8 +5894,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 )
             });
+        let flow_cx = FlowCx::new(self);
         let mut evaluator = FlowEvaluator {
-            dispatch: self,
+            dispatch: &flow_cx,
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
@@ -6045,17 +6032,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         #[cfg(any(test, feature = "test-support"))]
         let call_evidence = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .suppress_call_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             Vec::new()
         } else if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .undecided_relation_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -6107,9 +6094,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .short_execution_ledger
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -6123,9 +6110,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ledger yields NO executed selection.
         #[cfg(any(test, feature = "test-support"))]
         let frame_product_evidence = if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .drop_binding_domain_product
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -7123,7 +7110,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let unit_seed = !nullability.is_strict()
             || (!observations.contributes_arm()
                 && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening));
-        if unit_seed && arms.len() == 1 && holds.is_empty() && is_unique_symbol_node(graph, arms[0])
+        if unit_seed
+            && arms.len() == 1
+            && holds.is_empty()
+            && is_unique_symbol_node(&graph, arms[0])
         {
             arms[0] = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
         }
@@ -7660,11 +7650,11 @@ enum FlowIndexedArgumentBinding {
 /// union-valued binding only when every conditional leaf was a bare
 /// literal.
 fn widen_fresh_read_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
     nullability: crate::semantic_query::NullabilityPolicy,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.arena();
     if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
         let widened: Vec<SemanticNodeId> = members
             .iter()
@@ -7683,7 +7673,7 @@ fn widen_fresh_read_node(
 /// else passes through unchanged — an authored pinned arm beside a fresh
 /// one keeps its literal.
 fn widen_values_within(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
     values: &[SemanticNodeId],
     nullability: crate::semantic_query::NullabilityPolicy,
@@ -7691,7 +7681,7 @@ fn widen_values_within(
     if values.contains(&node) {
         return widen_literal_node(dispatch, node);
     }
-    let graph = dispatch.graph();
+    let graph = dispatch.arena();
     if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
         let widened: Vec<SemanticNodeId> = members
             .iter()
@@ -7713,7 +7703,7 @@ fn widen_values_within(
 
 /// Whether `node` is a `unique symbol` type.
 fn is_unique_symbol_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &impl crate::semantic_query::NodeRead,
     node: SemanticNodeId,
 ) -> bool {
     matches!(
@@ -7729,26 +7719,26 @@ fn is_unique_symbol_node(
 /// assigned to an unannotated variable declared by its initializer; every
 /// other node passes through unchanged.
 fn widen_unique_symbols(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
     nullability: crate::semantic_query::NullabilityPolicy,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.arena();
     let symbol = || graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
-    if is_unique_symbol_node(graph, node) {
+    if is_unique_symbol_node(&graph, node) {
         return symbol();
     }
     if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
         if !members
             .iter()
-            .any(|member| is_unique_symbol_node(graph, *member))
+            .any(|member| is_unique_symbol_node(&graph, *member))
         {
             return node;
         }
         let widened: Vec<SemanticNodeId> = members
             .iter()
             .map(|member| {
-                if is_unique_symbol_node(graph, *member) {
+                if is_unique_symbol_node(&graph, *member) {
                     symbol()
                 } else {
                     *member
@@ -8041,10 +8031,7 @@ fn loop_carried_subjects(
 }
 
 /// Whether `node` is the `null` or the `undefined` type.
-fn is_nullable_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: SemanticNodeId,
-) -> bool {
+fn is_nullable_node(graph: &impl crate::semantic_query::NodeRead, node: SemanticNodeId) -> bool {
     matches!(
         graph.node_data(node).as_deref(),
         Some(SemanticNodeData::Primitive(
@@ -8168,10 +8155,7 @@ fn top_level_literal_nodes_in(
 /// Widen one FRESH literal node (tsc's widening-literal-type rule): a
 /// plain literal to its primitive, an enum member's literal to its enum's
 /// type. Every non-literal node passes through unchanged.
-fn widen_literal_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> SemanticNodeId {
+fn widen_literal_node(dispatch: &impl FlowDemandDriver, node: SemanticNodeId) -> SemanticNodeId {
     dispatch.widened_literal(node)
 }
 
@@ -8240,7 +8224,7 @@ impl FlowBinderEnv {
 /// binder NAME because that is the vocabulary `lower_type_expr` resolves a
 /// type reference against — a binder is named, not slotted — so a reader
 /// should not mistake it for a surviving name-keyed value layer.
-struct FlowBinderEnv {
+pub(super) struct FlowBinderEnv {
     /// The file scope the binders declare into.
     scope: crate::semantic_query::NodeScopeId,
     /// The file's declaration scope payload (bare-name resolution).
@@ -8288,7 +8272,7 @@ struct FlowBinderEnv {
 /// side — which local declarations shadow the reference — that the
 /// meanings differ on.
 fn owner_scope_answers_frame_name(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl FlowDemandDriver,
     binder_env: &FlowBinderEnv,
     name: &crate::flow_slice_content::FrameShadowedName,
 ) -> bool {
@@ -8321,7 +8305,7 @@ fn owner_scope_answers_frame_name(
         )
     };
     let node = lower_probe(crate::semantic_query::ProjectionReductionContext::structural_transit());
-    match dispatch.graph().node_data(node).as_deref() {
+    match dispatch.arena().node_data(node).as_deref() {
         Some(SemanticNodeData::Opaque(_)) => false,
         Some(SemanticNodeData::BareRef(_)) => {
             // Settle the unresolved carrier through the shared
@@ -8337,7 +8321,7 @@ fn owner_scope_answers_frame_name(
                     crate::semantic_query::ProjectionMode::Expanded,
                 ),
             );
-            match dispatch.graph().node_data(settled).as_deref() {
+            match dispatch.arena().node_data(settled).as_deref() {
                 Some(SemanticNodeData::Opaque(_)) => {
                     let head = match name {
                         crate::flow_slice_content::FrameShadowedName::Value(name)
@@ -8357,7 +8341,7 @@ fn owner_scope_answers_frame_name(
 /// answered by the owner scope — the fail-closed test at every
 /// [`crate::flow_slice_content::GatedType`] consumption point.
 fn signature_answer_is_frame_shadowed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl FlowDemandDriver,
     binder_env: &FlowBinderEnv,
     gated: &crate::flow_slice_content::GatedType,
 ) -> bool {
@@ -8759,9 +8743,1488 @@ mod destructure;
 #[path = "flow_return_schedule.rs"]
 pub(super) mod schedule;
 
+use super::build::{AugmentationContributions, ClassAncestryReading, NormalizedTupleShape};
+use super::call_resolve::*;
+use super::dispatch_txn::RelationStep;
+use super::evaluate::StructuralFactDemandOutcome;
+use super::relation::{ComparabilityVerdict, IdentityCarrierUnwrap};
+use super::signature_discovery::SharedSignatureNodes;
+use super::signature_utility::AuthoredSignatures;
+use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use crate::resolver_core::scope_shadowing::ScopeShadowing;
+use crate::semantic_query::{
+    EnumLiteralType, IncompleteReason, NodeScopeId, ProjectionReductionContext, ResolveCallKey,
+    SemanticQueryOutput, SignatureKind, SignatureKind as GraphSignatureKind,
+};
+use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_type_expr::TypeExpr;
+
+/// Nested semantic demands always return to the existing driver. All calls
+/// are monomorphized; this is an internal execution facet, not a session port.
+pub(super) trait FlowDemandDriver {
+    fn flow_slice_skeleton(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<Arc<FunctionBodySkeleton>>;
+    fn flow_slice_lowered(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>>;
+    fn flow_slice_hash(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome>;
+    fn flow_bound_graph_for(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph>;
+    fn first_signature_param_occurrence(
+        &self,
+        params: &[crate::semantic_query::FunctionParam],
+        name: &str,
+    ) -> Option<u32>;
+    fn instantiate_clause_at_base_constraints<'n>(
+        &self,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId;
+    fn instantiate_clause_params_at_call<'n>(
+        &self,
+        params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId;
+    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool;
+    fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
+    fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId;
+    fn subtype_reduced_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite;
+    fn attach_function_kind_wrap(
+        &self,
+        result: FlowReturnResult,
+        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        yield_contributions: &[YieldContribution],
+        binder_env: &FlowBinderEnv,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> FlowReturnResult;
+    fn attach_inferred_predicate(
+        &self,
+        result: FlowReturnResult,
+        predicate: Option<crate::semantic_query::SignaturePredicate>,
+    ) -> FlowReturnResult;
+    fn authored_signatures_of(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> AuthoredSignatures;
+    fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
+    fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId;
+    fn bind_this_receiver(&self, node: SemanticNodeId, receiver: SemanticNodeId) -> SemanticNodeId;
+    fn canonical_is_module(&self, canonical: &str) -> bool;
+    fn class_heritage_ancestry(
+        &self,
+        root: &crate::semantic_query::DeclIdentity,
+    ) -> Arc<ClassAncestryReading>;
+    fn class_member_source(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> Option<SemanticNodeId>;
+    fn classify_truthiness_domain_read(
+        &self,
+        subject: SemanticNodeId,
+    ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain>;
+    fn connected_demand_tripped(&self) -> bool;
+    fn construct_signature_visibility(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<verter_type_expr::MemberVisibility>;
+    fn distribute_intersection(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+    ) -> Option<DistributedIntersection>;
+    fn erase_nullable_members(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId;
+    fn evaluate_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue>;
+    fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep;
+    fn execute_function_return_source(
+        &self,
+        source: &verter_type_expr::facts::FunctionReturnSource,
+        scope_canonical_id: &str,
+    ) -> FunctionReturnNode;
+    fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep;
+    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep;
+    fn demand_type_node(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>>;
+    fn finalize_evolving_array(
+        &self,
+        elements: &[super::flow_products::EvolvingElement],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite;
+    fn flow_binder_env(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        outer: Option<&FlowBinderEnv>,
+        nested_at: Option<u32>,
+    ) -> FlowBinderEnv;
+    fn flow_return_key_for(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    ) -> FlowReturnKey;
+    fn flow_slice_demand_site(
+        &self,
+        key: &FlowReturnKey,
+    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError>;
+    fn function_augmentations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationContributions>;
+    fn global_named_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &'static str,
+    ) -> Option<SemanticNodeId>;
+    fn instance_member_read_widens(&self, instance: SemanticNodeId, member: &str) -> bool;
+    fn instantiate_call_candidate(
+        &self,
+        signature: SemanticNodeId,
+        type_args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId>;
+    fn intern_normalized_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId;
+    fn intern_normalized_union_or_intersection(
+        &self,
+        members: &[SemanticNodeId],
+        is_union: bool,
+    ) -> SemanticNodeId;
+    fn is_enum_object_of(&self, node: SemanticNodeId, literal: &EnumLiteralType) -> bool;
+    fn is_function_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool;
+    fn is_lib_environment_canonical(&self, canonical: &str) -> bool;
+    fn join_flow_return_contributors(
+        &self,
+        contributors: Vec<FlowContribution>,
+        can_fall_through: NormalCompletion,
+        observations: BodyCompletionObservations,
+        holds: &[HeldCallee],
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        empty_completion: crate::flow_slice_content::EmptyCompletion,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> Result<(FlowReturnResult, bool), FlowReturnFailure>;
+    fn lower_lib_global(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId>;
+    fn lower_type_expr_in_owner_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId>;
+    fn lower_type_expr_in_owner_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Option<SemanticNodeId>;
+    fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult;
+    fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool;
+    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict;
+    fn normalize_node_for_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome;
+    fn normalize_tuple_spread(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        readonly: bool,
+    ) -> NormalizedTupleShape;
+    fn opaque(&self, err: QueryError) -> SemanticNodeId;
+    fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
+    fn reduce_arms_to_supertypes(
+        &self,
+        arms: &[ReductionArm],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> ReunionReduction;
+    fn reduce_template_literal_nodes(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
+    fn relation_nominal_identity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
+    fn resolve_call_context_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::ResolveCallContext;
+    fn resolve_closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId;
+    fn resolve_signature_source_carrier(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId;
+    fn resolve_typeinfo_surface_view(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SurfaceView>;
+    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId;
+    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
+    fn shallow_lower_type_expr_with_context(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId;
+    fn shared_signature_buckets(
+        &self,
+        subject: SemanticNodeId,
+    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason>;
+    fn shared_signature_nodes(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes;
+    fn substitute_semantic_type_param(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> SemanticNodeId;
+    fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId;
+    fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId;
+    fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>>;
+    fn unique_symbol_identity_for_typeof_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
+    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap;
+    fn value_read_widens(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        path: &[String],
+    ) -> bool;
+    fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
+    fn call_undecided_relations(&self) -> u64;
+    fn pending_obligation_count(&self) -> usize;
+    fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_>;
+    fn presence_intersection_for_flow(
+        &self,
+        members: &[Vec<crate::semantic_query::SurfaceMember>],
+    ) -> Vec<crate::semantic_query::SurfaceMember>;
+    fn flow_literal_provenance(
+        &self,
+        inputs: &[super::flow_products::LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap>;
+    fn flow_canonical_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite;
+}
+impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
+    fn flow_slice_skeleton(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<Arc<FunctionBodySkeleton>> {
+        self.flow_slice_driver().skeleton_for(key)
+    }
+    fn flow_slice_lowered(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>> {
+        self.flow_slice_driver().lookup_lowered(key)
+    }
+    fn flow_slice_hash(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome> {
+        self.flow_slice_driver().lookup_hash(key)
+    }
+    fn flow_bound_graph_for(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph> {
+        self.binding.flow_slice.bound_graph_for(key)
+    }
+    fn first_signature_param_occurrence(
+        &self,
+        params: &[crate::semantic_query::FunctionParam],
+        name: &str,
+    ) -> Option<u32> {
+        ProjectSemanticDispatch::first_signature_param_occurrence(self, params, name)
+    }
+    fn instantiate_clause_at_base_constraints<'n>(
+        &self,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::instantiate_clause_at_base_constraints(
+            self,
+            clause,
+            extracted,
+            constraint_spelling,
+            spelling,
+        )
+    }
+    fn instantiate_clause_params_at_call<'n>(
+        &self,
+        params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::instantiate_clause_params_at_call(
+            self, params, extracted, spelling,
+        )
+    }
+    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+        ProjectSemanticDispatch::unresolved_head_is_authored_import(self, scope, name)
+    }
+    fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        top_level_literal_nodes_in(self.graph(), node)
+    }
+    fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::widened_literal(self, node)
+    }
+    fn subtype_reduced_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability)
+    }
+    fn attach_function_kind_wrap(
+        &self,
+        result: FlowReturnResult,
+        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        yield_contributions: &[YieldContribution],
+        binder_env: &FlowBinderEnv,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> FlowReturnResult {
+        ProjectSemanticDispatch::attach_function_kind_wrap(
+            self,
+            result,
+            kind,
+            yield_contributions,
+            binder_env,
+            nullability,
+        )
+    }
+    fn attach_inferred_predicate(
+        &self,
+        result: FlowReturnResult,
+        predicate: Option<crate::semantic_query::SignaturePredicate>,
+    ) -> FlowReturnResult {
+        ProjectSemanticDispatch::attach_inferred_predicate(self, result, predicate)
+    }
+    fn authored_signatures_of(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> AuthoredSignatures {
+        ProjectSemanticDispatch::authored_signatures_of(self, subject, kind)
+    }
+    fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::awaited_normalize_for_flow(self, node)
+    }
+    fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::bind_callee_receiver(self, callee, receiver)
+    }
+    fn bind_this_receiver(&self, node: SemanticNodeId, receiver: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::bind_this_receiver(self, node, receiver)
+    }
+    fn canonical_is_module(&self, canonical: &str) -> bool {
+        ProjectSemanticDispatch::canonical_is_module(self, canonical)
+    }
+    fn class_heritage_ancestry(
+        &self,
+        root: &crate::semantic_query::DeclIdentity,
+    ) -> Arc<ClassAncestryReading> {
+        ProjectSemanticDispatch::class_heritage_ancestry(self, root)
+    }
+    fn class_member_source(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::class_member_source(self, canonical, owner, class, args, name)
+    }
+    fn classify_truthiness_domain_read(
+        &self,
+        subject: SemanticNodeId,
+    ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain> {
+        ProjectSemanticDispatch::classify_truthiness_domain_read(self, subject)
+    }
+    fn connected_demand_tripped(&self) -> bool {
+        ProjectSemanticDispatch::connected_demand_tripped(self)
+    }
+    fn construct_signature_visibility(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<verter_type_expr::MemberVisibility> {
+        ProjectSemanticDispatch::construct_signature_visibility(self, signature)
+    }
+
+    fn distribute_intersection(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+    ) -> Option<DistributedIntersection> {
+        ProjectSemanticDispatch::distribute_intersection(
+            self,
+            factors,
+            origin,
+            nullability,
+            ordered,
+        )
+    }
+    fn erase_nullable_members(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::erase_nullable_members(self, node, nullability)
+    }
+    fn evaluate_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        ProjectSemanticDispatch::evaluate_indexed_value(
+            self,
+            canonical,
+            owner,
+            expression,
+            hold_flow_result,
+        )
+    }
+    fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
+        ProjectSemanticDispatch::execute_flow_return(self, key)
+    }
+    fn execute_function_return_source(
+        &self,
+        source: &verter_type_expr::facts::FunctionReturnSource,
+        scope_canonical_id: &str,
+    ) -> FunctionReturnNode {
+        ProjectSemanticDispatch::execute_function_return_source(self, source, scope_canonical_id)
+    }
+    fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
+        ProjectSemanticDispatch::execute_relate_pair(self, source, target)
+    }
+    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+        ProjectSemanticDispatch::execute_resolve_call(self, key)
+    }
+    fn demand_type_node(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        SemanticQueryApi::execute_type_node(self, key)
+    }
+    fn finalize_evolving_array(
+        &self,
+        elements: &[super::flow_products::EvolvingElement],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability)
+    }
+    fn flow_binder_env(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        outer: Option<&FlowBinderEnv>,
+        nested_at: Option<u32>,
+    ) -> FlowBinderEnv {
+        ProjectSemanticDispatch::flow_binder_env(
+            self,
+            canonical,
+            owner,
+            type_parameters,
+            outer,
+            nested_at,
+        )
+    }
+    fn flow_return_key_for(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    ) -> FlowReturnKey {
+        ProjectSemanticDispatch::flow_return_key_for(self, identity)
+    }
+    fn flow_slice_demand_site(
+        &self,
+        key: &FlowReturnKey,
+    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
+        ProjectSemanticDispatch::flow_slice_demand_site(self, key)
+    }
+    fn function_augmentations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationContributions> {
+        ProjectSemanticDispatch::function_augmentations(self, decl_canonical, decl_name, context)
+    }
+    fn global_named_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &'static str,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::global_named_type(self, canonical, owner, name)
+    }
+    fn instance_member_read_widens(&self, instance: SemanticNodeId, member: &str) -> bool {
+        ProjectSemanticDispatch::instance_member_read_widens(self, instance, member)
+    }
+    fn instantiate_call_candidate(
+        &self,
+        signature: SemanticNodeId,
+        type_args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::instantiate_call_candidate(self, signature, type_args)
+    }
+    fn intern_normalized_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::intern_normalized_union(self, members, nullability)
+    }
+    fn intern_normalized_union_or_intersection(
+        &self,
+        members: &[SemanticNodeId],
+        is_union: bool,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::intern_normalized_union_or_intersection(self, members, is_union)
+    }
+    fn is_enum_object_of(&self, node: SemanticNodeId, literal: &EnumLiteralType) -> bool {
+        ProjectSemanticDispatch::is_enum_object_of(self, node, literal)
+    }
+    fn is_function_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
+        ProjectSemanticDispatch::is_function_global_identity(self, identity)
+    }
+    fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
+        ProjectSemanticDispatch::is_lib_environment_canonical(self, canonical)
+    }
+    fn join_flow_return_contributors(
+        &self,
+        contributors: Vec<FlowContribution>,
+        can_fall_through: NormalCompletion,
+        observations: BodyCompletionObservations,
+        holds: &[HeldCallee],
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        empty_completion: crate::flow_slice_content::EmptyCompletion,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
+        ProjectSemanticDispatch::join_flow_return_contributors(
+            self,
+            contributors,
+            can_fall_through,
+            observations,
+            holds,
+            degradation,
+            empty_completion,
+            nullability,
+        )
+    }
+    fn lower_lib_global(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::lower_lib_global(
+            self,
+            scope_canonical_id,
+            owner,
+            name,
+            args,
+            context,
+        )
+    }
+    fn lower_type_expr_in_owner_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
+            self,
+            scope_canonical_id,
+            owner,
+            expr,
+            context,
+        )
+    }
+    fn lower_type_expr_in_owner_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_mode(
+            self,
+            scope_canonical_id,
+            owner,
+            expr,
+            mode,
+        )
+    }
+    fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
+        ProjectSemanticDispatch::materialize_flow_return_wrap(self, result)
+    }
+    fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        ProjectSemanticDispatch::mentions_node(self, node, target)
+    }
+    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+        ProjectSemanticDispatch::nodes_comparable(self, a, b)
+    }
+    fn normalize_node_for_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
+    }
+    fn normalize_tuple_spread(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        readonly: bool,
+    ) -> NormalizedTupleShape {
+        ProjectSemanticDispatch::normalize_tuple_spread(self, elements, readonly)
+    }
+    fn opaque(&self, err: QueryError) -> SemanticNodeId {
+        ProjectSemanticDispatch::opaque(self, err)
+    }
+    fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        ProjectSemanticDispatch::receiver_this_types(self, node)
+    }
+    fn reduce_arms_to_supertypes(
+        &self,
+        arms: &[ReductionArm],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> ReunionReduction {
+        ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability)
+    }
+    fn reduce_template_literal_nodes(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
+        ProjectSemanticDispatch::reduce_template_literal_nodes(self, quasis, args, eval_context)
+    }
+    fn relation_nominal_identity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        ProjectSemanticDispatch::relation_nominal_identity(self, node)
+    }
+    fn resolve_call_context_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::ResolveCallContext {
+        ProjectSemanticDispatch::resolve_call_context_for(self, canonical)
+    }
+    fn resolve_closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::resolve_closed_signature_utility(self, node, context)
+    }
+    fn resolve_signature_source_carrier(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::resolve_signature_source_carrier(self, node, context)
+    }
+    fn resolve_typeinfo_surface_view(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SurfaceView> {
+        ProjectSemanticDispatch::resolve_typeinfo_surface_view(self, base, context)
+    }
+    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::resolved_reduction_view(self, view)
+    }
+    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::self_reference_declaration(self, node)
+    }
+    fn shallow_lower_type_expr_with_context(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
+            self,
+            expr,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            substitutions,
+            reduction_context,
+        )
+    }
+    fn shared_signature_buckets(
+        &self,
+        subject: SemanticNodeId,
+    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
+        ProjectSemanticDispatch::shared_signature_buckets(self, subject)
+    }
+    fn shared_signature_nodes(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes {
+        ProjectSemanticDispatch::shared_signature_nodes(self, subject, kind)
+    }
+    fn substitute_semantic_type_param(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::substitute_semantic_type_param(self, node, parameter_node, arg)
+    }
+    fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        ProjectSemanticDispatch::this_binder(self, canonical, owner, class, instance)
+    }
+    fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::type_parameter_apparent_receiver(self, receiver)
+    }
+    fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        ProjectSemanticDispatch::union_arms_of(self, node)
+    }
+    fn unique_symbol_identity_for_typeof_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        ProjectSemanticDispatch::unique_symbol_identity_for_typeof_node(self, node)
+    }
+    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
+        ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
+    }
+    fn value_read_widens(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        path: &[String],
+    ) -> bool {
+        ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
+    }
+    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+        super::arena_ops::ArenaOps::new(self.graph())
+    }
+    fn call_undecided_relations(&self) -> u64 {
+        self.dispatch_txn.borrow().call.undecided_relations
+    }
+    fn pending_obligation_count(&self) -> usize {
+        self.dispatch_txn
+            .borrow()
+            .obligations
+            .pending()
+            .pending_len()
+    }
+    fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_> {
+        super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, canonical)
+    }
+    fn presence_intersection_for_flow(
+        &self,
+        members: &[Vec<crate::semantic_query::SurfaceMember>],
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let result =
+            super::walk::presence_intersection_members(self.graph(), members, &mut evidence);
+        self.deposit_canonical_evidence(evidence);
+        result
+    }
+    fn flow_literal_provenance(
+        &self,
+        inputs: &[super::flow_products::LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+        let (membership, evidence) =
+            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
+        let incomplete = evidence.incomplete;
+        self.deposit_canonical_evidence(evidence);
+        if incomplete {
+            Err(crate::semantic_query::FlowGap::UnmodeledExpression)
+        } else {
+            Ok(membership)
+        }
+    }
+    fn flow_canonical_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        let composite =
+            super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+        let incomplete = composite.evidence.incomplete;
+        self.deposit_canonical_evidence(composite.evidence);
+        super::flow_products::FlowAlgebraComposite {
+            node: composite.node,
+            incomplete,
+        }
+    }
+}
+
+/// A frame sees only its static arena, selected input ports, observations,
+/// and finite semantic demands. It cannot acquire query leases or borrow the
+/// driver's transaction or resolver context.
+pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
+    driver: &'a D,
+    arena: super::arena_ops::ArenaOps<'a>,
+    inputs: &'a dyn crate::resolver_core::request_ports::IndexedInputs,
+    source: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
+    #[cfg(test)]
+    observers: &'a super::EngineObservers,
+}
+impl<'a> FlowCx<'a, ProjectSemanticDispatch<'a>> {
+    fn new(driver: &'a ProjectSemanticDispatch<'a>) -> Self {
+        Self {
+            driver,
+            arena: driver.arena(),
+            inputs: driver.ctx,
+            source: driver.ctx,
+            #[cfg(test)]
+            observers: &driver.binding.observers,
+        }
+    }
+}
+impl<D: FlowDemandDriver> FlowCx<'_, D> {
+    fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
+        &self.arena
+    }
+}
+impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
+    fn flow_slice_skeleton(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<Arc<FunctionBodySkeleton>> {
+        self.driver.flow_slice_skeleton(key)
+    }
+    fn flow_slice_lowered(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>> {
+        self.driver.flow_slice_lowered(key)
+    }
+    fn flow_slice_hash(
+        &self,
+        key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome> {
+        self.driver.flow_slice_hash(key)
+    }
+    fn flow_bound_graph_for(
+        &self,
+        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph> {
+        self.driver.flow_bound_graph_for(key)
+    }
+    fn first_signature_param_occurrence(
+        &self,
+        params: &[crate::semantic_query::FunctionParam],
+        name: &str,
+    ) -> Option<u32> {
+        self.driver.first_signature_param_occurrence(params, name)
+    }
+    fn instantiate_clause_at_base_constraints<'n>(
+        &self,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        self.driver.instantiate_clause_at_base_constraints(
+            clause,
+            extracted,
+            constraint_spelling,
+            spelling,
+        )
+    }
+    fn instantiate_clause_params_at_call<'n>(
+        &self,
+        params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        self.driver
+            .instantiate_clause_params_at_call(params, extracted, spelling)
+    }
+    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+        self.driver.unresolved_head_is_authored_import(scope, name)
+    }
+    fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        self.driver.top_level_literals(node)
+    }
+    fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
+        self.driver.widened_literal(node)
+    }
+    fn subtype_reduced_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        self.driver.subtype_reduced_union(members, nullability)
+    }
+    fn attach_function_kind_wrap(
+        &self,
+        result: FlowReturnResult,
+        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        yield_contributions: &[YieldContribution],
+        binder_env: &FlowBinderEnv,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> FlowReturnResult {
+        self.driver.attach_function_kind_wrap(
+            result,
+            kind,
+            yield_contributions,
+            binder_env,
+            nullability,
+        )
+    }
+    fn attach_inferred_predicate(
+        &self,
+        result: FlowReturnResult,
+        predicate: Option<crate::semantic_query::SignaturePredicate>,
+    ) -> FlowReturnResult {
+        self.driver.attach_inferred_predicate(result, predicate)
+    }
+    fn authored_signatures_of(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> AuthoredSignatures {
+        self.driver.authored_signatures_of(subject, kind)
+    }
+    fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.driver.awaited_normalize_for_flow(node)
+    }
+    fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.driver.bind_callee_receiver(callee, receiver)
+    }
+    fn bind_this_receiver(&self, node: SemanticNodeId, receiver: SemanticNodeId) -> SemanticNodeId {
+        self.driver.bind_this_receiver(node, receiver)
+    }
+    fn canonical_is_module(&self, canonical: &str) -> bool {
+        self.driver.canonical_is_module(canonical)
+    }
+    fn class_heritage_ancestry(
+        &self,
+        root: &crate::semantic_query::DeclIdentity,
+    ) -> Arc<ClassAncestryReading> {
+        self.driver.class_heritage_ancestry(root)
+    }
+    fn class_member_source(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        self.driver
+            .class_member_source(canonical, owner, class, args, name)
+    }
+    fn classify_truthiness_domain_read(
+        &self,
+        subject: SemanticNodeId,
+    ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain> {
+        self.driver.classify_truthiness_domain_read(subject)
+    }
+    fn connected_demand_tripped(&self) -> bool {
+        self.driver.connected_demand_tripped()
+    }
+    fn construct_signature_visibility(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<verter_type_expr::MemberVisibility> {
+        self.driver.construct_signature_visibility(signature)
+    }
+
+    fn distribute_intersection(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+    ) -> Option<DistributedIntersection> {
+        self.driver
+            .distribute_intersection(factors, origin, nullability, ordered)
+    }
+    fn erase_nullable_members(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        self.driver.erase_nullable_members(node, nullability)
+    }
+    fn evaluate_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        self.driver
+            .evaluate_indexed_value(canonical, owner, expression, hold_flow_result)
+    }
+    fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
+        self.driver.execute_flow_return(key)
+    }
+    fn execute_function_return_source(
+        &self,
+        source: &verter_type_expr::facts::FunctionReturnSource,
+        scope_canonical_id: &str,
+    ) -> FunctionReturnNode {
+        self.driver
+            .execute_function_return_source(source, scope_canonical_id)
+    }
+    fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
+        self.driver.execute_relate_pair(source, target)
+    }
+    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+        self.driver.execute_resolve_call(key)
+    }
+    fn demand_type_node(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.driver.demand_type_node(key)
+    }
+    fn finalize_evolving_array(
+        &self,
+        elements: &[super::flow_products::EvolvingElement],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        self.driver.finalize_evolving_array(elements, nullability)
+    }
+    fn flow_binder_env(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        outer: Option<&FlowBinderEnv>,
+        nested_at: Option<u32>,
+    ) -> FlowBinderEnv {
+        self.driver
+            .flow_binder_env(canonical, owner, type_parameters, outer, nested_at)
+    }
+    fn flow_return_key_for(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    ) -> FlowReturnKey {
+        self.driver.flow_return_key_for(identity)
+    }
+    fn flow_slice_demand_site(
+        &self,
+        key: &FlowReturnKey,
+    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
+        self.driver.flow_slice_demand_site(key)
+    }
+    fn function_augmentations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationContributions> {
+        self.driver
+            .function_augmentations(decl_canonical, decl_name, context)
+    }
+    fn global_named_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &'static str,
+    ) -> Option<SemanticNodeId> {
+        self.driver.global_named_type(canonical, owner, name)
+    }
+    fn instance_member_read_widens(&self, instance: SemanticNodeId, member: &str) -> bool {
+        self.driver.instance_member_read_widens(instance, member)
+    }
+    fn instantiate_call_candidate(
+        &self,
+        signature: SemanticNodeId,
+        type_args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        self.driver.instantiate_call_candidate(signature, type_args)
+    }
+    fn intern_normalized_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        self.driver.intern_normalized_union(members, nullability)
+    }
+    fn intern_normalized_union_or_intersection(
+        &self,
+        members: &[SemanticNodeId],
+        is_union: bool,
+    ) -> SemanticNodeId {
+        self.driver
+            .intern_normalized_union_or_intersection(members, is_union)
+    }
+    fn is_enum_object_of(&self, node: SemanticNodeId, literal: &EnumLiteralType) -> bool {
+        self.driver.is_enum_object_of(node, literal)
+    }
+    fn is_function_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
+        self.driver.is_function_global_identity(identity)
+    }
+    fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
+        self.driver.is_lib_environment_canonical(canonical)
+    }
+    fn join_flow_return_contributors(
+        &self,
+        contributors: Vec<FlowContribution>,
+        can_fall_through: NormalCompletion,
+        observations: BodyCompletionObservations,
+        holds: &[HeldCallee],
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        empty_completion: crate::flow_slice_content::EmptyCompletion,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
+        self.driver.join_flow_return_contributors(
+            contributors,
+            can_fall_through,
+            observations,
+            holds,
+            degradation,
+            empty_completion,
+            nullability,
+        )
+    }
+    fn lower_lib_global(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        self.driver
+            .lower_lib_global(scope_canonical_id, owner, name, args, context)
+    }
+    fn lower_type_expr_in_owner_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        self.driver.lower_type_expr_in_owner_scope_with_context(
+            scope_canonical_id,
+            owner,
+            expr,
+            context,
+        )
+    }
+    fn lower_type_expr_in_owner_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Option<SemanticNodeId> {
+        self.driver
+            .lower_type_expr_in_owner_scope_with_mode(scope_canonical_id, owner, expr, mode)
+    }
+    fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
+        self.driver.materialize_flow_return_wrap(result)
+    }
+    fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        self.driver.mentions_node(node, target)
+    }
+    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+        self.driver.nodes_comparable(a, b)
+    }
+    fn normalize_node_for_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        self.driver
+            .normalize_node_for_structural_fact_demand(node, context)
+    }
+    fn normalize_tuple_spread(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        readonly: bool,
+    ) -> NormalizedTupleShape {
+        self.driver.normalize_tuple_spread(elements, readonly)
+    }
+    fn opaque(&self, err: QueryError) -> SemanticNodeId {
+        self.driver.opaque(err)
+    }
+    fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        self.driver.receiver_this_types(node)
+    }
+    fn reduce_arms_to_supertypes(
+        &self,
+        arms: &[ReductionArm],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> ReunionReduction {
+        self.driver.reduce_arms_to_supertypes(arms, nullability)
+    }
+    fn reduce_template_literal_nodes(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
+        self.driver
+            .reduce_template_literal_nodes(quasis, args, eval_context)
+    }
+    fn relation_nominal_identity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        self.driver.relation_nominal_identity(node)
+    }
+    fn resolve_call_context_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::ResolveCallContext {
+        self.driver.resolve_call_context_for(canonical)
+    }
+    fn resolve_closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.driver.resolve_closed_signature_utility(node, context)
+    }
+    fn resolve_signature_source_carrier(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.driver.resolve_signature_source_carrier(node, context)
+    }
+    fn resolve_typeinfo_surface_view(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::SurfaceView> {
+        self.driver.resolve_typeinfo_surface_view(base, context)
+    }
+    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
+        self.driver.resolved_reduction_view(view)
+    }
+    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.driver.self_reference_declaration(node)
+    }
+    fn shallow_lower_type_expr_with_context(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.driver.shallow_lower_type_expr_with_context(
+            expr,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            substitutions,
+            reduction_context,
+        )
+    }
+    fn shared_signature_buckets(
+        &self,
+        subject: SemanticNodeId,
+    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
+        self.driver.shared_signature_buckets(subject)
+    }
+    fn shared_signature_nodes(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes {
+        self.driver.shared_signature_nodes(subject, kind)
+    }
+    fn substitute_semantic_type_param(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.driver
+            .substitute_semantic_type_param(node, parameter_node, arg)
+    }
+    fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.driver.this_binder(canonical, owner, class, instance)
+    }
+    fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId {
+        self.driver.type_parameter_apparent_receiver(receiver)
+    }
+    fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        self.driver.union_arms_of(node)
+    }
+    fn unique_symbol_identity_for_typeof_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        self.driver.unique_symbol_identity_for_typeof_node(node)
+    }
+    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
+        self.driver.unwrap_identity_carrier_for_relation(id)
+    }
+    fn value_read_widens(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        path: &[String],
+    ) -> bool {
+        self.driver.value_read_widens(canonical, owner, path)
+    }
+    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+        self.arena
+    }
+    fn call_undecided_relations(&self) -> u64 {
+        self.driver.call_undecided_relations()
+    }
+    fn pending_obligation_count(&self) -> usize {
+        self.driver.pending_obligation_count()
+    }
+    fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_> {
+        self.driver.enter_lexical_demand(canonical)
+    }
+    fn presence_intersection_for_flow(
+        &self,
+        members: &[Vec<crate::semantic_query::SurfaceMember>],
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        self.driver.presence_intersection_for_flow(members)
+    }
+    fn flow_literal_provenance(
+        &self,
+        inputs: &[super::flow_products::LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+        self.driver.flow_literal_provenance(inputs, result)
+    }
+    fn flow_canonical_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        self.driver.flow_canonical_union(members, nullability)
+    }
+}
+
 /// The per-frame evaluator state.
-struct FlowEvaluator<'d, 'b> {
-    dispatch: &'d ProjectSemanticDispatch<'d>,
+struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
+    dispatch: &'d FlowCx<'d, D>,
     /// The receiver value of a member call on a value the indexed program
     /// cannot evaluate (a call's result: `b.m().m()`), by the call's whole
     /// span — every call of a chain starts where the chain does, so only
@@ -9189,7 +10652,7 @@ struct FlowExecutionWitness<'w> {
 /// flag: the type of an object literal expression, not of a binding that
 /// holds one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ReductionArm {
+pub(super) struct ReductionArm {
     node: SemanticNodeId,
     view: SemanticNodeId,
     object_literal: bool,
@@ -9229,7 +10692,7 @@ enum ClassDerivation {
 /// Two states rather than an `Option<Vec<_>>`: "nothing was absorbed" and
 /// "the relation authority could not decide a pair" are the same arm list
 /// but NOT the same result — only the second one degrades the join.
-enum ReunionReduction {
+pub(super) enum ReunionReduction {
     /// The reduction completed; these are the surviving arms, in source
     /// order.
     Reduced(Vec<ReductionArm>),
@@ -9244,7 +10707,7 @@ enum ReunionReduction {
 /// when the deduplicated contributor set has exactly ONE member, so the
 /// freshness bit must survive to the join.
 #[derive(Clone)]
-struct FlowContribution {
+pub(super) struct FlowContribution {
     /// The evaluated contributor node.
     node: SemanticNodeId,
     /// The contributor as an operand of the join's subtype reduction
@@ -9269,7 +10732,7 @@ struct FlowContribution {
 }
 
 /// One evaluated `yield` of a generator body, for the yield join.
-struct YieldContribution {
+pub(super) struct YieldContribution {
     /// The yielded value.
     node: SemanticNodeId,
     /// The yielded value as an operand of the yield join's subtype
@@ -10174,7 +11637,7 @@ enum NullishStrip {
     AllNullish,
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// The canonical union of `members` under this frame's null algebra —
     /// the one union construction of the evaluation.
     fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
@@ -10803,7 +12266,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
             super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
         };
-        let surface = match self.dispatch.graph().node_data(resolved).as_deref() {
+        let surface = match self.dispatch.arena().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
                     && surface.call_signatures.is_empty()
@@ -11947,11 +13410,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return class_expression::MemberKey::Unmodeled;
         };
         // An enum member names the property its value names.
-        let node = match self.dispatch.graph().node_data(node).as_deref() {
+        let node = match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::EnumLiteral(literal)) => literal.base,
             _ => node,
         };
-        let named = match self.dispatch.graph().node_data(node).as_deref() {
+        let named = match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
                 Some(crate::semantic_query::AuthoredPropertyKey::string(
                     value.as_str(),
@@ -12028,9 +13491,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn local_declared(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
         #[cfg(test)]
         self.dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .observers
+            .flow
             .declared_authority_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.products.runtime_declared_type(binding)
@@ -12247,9 +13709,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         #[cfg(test)]
         let observed = self
             .dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .observers
+            .flow
             .observe_product_joins
             .load(std::sync::atomic::Ordering::Relaxed)
             .then(|| ObservedFlowAlgebra {
@@ -12276,9 +13737,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let mut products = products;
             if self
                 .dispatch
-                .ctx
-                .host_for_fact_tracer_install()
-                .flow_fault_injection
+                .observers
+                .flow
                 .reverse_product_predecessors
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -12293,9 +13753,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         #[cfg(test)]
         if let Some(observed) = observed {
             self.dispatch
-                .ctx
-                .host_for_fact_tracer_install()
-                .flow_fault_injection
+                .observers
+                .flow
                 .product_joins
                 .lock()
                 .unwrap()
@@ -12900,11 +14359,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             };
             if let Some(current) = current {
-                let value_data = self.dispatch.graph().node_data(value);
+                let value_data = self.dispatch.arena().node_data(value);
                 if let Some(existing) = self
                     .union_arms_or_self(current)
                     .into_iter()
-                    .find(|node| self.dispatch.graph().node_data(*node) == value_data)
+                    .find(|node| self.dispatch.arena().node_data(*node) == value_data)
                 {
                     return existing;
                 }
@@ -12944,10 +14403,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let pinned = self.pinned_literal_blockers(&parts);
             let mut merged: Vec<EvolvingPart> = Vec::new();
             for part in parts {
-                let data = self.dispatch.graph().node_data(part.node);
+                let data = self.dispatch.arena().node_data(part.node);
                 match merged
                     .iter_mut()
-                    .find(|existing| self.dispatch.graph().node_data(existing.node) == data)
+                    .find(|existing| self.dispatch.arena().node_data(existing.node) == data)
                 {
                     Some(existing) => {
                         existing.fresh &= part.fresh;
@@ -13175,7 +14634,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// itself when it is a literal, a union's literal members, nothing
     /// otherwise (intersection reduction pins its literal — measured).
     fn top_level_literal_nodes(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        top_level_literal_nodes_in(self.dispatch.graph(), node)
+        self.dispatch.top_level_literals(node)
     }
 
     /// The FRESH literal values one evaluated position carries, at its
@@ -13335,7 +14794,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let widening = (fresh_literal
             && !degraded
             && matches!(
-                self.dispatch.graph().node_data(node).as_deref(),
+                self.dispatch.arena().node_data(node).as_deref(),
                 Some(SemanticNodeData::Literal(
                     crate::semantic_query::LiteralValue::Boolean(_)
                 ))
@@ -13413,7 +14872,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let fresh =
                             matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
                                 && matches!(
-                                    self.dispatch.graph().node_data(reduced).as_deref(),
+                                    self.dispatch.arena().node_data(reduced).as_deref(),
                                     Some(SemanticNodeData::Literal(
                                         crate::semantic_query::LiteralValue::Boolean(_)
                                     ))
@@ -14351,7 +15810,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// direct spelling. `any` / `unknown` are mutually assignable with
     /// everything, so they are excluded up front.
     fn arm_reduces_to_undefined(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
+        match self.dispatch.arena().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => true,
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => false,
             _ => {
@@ -14373,7 +15832,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         key: &Arc<str>,
         has_default: bool,
     ) -> Option<SemanticNodeId> {
-        let data = self.dispatch.graph().node_data(base);
+        let data = self.dispatch.arena().node_data(base);
         let view = match data.as_deref() {
             Some(SemanticNodeData::Object(view)) => view,
             _ => return None,
@@ -14388,7 +15847,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // A default removes the member's `undefined` arm — the authored
             // one included. A member whose type is only `undefined` keeps it:
             // the default initializer's own type is not modelled.
-            return Some(match self.dispatch.graph().node_data(value).as_deref() {
+            return Some(match self.dispatch.arena().node_data(value).as_deref() {
                 Some(SemanticNodeData::Union(arms)) => {
                     let kept: Vec<SemanticNodeId> = arms
                         .iter()
@@ -14546,9 +16005,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         #[cfg(test)]
         self.dispatch
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .observers
+            .flow
             .indexed_argument_identity_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match occurrence {
@@ -14650,7 +16108,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // intact unless the exact-own-key/discriminant rules above select it.
         if survivors.len() > 1 {
             if let Some(SemanticNodeData::Object(init_view)) =
-                self.dispatch.graph().node_data(init).as_deref()
+                self.dispatch.arena().node_data(init).as_deref()
             {
                 let scores: Vec<(SemanticNodeId, usize)> = survivors
                     .iter()
@@ -14747,7 +16205,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// equality narrows by on both of its edges.
     fn is_guard_unit(&self, node: SemanticNodeId) -> bool {
         matches!(
-            self.dispatch.graph().node_data(node).as_deref(),
+            self.dispatch.arena().node_data(node).as_deref(),
             Some(
                 SemanticNodeData::Literal(_)
                     | SemanticNodeData::EnumLiteral(_)
@@ -14769,7 +16227,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     fn union_arms_or_self(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        match self.dispatch.graph().node_data(node).as_deref() {
+        match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),
             _ => vec![node],
         }
@@ -14821,7 +16279,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         gapped: &mut bool,
     ) {
         if let Some(SemanticNodeData::Union(members)) =
-            self.dispatch.graph().node_data(node).as_deref()
+            self.dispatch.arena().node_data(node).as_deref()
         {
             if expanded.insert(node) {
                 for member in members.iter().copied() {
@@ -14834,7 +16292,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete)
                 if concrete != node
                     && matches!(
-                        self.dispatch.graph().node_data(concrete).as_deref(),
+                        self.dispatch.arena().node_data(concrete).as_deref(),
                         Some(SemanticNodeData::Union(_))
                     ) =>
             {
@@ -15075,7 +16533,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         first: &str,
     ) -> Option<Vec<SemanticNodeId>> {
-        let arms: Vec<SemanticNodeId> = match self.dispatch.graph().node_data(base).as_deref() {
+        let arms: Vec<SemanticNodeId> = match self.dispatch.arena().node_data(base).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => return None,
         };
@@ -15109,7 +16567,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 current = match numeric_member_name(segment) {
                     Some(value)
                         if matches!(
-                            self.dispatch.graph().node_data(member).as_deref(),
+                            self.dispatch.arena().node_data(member).as_deref(),
                             Some(SemanticNodeData::Opaque(_))
                         ) =>
                     {
@@ -15133,7 +16591,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         index: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        match self.dispatch.execute_type_node(
+        match self.dispatch.demand_type_node(
             crate::semantic_query::SemanticQueryKey::IndexedAccess {
                 base,
                 index: crate::semantic_query::IndexKey::Computed(index),
@@ -15182,19 +16640,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // parameter's signature) to its ambient apparent surface; that
         // widening scopes its registry lookup by the lexical demand site,
         // which rides this guard (see `apparent_type.rs`).
-        let _demand_scope = super::LexicalDemandScopeGuard::push(
-            &self.dispatch.lexical_demand_scope,
-            Arc::from(self.canonical),
-        );
-        match self.dispatch.execute_type_node(
-            crate::semantic_query::SemanticQueryKey::ProjectPath {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        match self
+            .dispatch
+            .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path,
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
-            },
-        ) {
+            }) {
             crate::semantic_query::QueryResult::Value(output) => Some(output.value),
             _ => None,
         }
@@ -15207,19 +16664,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         key: crate::semantic_query::PropertyKey,
     ) -> Option<SemanticNodeId> {
-        let _demand_scope = super::LexicalDemandScopeGuard::push(
-            &self.dispatch.lexical_demand_scope,
-            Arc::from(self.canonical),
-        );
-        match self.dispatch.execute_type_node(
-            crate::semantic_query::SemanticQueryKey::ProjectPath {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        match self
+            .dispatch
+            .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path: Arc::from([crate::semantic_query::PathSegment::Member(key)]),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
-            },
-        ) {
+            }) {
             crate::semantic_query::QueryResult::Value(output) => Some(output.value),
             _ => None,
         }
@@ -15261,7 +16717,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 seen.push(concrete);
             }
             if let Some(SemanticNodeData::Union(arms)) =
-                self.dispatch.graph().node_data(concrete).as_deref()
+                self.dispatch.arena().node_data(concrete).as_deref()
             {
                 pending.extend(arms.iter().copied());
                 continue;
@@ -15292,7 +16748,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !self.nullability.is_strict() {
             return value;
         }
-        let data = self.dispatch.graph().node_data(value);
+        let data = self.dispatch.arena().node_data(value);
         match data.as_deref() {
             Some(SemanticNodeData::Primitive(
                 PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Undefined,
@@ -15823,8 +17279,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         returned: SemanticNodeId,
     ) {
         use crate::flow_slice_content::{ReturnPredicateTest, SliceNarrowRoot, SliceNarrowSubject};
-        let is_primitive = |dispatch: &ProjectSemanticDispatch<'_>, node, kind| {
-            dispatch.graph().node_data(node).as_deref() == Some(&SemanticNodeData::Primitive(kind))
+        let is_primitive = |dispatch: &FlowCx<'_, D>, node, kind| {
+            dispatch.arena().node_data(node).as_deref() == Some(&SemanticNodeData::Primitive(kind))
         };
         if !is_primitive(self.dispatch, returned, PrimitiveKind::Boolean) {
             return;
@@ -16029,7 +17485,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     fn is_never_node(&self, node: SemanticNodeId) -> bool {
         matches!(
-            self.dispatch.graph().node_data(node).as_deref(),
+            self.dispatch.arena().node_data(node).as_deref(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
         )
     }
@@ -16074,7 +17530,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if kind == crate::flow_slice_content::SliceTypeofKind::Function
                 && !negated
                 && matches!(
-                    self.dispatch.graph().node_data(*arm).as_deref(),
+                    self.dispatch.arena().node_data(*arm).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Object))
                 )
             {
@@ -16207,7 +17663,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .graph()
                 .intern_node(SemanticNodeData::Primitive(kind))
         };
-        let is_any = match self.dispatch.graph().node_data(arm).as_deref() {
+        let is_any = match self.dispatch.arena().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => true,
             Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => false,
             Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty() => {
@@ -16299,11 +17755,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         use crate::flow_slice_content::SliceTypeofKind;
         // An enum member's `typeof` is its value's.
         if let Some(SemanticNodeData::EnumLiteral(literal)) =
-            self.dispatch.graph().node_data(arm).as_deref()
+            self.dispatch.arena().node_data(arm).as_deref()
         {
             return self.arm_typeof_class(literal.base, kind);
         }
-        let classified = match self.dispatch.graph().node_data(arm).as_deref() {
+        let classified = match self.dispatch.arena().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(primitive)) => match primitive {
                 PrimitiveKind::String => Some(SliceTypeofKind::String),
                 PrimitiveKind::Number => Some(SliceTypeofKind::Number),
@@ -16349,7 +17805,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete)
                     if concrete != arm
                         && !matches!(
-                            self.dispatch.graph().node_data(concrete).as_deref(),
+                            self.dispatch.arena().node_data(concrete).as_deref(),
                             Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
                         ) =>
                 {
@@ -16421,7 +17877,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if !negated
                         && !this.nullability.is_strict()
                         && matches!(
-                            this.dispatch.graph().node_data(*leaf).as_deref(),
+                            this.dispatch.arena().node_data(*leaf).as_deref(),
                             Some(SemanticNodeData::Primitive(
                                 PrimitiveKind::Null | PrimitiveKind::Undefined
                             ))
@@ -16585,7 +18041,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // keeps every arm: `if (!x)` over `x: "a" | ""` reads `"a" | ""`.
         if negated && !self.nullability.is_strict() {
             return if matches!(
-                self.dispatch.graph().node_data(settled).as_deref(),
+                self.dispatch.arena().node_data(settled).as_deref(),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
             ) {
                 crate::semantic_query::TruthinessInhabitance::No
@@ -16862,7 +18318,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
         };
-        match self.dispatch.graph().node_data(settled).as_deref()? {
+        match self.dispatch.arena().node_data(settled).as_deref()? {
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => {
                 Some(SliceGuardLiteral::String(Arc::from(text.as_str())))
             }
@@ -17153,7 +18609,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
             };
             matches!(
-                this.dispatch.graph().node_data(settled).as_deref(),
+                this.dispatch.arena().node_data(settled).as_deref(),
                 Some(
                     SemanticNodeData::Literal(_)
                         | SemanticNodeData::TemplateLiteral { .. }
@@ -17204,7 +18660,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Whether `arm` is the empty object type `{}`.
     fn is_empty_object_arm(&self, arm: SemanticNodeId) -> bool {
         matches!(
-            self.dispatch.graph().node_data(arm).as_deref(),
+            self.dispatch.arena().node_data(arm).as_deref(),
             Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
         )
     }
@@ -17239,7 +18695,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return narrowed;
         }
         let literal_is_boolean = matches!(
-            self.dispatch.graph().node_data(literal_node).as_deref(),
+            self.dispatch.arena().node_data(literal_node).as_deref(),
             Some(SemanticNodeData::Literal(
                 crate::semantic_query::LiteralValue::Boolean(_)
             ))
@@ -17255,7 +18711,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     arm == literal_node
                         || (literal_is_boolean
                             && matches!(
-                                self.dispatch.graph().node_data(arm).as_deref(),
+                                self.dispatch.arena().node_data(arm).as_deref(),
                                 Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
                             ))
                 })
@@ -17361,14 +18817,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let (unknown, empty_arm) = match self.subject_current_node(subject) {
             Some(current) if !nullish && !negated => (
                 matches!(
-                    self.dispatch.graph().node_data(current).as_deref(),
+                    self.dispatch.arena().node_data(current).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
                 ),
                 self.enumerated_union_arms_or_self(current)
                     .iter()
                     .any(|arm| {
                         matches!(
-                            self.dispatch.graph().node_data(*arm).as_deref(),
+                            self.dispatch.arena().node_data(*arm).as_deref(),
                             Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
                         )
                     }),
@@ -17390,7 +18846,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if nullish {
             if let Some(current) = self.subject_current_node(subject) {
                 if matches!(
-                    self.dispatch.graph().node_data(current).as_deref(),
+                    self.dispatch.arena().node_data(current).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
                 ) {
                     if !negated {
@@ -17416,7 +18872,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut undecided = false;
         let narrowed = self.narrow_arms_by(subject, |this, arm| {
             if matches!(
-                this.dispatch.graph().node_data(arm).as_deref(),
+                this.dispatch.arena().node_data(arm).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Any | PrimitiveKind::Unknown
                 ))
@@ -17722,7 +19178,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> Option<bool> {
         let is_top = |this: &Self, node: SemanticNodeId| {
             matches!(
-                this.dispatch.graph().node_data(node).as_deref(),
+                this.dispatch.arena().node_data(node).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
                 ))
@@ -17765,7 +19221,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
             };
-            match self.dispatch.graph().node_data(concrete).as_deref() {
+            match self.dispatch.arena().node_data(concrete).as_deref() {
                 Some(SemanticNodeData::Object(surface))
                     if !surface.has_known_index_signature()
                         && surface.index_signatures.is_empty() =>
@@ -17792,7 +19248,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// A primitive (never the non-primitive `object`) or a literal.
     fn is_scalar_type(&self, node: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(node).as_deref() {
+        match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::Primitive(kind)) => *kind != PrimitiveKind::Object,
             Some(SemanticNodeData::Literal(_)) => true,
             _ => false,
@@ -17802,7 +19258,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// A unit type: a literal, `null` or `undefined`.
     fn is_unit_value(&self, node: SemanticNodeId) -> bool {
         matches!(
-            self.dispatch.graph().node_data(node).as_deref(),
+            self.dispatch.arena().node_data(node).as_deref(),
             Some(
                 SemanticNodeData::Literal(_)
                     | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
@@ -17813,7 +19269,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// A memberless type literal `{}` (`isEmptyAnonymousObjectType`).
     fn is_empty_anonymous_object(&self, node: SemanticNodeId) -> bool {
         matches!(
-            self.dispatch.graph().node_data(node).as_deref(),
+            self.dispatch.arena().node_data(node).as_deref(),
             Some(SemanticNodeData::Object(surface))
                 if surface.entries.is_empty()
                     && surface.call_signatures.is_empty()
@@ -17916,7 +19372,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// else (a union or intersection). A named value classifies by the
     /// structure it denotes; `None` when that cannot be settled.
     fn equality_value_class(&self, value: SemanticNodeId) -> Option<EqualityValueClass> {
-        match self.dispatch.graph().node_data(value).as_deref() {
+        match self.dispatch.arena().node_data(value).as_deref() {
             Some(SemanticNodeData::Primitive(
                 PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never,
             )) => Some(EqualityValueClass::Other),
@@ -18093,7 +19549,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<bool> {
         let current = self.subject_current_node(subject)?;
-        match self.dispatch.graph().node_data(current).as_deref() {
+        match self.dispatch.arena().node_data(current).as_deref() {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => Some(true),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => Some(false),
             _ => None,
@@ -18299,7 +19755,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .find(|(narrowed, _)| narrowed == *subject)
                     .is_some_and(|(_, node)| {
                         matches!(
-                            self.dispatch.graph().node_data(*node).as_deref(),
+                            self.dispatch.arena().node_data(*node).as_deref(),
                             Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
                         )
                     })
@@ -18538,7 +19994,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
                 };
                 if matches!(
-                    self.dispatch.graph().node_data(concrete).as_deref(),
+                    self.dispatch.arena().node_data(concrete).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
                 ) {
                     let graph = self.dispatch.graph();
@@ -18613,7 +20069,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     super::relation::IdentityCarrierUnwrap::Unresolvable => leaf,
                 };
                 if matches!(
-                    self.dispatch.graph().node_data(concrete).as_deref(),
+                    self.dispatch.arena().node_data(concrete).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
                 ) {
                     let graph = self.dispatch.graph();
@@ -18693,7 +20149,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // themselves on the false one.
         if let Some(current) = self.subject_current_node(subject) {
             if matches!(
-                self.dispatch.graph().node_data(current).as_deref(),
+                self.dispatch.arena().node_data(current).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Any | PrimitiveKind::Unknown
                 ))
@@ -18823,7 +20279,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return GuardNarrowing::Unchanged;
             }
             if matches!(
-                self.dispatch.graph().node_data(*arm).as_deref(),
+                self.dispatch.arena().node_data(*arm).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Never,
                 ))
@@ -18973,7 +20429,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::DeclIdentity> {
-        match self.dispatch.graph().node_data(node).as_deref() {
+        match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
             _ => None,
         }
@@ -18998,7 +20454,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// warm `instanceof` narrow could survive an edit to an intermediate
     /// base class.
     fn node_heritage_reading(&mut self, node: SemanticNodeId) -> HeritageReading {
-        let identity = match self.dispatch.graph().node_data(node).as_deref() {
+        let identity = match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
             Some(
                 SemanticNodeData::Object(_)
@@ -19029,7 +20485,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// they stay possible on both edges and degrade the result instead
     /// of killing a branch.
     fn instanceof_arm_is_unclassifiable(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
+        match self.dispatch.arena().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
             | Some(SemanticNodeData::Opaque(_))
             | None => true,
@@ -19076,7 +20532,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // `any` carries every key and absorbs the `Record` it would
         // intersect: the checker leaves it as it is on both edges.
         if matches!(
-            self.dispatch.graph().node_data(current).as_deref(),
+            self.dispatch.arena().node_data(current).as_deref(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
         ) {
             return GuardNarrowing::Unchanged;
@@ -19259,7 +20715,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 seen.push(concrete);
             }
-            match self.dispatch.graph().node_data(concrete).as_deref() {
+            match self.dispatch.arena().node_data(concrete).as_deref() {
                 Some(SemanticNodeData::Intersection(arms)) => {
                     pending.extend(arms.iter().copied());
                 }
@@ -19353,7 +20809,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// (`getBaseConstraintOfType`, `unknown` when it declares none), or
     /// `None` for any other node.
     fn type_param_constraint(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self.dispatch.graph().node_data(node).as_deref() {
+        match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::TypeParam { constraint, .. }) => {
                 Some(constraint.unwrap_or_else(|| {
                     self.dispatch
@@ -19391,13 +20847,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         if self.type_param_constraint(target).is_some() {
             return Some(matches!(
-                self.dispatch.graph().node_data(source).as_deref(),
+                self.dispatch.arena().node_data(source).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Never | PrimitiveKind::Any
                 ))
             ));
         }
-        let members = match self.dispatch.graph().node_data(source).as_deref() {
+        let members = match self.dispatch.arena().node_data(source).as_deref() {
             Some(SemanticNodeData::Intersection(members))
                 if members
                     .iter()
@@ -19429,7 +20885,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// `Function`, whose global identity is not read here; `Some(false)`
     /// otherwise.
     fn is_global_object_or_function(&self, node: SemanticNodeId) -> Option<bool> {
-        let identity = match self.dispatch.graph().node_data(node).as_deref() {
+        let identity = match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::BareRef(_)) => return None,
             Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
             Some(SemanticNodeData::InstantiationRef { base, args }) if args.is_empty() => {
@@ -19809,7 +21265,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // narrows `any` to the global `Object` or `Function`
         // (`narrowTypeByTypePredicate`).
         if matches!(
-            self.dispatch.graph().node_data(current).as_deref(),
+            self.dispatch.arena().node_data(current).as_deref(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
         ) {
             if negated {
@@ -19902,7 +21358,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     [only]
                         if matches!(
-                            self.dispatch.graph().node_data(*only).as_deref(),
+                            self.dispatch.arena().node_data(*only).as_deref(),
                             Some(SemanticNodeData::Signature { type_parameters, .. })
                                 if type_parameters.is_empty()
                         ) =>
@@ -19949,7 +21405,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return undecided(self)
             }
         };
-        let (predicate, occurrence) = match self.dispatch.graph().node_data(signature).as_deref() {
+        let (predicate, occurrence) = match self.dispatch.arena().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 predicate,
                 occurrence,
@@ -20285,7 +21741,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let object = self
             .narrowed_read(&subject)
             .or_else(|| self.local_value(binding));
-        match self.dispatch.graph().node_data(node).as_deref() {
+        match self.dispatch.arena().node_data(node).as_deref() {
             Some(SemanticNodeData::EnumLiteral(literal)) if &*literal.member == member.as_str() => {
                 object.is_some_and(|object| self.dispatch.is_enum_object_of(object, literal))
             }
@@ -21515,7 +22971,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // assignment's does.
                                 let widening = (fresh
                                     && matches!(
-                                        self.dispatch.graph().node_data(node).as_deref(),
+                                        self.dispatch.arena().node_data(node).as_deref(),
                                         Some(SemanticNodeData::Literal(
                                             crate::semantic_query::LiteralValue::Boolean(_)
                                         ))
@@ -21688,9 +23144,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let pinned = self.pinned_literal_blockers(&parts);
                             let mut merged: Vec<EvolvingPart> = Vec::new();
                             for part in parts {
-                                let data = self.dispatch.graph().node_data(part.node);
+                                let data = self.dispatch.arena().node_data(part.node);
                                 match merged.iter_mut().find(|existing| {
-                                    self.dispatch.graph().node_data(existing.node) == data
+                                    self.dispatch.arena().node_data(existing.node) == data
                                 }) {
                                     Some(existing) => {
                                         existing.fresh &= part.fresh;
@@ -22561,15 +24017,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .collect();
             let authorities = self
                 .dispatch
-                .ctx
-                .ensure_indexed_ready_serve(self.canonical)
-                .and_then(|serve| {
-                    serve
-                        .indexed
-                        .shallow_state
-                        .decl_bodies()
-                        .flow_capture_authorities(&locators)
-                });
+                .source
+                .indexed_flow_source(self.canonical)
+                .and_then(|(_, demand)| demand?.flow_capture_authorities(&locators));
             let Some(authorities) = authorities else {
                 self.record_degradation(
                     crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
@@ -22729,11 +24179,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         target: &verter_semantic::analysis::function_program::FunctionProgramKey,
         site: crate::flow_slice_content::SliceCallSite,
     ) -> CalleeClauseLookup {
-        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
+        let Some((_serve, source_demand)) = self
+            .dispatch
+            .source
+            .indexed_expression_source(self.canonical)
+        else {
             return CalleeClauseLookup::Unavailable;
         };
-        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
-        let index = decl_bodies.function_program_index();
+        let index = source_demand.function_program_index();
         let Some(matched) = index.get(target) else {
             return CalleeClauseLookup::Unavailable;
         };
@@ -22747,7 +24200,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // the constructors that would let it are private there.
         CalleeClause::read_from_program_entry(matched, site, |ordinal, param| {
             let clause =
-                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(entry));
+                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(entry));
             // Matched by ORDINAL, with the name as a cross-check: the
             // shallow index and the lowered clause both walk the SAME
             // authored clause in declaration order, so the ordinal is the
@@ -22870,7 +24323,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .project_path_navigate(object, std::slice::from_ref(member))
             .filter(|callee| {
                 !matches!(
-                    self.dispatch.graph().node_data(*callee).as_deref(),
+                    self.dispatch.arena().node_data(*callee).as_deref(),
                     Some(SemanticNodeData::Opaque(_))
                 )
             })
@@ -22920,7 +24373,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         match self.project_segments_navigate(object, std::slice::from_ref(member)) {
             Some(node)
                 if !matches!(
-                    self.dispatch.graph().node_data(node).as_deref(),
+                    self.dispatch.arena().node_data(node).as_deref(),
                     Some(SemanticNodeData::Opaque(_))
                 ) =>
             {
@@ -22929,7 +24382,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // fresh at the position that consumes it (`new K().r`
                 // widens at a return).
                 if matches!(
-                    self.dispatch.graph().node_data(node).as_deref(),
+                    self.dispatch.arena().node_data(node).as_deref(),
                     Some(SemanticNodeData::Literal(_))
                 ) && self.dispatch.instance_member_read_widens(object, member)
                 {
@@ -23929,7 +25382,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let element_read = name.parse::<u64>().is_ok();
         if element_read
             && matches!(
-                self.dispatch.graph().node_data(member).as_deref(),
+                self.dispatch.arena().node_data(member).as_deref(),
                 Some(SemanticNodeData::Opaque(
                     crate::semantic_query::QueryError::Miss
                 ))
@@ -24193,7 +25646,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> bool {
         let exported = self
             .dispatch
-            .ctx
+            .inputs
             .ensure_indexed_ready_serve(self.canonical)
             .is_some_and(|serve| {
                 serve
@@ -24243,7 +25696,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         );
         if synthesized
             && matches!(
-                self.dispatch.graph().node_data(resolved).as_deref(),
+                self.dispatch.arena().node_data(resolved).as_deref(),
                 Some(SemanticNodeData::Union(_))
             )
         {
@@ -24268,7 +25721,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .chain(construct_sigs.iter())
             .any(|signature| {
                 matches!(
-                    self.dispatch.graph().node_data(*signature).as_deref(),
+                    self.dispatch.arena().node_data(*signature).as_deref(),
                     Some(SemanticNodeData::Signature {
                         type_parameters,
                         ..
@@ -24516,7 +25969,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// of a function declaration does. A return still in flight (a hold)
     /// or with no value adds nothing here.
     fn absorb_body_degradation(&mut self, signature: SemanticNodeId) {
-        let identity = match self.dispatch.graph().node_data(signature).as_deref() {
+        let identity = match self.dispatch.arena().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 return_carrier:
                     crate::semantic_query::SignatureReturnCarrier::Function(
@@ -24639,7 +26092,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // served return answers the call.
                 let prepared = match &target.part {
                     verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
-                    _ => self.dispatch.ctx.prepared_value_decl_return_only(
+                    _ => self.dispatch.source.prepared_value_decl_return_only(
                         self.canonical,
                         target.declaration.owner,
                         target.declaration.name.as_ref(),
@@ -24817,13 +26270,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 match &source {
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                         let key = self.dispatch.flow_return_key_for(identity);
-                        let pending_before = self
-                            .dispatch
-                            .dispatch_txn
-                            .borrow()
-                            .obligations
-                            .pending()
-                            .pending_len();
+                        let pending_before = self.dispatch.pending_obligation_count();
                         match self.dispatch.execute_flow_return(key.clone()) {
                             FlowReturnStep::Complete(result) => {
                                 // A degraded callee value degrades every
@@ -24838,15 +26285,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // equation fixed point — the call is an
                                 // edge. A callee that closed its own SCC
                                 // independently is final: no edge.
-                                if self
-                                    .dispatch
-                                    .dispatch_txn
-                                    .borrow()
-                                    .obligations
-                                    .pending()
-                                    .pending_len()
-                                    > pending_before
-                                {
+                                if self.dispatch.pending_obligation_count() > pending_before {
                                     // The hold carries the SAME clause this
                                     // arm just applied: the fixed point
                                     // repeats this transfer, so it owes the
@@ -25198,7 +26637,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 let is_any = |node: SemanticNodeId| {
                     matches!(
-                        self.dispatch.graph().node_data(node).as_deref(),
+                        self.dispatch.arena().node_data(node).as_deref(),
                         Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
                     )
                 };
@@ -25396,7 +26835,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                let member: Arc<str> = match self.dispatch.graph().node_data(key).as_deref() {
+                let member: Arc<str> = match self.dispatch.arena().node_data(key).as_deref() {
                     Some(SemanticNodeData::Literal(
                         crate::semantic_query::LiteralValue::String(name),
                     )) => Arc::from(name.as_str()),

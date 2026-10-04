@@ -367,9 +367,13 @@ impl VerterHost {
                             &current_view,
                             overlay,
                         );
+                        let dispatch =
+                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                &host_ctx,
+                            );
                         let resolve_ctx = ExecutorResolveCtx {
-                            host: self,
                             ctx: &host_ctx,
+                            dispatch: &dispatch,
                         };
                         let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
                         adapter.normalize(&ctx, resolved)
@@ -444,10 +448,10 @@ impl VerterHost {
 /// dispatch). It is not a second resolver: every arm dispatches to existing
 /// shared resolution.
 struct ExecutorResolveCtx<'a> {
-    host: &'a VerterHost,
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
     ctx: &'a dyn crate::resolver_core::ResolverContext,
+    dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
 }
 
 impl ExecutorResolveCtx<'_> {
@@ -500,7 +504,10 @@ impl ExecutorResolveCtx<'_> {
             }
             PlannedDemand::SvelteSurface { owner, source } => ResolvedDemand::SvelteSurface(
                 crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-                    self.host, self.ctx, &owner, source,
+                    self.ctx,
+                    self.dispatch,
+                    &owner,
+                    source,
                 ),
             ),
         };
@@ -591,7 +598,9 @@ impl ExecutorResolveCtx<'_> {
                 level: TypeInfoQueryLevel::FullMetadata,
             };
             let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
-                self.ctx, &request,
+                self.ctx,
+                self.dispatch,
+                &request,
             );
             any_partial |= dtos_read.is_partial();
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
@@ -651,8 +660,8 @@ impl ExecutorResolveCtx<'_> {
         }
         // Resolve against the ONE request-bound `ctx` (NOT a fresh view) so this
         // demand shares the same coherent owner version as the rest of the
-        // response. `ctx.dispatch()` keeps the surface inside the single engine.
-        let dispatch = self.ctx.dispatch();
+        // response. the borrowed request facade keeps the surface inside the single engine.
+        let dispatch = self.dispatch;
         // Resolve the base declaration CARRIER through the shared engine — the
         // SAME `ResolveDecl` a named-declaration shallow surface resolves
         // through — then project the path-precise selector. The path walker runs
@@ -673,9 +682,9 @@ impl ExecutorResolveCtx<'_> {
             QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return ResolvedOutcome::Missing,
         };
-        match self.host.project_shallow_surface_from_base(
+        match crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
             self.ctx,
-            &dispatch,
+            dispatch,
             decl,
             Arc::from(path.to_vec().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),

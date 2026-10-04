@@ -680,6 +680,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(target) =
                     crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                         self.ctx,
+                        self,
                         key.scope.canonical_id.as_ref(),
                         key.scope.owner,
                         scope_payload.as_ref(),
@@ -819,8 +820,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     shallow.visible_value_binding(value_root.scope.owner, &joined),
                     Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
                 ) && shallow
-                    .decl_bodies()
-                    .header_index()
+                    .headers
                     .namespace_member_is_exported(value_root.scope.owner, &joined)
                 {
                     let member_root = ValueRootKey {
@@ -1074,6 +1074,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(global) => Some(global),
             None => crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.ctx,
+                self,
                 value_root.scope.canonical_id.as_ref(),
                 value_root.scope.owner,
                 scope_payload.as_ref(),
@@ -1131,9 +1132,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // consumer cache whose validity rail consults
                     // import-route facts re-validates when the specifier
                     // resolves.
-                    self.ctx
-                        .host_for_fact_tracer_install()
-                        .observe_owner_import_route_witness(owner_canonical);
+                    self.ctx.observe_owner_import_route_witness(owner_canonical);
                     // The build-layer fence cannot carry the import-route
                     // rail (no `DepVersion` variant expresses a resolution
                     // witness) and a value-import known-miss may not even surface
@@ -1758,8 +1757,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     serve
                         .indexed
                         .shallow_state
-                        .decl_bodies()
-                        .header_index()
+                        .headers
                         .value_header_in(identity.owner, identity.symbol_name.as_ref())
                         .is_none()
                 });
@@ -2162,6 +2160,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             });
             crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.ctx,
+                self,
                 canonical,
                 owner,
                 scope_payload.as_ref(),
@@ -2198,7 +2197,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         value_root: &ValueRootKey,
         path: &[Arc<str>],
-        shallow: &crate::resolver_core::ShallowFileState,
+        shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
         unbound: bool,
     ) -> Option<(ValueRootKey, usize)> {
         use crate::resolver_core::shallow_file_state::LexicalValueBinding;
@@ -2264,6 +2263,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                         self.ctx,
+                        self,
                         canonical,
                         owner,
                         scope_payload.as_ref(),
@@ -2307,8 +2307,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(LexicalValueBinding::Local(_))
                     ) && declaring_state
                         .shallow_state
-                        .decl_bodies()
-                        .header_index()
+                        .headers
                         .namespace_member_is_exported(declaring.owner, &name))
                     .then(|| {
                         (
@@ -2329,10 +2328,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // body: one the namespace does not export is no member of it
             // (TS2339).
             let declared = (matches!(visible, Some(LexicalValueBinding::Local(_)))
-                && shallow
-                    .decl_bodies()
-                    .header_index()
-                    .namespace_member_is_exported(owner, &name))
+                && shallow.headers.namespace_member_is_exported(owner, &name))
                 || (visible.is_none()
                     && matches!(
                         shallow.value_fallback_augmentation_scope(owner, &name),
@@ -2558,7 +2554,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !default_symbol.is_synthesised_component_default {
             return None;
         }
-        let default_body = indexed.shallow_state.value_decl_in(decl_owner, "default")?;
+        let default_body =
+            self.ctx
+                .lowered_value_decl(&indexed.shallow_state, decl_owner, "default")?;
         // The synthesized instance shape rides the annotation FACT as the
         // closed/synthesized four-source arm
         // (`lowered_value_decl_for_synthesised_default`): the fabricated
@@ -3381,7 +3379,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // list closed (never a fabricated / partially-instantiated base).
         let mut authored: Vec<TypeExpr> = Vec::with_capacity(args.len());
         for locator in args {
-            match indexed.shallow_state.decl_bodies().deref_type_arg(locator) {
+            match self
+                .ctx
+                .deref_type_argument(&indexed.shallow_state, locator)
+            {
                 Ok(expr) => authored.push(expr),
                 Err(_) => return None,
             }
@@ -3491,10 +3492,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         locators
             .iter()
             .map(|locator| {
-                let arg = indexed
-                    .shallow_state
-                    .decl_bodies()
-                    .deref_type_arg(locator)
+                let arg = self
+                    .ctx
+                    .deref_type_argument(&indexed.shallow_state, locator)
                     .expect("test heritage argument must dereference");
                 let body_locator =
                     crate::semantic_query::InferBinderFactory::authored_body_locator_for_type_arg(
@@ -4558,14 +4558,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // returns `cache_suppress` below.
         let decl_canonical_str = decl_canonical.as_ref();
         let is_non_file_base = crate::semantic_query::is_non_file_base(decl_canonical_str);
-        let live_indexed: Option<Arc<crate::project_type_store::IndexedReady>> = if is_non_file_base
-        {
-            None
-        } else {
-            self.ctx
-                .ensure_indexed_ready_serve(decl_canonical_str)
-                .map(|serve| serve.indexed)
-        };
+        let live_indexed: Option<Arc<crate::resolver_core::request_inputs::IndexedInputRecord>> =
+            if is_non_file_base {
+                None
+            } else {
+                self.ctx
+                    .ensure_indexed_ready_serve(decl_canonical_str)
+                    .map(|serve| serve.indexed)
+            };
         let decl_whole_hash: crate::semantic_query::HashValue = match &live_indexed {
             Some(indexed) => indexed.whole_hash,
             None => crate::semantic_query::HashValue::default(),
@@ -4584,7 +4584,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .graph()
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
 
-        let adapter = SessionDispatchHost::new(self.ctx);
+        let adapter = SessionDispatchHost::from_facade(self);
 
         // 1b. `.vue` synthesized `default` public-instance dispatch.
         //
@@ -5463,8 +5463,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // sibling augmenter pulled in via a side-effect `import "./base"` is
         // discovered rather than silently dropped. Loads are idempotent /
         // content-hash cached; the augmentation index is then built once.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
+        for rdep in self
+            .ctx
+            .reverse_dependency_canonicals(decl_canonical.as_ref())
+        {
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
 
@@ -5494,8 +5496,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Candidate-augmenter discovery, exactly as the declaration stitch
         // does it: an augmenting block lives in a file that depends on the
         // augmented module.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
+        for rdep in self
+            .ctx
+            .reverse_dependency_canonicals(decl_canonical.as_ref())
+        {
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
         self.collect_augmentation_contributions(
@@ -5656,51 +5660,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         request_canonical: &str,
         excluded_contributor: Option<&str>,
     ) -> Option<AugmentationContributions> {
-        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
+        use crate::file_artifact_store::AugmentationTargetKind;
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
-        let host = self.ctx.host_for_fact_tracer_install();
-        host.ingest_program_ambient_roots();
-        // Store-view / workspace-default basis: the warm-validate
-        // `AugmentationTargetKey` is recomposed from the sealed store
-        // view's `project_env_root` (workspace-default env + identity).
-        // Request-ambient keys split populate vs validate and miss on
-        // replay when no request is installed. Per-canonical target
-        // identity must move populate and validate together.
-        let env_hashes = host.host_view_env_hashes();
-        let project_identity = host.host_view_project_identity();
-
-        // Population identity (overlay-aware augmentation index): under an
-        // active session view the augmenter set is keyed under
-        // `Session(overlay-set fingerprint)` and the cold scan unions the
-        // session's overlay artifacts (matched by the session overlay
-        // discriminator) with base; otherwise base-only. A session overlay's
-        // `declare module` augmenters stay isolated from the base index. The
-        // Population + discriminator are derived through the shared
-        // `augmentation_population_for_view`, the single session-population
-        // definition for semantic augmentation stitching.
-        let (population, overlay_discriminator) =
-            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
-
-        let key = AugmentationTargetKey {
-            project_identity,
-            resolve_env_hash: env_hashes.resolve_env_hash,
-            lib_env_hash: env_hashes.lib_env_hash,
-            population,
-            target: target.clone(),
-        };
-
-        let artifact_store = self.ctx.project_type_store().indexed();
+        // The source boundary captures the same session population and host
+        // environment, ingests program roots, and returns an owned index read.
+        let (key, augmenter_set) = self.ctx.augmentation_index(target.clone());
         let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             self.ctx
                 .resolve_type_dependency_canonical(augmenter, spec)
                 .map(Arc::from)
         };
-        let augmenter_set = artifact_store.ensure_augmentation_index_populated(
-            &key,
-            resolve_rel,
-            overlay_discriminator,
-        );
 
         // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
         // augmenter add/remove/reorder and on any augmenter's
@@ -5748,20 +5718,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         );
 
-        let options = host.semantic_compiler_options_for(request_canonical);
+        let options = self.ctx.semantic_compiler_options_for(request_canonical);
         let allow_automatic_libs = !options.no_lib;
         let selected_libs: rustc_hash::FxHashSet<String> = options
             .effective_lib_file_names()
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let population = artifact_store.global_contributor_index().snapshot();
-        let population_hit = population.lookup(
-            &target,
-            decl_name,
-            overlay_discriminator,
-            allow_automatic_libs,
-        );
+        let population_answer =
+            self.ctx
+                .contributor_answer(&target, decl_name, allow_automatic_libs, None);
+        let population_hit = population_answer.contributors;
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
@@ -5770,11 +5737,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &target, decl_name,
                     ),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population.observation_fingerprint(
-                        &target,
-                        decl_name,
-                        overlay_discriminator,
-                    ),
+                    expected_hash: population_answer.population_fingerprint,
                 },
             ),
         );
@@ -5829,7 +5792,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Vec::with_capacity(augmenter_set.entries.len() + file_scope_entries.len());
         for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
             ordered.push(OrderedCandidate {
-                rank: host.declaration_sequence_rank(augmenter.canonical().as_ref()),
+                rank: self
+                    .ctx
+                    .declaration_sequence_rank(augmenter.canonical().as_ref()),
                 canonical: Arc::clone(augmenter.canonical()),
                 parse_stable_hash: augmenter.parse_stable_hash,
                 origin: OrderedOrigin::Augmenter(idx),
@@ -5837,7 +5802,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         for (idx, entry) in file_scope_entries.iter().enumerate() {
             ordered.push(OrderedCandidate {
-                rank: host.declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
+                rank: self
+                    .ctx
+                    .declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
                 canonical: Arc::clone(&entry.artifact_key.canonical),
                 parse_stable_hash: entry.parse_stable_hash,
                 origin: OrderedOrigin::FileScope(idx),
@@ -5895,11 +5862,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // augmentation. `ensure_indexed_ready_serve` above already materialised
                     // the augmenter's CURRENT version, so `indexed.whole_hash` is the
                     // scheduler-authoritative current content hash.
-                    let Some((art, refreshed_key)) = artifact_store
-                        .augmenter_artifacts_self_healing(
-                            &augmenter.artifact_key,
-                            indexed.whole_hash,
-                        )
+                    let Some(art) = self
+                        .ctx
+                        .augmenter_artifact_answer(&augmenter.artifact_key, indexed.whole_hash)
                     else {
                         // Unhealable captured key: the augmenter's exact artifact
                         // identity is unobservable — refuse warm admission. The
@@ -5910,6 +5875,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     };
                     // The EXACT key the contributor read serves from (the healed
                     // current key when the captured one was stale).
+                    let refreshed_key = art.refreshed_key.clone();
                     let effective_artifact_key = refreshed_key
                         .clone()
                         .unwrap_or_else(|| augmenter.artifact_key.clone());
@@ -5927,11 +5893,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         {
                             continue;
                         }
+                        let relative = if matches!(key.target, crate::file_artifact_store::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                            && verter_semantic::resolver_core::is_relative_specifier(fact.specifier.as_ref()) {
+                            resolve_rel(augmenter_canonical.as_ref(), fact.specifier.as_ref())
+                        } else { None };
                         if !crate::file_artifact_store::augmenter_matches_target(
                             fact,
                             &key,
-                            augmenter_canonical.as_ref(),
-                            resolve_rel,
+                            relative.as_deref(),
                         ) {
                             continue;
                         }
@@ -5980,7 +5949,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             AugmentationScopeKind::Module(spec.clone())
                         };
                         if contribution == AugmentationContribution::FunctionSignatures {
-                            let prepared = match bundle.prepare_augmentation_value_decl_outcome_in(
+                            let prepared = match self.ctx.prepare_augmentation_value(&bundle,
                                 &scope_kind,
                                 *contributor_owner,
                                 decl_name,
@@ -6053,7 +6022,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             any_contribution = true;
                             continue;
                         }
-                        let aug_prepared = match bundle.prepare_augmentation_type_decl_outcome_in(
+                        let aug_prepared = match self.ctx.prepare_augmentation_type(
+                            &bundle,
                             &scope_kind,
                             *contributor_owner,
                             decl_name,
@@ -6180,12 +6150,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         source_env_unobservable = true;
                         continue;
                     };
-                    let Some((art, refreshed_key)) = artifact_store
-                        .augmenter_artifacts_self_healing(&entry.artifact_key, indexed.whole_hash)
+                    let Some(art) = self
+                        .ctx
+                        .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
                     else {
                         source_env_unobservable = true;
                         continue;
                     };
+                    let refreshed_key = art.refreshed_key.clone();
                     let effective_artifact_key = refreshed_key
                         .clone()
                         .unwrap_or_else(|| entry.artifact_key.clone());
@@ -6204,14 +6176,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         source_env_unobservable = true;
                         continue;
                     };
-                    let prepared = match bundle.prepared_type_decls.get_in(entry.owner, decl_name) {
-                        Ok(Some(prepared)) => prepared,
-                        Ok(None) => continue,
-                        Err(_) => {
-                            source_env_unobservable = true;
-                            continue;
-                        }
-                    };
+                    let prepared =
+                        match self
+                            .ctx
+                            .prepared_type_from_input(&bundle, entry.owner, decl_name)
+                        {
+                            Ok(Some(prepared)) => prepared,
+                            Ok(None) => continue,
+                            Err(_) => {
+                                source_env_unobservable = true;
+                                continue;
+                            }
+                        };
                     let aug_scope = NodeScopeId::File {
                         canonical_id: Arc::clone(&entry.artifact_key.canonical),
                         owner: entry.owner,
@@ -6288,10 +6264,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `#[cfg(any(test, feature = "test-support"))]` so a production build
         // has NO field and NO load on this augmentation-collection hot path.
         #[cfg(any(test, feature = "test-support"))]
-        if host
-            .augmentation_force_source_env_unobservable
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if self.ctx.augmentation_source_env_forced_unobservable() {
             source_env_unobservable = true;
         }
 
@@ -6304,23 +6277,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the identical fingerprint keeps every recorded
         // `ModuleAugmentationIndexShape` signature valid while making the next
         // stitch hit the fast exact-key path (mirrors the names stitch).
-        if !refreshed_keys.is_empty() {
-            use crate::file_artifact_store::{AugmenterEntry, AugmenterSet};
-            let mut entries = augmenter_set.entries.clone();
-            for (idx, current_key) in refreshed_keys {
-                entries[idx] = AugmenterEntry {
-                    artifact_key: current_key,
-                    parse_stable_hash: entries[idx].parse_stable_hash,
-                };
-            }
-            artifact_store.populate_augmenter_set(
-                key.clone(),
-                Arc::new(AugmenterSet {
-                    entries,
-                    fingerprint: augmenter_set.fingerprint,
-                }),
-            );
-        }
+        self.ctx
+            .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
 
         if contributor_nodes.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):
@@ -6449,8 +6407,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         serve
                             .indexed
                             .shallow_state
-                            .decl_bodies()
-                            .header_index()
+                            .headers
                             .namespace_member_is_exported(block.owner, qualified)
                     })
             };
@@ -6499,8 +6456,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn module_file_augmentation_blocks(&self, module: &str) -> Vec<AmbientModuleBlock> {
         use crate::file_artifact_store::AugmentationTargetKind;
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
-        let host = self.ctx.host_for_fact_tracer_install();
-        for rdep in host.workspace().reverse_deps_for(module) {
+        for rdep in self.ctx.reverse_dependency_canonicals(module) {
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
         self.module_augmentation_blocks(
@@ -6526,32 +6482,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         attribution: &str,
         declares: impl Fn(&str, &verter_semantic::analysis::type_eval::AugmentationScopeKind) -> bool,
     ) -> Vec<AmbientModuleBlock> {
-        use crate::file_artifact_store::AugmentationTargetKey;
-        let host = self.ctx.host_for_fact_tracer_install();
-        host.ingest_program_ambient_roots();
-        let env_hashes = host.host_view_env_hashes();
-        let (population, overlay_discriminator) =
-            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
-        let key = AugmentationTargetKey {
-            project_identity: host.host_view_project_identity(),
-            resolve_env_hash: env_hashes.resolve_env_hash,
-            lib_env_hash: env_hashes.lib_env_hash,
-            population,
-            target: target.clone(),
-        };
-        let augmenter_set = self
-            .ctx
-            .project_type_store()
-            .indexed()
-            .ensure_augmentation_index_populated(
-                &key,
-                |augmenter: &str, spec: &str| {
-                    self.ctx
-                        .resolve_type_dependency_canonical(augmenter, spec)
-                        .map(Arc::from)
-                },
-                overlay_discriminator,
-            );
+        let (_, augmenter_set) = self.ctx.augmentation_index(target.clone());
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
@@ -6570,8 +6501,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|entry| Arc::clone(entry.canonical()))
             .collect();
         canonicals.sort_by(|left, right| {
-            host.declaration_sequence_rank(left)
-                .cmp(&host.declaration_sequence_rank(right))
+            self.ctx
+                .declaration_sequence_rank(left)
+                .cmp(&self.ctx.declaration_sequence_rank(right))
                 .then_with(|| left.cmp(right))
         });
         canonicals.dedup();
@@ -6584,12 +6516,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             else {
                 continue;
             };
-            for block in &indexed
-                .shallow_state
-                .decl_bodies()
-                .header_index()
-                .augmentation_blocks
-            {
+            for block in &indexed.shallow_state.headers.augmentation_blocks {
                 if declares(canonical.as_ref(), &block.scope) {
                     blocks.push(AmbientModuleBlock {
                         canonical: Arc::clone(&canonical),
@@ -6766,38 +6693,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         space: verter_semantic::facts::SymbolSpace,
     ) -> crate::global_contributors::SymbolContributors {
         use crate::file_artifact_store::AugmentationTargetKind;
-        let host = self.ctx.host_for_fact_tracer_install();
-        host.ingest_program_ambient_roots();
-        let (_, overlay_discriminator) =
-            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
         let target = AugmentationTargetKind::GlobalAugmentation;
-        let population = self
-            .ctx
-            .project_type_store()
-            .indexed()
-            .global_contributor_index()
-            .snapshot();
+        let answer = self.ctx.global_contributor_answer(name, space);
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
                     canonical_id: String::new(),
                     key: crate::global_contributors::population_contributor_fact_key(&target, name),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population.observation_fingerprint(
-                        &target,
-                        name,
-                        overlay_discriminator,
-                    ),
+                    expected_hash: answer.population_fingerprint,
                 },
             ),
         );
-        let contributors =
-            population.lookup_in_space(&target, name, overlay_discriminator, true, space);
+        let contributors = answer.contributors;
         // The global scope is one program's: a contributor of another
         // project's program declares nothing the demand reads.
-        let project = host.resolve_project_for_canonical(demand_canonical);
+        let project = self.ctx.resolve_project_for_canonical(demand_canonical);
         if contributors.entries.iter().all(|entry| {
-            host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+            self.ctx
+                .resolve_project_for_canonical(&entry.artifact_key.canonical)
+                == project
         }) {
             return contributors;
         }
@@ -6806,7 +6721,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .entries
                 .iter()
                 .filter(|entry| {
-                    host.resolve_project_for_canonical(&entry.artifact_key.canonical) == project
+                    self.ctx
+                        .resolve_project_for_canonical(&entry.artifact_key.canonical)
+                        == project
                 })
                 .cloned()
                 .collect(),
@@ -6849,7 +6766,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return Some(identity);
         };
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         let declared = match space {
             GlobalSpace::Type => headers.type_header_in(identity.owner, name).is_some(),
             GlobalSpace::Value => headers.value_header_in(identity.owner, name).is_some(),
@@ -6876,7 +6793,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
-        let host = self.ctx.host_for_fact_tracer_install();
         let population = self.global_contributors_in(
             demand_canonical,
             name,
@@ -6899,8 +6815,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
             })
             .min_by(|left, right| {
-                host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                    .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                self.ctx
+                    .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                    .cmp(
+                        &self
+                            .ctx
+                            .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
+                    )
                     .then_with(|| {
                         left.artifact_key
                             .canonical
@@ -6928,7 +6849,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<ResolvedRootIdentity> {
         use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         let (head, _) = name.split_once('.')?;
-        let host = self.ctx.host_for_fact_tracer_install();
         let population = self.global_contributors_in(
             demand_canonical,
             head,
@@ -6944,8 +6864,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         declarations.sort_by(|left, right| {
-            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+            self.ctx
+                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(
+                    &self
+                        .ctx
+                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
+                )
                 .then_with(|| {
                     left.artifact_key
                         .canonical
@@ -6958,7 +6883,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ctx
                 .ensure_indexed_ready_serve(entry.artifact_key.canonical.as_ref())?
                 .indexed;
-            let headers = indexed.shallow_state.decl_bodies().header_index();
+            let headers = &indexed.shallow_state.headers;
             (headers.type_header_in(entry.owner, name).is_some()
                 && headers.namespace_member_is_exported(entry.owner, name))
             .then(|| {
@@ -7019,7 +6944,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     > {
         use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         use verter_semantic::analysis::type_eval::ValueDeclKind;
-        let host = self.ctx.host_for_fact_tracer_install();
         let lib = self
             .lib_global_declaration(demand_canonical, name, GlobalSpace::Value)
             .and_then(|identity| {
@@ -7029,8 +6953,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .indexed;
                 let kind = indexed
                     .shallow_state
-                    .decl_bodies()
-                    .header_index()
+                    .headers
                     .value_header_in(identity.owner, name)?
                     .kind;
                 Some((identity, kind))
@@ -7059,7 +6982,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ctx
                 .ensure_indexed_ready_serve(&entry.artifact_key.canonical)?
                 .indexed;
-            let headers = indexed.shallow_state.decl_bodies().header_index();
+            let headers = &indexed.shallow_state.headers;
             let kind = if entry.origin == ContributorOrigin::FileScopeValue {
                 headers.value_header_in(entry.owner, name)?.kind
             } else {
@@ -7077,8 +7000,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             declarations.push((entry, kind));
         }
         declarations.sort_by(|(left, _), (right, _)| {
-            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+            self.ctx
+                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(
+                    &self
+                        .ctx
+                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
+                )
                 .then_with(|| {
                     left.artifact_key
                         .canonical
@@ -7160,6 +7088,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         });
         let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self,
             canonical,
             owner,
             payload.as_ref(),
@@ -7315,7 +7244,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.decl_name.as_ref(),
         );
         let prepared =
-            match SessionDispatchHost::new(self.ctx).resolve_prepared_type_decl(base, &ri) {
+            match SessionDispatchHost::from_facade(self).resolve_prepared_type_decl(base, &ri) {
                 PreparedTypeDeclResolution::Complete(prepared) => prepared,
                 PreparedTypeDeclResolution::AuthoredPartial { .. }
                 | PreparedTypeDeclResolution::Missing
@@ -7394,7 +7323,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let base = self
             .graph()
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope);
-        let adapter = SessionDispatchHost::new(self.ctx);
+        let adapter = SessionDispatchHost::from_facade(self);
         let ri = ResolvedRootIdentity::new_in_owner(
             identity.canonical_id.as_ref(),
             identity.owner,
@@ -8330,10 +8259,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     spans: member_span_memo
                         .as_ref()
                         .map(|indexed| {
-                            indexed
-                                .shallow_state
-                                .decl_bodies()
-                                .recover_member_spans_or_absent(&member.span_origin)
+                            self.ctx
+                                .recover_member_spans(&indexed.shallow_state, &member.span_origin)
                         })
                         .unwrap_or_default(),
                     declaration_origin: match &member.declaration_origin {
@@ -12053,7 +11980,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             context: source_context,
         });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         // `partial_reason_classes` bridges a classless partial to
         // `PROPAGATED` itself, so the fold below is verdict-identical to
         // the old bare-bool hand-off whenever the read named no class.
@@ -12387,10 +12314,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .node_scope(source)
             .and_then(|scope| scope.canonical_file())
             .map_or((true, false), |canonical| {
-                let options = self
-                    .ctx
-                    .host_for_fact_tracer_install()
-                    .semantic_compiler_options_for(&canonical);
+                let options = self.ctx.semantic_compiler_options_for(&canonical);
                 (
                     options.strict_null_checks,
                     options.exact_optional_property_types,
@@ -12485,10 +12409,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .node_scope(container)
             .and_then(|scope| scope.canonical_file())
             .map_or((true, false), |canonical| {
-                let options = self
-                    .ctx
-                    .host_for_fact_tracer_install()
-                    .semantic_compiler_options_for(&canonical);
+                let options = self.ctx.semantic_compiler_options_for(&canonical);
                 (
                     options.strict_null_checks,
                     options.exact_optional_property_types,
@@ -12621,7 +12542,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // never forces a value operand; the typed `Cancelled` output is
         // `ReturnOnly` (cache-suppressed) so no partial per-key work can
         // warm a whole-surface candidate.
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
         // A mapping over a type parameter instantiates the checker's way:
@@ -12973,7 +12894,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for key in &keys {
             // Cancellation before this key's remap substitution AND before
             // its value force — the two per-key forcing points.
-            if self.ctx.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 cancelled = true;
                 break;
             }
@@ -13054,7 +12975,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   `synthesise_mapped_surface` calls the same helper at the
             //   Published(Shallow) macro publication boundary so both
             //   paths converge on identical per-key semantics.
-            if self.ctx.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 cancelled = true;
                 break;
             }
@@ -13178,7 +13099,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // Cancelled mid-loop: return the typed `Cancelled` output rather
         // than publishing the keys that happened to complete first.
-        if cancelled || self.ctx.is_cancelled() {
+        if cancelled || self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
 
@@ -13873,7 +13794,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // not start a domain walk it will discard; declining sends the
         // caller to the coarse route, which fails closed at
         // [`Self::build_mapped_type`]'s own entry check.
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return None;
         }
         let domain = self.key_literals_from_keyspace_node(mapper.key_space)?;
@@ -13919,7 +13840,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut matched: Vec<super::enumerate::KeyDomainKey> = Vec::new();
         for key in domain {
             // Cancellation before each remap substitution.
-            if self.ctx.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 return None;
             }
             let produces = match self.mapped_member_name_remap_outcome(mapper, &key, context) {
@@ -16574,7 +16495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // later serve stale.
         let owner_canonical_str = owner.defining_canonical.as_ref();
         let is_non_file_owner = crate::semantic_query::is_non_file_base(owner_canonical_str);
-        let owner_indexed: Option<Arc<crate::project_type_store::IndexedReady>> =
+        let owner_indexed: Option<Arc<crate::resolver_core::request_inputs::IndexedInputRecord>> =
             if is_non_file_owner {
                 None
             } else {
@@ -16607,7 +16528,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Always pin the project-generation so the fence catches
         // workspace-wide changes that could invalidate the lowering
         // basis (mirrors `dep_signature_for` semantics).
-        let project_gen = self.ctx.project_type_store().project_generation();
+        let project_gen = self.ctx.current_project_generation();
         local_fence.push((
             Arc::clone(&owner.defining_canonical),
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),

@@ -1,5 +1,20 @@
 ## IndexedReady Target Contract
 
+**Engine-facing input records.** The source backend retains `IndexedReady`,
+`ShallowFileState` and their lazy workers. `IndexedInputs` returns cached owned
+`IndexedInputRecord`, `ShallowInputRecord` and `PreparedInputRecord` projections
+with header facts, locators and exact content identity. Those records expose no
+body memo, prepared cache, macro cells or workspace. Body/dependency/preparation
+demands go through `OwnedLowering`; source endpoints reuse the same retained
+parse and return owned products. Private request retention keeps the exact
+observed source alive, including fenced artifacts, without promoting admission
+or changing completion state. New raw-artifact observations and source edits
+retain their own identity; cloning a pure projection preserves its observation.
+A missing exact lease returns the existing typed miss.
+`PreparedDeclBundle` and its owned input record share one immutable `Arc` of
+owner scopes. Declaration-scope payloads read those same name sets and binding
+maps; selecting a port record does not copy a scope collection.
+
 Architectural target for the project-global cache cutover:
 
 - `IndexedReady` is the canonical post-parse per-file artifact: a shallow declaration INDEX plus body locators, NOT a body store.
@@ -38,4 +53,3 @@ semantic `ScriptShallowIndex` joins those routes with declaration headers, and
 semantic `decl_dependencies` owns structural dependency names. These layers
 perform no type evaluation and expose no resolved-element carrier. Query-time
 finite types are governed by the shared semantic-dispatch contract above.
-

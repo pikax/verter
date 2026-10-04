@@ -716,7 +716,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
     upsert(&host, FILE, &dto_partial_sfc());
 
     // Build a request-bound ctx so `vue_macro_dtos_with_ctx` can read
-    // `ctx.store_view()` and observe its OWN per-request completeness (the bare
+    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and observe its OWN per-request completeness (the bare
     // `host.vue_macro_dtos` returner drops `.completeness`, so we drive the
     // ctx-bound entry directly to assert the partial flag).
     host.ensure_indexed_ready(FILE).expect("indexed");
@@ -752,7 +752,10 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
     let partial_read = {
         // Tight budget 6 → the 32-arm intersection trips the fuse.
         let _g = install_budget(6);
-        vue_macro_dtos_with_ctx(&ctx, &partial_request)
+
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+        vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &partial_request)
     };
     let partial_len_after = store.len();
 
@@ -787,7 +790,9 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         // A generous budget for the sibling so its completeness reflects its
         // own (trivial) surface, never the partial call's exhausted counter.
         let _g = install_budget(100_000);
-        vue_macro_dtos_with_ctx(&ctx, &complete_request)
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+        vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &complete_request)
     };
     let complete_len_after = store.len();
 

@@ -450,7 +450,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     let never_loaded = "/self_root/strict_never_loaded.ts";
 
     let ctx: &dyn ResolverContext = &host;
-    let view = ctx.resolver_store_view();
+    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !crate::resolver_core::StoreView::tracks_file(&view, never_loaded),
         "fixture invariant: the probe canonical must be untracked by the live \
@@ -501,7 +501,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     let (host, real_hash) = host_with_ts(canonical, "export const tracked = 1;\n");
 
     let ctx: &dyn ResolverContext = &host;
-    let view = ctx.resolver_store_view();
+    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         crate::resolver_core::StoreView::tracks_file(&view, canonical),
         "fixture invariant: the loaded canonical must be tracked by the live \

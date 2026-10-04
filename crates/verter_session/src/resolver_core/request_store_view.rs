@@ -171,6 +171,9 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// request-world memo covering the base, session-overlay and
     /// `RequestOnly` worlds. See [`RequestBundleMemo`].
     bundle_memo: RequestBundleMemo,
+    /// Source lifetime bookkeeping only: excluded from revision, compatibility
+    /// and validation population. Includes unpublished inputs until request end.
+    pub(crate) input_artifacts: super::request_inputs::InputArtifactLeases,
     #[cfg(test)]
     verify_write_protocol: AtomicBool,
     /// How many completions promoted a content version (test-only).
@@ -365,6 +368,7 @@ impl CanonicalCompletionOverlay {
             derived_hashes_nonempty: AtomicBool::new(false),
             file_facts_nonempty: AtomicBool::new(false),
             bundle_memo: RequestBundleMemo::default(),
+            input_artifacts: super::request_inputs::InputArtifactLeases::default(),
             #[cfg(test)]
             verify_write_protocol: AtomicBool::new(false),
             #[cfg(test)]
@@ -574,8 +578,8 @@ impl CanonicalCompletionOverlay {
     /// (the host-tier prepared-decl-bundle materialiser holds the
     /// concrete `&VerterHost` and the base view, and can short-circuit
     /// before invoking this overlay write). Keeping `host` out of the
-    /// resolver-tier API surface preserves the resolver-context seal
-    /// (`no_concrete_verter_host_in_seal_scope` architecture guard).
+    /// resolver-tier API surface preserves the request-port boundary (the
+    /// six ports in `request_ports`, none of which returns a host handle).
     pub(crate) fn complete_route_canonical(
         &self,
         canonical: &str,
@@ -883,9 +887,8 @@ impl CanonicalCompletionOverlay {
 /// The wrapper owns the overlay via `Arc` and borrows the base view.
 /// Constructed once at request entry; the
 /// `HostResolverContext` / `SessionResolverContext` owns the wrapper as
-/// a field so [`crate::resolver_core::ResolverContext::store_view`]
-/// returns a borrow into the owned field — there is no temporary view
-/// built per call.
+/// a private field. The [`super::fact_validation_port::FactValidation`] adapter
+/// validates against that field without building a temporary view per call.
 ///
 /// ### Shadowing semantics
 ///
@@ -1632,9 +1635,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // path. The epoch guard lives at
         // the producer-side call site (where the concrete host is
         // available) so this trait method stays off the
-        // `VerterHost` type and the resolver-context seal
-        // (`no_concrete_verter_host_in_seal_scope` architecture
-        // guard) keeps holding.
+        // `VerterHost` type and the request-port boundary keeps holding.
         self.overlay
             .complete_route_canonical(canonical, whole_hash, route_hash);
     }

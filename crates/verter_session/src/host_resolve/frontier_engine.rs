@@ -152,7 +152,9 @@ impl VerterHost {
         target: &crate::resolver_core::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        route_shallow_cache: &mut RouteShallowStateCache,
+        route_shallow_cache: &mut RouteShallowStateCache<
+            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        >,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
             crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
@@ -323,7 +325,8 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-    ) -> Option<RoutedShallowServe> {
+    ) -> Option<RoutedShallowServe<crate::resolver_core::shallow_file_state::ShallowInputRecord>>
+    {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
     }
@@ -332,9 +335,12 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<RoutedShallowServe> {
-        let cache_key = ctx.normalized_analysis_canonical(canonical_id).into_owned();
+        route_shallow_cache: &mut RouteShallowStateCache<
+            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        >,
+    ) -> Option<RoutedShallowServe<crate::resolver_core::shallow_file_state::ShallowInputRecord>>
+    {
+        let cache_key = ctx.normalized_analysis_canonical(canonical_id);
         if let Some(cached) = route_shallow_cache.get(cache_key.as_str()) {
             return Some(cached.clone());
         }
@@ -353,8 +359,10 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        route_shallow_cache: &mut RouteShallowStateCache<
+            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        >,
+    ) -> Option<Arc<crate::resolver_core::shallow_file_state::ShallowInputRecord>> {
         self.route_shallow_state_serve_with_context(ctx, canonical_id, route_shallow_cache)
             .map(|serve| serve.state)
     }
@@ -382,14 +390,6 @@ impl VerterHost {
     /// This is the route-surface fallback
     /// [`Self::shallow_file_state_with_context`] uses; its indexed fast
     /// path is content-pinned via [`Self::route_shallow_state`].
-    pub(crate) fn routed_shallow_state_with_context(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.routed_shallow_state_with_view(canonical_id, ctx.active_session_view())
-    }
-
     /// View-aware variant of [`Self::routed_shallow_state`].
     ///
     /// When `view: Some(...)` carries parse artifacts for `canonical_id`,
@@ -440,7 +440,9 @@ impl VerterHost {
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        route_shallow_cache: &mut RouteShallowStateCache,
+        route_shallow_cache: &mut RouteShallowStateCache<
+            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        >,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
         if !active.insert(key.clone()) {
@@ -552,7 +554,7 @@ impl VerterHost {
                             );
                         }
                         let member = format!("{assigned}.{exported_name}");
-                        let headers = state.decl_bodies().header_index();
+                        let headers = &state.headers;
                         let declared = (state.effective_value_header_present_in(ordinary, &member)
                             || state.effective_type_header_present_in(ordinary, &member)
                             || headers.namespace_blocks.iter().any(|block| {
@@ -767,13 +769,12 @@ impl VerterHost {
         // funnel's post-compute verdict is the structural floor that covers all
         // four — including the content-neutral ones, where the hash does not move
         // and a warm-rooted entry would validate forever.
-        let cached_route = self
-            .resolver
-            .runtime
-            .routes
-            .get_or_resolve_route_observing_facts_with_context(route_key, view, ctx, || {
-                self.build_named_type_export_route_entry_with_context(ctx, provider, requested_name)
-            });
+        let cached_route = crate::host_manage::source_request::RouteRequestDriver::new(
+            &self.resolver.runtime.routes,
+        )
+        .get_or_resolve_route_observing_facts_with_context(route_key, view, ctx, || {
+            self.build_named_type_export_route_entry_with_context(ctx, provider, requested_name)
+        });
         let cached_route = cached_route?;
         cached_route
             .resolved()

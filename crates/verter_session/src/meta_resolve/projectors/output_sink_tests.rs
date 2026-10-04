@@ -116,7 +116,7 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
     // input node (whose demanded reduction cannot materialise — the
     // referenced type does not exist) publishes the INPUT node back as
     // the carrier, never a root-sentinel shape.
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host, &dispatch);
     let carrier = reduce_field_value_node(
         &mut query_engine,
         "/p.ts",

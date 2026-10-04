@@ -250,29 +250,24 @@ where
             .sum()
     }
 
-    /// Read the slot for the first candidate that passes `accept`.
+    /// Clone the ordered slot candidates before request-local validation.
     ///
-    /// The candidate `Arc` is cloned out before `accept` runs, so a
-    /// concurrent removal never invalidates the borrow. `accept` is the
-    /// caller's read-side validator (generation gate +
+    /// The candidate `Arc` is cloned out before any validation, so a
+    /// concurrent removal never invalidates the borrow. The
+    /// request-local driver owns the read-side validator (generation gate +
     /// `signature.validate_with_self_roots` + fact-bubble side effect);
     /// the discriminant is NOT consulted here — it is admission identity,
-    /// not the read oracle. Returns the first accepted candidate's value.
-    pub(crate) fn lookup<F>(&self, key: &K, mut accept: F) -> Option<V>
-    where
-        F: FnMut(&Candidate<FactCandidateDiscriminant, V>) -> Option<V>,
-    {
+    /// not the read oracle. Returns the owned snapshot in its original order.
+    pub(crate) fn candidate_snapshot(
+        &self,
+        key: &K,
+    ) -> Option<Vec<Arc<Candidate<FactCandidateDiscriminant, V>>>> {
         let snapshot = {
             let slot = self.slots.get(key)?;
             let guard = slot.value().candidates.read();
             guard.clone()
         };
-        for candidate in &snapshot {
-            if let Some(value) = accept(candidate) {
-                return Some(value);
-            }
-        }
-        None
+        Some(snapshot)
     }
 
     /// Non-reentrant publish step — runs under the slot write guard.

@@ -39,4 +39,6 @@ mod macro_arg_producer;
 // raw structural lowerer, the binder-seed builder, and the mirror builder stay
 // UNREACHABLE (they are private to `macro_arg_producer`, the single producer
 // module).
-pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};
+pub(crate) use macro_arg_producer::{
+    macro_type_arg_hot_ref, MacroHotMirror, MacroHotProduct, MacroMirrorAttachment,
+};

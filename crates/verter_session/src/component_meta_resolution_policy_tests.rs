@@ -56,6 +56,9 @@ fn run_policy(
     registry_meta: &[ResolvedTypeRegistryMeta],
 ) {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         apply_component_meta_resolution_policy(
             meta,
             registry,
@@ -64,6 +67,7 @@ fn run_policy(
             "/owner.vue",
             None,
             ctx,
+            &fixture_dispatch_0,
         );
     });
 }
@@ -110,6 +114,9 @@ fn run_policy_with_macro_participation(
         }
     }
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_1 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
             meta,
             registry,
@@ -118,7 +125,7 @@ fn run_policy_with_macro_participation(
             "/owner.vue",
             &participating,
             ctx,
-        );
+        &fixture_dispatch_1, );
     });
 }
 
@@ -288,7 +295,10 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
 fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        out = crate::project_semantic_dispatch::node_data_for(ctx, node);
+        out = crate::project_semantic_dispatch::node_data_for(
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+            node,
+        );
     });
     out
 }
@@ -298,8 +308,12 @@ fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNode
 fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_2 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         out = crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
-            ctx, node,
+            &fixture_dispatch_2,
+            node,
         )
         .map(|(name, args)| (name, args.len()));
     });
@@ -316,8 +330,11 @@ fn bare_ref_scope_and_resolved_decl(
 ) {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        let data = crate::project_semantic_dispatch::node_data_for(ctx, node)
-            .expect("reference node data");
+        let data = crate::project_semantic_dispatch::node_data_for(
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+            node,
+        )
+        .expect("reference node data");
         let (name, scope, identity) = match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
                 (Arc::clone(&identity.decl_name), None, identity.clone())
@@ -334,8 +351,11 @@ fn bare_ref_scope_and_resolved_decl(
                         crate::semantic_query::ProjectionMode::Navigate,
                     ),
                 );
-                let identity = match crate::project_semantic_dispatch::node_data_for(ctx, resolved)
-                    .as_deref()
+                let identity = match crate::project_semantic_dispatch::node_data_for(
+                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+                    resolved,
+                )
+                .as_deref()
                 {
                     Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
                     Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
@@ -358,7 +378,11 @@ fn symbolic_projection_eq_for_test(
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |resolver_ctx| {
         let registry = super::core::PolicyRegistry::build(&[], &[]);
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx);
+
+        let fixture_dispatch_3 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(resolver_ctx);
+        let mut engine =
+            crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx, &fixture_dispatch_3);
         let participating = rustc_hash::FxHashSet::default();
         let policy_ctx = super::core::PolicyCtx {
             registry: &registry,
@@ -383,7 +407,11 @@ fn proof_reference_maps_match_for_test(
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |resolver_ctx| {
         let registry = super::core::PolicyRegistry::build(&[], &[]);
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx);
+
+        let fixture_dispatch_4 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(resolver_ctx);
+        let mut engine =
+            crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx, &fixture_dispatch_4);
         let participating = rustc_hash::FxHashSet::default();
         let policy_ctx = super::core::PolicyCtx {
             registry: &registry,

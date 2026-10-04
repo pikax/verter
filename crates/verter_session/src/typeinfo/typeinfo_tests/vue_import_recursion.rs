@@ -127,10 +127,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
             panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}")
         }
     };
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
@@ -181,10 +178,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         QueryResult::Recursive(node) => node,
         QueryResult::Error(_) => return None,
     };
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
@@ -302,11 +296,9 @@ fn instantiate_vue_default_node(
 /// SUPPLIED `dispatch` so the returned `SemanticNodeId` is comparable.
 fn typeof_default_construct_return_node(
     host: &VerterHost,
-    host_ctx: &crate::resolver_core::HostResolverContext<'_>,
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
 ) -> SemanticNodeId {
-    use crate::resolver_core::ResolverContext;
     let _ = host;
     let typeof_node = match dispatch.execute_type_node(dispatch.typeof_key_for(
         ValueRootKey {
@@ -328,7 +320,7 @@ fn typeof_default_construct_return_node(
         QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => panic!("TypeOf(default) for {canonical_id} errored: {e:?}"),
     };
-    let graph = host_ctx.project_type_store().semantic_graph();
+    let graph = host.project_type_store().semantic_graph();
     let SemanticNodeData::Object(view) = graph
         .node_data(typeof_node)
         .as_deref()
@@ -459,7 +451,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
 
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(&host_ctx, node).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph(), node).as_deref(),
             Some(SemanticNodeData::Object(view))
                 if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "$props")
         ),
@@ -962,7 +954,6 @@ defineProps<{ peer: E; f: string }>();
 
 #[test]
 fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
-    use crate::resolver_core::ResolverContext;
     use crate::semantic_query::OriginEdgeKind;
 
     const A: &str = "/w/A.vue";
@@ -975,8 +966,8 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
 
     // ONLY TypeOf is dispatched here — so an Instantiate provenance edge on the
     // construct return can ONLY have come from build_typeof routing through it.
-    let typeof_return = typeof_default_construct_return_node(&host, &host_ctx, &dispatch, A);
-    let graph = host_ctx.project_type_store().semantic_graph();
+    let typeof_return = typeof_default_construct_return_node(&host, &dispatch, A);
+    let graph = host.project_type_store().semantic_graph();
     let has_instantiate_origin = graph
         .origins(typeof_return)
         .into_iter()

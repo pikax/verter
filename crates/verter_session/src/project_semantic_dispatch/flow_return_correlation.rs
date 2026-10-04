@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use super::{FlowEvaluator, FlowProductSubject, GuardNarrowing, LiteralComparison};
+use super::{
+    FlowDemandDriver, FlowEvaluator, FlowProductSubject, GuardNarrowing, LiteralComparison,
+};
 use crate::flow_slice_content::{
     SliceGuard, SliceNarrowRoot, SliceNarrowSubject, SlicePattern, SlicePatternKey,
 };
@@ -40,7 +42,7 @@ pub(super) enum GuardAlias {
 /// The pseudo-reference segment.
 const PSEUDO_SEGMENT: &str = "\u{0}pattern";
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// Register the narrowings a destructured declaration's elements carry
     /// (see the module doc): each object or array pattern of two or more
     /// elements whose parent is a union correlates its elements that have

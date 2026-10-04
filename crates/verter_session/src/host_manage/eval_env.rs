@@ -132,8 +132,7 @@ impl VerterHost {
     ) -> Option<verter_type_expr::TopLevelOwnerId> {
         let mut owner = None;
         for key in state
-            .decl_bodies()
-            .header_index()
+            .headers
             .type_headers
             .keys()
             .filter(|key| key.name.as_ref() == resolved_name)
@@ -183,7 +182,7 @@ impl VerterHost {
         let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
         // Presence WITHOUT body lowering — a header miss is `None`,
         // mirroring the oracle's `type_declaration_id` miss.
-        let header_index = state.decl_bodies().header_index();
+        let header_index = &state.headers;
         header_index.type_header_in(owner, resolved_name)?;
         // Stable-unique per `(file, name)`: a deterministic ordinal over
         // the header index's sorted type-symbol names. This is NOT the
@@ -964,6 +963,7 @@ impl VerterHost {
     pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         owner_eval_source: Option<&str>,
@@ -978,6 +978,7 @@ impl VerterHost {
         };
         self.compute_evaluated_types_from_owner_context_with_ctx(
             ctx,
+            dispatch,
             canonical,
             snapshot,
             eval_source,
@@ -1102,6 +1103,7 @@ impl VerterHost {
     pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
@@ -1198,7 +1200,7 @@ impl VerterHost {
             // (the per-field context), so the resolver context is aliased
             // here to stay reachable inside it.
             let resolver_ctx = ctx;
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
                 snapshot.macros.as_ref(),
                 Some(eval_source),
@@ -1459,7 +1461,7 @@ impl VerterHost {
                                         .or_else(authored_field_source)
                                         .unwrap_or_else(unknown_source);
                                     match crate::host_manage::component_meta_methods::expand_define_model_output(
-                                        engine.ctx(),
+                                        engine.dispatch,
                                         canonical,
                                         ctx.macro_index,
                                         &model_fallback,
@@ -1551,14 +1553,10 @@ impl VerterHost {
                                         // as a closed scalar.
                                         let carrier_lower_mode = {
                                             let root_is_reference_carrier =
-                                                crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                                                    engine.ctx(),
-                                                    canonical,
-                                                    ctx.macro_index,
-                                                )
+                                                engine.dispatch.macro_type_arg_hot_ref(canonical, ctx.macro_index)
                                                 .and_then(|product| {
                                                     crate::project_semantic_dispatch::node_data_for(
-                                                        engine.ctx(),
+                                                        engine.dispatch.graph(),
                                                         product.hot.node(),
                                                     )
                                                 })
@@ -1623,7 +1621,7 @@ impl VerterHost {
                                                         authored_field_source()
                                                             .unwrap_or_else(unknown_source);
                                                     match crate::host_manage::component_meta_methods::expand_slot_binding_output(
-                                                        engine.ctx(),
+                                                        engine.dispatch,
                                                         canonical,
                                                         ctx.macro_index,
                                                         carrier_lower_mode,
@@ -1731,7 +1729,7 @@ impl VerterHost {
                                             let field_fallback = authored_field_source()
                                                 .unwrap_or_else(unknown_source);
                                             match crate::host_manage::component_meta_methods::expand_generic_project_path_output(
-                                                engine.ctx(),
+                                                engine.dispatch,
                                                 canonical,
                                                 ctx.macro_index,
                                                 carrier_lower_mode,

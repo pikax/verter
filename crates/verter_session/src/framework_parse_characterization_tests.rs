@@ -652,8 +652,13 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         Arc::ptr_eq(&from_fallthrough, &indexed.eval_source),
         "uncaptured eval-env compute must clone IndexedReady.eval_source, not recatalog or to_string"
     );
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+        &host as &dyn ResolverContext,
+    );
     let computed = host.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
         &host as &dyn ResolverContext,
+        &fixture_dispatch_0,
         "EvalEnv.vue",
         &snapshot,
         None,

@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use super::super::call_resolve::ResolveCallStep;
 use super::contextual::{FunctionArgumentMark, FunctionArgumentRequest};
+use super::FlowDemandDriver;
 use super::*;
 use crate::flow_slice_content::{
     SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceExpr,
@@ -105,7 +106,7 @@ pub(super) enum CallStep<'e> {
 /// A call's executor route ([`FlowEvaluator::resolve_call_step`]) between
 /// its arguments: the arguments typed so far.
 pub(super) struct ResolveCallFrame<'e> {
-    _serve: crate::host_manage::prepared_decl::IndexedReadyServe,
+    _serve: crate::resolver_core::request_inputs::IndexedInputServe,
     /// The call's whole span.
     span: verter_span::Span,
     callee: SemanticNodeId,
@@ -125,7 +126,7 @@ pub(super) struct ResolveCallFrame<'e> {
 /// asked, and asked again for each context-sensitive argument its second
 /// inference pass retypes.
 pub(super) struct FinishRoute {
-    _serve: crate::host_manage::prepared_decl::IndexedReadyServe,
+    _serve: crate::resolver_core::request_inputs::IndexedInputServe,
     key: crate::semantic_query::ResolveCallKey,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
@@ -195,7 +196,7 @@ fn call_operand(call: &SliceCall) -> Option<&SliceExpr> {
     }
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Begin evaluating a call from [`Self::eval_expr`]'s stack. A call is a
     /// throw point: an enclosing `try`'s catch / finally can be entered
     /// from HERE, with the state as it stands BEFORE the call.
@@ -426,7 +427,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// The evidence baseline of a call about to evaluate.
     pub(super) fn call_evidence_mark(&self) -> CallEvidenceMark {
         CallEvidenceMark {
-            undecided_relations: self.dispatch.dispatch_txn.borrow().call.undecided_relations,
+            undecided_relations: self.dispatch.call_undecided_relations(),
             degradation: self.degradation,
         }
     }
@@ -446,8 +447,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> Positional<CallValue> {
         let newly_degraded = mark.degradation.is_none() && self.degradation.is_some();
         if !matches!(value, Positional::Unmodeled) && !newly_degraded {
-            let relations_decided = self.dispatch.dispatch_txn.borrow().call.undecided_relations
-                == mark.undecided_relations;
+            let relations_decided =
+                self.dispatch.call_undecided_relations() == mark.undecided_relations;
             self.call_evidence.push(FlowCallEvidence {
                 span: site.span(),
                 relations_decided,
@@ -464,16 +465,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         site: SliceCallSite,
         arguments: &'e SliceCallArguments,
     ) -> ResolveCallProgress<'e> {
-        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
+        let Some((serve, source_demand)) = self
+            .dispatch
+            .source
+            .indexed_expression_source(self.canonical)
+        else {
             return ResolveCallProgress::Done(None);
         };
-        let memo = serve.indexed.shallow_state.decl_bodies();
         // The arguments this frame lowered and evaluates itself need no
         // indexed record of their own.
         let frame_lowered: Arc<[bool]> = (0..arguments.len())
             .map(|ordinal| arguments.get(ordinal).is_some())
             .collect();
-        let Some(indexed) = memo.indexed_call_expression_over_frame_at(site.span(), frame_lowered)
+        let Some(indexed) =
+            source_demand.indexed_call_expression_over_frame_at(site.span(), frame_lowered)
         else {
             return ResolveCallProgress::Done(None);
         };

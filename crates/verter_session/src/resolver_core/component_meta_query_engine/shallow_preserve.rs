@@ -49,22 +49,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> bool {
         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
-        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            scope_canonical_id,
-            macro_index,
-        ) else {
-            return true;
-        };
-        let Some(data) =
-            crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())
+        let Some(product) = self
+            .dispatch
+            .macro_type_arg_hot_ref(scope_canonical_id, macro_index)
         else {
             return true;
         };
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            product.hot.node(),
+        ) else {
+            return true;
+        };
         let Some(scope_owner) = self
-            .ctx
-            .project_type_store()
-            .semantic_graph()
+            .dispatch
+            .graph()
             .node_scope(product.hot.node())
             .and_then(|scope| scope.top_level_owner())
         else {
@@ -111,7 +110,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .iter()
             .map(|param| param.name.as_str())
             .collect();
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
         let Some(member_node) = dispatch
             .raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
@@ -123,7 +122,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return true;
         };
-        node_references_type_param_names(self.ctx, member_node.node(), &param_names)
+        node_references_type_param_names(self.dispatch, member_node.node(), &param_names)
     }
 
     /// Node-domain fast-path classifier for one macro field: decide whether
@@ -183,8 +182,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return symbolic_preserve(field_value);
         }
 
-        let root_data =
-            crate::project_semantic_dispatch::node_data_for(self.ctx, field_value.node())?;
+        let root_data = crate::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            field_value.node(),
+        )?;
 
         // (2) Imported generic reference root.
         if let Some((name, _)) = root_data.bare_ref_head() {
@@ -219,7 +220,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             index: crate::semantic_query::IndexKey::String(member_name),
         } = root_data.as_ref()
         {
-            let object_data = crate::project_semantic_dispatch::node_data_for(self.ctx, *object);
+            let object_data =
+                crate::project_semantic_dispatch::node_data_for(self.dispatch.graph(), *object);
             let root_name = object_data.as_deref().and_then(|data| {
                 data.bare_ref_head().and_then(|(name, _)| {
                     data.carrier_type_args()
@@ -256,8 +258,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .iter()
                         .map(|param| param.name.as_str())
                         .collect();
-                    let dispatch =
-                        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+                    let dispatch = self.dispatch;
                     let member_node = dispatch
                         .raise_authored_locator_to_hot(
                             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
@@ -268,12 +269,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             ),
                         )
                         .at_optional_boundary()?;
-                    if node_references_type_param_names(self.ctx, member_node.node(), &param_names)
-                    {
+                    if node_references_type_param_names(
+                        self.dispatch,
+                        member_node.node(),
+                        &param_names,
+                    ) {
                         return None;
                     }
                     let exactness = match crate::meta_resolve::exactness::classify_node(
-                        &dispatch,
+                        dispatch,
                         member_node.node(),
                     ) {
                         verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
@@ -314,10 +318,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         ) {
                             if prepared.type_parameters.is_empty() {
                                 let body_slot = prepared.body_facts.body_slot.clone();
-                                let dispatch =
-                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                        self.ctx,
-                                    );
+                                let dispatch = self.dispatch;
                                 if let Some(body_node) = dispatch.raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot.clone(),
@@ -328,7 +329,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 ).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
-                                            &dispatch,
+                                            dispatch,
                                             body_node.node(),
                                         ) {
                                             verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
@@ -386,18 +387,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return None;
         };
-        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            scope_canonical_id,
-            macro_index,
-        )?;
+        let product = self
+            .dispatch
+            .macro_type_arg_hot_ref(scope_canonical_id, macro_index)?;
         let scope_owner = self
-            .ctx
-            .project_type_store()
-            .semantic_graph()
+            .dispatch
+            .graph()
             .node_scope(product.hot.node())?
             .top_level_owner()?;
-        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())?;
+        let data = crate::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            product.hot.node(),
+        )?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
             return match surface.project_string_key(field_name.as_ref()) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
@@ -423,7 +424,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )?;
         let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
         let member = prepared.member_index.get(&field_key)?;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
         dispatch
             .raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
@@ -450,7 +451,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         crate::graph_walk::reaches(UtilityQuestion::Route(node), |question| match question {
             UtilityQuestion::Route(node) => {
-                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
+                let Some(data) =
+                    crate::project_semantic_dispatch::node_data_for(self.dispatch.graph(), node)
                 else {
                     return Reach::Parts(Vec::new());
                 };
@@ -518,7 +520,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // imported root, a foreign resolved reference, or another imported
             // utility route.
             UtilityQuestion::Argument(node) => {
-                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
+                let Some(data) =
+                    crate::project_semantic_dispatch::node_data_for(self.dispatch.graph(), node)
                 else {
                     return Reach::Parts(Vec::new());
                 };
@@ -596,7 +599,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let in_scope = |nodes: &mut dyn Iterator<
                 Item = crate::semantic_query::SemanticNodeId,
             >| { nodes.map(|node| (node, scope)).collect::<Vec<_>>() };
-            let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+            let Some(data) =
+                crate::project_semantic_dispatch::node_data_for(self.dispatch.graph(), node)
+            else {
                 return Reach::Parts(Vec::new());
             };
             if let Some((name, _)) = data.bare_ref_head() {
@@ -626,9 +631,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             .map(|prepared| prepared.body_facts.body_slot.clone())
                             .and_then(|body_slot| {
                                 let dispatch =
-                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                        self.ctx,
-                                    );
+                                    self.dispatch;
                                 dispatch.raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot,
@@ -738,6 +741,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let payload = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             payload.as_deref(),
@@ -793,7 +797,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// IS a parent-parameter reference). Every node is read once, whatever the
 /// nesting; purely carrier-data-driven.
 fn node_references_type_param_names(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     param_names: &FxHashSet<&str>,
 ) -> bool {
@@ -804,7 +808,8 @@ fn node_references_type_param_names(
         return false;
     }
     crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             return Reach::Parts(Vec::new());
         };
         Reach::Parts(match data.as_ref() {

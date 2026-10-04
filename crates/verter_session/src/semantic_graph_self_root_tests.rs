@@ -38,6 +38,7 @@
 //! physically present (the discrimination is the validator rejecting
 //! it, not the entry being absent).
 
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use verter_semantic::facts::{FactKey, FactLane};
@@ -2206,9 +2207,13 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         .observe_materialize_scope(canonical)
         .expect("overlay materialize-scope observation must resolve");
     assert_eq!(overlay_observation.whole_hash(), overlay_hash);
-    assert!(
-        Arc::ptr_eq(&overlay_observation.indexed, &overlay_indexed),
-        "the production session observation must retain the exact published overlay artifact"
+    assert_eq!(
+        overlay_observation.observed_whole_hash, overlay_indexed.whole_hash,
+        "the production session observation must describe the published overlay content"
+    );
+    assert_eq!(
+        overlay_observation.observed_shallow_hash, overlay_indexed.shallow_state.whole_hash,
+        "both observed hashes must come from the same overlay snapshot"
     );
     let overlay_parse_fact = overlay_observation
         .syntactic_export_set
@@ -2221,6 +2226,19 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
          indistinguishable and the test does not discriminate",
     );
 
+    let exact_overlay_parse_fact =
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            &session_ctx,
+            canonical,
+            overlay_indexed.whole_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )
+        .expect("the exact observed overlay has parse provenance");
+    assert_eq!(
+        overlay_parse_fact, exact_overlay_parse_fact,
+        "the content hash and parse fact must describe the same exact observation"
+    );
     let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(canonical, "Probe"));
 
     // Publish a `MemoEntry` whose carrier's fact rail leads with the

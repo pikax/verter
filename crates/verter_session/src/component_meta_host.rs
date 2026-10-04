@@ -760,16 +760,20 @@ fn extract_component_meta_from_resolved_with_evaluated(
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
+    let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
     // Macro-DTO surface reads through the same request-bound `ctx` as
     // `extract_component_meta_from_resolved`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
+        dispatch,
         canonical_id,
         resolved.snapshot.macros.as_ref(),
     );
     let resolved_binding_reactivity =
         crate::host_manage::component_meta_extract::resolved_binding_reactivity(
             ctx,
+            dispatch,
             &resolved.snapshot,
         );
     let resolved_type_registry =
@@ -802,6 +806,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
             None,
             &mut visiting,
             ctx,
+            dispatch,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;

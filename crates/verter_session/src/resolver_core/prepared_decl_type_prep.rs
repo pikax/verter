@@ -178,7 +178,7 @@ fn insert_file_symbol_resolutions(
     owner: verter_type_expr::TopLevelOwnerId,
     interner: &IdentityInterner,
 ) {
-    for key in state.decl_bodies().header_index().type_headers.keys() {
+    for key in state.headers.type_headers.keys() {
         if key.owner != owner {
             continue;
         }
@@ -188,7 +188,7 @@ fn insert_file_symbol_resolutions(
             ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
         );
     }
-    for key in state.decl_bodies().header_index().value_headers.keys() {
+    for key in state.headers.value_headers.keys() {
         if key.owner != owner {
             continue;
         }
@@ -491,11 +491,10 @@ fn add_namespace_sibling_resolutions(
         // consumable through the prepared-type / prepared-value caches).
         None => {
             for key in state
-                .decl_bodies()
-                .header_index()
+                .headers
                 .type_headers
                 .keys()
-                .chain(state.decl_bodies().header_index().value_headers.keys())
+                .chain(state.headers.value_headers.keys())
                 .filter(|key| key.owner == owner)
             {
                 let dep_name = key.name.as_ref();

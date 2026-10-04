@@ -577,21 +577,19 @@ pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
 /// run; no `N0` navigation/location projection produces it (the
 /// navigation layer is a pure PROJECTION over this substrate).
 /// Structural evidence over the source tree.
+///
+/// The demand producer's own call site is NOT asserted here: the demand is
+/// produced by the facade's memo producer
+/// (`project_semantic_dispatch/memo.rs`), so a scan of the substrate module
+/// for `ensure_indexed_ready_serve` would reject the ownership split without
+/// testing anything about the substrate.
+/// The demand-produced-from-the-artifact behaviour is owned
+/// behaviourally by `binder_provenance_served_from_artifact_in_authored_order`
+/// and `binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit`
+/// below, which drive the real producer and read the served artifact.
 #[test]
 pub(crate) fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let producer_src = std::fs::read_to_string(manifest_dir.join("src/binder_identity_facts.rs"))
-        .expect("the family-A artifact module must exist");
-    // Produced FROM IndexedReady: the demand producer serves the
-    // canonical post-parse artifact through the resolver-tier accessor.
-    assert!(
-        producer_src.contains("ensure_indexed_ready_serve"),
-        "the BinderIdentityFacts producer must be demand-produced FROM IndexedReady"
-    );
-    assert!(
-        producer_src.contains("project_binder_identity_facts"),
-        "the artifact must be a typed projection over the shallow inventory"
-    );
 
     // Not N0-owned: nothing named `n0` / `nav_location` may produce the
     // artifact; the only files referencing the substrate are the
@@ -607,14 +605,21 @@ pub(crate) fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
         // `DeclarationSlotSeed` (the query-identity projection of the
         // substrate), not a producer.
         "semantic_query.rs",
+        // The facade's family-A memo producer (`memo.rs`) and its engine
+        // binding (`engine_binding.rs`) — they SERVE the demand-produced
+        // artifact, they do not produce a second one.
+        "project_semantic_dispatch/memo.rs",
+        "project_semantic_dispatch/engine_binding.rs",
     ];
     let mut offenders: Vec<String> = Vec::new();
     for path in rust_files_under(&src_dir) {
+        // Normalise the separator so the allowlist below is one list for
+        // every platform (Windows yields `a\b.rs`, POSIX `a/b.rs`).
         let name = path
             .strip_prefix(&src_dir)
             .unwrap()
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         if allowed.iter().any(|a| *a == name) {
             continue;
         }

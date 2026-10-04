@@ -93,8 +93,12 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_0,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
@@ -168,8 +172,12 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_1,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -236,8 +244,12 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_2,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // The union-of-functions slot must be PUBLISHED (pre-fix it was dropped).
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
@@ -306,8 +318,12 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_3,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // The union-of-callables slot is still PUBLISHED (positive): one arm having
     // no param does not make the member non-slot-like.
@@ -375,8 +391,12 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_4,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -461,8 +481,12 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with an imported-inline Pick resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_5,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -526,8 +550,12 @@ fn define_slots_named_alias_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a named-alias Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_6,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -598,8 +626,12 @@ fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a userland-Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_7,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -651,8 +683,12 @@ fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a structural-source Pick resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_8,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -708,8 +744,12 @@ fn define_slots_nullable_slot_is_intentionally_dropped() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_9,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // CONTRAST: the non-nullable `present` slot IS published (the callable realizes).
     assert!(
@@ -757,8 +797,13 @@ fn define_slots_two_param_callback_binds_first_param_only() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_10 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_10,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let default_slot = slots
         .iter()
@@ -820,8 +865,13 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_11 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_11,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let default_slot = slots
         .iter()

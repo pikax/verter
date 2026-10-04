@@ -105,8 +105,12 @@ fn distinct_views_coexist_same_view_replaces() {
 
     // The refreshed base value is observable; the overlay candidate is
     // untouched.
-    let base = store.lookup(&key, |c| (c.value == "base-v2").then(|| c.value.clone()));
-    let overlay = store.lookup(&key, |c| (c.value == "overlay").then(|| c.value.clone()));
+    let base = crate::project_semantic_dispatch::memo::read_candidate(&store, &key, |c| {
+        (c.value == "base-v2").then(|| c.value.clone())
+    });
+    let overlay = crate::project_semantic_dispatch::memo::read_candidate(&store, &key, |c| {
+        (c.value == "overlay").then(|| c.value.clone())
+    });
     assert_eq!(base.as_deref(), Some("base-v2"));
     assert_eq!(overlay.as_deref(), Some("overlay"));
 }
@@ -415,7 +419,7 @@ fn budget_victim_eviction_is_admission_seq_scoped() {
         // The only candidate in slot 1 is the old one; read its seq via
         // a lookup that returns the admission_seq through the accept hook.
         let mut captured = None;
-        store.lookup(&1, |c| {
+        crate::project_semantic_dispatch::memo::read_candidate(&store, &1, |c| {
             captured = Some(c.admission_seq);
             None::<String>
         });
@@ -439,13 +443,17 @@ fn budget_victim_eviction_is_admission_seq_scoped() {
         1,
         "the seq-scoped eviction removed ONLY the old candidate"
     );
-    let fresh_value = store.lookup(&1, |c| (c.value == "fresh").then(|| c.value.clone()));
+    let fresh_value = crate::project_semantic_dispatch::memo::read_candidate(&store, &1, |c| {
+        (c.value == "fresh").then(|| c.value.clone())
+    });
     assert_eq!(
         fresh_value.as_deref(),
         Some("fresh"),
         "the fresh same-key re-publish must survive an eviction scoped to the OLD seq"
     );
-    let old_gone = store.lookup(&1, |c| (c.value == "old").then(|| c.value.clone()));
+    let old_gone = crate::project_semantic_dispatch::memo::read_candidate(&store, &1, |c| {
+        (c.value == "old").then(|| c.value.clone())
+    });
     assert_eq!(old_gone, None, "the old candidate was evicted");
 }
 
