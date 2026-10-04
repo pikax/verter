@@ -432,9 +432,11 @@ impl DocumentRegistry {
     /// likes. NOTHING the document lifecycle needs is held across that await: the
     /// fence is the synchronous claim/cancel slot, not a mutex the close has to
     /// wait on, so a close, open or change never queues behind a stalled consumer.
-    /// A close instead CANCELS the suspended enqueue, which withdraws the payload
-    /// from the lane, so it never reaches the client — the same stale-publication
-    /// guarantee, without the stranding.
+    /// A close instead CANCELS the suspended enqueue, which withdraws a payload
+    /// still pending or waiting in the lane, so it never reaches the client — the
+    /// same stale-publication guarantee, without the stranding. The one payload
+    /// the lane pump has already handed to the transport is committed: it still
+    /// lands, ahead of any newer publication for the same document.
     pub(crate) async fn publish_diagnostics(
         &self,
         client: &Client,

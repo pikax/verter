@@ -23,7 +23,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::sync::{Notify, OnceCell};
-use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::jsonrpc::{ErrorCode, Result};
 use tower_lsp_server::ls_types::{
     Diagnostic, InitializeParams, InitializeResult, PublishDiagnosticsParams, Range, Uri,
 };
@@ -230,15 +230,11 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
     editor
         .send(json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown"}))
         .await;
-    let backed_up = lane.load();
-    assert!(
-        backed_up.messages >= budget.replaceable_messages,
-        "the storm must back the lane up to its budget, got {backed_up:?}"
-    );
 
     let mut responses: HashMap<u64, Value> = HashMap::new();
     let mut diagnostics_before_control = 0usize;
     let mut newest: HashMap<String, (u64, usize)> = HashMap::new();
+    let mut final_sets: HashMap<String, Value> = HashMap::new();
     let complete = |newest: &HashMap<String, (u64, usize)>| {
         newest.len() == DOCUMENTS && newest.values().all(|(edit, _)| *edit == EDITS)
     };
@@ -271,13 +267,15 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
                 entry.0
             );
             *entry = (edit, entry.1 + 1);
+            final_sets.insert(params.uri.as_str().to_owned(), message["params"].clone());
         }
     })
     .await
     .expect("the resumed client receives every response and the newest diagnostics");
 
     assert_eq!(
-        responses[&2]["error"]["code"], -32800,
+        responses[&2]["error"]["code"],
+        ErrorCode::RequestCancelled.code(),
         "the cancelled request is answered as cancelled"
     );
     assert_eq!(responses[&3]["result"], Value::Null);
@@ -305,17 +303,65 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
     for (uri, (_, received)) in &newest {
         assert!(*received <= 3, "{uri} received {received} superseded sets");
     }
-    let high_water = lane.high_water();
-    assert!(
-        high_water.messages <= budget.replaceable_messages
-            && high_water.bytes <= budget.replaceable_bytes,
-        "the lane exceeded its envelope: {high_water:?}"
-    );
     let delivered = storm.await.unwrap();
     assert_eq!(
         delivered,
         newest.values().map(|(_, received)| received).sum::<usize>(),
         "every delivered publication reached the client"
+    );
+    // The envelope, over everything the lane ever owned: the storm filled the
+    // admitted set to its budget and never past it, and every payload it held
+    // back waited as its document's single newest offer.
+    let high_water = lane.high_water();
+    assert_eq!(
+        high_water.admitted.messages, budget.replaceable_messages,
+        "the storm backs the lane up to its budget: {high_water:?}"
+    );
+    assert!(
+        high_water.admitted.bytes <= budget.replaceable_bytes,
+        "the admitted set exceeded the byte budget: {high_water:?}"
+    );
+    assert!(
+        high_water.retained.messages <= budget.replaceable_messages + DOCUMENTS,
+        "the lane retained more than its budget plus one payload per document: {high_water:?}"
+    );
+    let largest = (0..DOCUMENTS)
+        .map(|document| serde_json::to_vec(&payload(document, EDITS)).unwrap().len())
+        .max()
+        .unwrap();
+    assert!(
+        high_water.retained.bytes <= budget.replaceable_bytes + DOCUMENTS * largest,
+        "the lane retained more bytes than its envelope: {high_water:?}"
+    );
+    assert_eq!(lane.load().retained(), Default::default());
+
+    // Fresh basis: publishing only the newest epoch of every document, through a
+    // fresh lane to the now-reading client, yields exactly the sets the storm
+    // ended on — contents and ranges included.
+    let fresh_lane = ReplaceableLane::new(budget);
+    let fresh_publications = (0..DOCUMENTS)
+        .map(|document| fresh_lane.publish_diagnostics(&client, EDITS, payload(document, EDITS)))
+        .collect::<FuturesUnordered<_>>()
+        .collect::<Vec<_>>();
+    let fresh_reads = async {
+        let mut fresh = HashMap::new();
+        while fresh.len() < DOCUMENTS {
+            let message = editor.recv().await;
+            assert_eq!(message["method"], "textDocument/publishDiagnostics");
+            let uri = message["params"]["uri"].as_str().unwrap().to_owned();
+            fresh.insert(uri, message["params"].clone());
+        }
+        fresh
+    };
+    let (fresh_deliveries, fresh_sets) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(fresh_publications, fresh_reads)
+    })
+    .await
+    .expect("the fresh publication reaches the reading client");
+    assert!(fresh_deliveries.iter().all(|d| *d == Delivery::Delivered));
+    assert_eq!(
+        final_sets, fresh_sets,
+        "the storm's final diagnostics equal a fresh publication of the newest epoch"
     );
 
     editor

@@ -3,7 +3,7 @@
   "kind": "implementation",
   "finalOwner": "expansion.workspace-responsiveness",
   "products": [
-    "OutboundBudget with separate control, response and replaceable-notification accounting (crates/verter_lsp/src/outbound/mod.rs)",
+    "OutboundBudget bounding the replaceable class by admitted count and serialized bytes, with LaneLoad reporting admitted and waiting payloads (crates/verter_lsp/src/outbound/mod.rs); control from producers that cannot await its send is ordered and accounted by ControlLane (crates/verter_lsp/src/outbound/control.rs); awaiting control producers and responses are bounded structurally (one message per awaiting producer; LSP_MAX_CONCURRENCY and the zero-capacity response channel) and carry no byte account",
     "Per-document versioned replacement coalescer: ReplaceableLane, the only route publishDiagnostics takes to the client (crates/verter_lsp/src/outbound/mod.rs, consumed by DocumentRegistry::publish_diagnostics)",
     "Backpressure and slow-client recovery evidence (crates/verter_lsp/tests/cases/outbound_slow_client.rs)"
   ],
@@ -19,7 +19,7 @@
   "cases": [
     {
       "id": "WSP3-AC1",
-      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (lane high-water within budget under a stalled reader and edit storm; every document ends on its newest complete set, never older-after-newer) + crates/verter_lsp/src/outbound/tests.rs + documents::diagnostics::tests::a_send_superseded_behind_a_slow_client_never_reaches_it"
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (under a stalled reader and edit storm: the admitted high-water reaches and never exceeds the budget; retained payloads, admitted and waiting, stay within the budget plus one payload per document; every document ends on its newest complete set, never older-after-newer) + crates/verter_lsp/src/outbound/tests.rs (message and byte backpressure, waiting payloads accounted, newer epoch retires the older payload while it waits, offer-order admission, pump retirement with the last lane handle, ordered and accounted ControlLane) + documents::diagnostics::tests::a_send_superseded_behind_a_slow_client_never_reaches_it"
     },
     {
       "id": "WSP3-AC2",
@@ -35,7 +35,7 @@
     },
     {
       "id": "WSP3-AC-BASIS",
-      "binding": "publication incrementality unchanged at the semantic layer (same epoch/receipt fence); the lane only removes superseded payloads, so the delivered final set equals a fresh publication of the newest epoch (outbound_slow_client asserts each document ends on its newest complete set)"
+      "binding": "publication incrementality unchanged at the semantic layer (same epoch/receipt fence); the lane only removes superseded payloads. outbound_slow_client compares the full final diagnostic set of every document after the storm with a fresh publication of only the newest epoch through a fresh lane to the same client, contents and ranges included"
     },
     {
       "id": "WSP3-AC-RESOURCE",
