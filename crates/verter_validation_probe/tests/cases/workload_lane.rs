@@ -325,6 +325,14 @@ fn every_checkout_is_at_the_pinned_revision() {
             "the {framework} checkout is at a different commit than the manifest pins",
         );
         lane::check_revision(&manifest).unwrap_or_else(|error| panic!("{error}"));
+        lane::check_inventory(&manifest).unwrap_or_else(|error| panic!("{error}"));
+        let selected = lane::selection(&manifest, Lane::Main);
+        let planned = lane::plan(&manifest, &selected).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            planned.len(),
+            selected.len(),
+            "every input's digest is checked"
+        );
     }
 }
 

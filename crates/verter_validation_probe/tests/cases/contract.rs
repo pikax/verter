@@ -948,3 +948,14 @@ fn a_gate_citing_another_authority_is_refused() {
         }],
     );
 }
+
+#[test]
+fn strata_can_select_a_corpus_directory_without_admitting_same_named_siblings() {
+    let manifest = ProbeStateManifest::from_toml_str(
+        &MANIFEST.replace("pattern = \"App*\"", "pattern = \"fixtures/App*\""),
+    )
+    .expect("relative path patterns select cases");
+    assert_eq!(manifest.derived_smoke_slice(), vec![CASE]);
+    let wrong_directory = MANIFEST.replace("pattern = \"App*\"", "pattern = \"other/App*\"");
+    assert!(ProbeStateManifest::from_toml_str(&wrong_directory).is_err());
+}

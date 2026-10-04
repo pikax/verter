@@ -973,9 +973,6 @@ impl ProbeRun {
         authored: &std::collections::BTreeSet<String>,
         terminal: Option<ProbeOutcomeClass>,
     ) -> DimensionInput {
-        if manifest.comparison == Comparison::None {
-            return DimensionInput::NotApplicable(NotApplicableReason::ComparatorAbsent);
-        }
         let reference_failure =
             |message: String, source: EvidenceSource| DimensionInput::Observed {
                 classes: vec![ProbeOutcomeClass::ReferenceFailure],
@@ -1000,6 +997,9 @@ impl ProbeRun {
                 }],
             };
         };
+        if manifest.comparison == Comparison::None {
+            return DimensionInput::NotApplicable(NotApplicableReason::ComparatorAbsent);
+        }
         match &reference[position] {
             ReferenceResult::Failed { error } => {
                 reference_failure(error.clone(), EvidenceSource::Reference)

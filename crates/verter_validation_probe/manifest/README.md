@@ -70,7 +70,10 @@ planned without a digest fails the lane before it is loaded.
 
 `smoke` is the bounded case list a pull request runs; the broader lane runs the complete `inventory`. It is
 listed by case id rather than computed at run time, and then checked to EQUAL its own derivation — the
-lexicographic first `min_cases` cases of each stratum, in stratum declaration order. So a reviewer reads
+lexicographic first `min_cases` cases of each stratum, in stratum declaration order.
+Patterns without `/` match file names; patterns with `/` match corpus-relative paths.
+This lets the Svelte smoke slice cover the ten unique component templates under
+`fixtures/20` and repeated bodies without repeated directories displacing unique templates. So a reviewer reads
 exactly what the required job covers, and a slice that was emptied, padded, reordered, or hand-picked fails
 `ProbeStateManifest::validate` instead of quietly re-scoping the lane. The bound (`MAX_SMOKE_CASES`) is
 structural, never a wall clock: a size expressed as a time budget drifts with the machine. It bounds each
@@ -92,3 +95,19 @@ context belongs in a landing title and ISO date, never a commit hash acceptance
 check. Older observation artifacts without retained manifests cannot satisfy
 this schema: capture a fresh observation rather than reconstructing proof from
 old commits or silently accepting missing validation inputs.
+
+The Svelte main inventory covers the complete output of the pinned upstream
+`pnpm install && pnpm generate`, including all default sizes and repeated inputs.
+The workflow uses `pnpm --ignore-workspace install` inside the corpus checkout so
+installation resolves that project's dependencies rather than the enclosing Verter workspace.
+
+Every probe requires an authenticated reference frame. A missing frame reports
+Structural `harness_failure` even under `comparison = none`; completed Compile
+and Performance results remain available. An explicit Svelte `inapplicable`
+frame retains Structural `NotApplicable`. Summary counters include protocol
+failures and never count those cases as passed.
+
+The required workload job excludes observation capture. A separate
+`continue-on-error` observation job prepares the same pinned inputs, runs only
+capture and uploads complete samples and metadata. Capture and upload failures
+cannot fail workload validation; no timing threshold or disposition runs there.

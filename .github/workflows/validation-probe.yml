@@ -11,7 +11,7 @@ name: Validation Probe
 # compiler is evidence for the owning semantic node; it is never a verdict on
 # Verter and never a reason to change compiler behaviour from this lane.
 #
-# Exactly ONE probe job runs every slice. There is no per-fixture job, no
+# Exactly ONE workload probe job runs every slice. There is no per-fixture job, no
 # per-framework job, and no per-fixture test: which cases run, what they are
 # expected to do, and who owns that expectation are manifest data, `framework`
 # is a case attribute, and the runner is table-driven over both.
@@ -113,32 +113,18 @@ jobs:
           path: .integration-tests/repos/svelte-benchmarks
           persist-credentials: false
 
-      # That repository COMMITS no components: its corpus is written by its own
-      # deterministic generator. The generator runs ONCE, with the smallest
-      # invocation that still emits every one of its component families — its
-      # default also writes two thousand-file corpora and their byte-identical
-      # `-repeated` twins, which are a content-hash cache demo rather than
-      # additional workload evidence and would put a six-figure-line inventory
-      # in the tree.
-      #
-      # It is run directly rather than through the corpus's own `pnpm install
-      # && pnpm generate`: the generator imports nothing but Node builtins and
-      # its own `scripts/lib`, so its component bytes do not depend on that
-      # install, while running it would resolve a third-party dependency tree
-      # under a different pinned package manager inside this workspace. What
-      # the generator actually produced is not taken on trust either way — the
-      # manifest carries a SHA-256 per case and the lane refuses a case whose
-      # bytes are not the ratified ones.
+      # Materialise the generator's complete default corpus, including repeated
+      # inputs. Install its own pinned dependencies independently of this workspace.
       - name: Generate the pinned Svelte corpus
         working-directory: .integration-tests/repos/svelte-benchmarks
-        run: node scripts/generate.mjs --counts 50 --no-repeated
+        run: pnpm --ignore-workspace install && pnpm generate
 
       # The pull-request lane drives each manifest's bounded smoke slice; main
       # and manual runs drive the complete ratified inventories.
       - name: Run the workload probe
         env:
           VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
-        run: cargo nextest run -p verter_validation_probe --features external-corpus
+        run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'not test(observation_lane_emits_one_artifact)'
 
       - name: Upload the summary artifact
         if: always()
@@ -146,22 +132,6 @@ jobs:
         with:
           name: validation-probe-summary-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/validation-probe/summary.json
-          if-no-files-found: error
-
-      # Non-gating observation artifact. The package run above already executes
-      # `observation_lane_emits_one_artifact`, which records correctness-labeled
-      # timings; a second job repeating the whole checkout, toolchain, install,
-      # addon build and corpus preparation only to run that one test again
-      # doubled this workflow's runner footprint for no extra evidence. Nothing
-      # here thresholds, rebaselines, or disposes on a number: a missing file
-      # fails because the artifact was not produced, never because a timing
-      # missed a budget.
-      - name: Upload the observation artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/validation-probe/observations.json
           if-no-files-found: error
 
       - name: Render the job summary
@@ -175,3 +145,73 @@ jobs:
       - name: Lane disposition
         if: always()
         run: cargo run -p verter_validation_probe --bin validation-probe-summary -- --dispose
+
+  observe:
+    name: Compile observations
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      # No job step pushes or fetches, and the corpus generator runs inside
+      # this workspace, so the root checkout keeps no token in its Git config.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: validation-probe
+      - uses: taiki-e/install-action@nextest
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The runner never links the addon: the public routes are addon methods
+      # bound for JavaScript, so the driver loads them through @verter/native.
+      - name: Build the native addon
+        run: pnpm --filter @verter/native build
+
+      # Checked out at its EXACT commit. A moving ref would make every
+      # classification in the summary unattributable.
+      - name: Check out the pinned Vue corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.VUE_BENCHMARKS_REPO }}
+          ref: ${{ env.VUE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/vue-benchmarks
+          persist-credentials: false
+
+      # Checked out at its EXACT commit, for the same reason.
+      - name: Check out the pinned Svelte corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SVELTE_BENCHMARKS_REPO }}
+          ref: ${{ env.SVELTE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/svelte-benchmarks
+          persist-credentials: false
+
+      # Materialise the generator's complete default corpus, including repeated
+      # inputs. Install its own pinned dependencies independently of this workspace.
+      - name: Generate the pinned Svelte corpus
+        working-directory: .integration-tests/repos/svelte-benchmarks
+        run: pnpm --ignore-workspace install && pnpm generate
+
+      - name: Capture observations
+        env:
+          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
+        run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'test(observation_lane_emits_one_artifact)'
+
+      - name: Upload the observation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation-probe/observations.json
+          if-no-files-found: error
