@@ -104,8 +104,12 @@ installation resolves that project's dependencies rather than the enclosing Vert
 Every probe requires an authenticated reference frame. A missing frame reports
 Structural `harness_failure` even under `comparison = none`; completed Compile
 and Performance results remain available. An explicit Svelte `inapplicable`
-frame retains Structural `NotApplicable`. Summary counters include protocol
-failures and never count those cases as passed.
+frame retains Structural `NotApplicable`. That frame is the ONLY acceptable
+answer under `comparison = none`: a producer that failed, or a reference a
+comparator-less manifest has no way to compare, reports Structural
+`reference_failure` rather than an owned skip, so a broken reference protocol
+is never reported as a clean inapplicable dimension. Summary counters include
+protocol failures and never count those cases as passed.
 
 The required workload job excludes observation capture. A separate
 `continue-on-error` observation job prepares the same pinned inputs, runs only

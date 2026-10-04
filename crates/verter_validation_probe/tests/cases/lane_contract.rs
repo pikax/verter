@@ -648,6 +648,49 @@ fn an_unregistered_producer_is_not_applicable_when_the_manifest_declares_no_comp
         .expect("the observation agrees with the manifest's applicability");
 }
 
+/// `comparison = none` accepts the explicit `inapplicable` frame and nothing
+/// else. A reference producer that failed is a reference failure, so a case
+/// whose comparator is absent can never pass as an owned skip while the
+/// producer's error is recorded nowhere.
+#[test]
+fn a_failed_reference_frame_is_a_reference_failure_even_with_no_comparison() {
+    let manifest = svelte_manifest();
+    let mut run = ProbeRun::new(
+        SVELTE_CASE,
+        vec![RequestedEntry {
+            canonical_id: SVELTE_CASE.to_string(),
+            source: String::new(),
+            request_digest: String::new(),
+        }],
+    );
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Compile));
+    let _ = run.ingest_frame(compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Reference));
+    let _ = run.ingest_frame(reference_frame(
+        SVELTE_CASE,
+        vec![ReferenceResult::Failed {
+            error: "the reference producer exited with code 1".to_string(),
+        }],
+    ));
+    let observation = run
+        .finish(&manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::ReferenceFailure),
+        "a failed reference producer is not an owned skip",
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Route).class(),
+        Some(C::Pass),
+        "the completed compile measurement survives a reference failure",
+    );
+    manifest
+        .check_applicability(&observation)
+        .expect("a reference failure is a protocol failure, not an applicability mismatch");
+}
+
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
@@ -2089,10 +2132,11 @@ fn only_the_implemented_route_authority_gates() {
     }
 }
 
-/// The lane is table-driven: the workflow declares exactly ONE probe job, and
-/// there is no per-fixture job or per-fixture test definition.
+/// The lane is table-driven: the workflow declares exactly ONE workload
+/// (`probe`) job, alongside the non-required `observe` job that runs capture,
+/// and there is no per-fixture job or per-fixture test definition.
 #[test]
-fn the_workflow_declares_exactly_one_probe_job() {
+fn the_workflow_declares_one_workload_job_and_one_observation_job() {
     let text = workflow_text();
 
     let mut in_jobs = false;
