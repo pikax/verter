@@ -2555,6 +2555,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
         TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
 
     let prepared = prepare_non_carrier_provider_sync(
+        &verter_session::framework::HostLanguageClassifier::default(),
         None,
         &reader,
         "/workspace/src/App.ts",
@@ -2608,6 +2609,7 @@ fn provider_sync_refuses_return_only_resolution_products() {
     let start = source.find(expr).expect("fixture import");
 
     let prepared = prepare_non_carrier_provider_sync(
+        &verter_session::framework::HostLanguageClassifier::default(),
         Some(&PublishedResolverSnapshot {
             resolver,
             resolution_view: None,
@@ -2657,6 +2659,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let dynamic_start = source.find(dynamic_expr).unwrap();
 
     let prepared = prepare_non_carrier_provider_sync(
+        &verter_session::framework::HostLanguageClassifier::default(),
         Some(&PublishedResolverSnapshot {
             resolver,
             resolution_view: None,
@@ -3341,6 +3344,7 @@ fn build_workspace_components_dotted_collision_is_deterministic() {
 #[test]
 fn import_resolved_matches_target_exact() {
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/project/src/components/Foo.vue",
         "C:/project/src/components/Foo.vue"
     ));
@@ -3351,14 +3355,17 @@ fn import_resolved_matches_target_svelte_carrier() {
     // The fuzzy import matcher is carrier-generic: `./Popup` resolves a
     // `.svelte` carrier just as it does `.vue` (gap-5 import resolution).
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup",
         "C:/proj/src/Popup.svelte"
     ));
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popover",
         "C:/proj/src/Popover/index.svelte"
     ));
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popover",
         "C:/proj/src/Popover/Popover.svelte"
     ));
@@ -3366,10 +3373,12 @@ fn import_resolved_matches_target_svelte_carrier() {
     // fuzzy match (mirrors the `.vue` early-out), and an unrelated target does
     // not match.
     assert!(!import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup.svelte",
         "C:/proj/src/Other.svelte"
     ));
     assert!(!import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup",
         "C:/proj/src/Other.svelte"
     ));
@@ -3380,6 +3389,7 @@ fn import_resolved_matches_target_missing_vue_ext() {
     // Import `../Popup` resolves to `C:/proj/src/Popup` (no ext)
     // Target is `C:/proj/src/Popup.vue`
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup",
         "C:/proj/src/Popup.vue"
     ));
@@ -3390,6 +3400,7 @@ fn import_resolved_matches_target_directory_index() {
     // Import `./Popover` resolves to `C:/proj/src/Popover` (directory)
     // Target is `C:/proj/src/Popover/index.vue`
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popover",
         "C:/proj/src/Popover/index.vue"
     ));
@@ -3400,6 +3411,7 @@ fn import_resolved_matches_target_directory_same_name() {
     // Import `./Popover` resolves to `C:/proj/src/Popover` (directory)
     // Target is `C:/proj/src/Popover/Popover.vue`
     assert!(import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popover",
         "C:/proj/src/Popover/Popover.vue"
     ));
@@ -3408,10 +3420,12 @@ fn import_resolved_matches_target_directory_same_name() {
 #[test]
 fn import_resolved_does_not_match_different_component() {
     assert!(!import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup",
         "C:/proj/src/Dialog.vue"
     ));
     assert!(!import_resolved_matches_target(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "C:/proj/src/Popup",
         "C:/proj/src/PopupMenu.vue"
     ));
@@ -4987,7 +5001,10 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         style_vbind_roots: Vec::new(),
     };
 
-    let ids = collect_imported_carrier_priority_ids(&analysis);
+    let ids = collect_imported_carrier_priority_ids(
+        &verter_session::framework::HostLanguageClassifier::default(),
+        &analysis,
+    );
 
     assert_eq!(
         ids,
@@ -5022,6 +5039,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     ];
 
     let ids = collect_imported_carrier_priority_ids_from_imports_with_transient_fallback(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &imports,
         Some("/workspace/src/TemplateSlotCases.vue"),
         |parent, specifier| {
@@ -5066,6 +5084,7 @@ fn refused_later_carrier_resolution_discards_the_entire_priority_batch() {
     ];
 
     let publication = collect_imported_carrier_priority_ids_from_imports_for_publication(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &imports,
         Some("/workspace/src/App.vue"),
         |_parent, _specifier| {
@@ -5142,6 +5161,7 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
     ];
 
     let ids = collect_imported_carrier_priority_ids_from_specifiers_for_publication(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &imports,
         Some("/workspace/src/App.vue"),
         |parent, specifier| {
@@ -23886,24 +23906,80 @@ fn test_is_config_file_windows_paths() {
 
 #[test]
 fn test_carrier_language_for() {
+    let classifier = verter_session::framework::HostLanguageClassifier::default();
     assert_eq!(
-        carrier_language_for("file:///project/src/App.vue"),
+        carrier_language_for(&classifier, "file:///project/src/App.vue"),
         Some(verter_session::FileLanguage::vue())
     );
     assert_eq!(
-        carrier_language_for("C:/project/src/App.vue"),
+        carrier_language_for(&classifier, "C:/project/src/App.vue"),
         Some(verter_session::FileLanguage::vue())
     );
     // `.svelte` is a KNOWN carrier row (no carrier implementation is
     // registered behind it — watched events stay inert, requests
     // surface the typed unsupported-language error).
     assert_eq!(
-        carrier_language_for("file:///project/src/Box.svelte"),
+        carrier_language_for(&classifier, "file:///project/src/Box.svelte"),
         Some(verter_session::FileLanguage::svelte())
     );
-    assert!(carrier_language_for("file:///project/src/utils.ts").is_none());
-    assert!(carrier_language_for("file:///project/tsconfig.json").is_none());
-    assert!(carrier_language_for("file:///project/vue.config.js").is_none());
+    assert!(carrier_language_for(&classifier, "file:///project/src/utils.ts").is_none());
+    assert!(carrier_language_for(&classifier, "file:///project/tsconfig.json").is_none());
+    assert!(carrier_language_for(&classifier, "file:///project/vue.config.js").is_none());
+}
+
+/// A host narrowed to Vue classifies every protocol-level carrier decision
+/// under its own admission: a `.svelte` path is not a carrier (did-open
+/// dependency tracking, watched-file carrier resync and drop edits skip it),
+/// a `.svelte.ts` rune module is not an adapter module, and both serve the
+/// provider as the plain scripts the host upserted them as — never as the
+/// Svelte vertical the operator excluded.
+#[test]
+fn narrowed_host_protocol_classification_follows_its_admission() {
+    let host = VerterHost::new_standalone(HostConfig {
+        framework: verter_session::framework::FrameworkOptions::admitting_names(["vue"])
+            .expect("vue is composed"),
+        ..HostConfig::default()
+    });
+    let classifier = host.language_classifier();
+    assert_eq!(
+        carrier_language_for(classifier, "file:///project/src/App.vue"),
+        Some(verter_session::FileLanguage::vue())
+    );
+    assert_eq!(
+        carrier_language_for(classifier, "file:///project/src/Box.svelte"),
+        None
+    );
+    assert!(!super::server_utils::is_default_export_component_carrier(
+        classifier,
+        "/project/src/Box.svelte"
+    ));
+    assert_eq!(
+        super::server_utils::adapter_module_language_for(
+            classifier,
+            "/project/src/store.svelte.ts"
+        ),
+        None
+    );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "/project/src/store.svelte.ts"),
+        Some(verter_session::FileLanguage::script(
+            verter_session::ScriptSourceType::Ts
+        ))
+    );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "/project/README.md"),
+        None,
+        "an unregistered extension still serves no provider buffer"
+    );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "/project/src/Box.svelte"),
+        None,
+        "an unadmitted carrier serves no provider buffer, like an unregistered extension"
+    );
+    assert_eq!(
+        super::server_utils::self_file_language_for(classifier, "file:///project/src/Box.svelte"),
+        None
+    );
 }
 
 /// The watcher glob is host-derived: it covers every carrier row of the
@@ -26375,6 +26451,7 @@ import Child from '@/components/Child.vue'
     // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
     let ids_before = collect_imported_carrier_priority_ids_from_imports_for_publication(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -26415,6 +26492,7 @@ import Child from '@/components/Child.vue'
 
     // Now aliased import should resolve
     let ids_after = collect_imported_carrier_priority_ids_from_imports_for_publication(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -30852,11 +30930,19 @@ async fn did_change_watched_files_resyncs_rune_module_via_adapter_module_glob() 
     // The rune module is classified as an ADAPTER MODULE, not a carrier — the
     // exact predicate the watched-files branch uses to route it.
     assert!(
-        super::server_utils::adapter_module_language_for(canonical).is_some(),
+        super::server_utils::adapter_module_language_for(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            canonical
+        )
+        .is_some(),
         "a `.svelte.ts` is an adapter module (the descriptor-derived watch branch predicate)"
     );
     assert!(
-        super::server_utils::carrier_language_for(canonical).is_none(),
+        super::server_utils::carrier_language_for(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            canonical
+        )
+        .is_none(),
         "a rune module is NOT a carrier — it must not route through the carrier resync"
     );
 

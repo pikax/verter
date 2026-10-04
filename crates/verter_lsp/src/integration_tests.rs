@@ -192,6 +192,7 @@ const message = 'hello'
         character: (offset - line_start) as u32,
     };
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -235,6 +236,7 @@ const count = ref(0)
     // Position inside script should also return completions
     let position = position_of(source, "ref(0)");
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -271,6 +273,7 @@ const msg = 'hello'
     // Go-to-definition on "msg" in template should find the binding declaration in script
     let position = position_of(source, "msg }}</div>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -302,6 +305,7 @@ const msg = 'hello'
     // Click on "msg" in template
     let position = position_of(source, "msg }}</div>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -358,6 +362,7 @@ const title = 'hello'
 
     let position = position_of(source, "title }}</h1>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -5849,6 +5854,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
     };
 
     let edit = document_drop_edit(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "file:///project/src/MyButton.svelte",
         &drop_pos,
         source,
@@ -5876,6 +5882,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
 
     // Discrimination: a non-carrier .ts drop returns None.
     let none = document_drop_edit(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "file:///project/src/util.ts",
         &drop_pos,
         source,
@@ -5940,6 +5947,7 @@ fn definition_retries_default_export_for_svelte_carrier() {
     };
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,

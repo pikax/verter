@@ -61,6 +61,7 @@ fn test_template_completions_include_bindings() {
         character: 5,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -109,6 +110,7 @@ fn test_script_completions_include_imports() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -154,6 +156,7 @@ fn test_filters_internal_symbols() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -182,6 +185,7 @@ fn test_style_returns_css_completions() {
         character: 5,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -234,6 +238,7 @@ fn test_template_excludes_type_only_imports() {
         character: 3,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -277,6 +282,7 @@ fn test_class_completions_in_static_class() {
     let cursor = source.find("fo\"").unwrap() + 2; // after "fo"
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -331,6 +337,7 @@ fn test_no_class_completions_outside_class_attr() {
     let cursor = source.find("app").unwrap() + 1;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -368,6 +375,7 @@ fn test_class_completions_no_style_block() {
     let cursor = source.find("foo").unwrap() + 1;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -516,6 +524,7 @@ fn test_class_completions_in_dynamic_class() {
     let btn_offset = source.find("'btn'").unwrap() + 2; // inside the string
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -583,6 +592,7 @@ fn test_no_class_completions_outside_dynamic_string() {
     let btn_offset = source.find("btn:").unwrap() + 1;
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -622,6 +632,7 @@ fn test_event_modifier_completions_click() {
     let dot_pos = source.find("@click.").unwrap() + 7;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -669,6 +680,7 @@ fn test_event_modifier_completions_keyup() {
     let dot_pos = source.find("@keyup.").unwrap() + 7;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -711,6 +723,7 @@ fn test_event_modifier_completions_mouse() {
     let dot_pos = source.find("@mousedown.").unwrap() + 11;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -749,6 +762,7 @@ fn test_no_event_modifier_in_text() {
     let dot_pos = source.find("text.").unwrap() + 5;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -781,6 +795,7 @@ fn test_event_modifier_completions_chained() {
     let second_dot = source.find(".stop.").unwrap() + 6;
     let pos = line_index.offset_to_position(second_dot as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1008,6 +1023,7 @@ fn test_root_completions_empty_file() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1053,6 +1069,7 @@ fn test_root_completions_with_existing_blocks() {
         .offset_to_position(blocks[0].close_tag_end)
         .unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1095,6 +1112,7 @@ fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
         .expect("root position");
 
     let labels = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1132,6 +1150,7 @@ fn test_attribute_completions_script() {
     // Position inside opening tag (on the space after "script")
     let pos = line_index.offset_to_position(8).unwrap(); // after "<script " before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1167,6 +1186,7 @@ fn test_attribute_completions_script_existing_attrs_filtered() {
     // Position inside opening tag
     let pos = line_index.offset_to_position(22).unwrap(); // before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1206,6 +1226,7 @@ fn test_attribute_completions_style() {
 
     let pos = line_index.offset_to_position(7).unwrap(); // space before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1242,6 +1263,7 @@ fn test_no_completions_on_closing_tag() {
         .offset_to_position(blocks[0].close_tag_start + 2)
         .unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1307,6 +1329,7 @@ fn test_tag_name_no_script_bindings() {
     let cursor = source.find("  <\n").unwrap() + 3; // right after `<`
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1342,6 +1365,7 @@ fn test_tag_name_includes_html_elements() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1403,6 +1427,7 @@ fn test_tag_name_includes_components() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1673,6 +1698,7 @@ fn test_tag_name_includes_vue_builtins() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1741,6 +1767,7 @@ fn test_attr_name_no_script_bindings() {
     let cursor = source.find("<div >").unwrap() + 5; // space before >
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1775,6 +1802,7 @@ fn test_attr_name_includes_directives() {
     let cursor = source.find("<div >").unwrap() + 5;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1842,6 +1870,7 @@ fn test_text_content_no_bindings() {
     let cursor = source.find("some text").unwrap() + 4; // inside text
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1891,6 +1920,7 @@ fn test_mustache_shows_bindings() {
     let cursor = source.find("{{ }}").unwrap() + 3; // inside {{ }}
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1979,6 +2009,7 @@ fn test_attr_value_shows_bindings() {
     let cursor = source.find(":foo=\"\"").unwrap() + 6; // between the quotes
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2013,6 +2044,7 @@ fn test_vmodel_modifier_completions() {
     let dot_pos = source.find("v-model.").unwrap() + 8;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2066,6 +2098,7 @@ const msg = ref('hello')
         character: col as u32 + 10, // Inside the value
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2103,6 +2136,7 @@ const msg = ref('hello')
         character: col as u32 + 5, // Inside the value
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2140,6 +2174,7 @@ const msg = ref('hello')
         character: pos as u32,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2201,6 +2236,7 @@ fn test_script_completions_have_sort_text() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2762,6 +2798,7 @@ fn test_component_prop_completions_from_macros() {
         });
 
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2891,6 +2928,7 @@ fn incomplete_component_opening_uses_import_and_committed_child_analysis() {
         let resolve = |_: &str, _: Option<&str>| Some(child.clone());
 
         let result = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -2915,6 +2953,7 @@ fn incomplete_component_opening_uses_import_and_committed_child_analysis() {
 
         let cold = |_: &str, _: Option<&str>| None;
         let cold_labels: Vec<String> = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -2973,6 +3012,7 @@ fn svelte_unclosed_text_does_not_fabricate_component_attribute_authority() {
         };
         assert!(
             completions_at_position(
+                &verter_session::framework::HostLanguageClassifier::default(),
                 &position,
                 source,
                 &project_carrier_blocks(&structure),
@@ -3031,6 +3071,7 @@ fn unclosed_post_attribute_gaps_do_not_capture_the_component_resolver() {
         };
 
         let _ = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             &source,
             &project_carrier_blocks(&structure),
@@ -3109,6 +3150,7 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     };
 
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3299,6 +3341,7 @@ fn d5_slot_completions(
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| child.clone());
     completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3476,6 +3519,7 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| Some(child.clone()));
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3574,6 +3618,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
     let cursor = source.find("{@render ").unwrap() + "{@render ".len();
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3698,6 +3743,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| Some(child.clone()));
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,

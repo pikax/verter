@@ -771,7 +771,7 @@ impl DeclOverlayOwner {
                 let Some(canonical_id) = documents.get_canonical_id(&uri) else {
                     continue;
                 };
-                if carrier_language_for(&canonical_id).is_some() {
+                if carrier_language_for(documents.language_classifier(), &canonical_id).is_some() {
                     roots.insert(canonical_id);
                 }
             }

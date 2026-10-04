@@ -239,6 +239,17 @@ impl VerterHost {
         &self.language_classifier
     }
 
+    /// The typed framework options this host was constructed with — the
+    /// admission set the composed framework services, the classifier,
+    /// and the grammar authority all derive from. Read-only for the
+    /// host's lifetime: request-specific options cannot mutate this
+    /// host-scoped configuration; a different admission is a different
+    /// host.
+    #[must_use]
+    pub fn framework_options(&self) -> &crate::framework::FrameworkOptions {
+        self.framework_services.options()
+    }
+
     /// The platform-services profile bound at construction: which
     /// io/time/scheduling/persistence/process routes this host
     /// received, its execution-host kind, and the engine version every
@@ -368,7 +379,11 @@ impl VerterHost {
         // that catalog registers itself here, and one removed upstream stops
         // being claimed here. A catalog row without a registered grammar
         // fact fails construction loudly, never a silently skipped row.
-        let framework_services = std::sync::Arc::new(crate::framework::HostServices::built_in());
+        // The composition runs under the typed framework options, so an
+        // unadmitted vertical registers no grammar here either — its
+        // sources fail closed at this authority instead of half-existing.
+        let framework_services =
+            std::sync::Arc::new(crate::framework::HostServices::composed(&config.framework));
         framework_services
             .capabilities()
             .register_all(&carrier_grammar_authority)
@@ -385,12 +400,16 @@ impl VerterHost {
         let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
 
         // The host's language classification authority. The capability
-        // snapshot is empty: no capability producer exists in the
-        // session yet, so host-gated classification equals the static
-        // registry resolution until one lands.
-        let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
-            crate::framework::ProjectCapabilitySnapshot::empty(),
-        );
+        // snapshot is empty: no capability producer exists in the session
+        // yet, so host-gated classification equals the static registry
+        // resolution until one lands. The framework admission is the SAME
+        // typed options the framework services composed under, so the two
+        // authorities cannot disagree about which verticals exist.
+        let language_classifier =
+            crate::framework::HostLanguageClassifier::with_built_in_registry_and_options(
+                crate::framework::ProjectCapabilitySnapshot::empty(),
+                &config.framework,
+            );
         // The classifier is the host's watch surface and the language
         // server's advertised framework surface, so it must classify exactly
         // the carriers the composed services registered. Without this the two
@@ -1725,5 +1744,79 @@ mod resource_policy_lazy_tests {
                  catalog fact"
             );
         }
+    }
+}
+
+/// K2 typed framework options: a narrowed admission reaches every
+/// framework authority of the CONSTRUCTED host — the retained options,
+/// the classifier's watch surface, and the live grammar authority —
+/// coherently, and an unadmitted vertical's sources fail closed there.
+#[cfg(test)]
+mod framework_options_construction_tests {
+    use std::sync::Arc;
+
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
+    use verter_language::LanguageId;
+
+    use crate::framework::FrameworkOptions;
+    use crate::types::HostConfig;
+    use crate::{FileLanguage, VerterHost};
+
+    fn vue_only_options() -> FrameworkOptions {
+        FrameworkOptions::admitting_names(["vue"]).expect("the Vue vertical is composed")
+    }
+
+    #[test]
+    fn a_narrowed_admission_reaches_every_host_authority() {
+        let host = VerterHost::new_standalone(HostConfig {
+            framework: vue_only_options(),
+            ..HostConfig::default()
+        });
+        let vue_only = vue_only_options();
+        assert_eq!(host.framework_options(), &vue_only);
+        assert_eq!(
+            host.language_classifier().carrier_extensions(),
+            vec!["vue"],
+            "the watch surface narrows with the admission"
+        );
+        assert!(
+            !host
+                .framework_registry()
+                .contains(&verter_language::FrameworkAdapterId::svelte()),
+            "the dispatch authority registers no unadmitted vertical"
+        );
+    }
+
+    #[test]
+    fn an_unadmitted_verticals_sources_fail_closed_on_the_real_host() {
+        let host = VerterHost::new_standalone(HostConfig {
+            framework: vue_only_options(),
+            ..HostConfig::default()
+        });
+        let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+        let svelte_source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///workspace/Box.svelte"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                FileLanguage::svelte(),
+                Arc::from("<script>let x = 1;</script>"),
+            )
+            .expect("registered source");
+        let svelte_grammar =
+            verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                &verter_language::FrameworkAdapterId::svelte(),
+                &LanguageId::new("svelte"),
+            )
+            .expect("the frontend catalog publishes the Svelte carrier grammar");
+        assert!(
+            host.carrier_publication
+                .grammar_authority
+                .accept_registered_source(&source_authority, &svelte_source, svelte_grammar)
+                .is_err(),
+            "an unadmitted vertical's source must fail closed on the live host authority"
+        );
     }
 }

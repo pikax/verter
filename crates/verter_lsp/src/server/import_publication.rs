@@ -391,6 +391,7 @@ impl VerterLanguageServer {
 
         let mut import_ids =
             match collect_imported_carrier_priority_ids_from_imports_for_publication(
+                self.documents.language_classifier(),
                 &ingress.imports,
                 Some(&canonical_id),
                 |parent, specifier| {
@@ -750,6 +751,7 @@ impl VerterLanguageServer {
                 .collect();
             let reader = LspProjectResolverReader::new(&self.documents);
             let Some(prepared) = prepare_non_carrier_provider_sync(
+                self.documents.language_classifier(),
                 Some(&snapshot),
                 &reader,
                 barrel_id,

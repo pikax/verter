@@ -167,12 +167,17 @@ impl DocumentRegistry {
         if let Some(host) = slot.as_ref() {
             return host.clone();
         }
+        // The enrichment host admits exactly the framework verticals the
+        // projection host was constructed with: it must never analyse a
+        // vertical the server's own admission excludes.
+        let framework = self.host().framework_options().clone();
         let host = super::SharedHost::new(Arc::new(VerterHost::new_standalone(
             verter_session::HostConfig {
                 analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
                 // Isolation is also a fairness boundary: native enrichment cannot
                 // occupy the projection scheduler or saturate all host CPU workers.
                 host_cpu_threads: Some(1),
+                framework,
                 ..verter_session::HostConfig::default()
             },
         )));
@@ -576,8 +581,11 @@ impl DocumentRegistry {
                 Some(feature.projection_host_revision)
             }
             Some(_) => return None,
-            None if crate::server::server_utils::carrier_language_for(&document.canonical_id)
-                .is_some() =>
+            None if crate::server::server_utils::carrier_language_for(
+                self.language_classifier(),
+                &document.canonical_id,
+            )
+            .is_some() =>
             {
                 return None;
             }

@@ -598,7 +598,7 @@ pub(super) async fn handle_did_open(
     // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.touch_mru(canonical_id);
-        if carrier_language_for(canonical_id).is_some() {
+        if carrier_language_for(server.documents.language_classifier(), canonical_id).is_some() {
             server.refresh_carrier_dependency_tracking(canonical_id);
             // Workspace discovery has already published most carrier snapshots.
             // Promote that immutable IDE projection immediately on open instead
@@ -636,6 +636,7 @@ pub(super) async fn handle_did_open(
         && !server.suppress_imported_carrier_prewarm;
     let imported_carrier_priority_ids =
         collect_imported_carrier_priority_ids_from_specifiers_for_publication(
+            server.documents.language_classifier(),
             &result.import_specifiers,
             current_canonical_id.as_deref(),
             |parent, specifier| server.resolve_import_specifier_for_publication(parent, specifier),
@@ -686,7 +687,9 @@ pub(super) async fn handle_did_open(
     // for any carrier or unknown-extension document).
     if current_canonical_id
         .as_deref()
-        .and_then(self_file_language_for)
+        .and_then(|canonical_id| {
+            self_file_language_for(server.documents.language_classifier(), canonical_id)
+        })
         .is_some()
     {
         server.sync_self_file_shadow_unresolved(uri).await;
@@ -879,7 +882,8 @@ pub(super) async fn handle_did_change(
     let canonical_id = server.documents.get_canonical_id(&uri);
     if !style_only {
         if let Some(canonical_id) = canonical_id.as_ref() {
-            if carrier_language_for(canonical_id).is_some() {
+            if carrier_language_for(server.documents.language_classifier(), canonical_id).is_some()
+            {
                 server.refresh_carrier_dependency_tracking(canonical_id);
             }
         }
@@ -1028,7 +1032,9 @@ pub(super) async fn handle_did_close(
     // explicitly so the open-document buffer does not linger in the provider.
     if server.documents.get_virtual_source_uri(uri).is_none() && server.project_sync.is_some() {
         if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-            if self_file_language_for(&canonical_id).is_some() {
+            if self_file_language_for(server.documents.language_classifier(), &canonical_id)
+                .is_some()
+            {
                 server.clear_provider_sync_state(&canonical_id).await;
             }
         }
@@ -1260,9 +1266,18 @@ pub(super) async fn handle_did_change_watched_files(
                 importer_closure.extend(ws.affected_canonicals(&canonical_id));
             }
         }
+        // The carrier of a vertical this host does not admit is no script of
+        // any dialect: only the filesystem facts move — no provider event, no
+        // resync — exactly like an extension with no language row.
+        let unadmitted_carrier = server
+            .documents
+            .language_classifier()
+            .is_unadmitted_carrier(&canonical_id);
         // A framework carrier is never a TypeScript file in its own right: the
         // engine only ever sees the companions Verter delivers for it.
-        if carrier_language_for(&canonical_id).is_none() {
+        if !unadmitted_carrier
+            && carrier_language_for(server.documents.language_classifier(), &canonical_id).is_none()
+        {
             provider_changes.push(verter_type_runtime::WatchedFileChange {
                 path: canonical_id.clone(),
                 kind: if event.typ == FileChangeType::DELETED {
@@ -1290,7 +1305,13 @@ pub(super) async fn handle_did_change_watched_files(
             tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
             // Config files also trigger vite dep check below, but the
             // registry rebuild is the primary action.
-        } else if carrier_language_for(&canonical_id).is_some() {
+        } else if unadmitted_carrier {
+            tracing::debug!(
+                "did_change_watched_files: unadmitted carrier {canonical_id} — disk facts only"
+            );
+        } else if carrier_language_for(server.documents.language_classifier(), &canonical_id)
+            .is_some()
+        {
             // Any framework CARRIER (`.vue`, `.svelte`, …) routes through the
             // shared resync/delete queues. The downstream compile + provider
             // sync is carrier-generic: a carrier-less language's upserts fail
@@ -1302,7 +1323,9 @@ pub(super) async fn handle_did_change_watched_files(
             } else {
                 carrier_resync_ids.push(canonical_id);
             }
-        } else if adapter_module_language_for(&canonical_id).is_some() {
+        } else if adapter_module_language_for(server.documents.language_classifier(), &canonical_id)
+            .is_some()
+        {
             // A standalone ADAPTER MODULE (`.svelte.ts` / `.svelte.js` rune
             // module) — classified EXPLICITLY (descriptor-derived) rather than
             // falling through the incidental generic-TS `else` arm. A rune
@@ -1475,7 +1498,7 @@ pub(super) async fn handle_did_create_files(
     let _hg = HandlerGuard::new("did_create_files");
     for file in &params.files {
         // Only index framework CARRIER files (`.vue`, `.svelte`, …).
-        if carrier_language_for(&file.uri).is_none() {
+        if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {
@@ -1498,7 +1521,7 @@ pub(super) async fn handle_did_delete_files(
     let _hg = HandlerGuard::new("did_delete_files");
     for file in &params.files {
         // Only framework CARRIER files (`.vue`, `.svelte`, …).
-        if carrier_language_for(&file.uri).is_none() {
+        if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {

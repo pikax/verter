@@ -286,8 +286,11 @@ async fn handle_hover_attempt(
             // the mapped projection (its local name stays provider-answered).
             native.or_else(|| {
                 let canonical_id = server.documents.get_canonical_id(uri)?;
-                if !crate::server::carrier_language_for(&canonical_id)
-                    .is_some_and(|language| language.is_svelte())
+                if !crate::server::carrier_language_for(
+                    server.documents.language_classifier(),
+                    &canonical_id,
+                )
+                .is_some_and(|language| language.is_svelte())
                 {
                     return None;
                 }
@@ -851,8 +854,10 @@ async fn handle_completion_attempt(
                 .as_ref()
                 .map(|context| context.tag().to_string())
                 .or_else(|| {
-                    (CarrierTemplateLanguage::from_uri(uri.as_str())
-                        == Some(CarrierTemplateLanguage::Svelte)
+                    (CarrierTemplateLanguage::from_uri(
+                        server.documents.language_classifier(),
+                        uri.as_str(),
+                    ) == Some(CarrierTemplateLanguage::Svelte)
                         && matches!(
                             svelte_head_cursor_fact(structure, offset),
                             Some(SvelteHeadCursorFact::SnippetName)
@@ -980,7 +985,12 @@ async fn handle_completion_attempt(
             let resolved = import
                 .resolved_canonical_id
                 .as_deref()
-                .filter(|resolved| crate::server::is_default_export_component_carrier(resolved))
+                .filter(|resolved| {
+                    crate::server::is_default_export_component_carrier(
+                        server.documents.language_classifier(),
+                        resolved,
+                    )
+                })
                 .map(str::to_string)
                 .or_else(|| {
                     (verter_semantic::resolver_core::is_relative_specifier(&import.source)
@@ -1019,6 +1029,7 @@ async fn handle_completion_attempt(
             dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
         let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
         completions_at_position(
+            server.documents.language_classifier(),
             position,
             &native.source,
             &native.blocks,
@@ -1138,7 +1149,7 @@ async fn handle_completion_attempt(
             &native.source,
             &native.blocks,
             native.analysis.as_ref(),
-            CarrierTemplateLanguage::from_uri(uri.as_str()),
+            CarrierTemplateLanguage::from_uri(server.documents.language_classifier(), uri.as_str()),
             native.structure.as_ref(),
         );
         let source_ctx = match &context {
@@ -1471,7 +1482,10 @@ async fn handle_completion_attempt(
                             Some(&ctx.tsx_path),
                             tp.provider_id(),
                             is_template_attr_context,
-                            match CarrierTemplateLanguage::from_uri(uri.as_str()) {
+                            match CarrierTemplateLanguage::from_uri(
+                                server.documents.language_classifier(),
+                                uri.as_str(),
+                            ) {
                                 Some(CarrierTemplateLanguage::Vue) => {
                                     Some(merge::CarrierAttributeSyntax::Vue)
                                 }

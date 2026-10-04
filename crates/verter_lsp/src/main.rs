@@ -84,7 +84,21 @@ async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let host = Arc::new(VerterHost::new_standalone(lsp_projection_host_config()));
+    // Framework admission is a construction-time choice: parse and
+    // validate the typed options BEFORE the host exists, through the one
+    // shared session validator, and refuse startup on an invalid
+    // combination instead of serving a host the operator did not ask for.
+    let framework_options = match framework_options_from_cli(args.frameworks.as_deref()) {
+        Ok(options) => options,
+        Err(error) => {
+            tracing::error!("invalid --frameworks value: {error}");
+            return;
+        }
+    };
+
+    let host = Arc::new(VerterHost::new_standalone(lsp_projection_host_config(
+        framework_options,
+    )));
 
     // The LSP binary no longer hosts the MCP HTTP server in-process.
     // `verter_lsp` and `verter_mcp` ship as independent products; IDEs
@@ -209,7 +223,14 @@ async fn serve() {
 /// macros, exports, and lightweight style metadata) as well as import ingress.
 /// Full template/style/cross-file semantic enrichment and typeinfo remain a
 /// separate optional background concern and are never reconstructed by handlers.
-fn lsp_projection_host_config() -> HostConfig {
+///
+/// `framework` is the typed framework admission the CLI supplied — the
+/// configuration the NAPI and WebAssembly carriers pass through their
+/// own construction channels, keeping the carriers' configuration
+/// semantics equivalent.
+fn lsp_projection_host_config(
+    framework: verter_session::framework::FrameworkOptions,
+) -> HostConfig {
     HostConfig {
         analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
         // `$/verter/getStatistics` (custom_methods/mod.rs) unconditionally
@@ -219,8 +240,27 @@ fn lsp_projection_host_config() -> HostConfig {
         // preserve that always-on behavior as the runtime toggle's
         // equivalent, or the merged counters silently read zero forever.
         metrics_enabled: true,
+        framework,
         ..HostConfig::default()
     }
+}
+
+/// Parse the `--frameworks` comma list into the typed framework options
+/// through the shared session validator.
+///
+/// `None` keeps the default admission (every composed vertical). An
+/// empty segment, duplicate, or unknown name is rejected with the
+/// validator's actionable diagnostic, so the LSP accepts exactly the
+/// names, defaults, and rejections the other carriers do.
+fn framework_options_from_cli(
+    frameworks: Option<&str>,
+) -> Result<verter_session::framework::FrameworkOptions, String> {
+    let Some(list) = frameworks else {
+        return Ok(verter_session::framework::FrameworkOptions::default());
+    };
+    let names: Vec<&str> = list.split(',').map(str::trim).collect();
+    verter_session::framework::FrameworkOptions::admitting_names(names)
+        .map_err(|error| error.to_string())
 }
 
 /// Parsed CLI arguments.
@@ -256,6 +296,13 @@ struct CliArgs {
     /// Optional early client-process witness. The standard LSP initialize
     /// `processId` replaces it and is the editor-neutral authority.
     client_pid: Option<u32>,
+    /// Framework verticals the serving host admits, as a comma-separated
+    /// list of the exact names the composed capability catalog spells
+    /// (`--frameworks=vue` or `--frameworks=vue,svelte`). Absent admits
+    /// every composed vertical. An unknown name refuses startup with the
+    /// shared actionable diagnostic — the same validator the NAPI and
+    /// WebAssembly carriers use.
+    frameworks: Option<String>,
 }
 
 impl CliArgs {
@@ -292,6 +339,7 @@ impl CliArgs {
         let mut workspace_root = None;
         let mut mcp_port = None;
         let mut client_pid = None;
+        let mut frameworks = None;
         // The SHARED editor-attach rendezvous is opt-in via CLI flag or env — the
         // editor extension supplies it when it spawns a `verter-relay-shim` as its
         // `tsgo`. Absent both, SHARED is never attempted (fail-closed OWNED baseline).
@@ -316,6 +364,8 @@ impl CliArgs {
                 client_pid = Some(val.parse::<u32>().map_err(|error| {
                     format!("--client-pid requires a positive integer, got `{val}`: {error}")
                 })?);
+            } else if let Some(val) = arg.strip_prefix("--frameworks=") {
+                frameworks = Some(val.to_string());
             } else if arg.starts_with("--mcp-lint-preset=") {
                 // Accepted for syntactic compatibility with IDE
                 // configurations that previously bundled MCP into the
@@ -339,6 +389,7 @@ impl CliArgs {
             editor_tsserver_receipt,
             editor_tsserver_nonce,
             client_pid,
+            frameworks,
         })
     }
 

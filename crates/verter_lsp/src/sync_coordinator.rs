@@ -1666,7 +1666,9 @@ async fn sync_file(
     // projection for diagnostics and (b) never clobbers the Shadow state via
     // the carrier-miss `preserve_open_unresolved_carrier`, which would
     // overwrite it with an IDE-path state and break did_close cleanup.
-    if let Some(file_language) = crate::server::self_file_language_for(canonical_id) {
+    if let Some(file_language) =
+        crate::server::self_file_language_for(deps.documents.language_classifier(), canonical_id)
+    {
         if let Some(uri) = deps.documents.canonical_id_to_uri(canonical_id) {
             let delivered = crate::server::sync_self_file_shadow_state(
                 &deps.documents,
@@ -2603,7 +2605,9 @@ pub(crate) async fn provider_diagnostics_batch(
     canonical_id: &str,
     native: Vec<Diagnostic>,
 ) -> ProviderDiagnosticBatch {
-    if crate::server::self_file_language_for(canonical_id).is_some() {
+    if crate::server::self_file_language_for(documents.language_classifier(), canonical_id)
+        .is_some()
+    {
         self_file_diagnostics(documents, states, encoding, provider, canonical_id, native).await
     } else {
         carrier_provider_diagnostics_batch(

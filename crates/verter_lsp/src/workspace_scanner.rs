@@ -830,6 +830,7 @@ async fn sync_non_carrier_file_to_provider(
         // a read-only consumer; route through `host.workspace_read()`.
         let ws = host_clone.host().workspace_read();
         crate::server::prepare_non_carrier_provider_sync(
+            host_clone.host().language_classifier(),
             Some(&snap_clone),
             ws.as_ref(),
             &id_clone,

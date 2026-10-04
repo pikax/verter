@@ -30,7 +30,10 @@ pub(super) fn is_style_v_bind_context(
                 &doc.source,
                 &blocks,
                 analysis.as_ref(),
-                CarrierTemplateLanguage::from_uri(uri.as_str()),
+                CarrierTemplateLanguage::from_uri(
+                    server.documents.language_classifier(),
+                    uri.as_str()
+                ),
                 structure.as_ref(),
             ),
             CursorContext::Style(crate::features::cursor_context::StyleCursorContext::VBind)

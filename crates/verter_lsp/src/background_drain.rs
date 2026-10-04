@@ -511,7 +511,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         let Some(canonical_id) = documents.get_canonical_id(&uri) else {
             continue;
         };
-        if carrier_language_for(&canonical_id).is_none() {
+        if carrier_language_for(documents.language_classifier(), &canonical_id).is_none() {
             continue;
         }
         let Some(analysis) = host.get_analysis(&canonical_id) else {
@@ -520,6 +520,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 
         // Static imports (same pipeline as did_open line 6103)
         let ids = match collect_imported_carrier_priority_ids_from_imports_for_publication(
+            documents.language_classifier(),
             &analysis.imports,
             Some(&canonical_id),
             |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -685,7 +686,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             let Some(canonical_id) = documents.get_canonical_id(&uri) else {
                 continue;
             };
-            if carrier_language_for(&canonical_id).is_none() {
+            if carrier_language_for(documents.language_classifier(), &canonical_id).is_none() {
                 continue;
             }
             let Some(analysis) = host.get_analysis(&canonical_id) else {
@@ -932,7 +933,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     rewrite_import_specifiers: bool,
     pending_snapshot_provider_sync: &DashSet<String>,
 ) -> SyncOutcome {
-    if carrier_language_for(canonical_id).is_some() {
+    if carrier_language_for(documents.language_classifier(), canonical_id).is_some() {
         sync_pending_carrier_provider_file(
             sync,
             documents,
@@ -972,7 +973,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
         // editor's text, so its hovers and navigation would land on the wrong
         // tokens.
         if let (Some(file_language), Some(uri)) = (
-            crate::server::self_file_language_for(canonical_id),
+            crate::server::self_file_language_for(documents.language_classifier(), canonical_id),
             documents.canonical_id_to_uri(canonical_id),
         ) {
             // A re-synced buffer must look new to the diagnostics cache and to any
@@ -2021,6 +2022,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     });
     let reader = LspProjectResolverReader::new(documents);
     let Some(prepared) = prepare_non_carrier_provider_sync(
+        documents.language_classifier(),
         Some(snapshot),
         &reader,
         canonical_id,

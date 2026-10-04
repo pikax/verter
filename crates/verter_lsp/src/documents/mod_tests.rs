@@ -579,6 +579,75 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
     }
 }
 
+/// A server constructed under a narrowed framework admission keeps the
+/// unadmitted vertical out of BOTH document ingress paths: an editor
+/// document whose `languageId` names an unadmitted carrier classifies
+/// through the host's admission-aware classifier — never as that carrier
+/// from a process-global registry — and the isolated semantic-enrichment
+/// host is composed under the SAME admission as the projection host, so
+/// it cannot analyse a vertical the projection host refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_admission_governs_both_document_ingress_paths() {
+    let vue_only = verter_session::framework::FrameworkOptions::admitting_names(["vue"])
+        .expect("the Vue vertical is composed");
+    let projection_host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::IMPORTS),
+            framework: vue_only.clone(),
+            ..verter_session::HostConfig::default()
+        },
+    ));
+    let registry = Arc::new(DocumentRegistry::new(projection_host));
+    registry.set_semantic_analysis_enabled(true);
+
+    let uri: Uri = "file:///workspace/Box.svelte".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<script lang=\"ts\">\nconst count = 1;\n</script>\n<p>{count}</p>".to_string(),
+    });
+    let canonical_id = uri_to_canonical_id(&uri);
+    assert!(
+        !registry
+            .document_file_language("svelte", &canonical_id)
+            .is_framework_carrier(),
+        "an unadmitted carrier's editor languageId must not resolve to its carrier row"
+    );
+    assert!(
+        registry.get_projection(&uri).is_none(),
+        "an unadmitted carrier must not project as an own-path self-file provider buffer"
+    );
+    assert!(
+        registry
+            .document_file_language("vue", "/workspace/App.vue")
+            .is_framework_carrier(),
+        "the admitted vertical keeps its carrier row"
+    );
+
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("enabled enrichment spawns a semantic task")
+        .await
+        .expect("the semantic task completes");
+    let semantic_host = registry
+        .semantic_host
+        .read()
+        .clone()
+        .expect("the enrichment task constructed the semantic host");
+    assert_eq!(
+        semantic_host.host().framework_options(),
+        &vue_only,
+        "the semantic-enrichment host admits exactly what the projection host admits"
+    );
+    assert!(
+        registry
+            .get_analysis(&uri)
+            .is_none_or(|analysis| analysis.template.is_none()),
+        "no carrier template analysis may be published for an unadmitted vertical"
+    );
+}
+
 /// A native feature read must follow the document-revision-stamped snapshot,
 /// not depend exclusively on the secondary canonical-id lookup. Dependency
 /// publication can invalidate/rebuild that lookup while an unchanged parent
