@@ -375,6 +375,14 @@ export const POLL_SEQUENCES = {
       "server to certify its entry document, then for its level-2 announcement — in series " +
       "under the hook's declared 90s deadline",
   },
+  restartedWorkspaceReferences: {
+    members: ["restartTypeProviderSync"],
+    parentTimeoutMs: 90_000,
+    reason:
+      "a workspace-wide references test that follows an in-test server restart awaits the new " +
+      "server's level-2 announcement before counting; the count then polls under the rest of the " +
+      "test's own 90s",
+  },
   restartedProviderOwnedWitnesses: {
     members: [
       "restartEntryDiagnostics",

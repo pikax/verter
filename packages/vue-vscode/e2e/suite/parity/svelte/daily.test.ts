@@ -4,7 +4,12 @@
 import { strict as assert } from "node:assert";
 import * as vscode from "vscode";
 
-import { FIXTURE_NAME, waitForDiagnostics, waitForFileReady } from "../../../helpers";
+import {
+  ensureTypeProviderSynced,
+  FIXTURE_NAME,
+  waitForDiagnostics,
+  waitForFileReady,
+} from "../../../helpers";
 import {
   assertCleanErrors,
   assertCompletionsInclude,
@@ -19,7 +24,7 @@ import {
   settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
-import { sequenceParent } from "../../../lib/timeouts";
+import { pollBudget, sequenceParent } from "../../../lib/timeouts";
 
 function onlySvelteParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "svelte-parity")
@@ -241,6 +246,12 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
 
   test("svelte.references.script-and-markup", async function () {
     onlySvelteParity(this);
+    this.timeout(sequenceParent("restartedWorkspaceReferences"));
+    // The provider-owned witnesses above restart the server in-test, which
+    // invalidates the suite setup's level-2 fact. Closed-file references are
+    // answered only once the new server's project frontier is complete, so
+    // await its own level-2 announcement before counting.
+    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
     try {
       await assertReferenceCountAtLeast(
         { file: "src/DailyBinding.svelte", token: "dailyValue", occurrence: 0 },
