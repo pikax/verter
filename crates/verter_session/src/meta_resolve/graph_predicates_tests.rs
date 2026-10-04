@@ -96,7 +96,10 @@ mod node_root_gate_tests {
 
         for (expr, expect) in &cases {
             let node = lower(&host, scope, expr);
-            let mut qe_node = ComponentMetaQueryEngine::new(&host);
+
+            let fixture_dispatch_0 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+            let mut qe_node = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_0);
             let (verdict, fence) =
                 node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
             assert_eq!(
@@ -144,7 +147,11 @@ mod node_root_gate_tests {
 
         for (expr, expect_cycle) in [(&cyclic, true), (&acyclic, false)] {
             let node = lower(&host, scope, expr);
-            let node_cycle = node_root_reaches_transitive_cycle_with_fence(&host, scope, node).0;
+
+            let fixture_dispatch_1 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+            let node_cycle =
+                node_root_reaches_transitive_cycle_with_fence(&fixture_dispatch_1, scope, node).0;
             assert_eq!(
                 node_cycle, expect_cycle,
                 "case {expr:?} must GENUINELY reach the expected cycle verdict (not vacuous)"
@@ -218,13 +225,17 @@ mod node_root_gate_tests {
         let bare_a = make_bare("A");
         let bare_c = make_bare("C");
 
+        let fixture_dispatch_2 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
         assert!(
-            node_root_reaches_transitive_cycle_with_fence(&host, scope, bare_a).0,
+            node_root_reaches_transitive_cycle_with_fence(&fixture_dispatch_2, scope, bare_a).0,
             "a BareRef whose head resolves to a cyclic generic (A → B → A) MUST be detected as a \
              cycle — the head is resolved via resolve_carrier_subject_node, NOT dropped"
         );
+        let fixture_dispatch_2 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
         assert!(
-            !node_root_reaches_transitive_cycle_with_fence(&host, scope, bare_c).0,
+            !node_root_reaches_transitive_cycle_with_fence(&fixture_dispatch_2,  scope, bare_c).0,
             "a BareRef whose head resolves to an acyclic generic (C) is NOT a cycle (genuine reach)"
         );
     }
@@ -295,7 +306,10 @@ mod node_root_gate_tests {
 
         for (expr, expect) in [(&userland_pick, false), (&builtin_omit, true)] {
             let node = lower(&host, scope, expr);
-            let mut qe_node = ComponentMetaQueryEngine::new(&host);
+
+            let fixture_dispatch_3 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+            let mut qe_node = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_3);
             let node_result =
                 node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
             assert_eq!(
@@ -380,7 +394,10 @@ mod node_root_gate_tests {
             ],
         );
         let node = lower(&host, scope, &imported_pick);
-        let mut qe_node = ComponentMetaQueryEngine::new(&host);
+
+        let fixture_dispatch_4 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let mut qe_node = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_4);
         let node_result =
             node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
 
@@ -461,7 +478,10 @@ mod node_root_gate_tests {
 
         // The carrier (file-X identity) is package-backed — resolved at file X, NOT
         // re-resolved by name from `scope`.
-        let mut qe = ComponentMetaQueryEngine::new(&host);
+
+        let fixture_dispatch_5 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let mut qe = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_5);
         let (carrier_verdict, _fence) =
             node_package_backed_object_like_root_with_fence(&mut qe, scope, carrier);
         assert!(
@@ -475,7 +495,7 @@ mod node_root_gate_tests {
         // would collapse the carrier verdict to THIS `false`, so the `true` above
         // can only come from identity preservation.
         let scope_local = lower(&host, scope, &TypeExpr::named("Shared"));
-        let mut qe_scope = ComponentMetaQueryEngine::new(&host);
+        let mut qe_scope = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_5);
         let (scope_local_verdict, _) =
             node_package_backed_object_like_root_with_fence(&mut qe_scope, scope, scope_local);
         assert!(

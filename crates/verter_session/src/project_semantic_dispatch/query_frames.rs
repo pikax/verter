@@ -210,7 +210,7 @@ impl<'p, 'a> Program for QueryProgram<'p, 'a> {
     }
 
     fn stop(&self) -> Option<()> {
-        self.dispatch.ctx.is_cancelled().then_some(())
+        self.dispatch.cancellation.is_cancelled().then_some(())
     }
 }
 

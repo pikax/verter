@@ -53,6 +53,9 @@ pub(crate) mod jsdoc_resolve;
 pub(crate) mod overlay_materialize;
 pub(crate) mod overlay_priority;
 pub(crate) mod prepared_decl;
+pub(crate) mod source_augmentation;
+pub(crate) mod source_owner_import;
+pub(crate) mod source_request;
 
 // §11c.5 re-export block — preserves `crate::host_manage::populate_*` /
 // `crate::host_manage::extract_*` paths used by `meta.rs`,
@@ -666,7 +669,7 @@ impl FallthroughRequestHost for VerterHost {
         // currentness intrinsic to the seed: on a non-current (`ReturnOnly`)
         // snapshot the context's `validates*` family fails closed, so the
         // fallthrough resolver's per-element / per-child / per-root
-        // node-cache validation (which reads through `ctx.store_view()`)
+        // node-cache validation (which reads through `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`)
         // MISSES rather than consuming a stale warm hit. The outer
         // `is_stable` / publish fence still gates promotion.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -684,6 +687,7 @@ impl FallthroughRequestHost for VerterHost {
             prop_type_overrides,
             visiting,
             ctx,
+            &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
         )
     }
 
@@ -712,7 +716,7 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// [`crate::resolver_core::HostResolverContext`] instead of paying
     /// a fresh workspace-sweep cost per call.
     ///
-    /// `ctx.store_view()` is ALSO the per-element / per-child / per-root
+    /// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child / per-root
     /// fallthrough-NODE cache validation view (see
     /// `intrinsic_members_for_tag`, `resolve_child_fallthrough`,
     /// `resolve_root_consumption`). It is the request-bound
@@ -728,6 +732,8 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// `..._with_resolution`) supply a real request-bound ctx; tests /
     /// off-path callers go through `with_bare_host_ctx_for_test`.
     pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(in crate::host_manage) dispatch:
+        &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
 }
 
 #[cfg(test)]
@@ -792,7 +798,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         let cache_key =
             crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(&project_anchor, tag);
 
-        // Validate through the request-bound `ctx.store_view()` (a borrow
+        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (a borrow
         // into the cold compute's currentness-gated `RequestStoreView`,
         // built once at the request boundary) instead of rebuilding a full
         // owned `HostStoreView` per intrinsic-tag lookup — these fire ~per
@@ -812,12 +818,10 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // so it may only retire what it can PROVE it outranks. A candidate at or
         // beyond the sampled generation is a concurrent writer's newer
         // completion and survives.
-        if let Some(node) = self
-            .host
-            .resolver_runtime()
-            .fallthrough
-            .get_cached_node(&cache_key, &self.ctx.store_view())
-        {
+        if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
+            &cache_key,
+            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+        ) {
             match self.host.runtime_intrinsic_node_to_members(node) {
                 Some((members, node_generation)) if node_generation == cache_generation => {
                     return members;
@@ -851,7 +855,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             .compute_and_maybe_admit(self.ctx, || {
                 let members = self
                     .host
-                    .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
+                    .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx, self.dispatch)
                     .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
                 // Re-sample the live generation AFTER the compute. The node is
                 // stamped with the PRE-compute sample, so a surface built
@@ -964,15 +968,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
         );
 
-        // Validate through the request-bound `ctx.store_view()` (see
+        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-child
         // owned-view rebuild and fails closed on a non-current cold-seed.
-        if let Some(node) = self
-            .host
-            .resolver_runtime()
-            .fallthrough
-            .get_cached_node(&cache_key, &self.ctx.store_view())
-        {
+        if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
+            &cache_key,
+            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+        ) {
             if let Some(resolution) = self.host.runtime_child_node_to_resolution(node) {
                 return Some(resolution);
             }
@@ -1033,16 +1035,14 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             crate::resolver_core::FallthroughOverrideIdentity::for_overrides(overrides),
         );
 
-        // Validate through the request-bound `ctx.store_view()` (see
+        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-root-
         // binding owned-view rebuild and fails closed on a non-current
         // cold-seed.
-        if let Some(node) = self
-            .host
-            .resolver_runtime()
-            .fallthrough
-            .get_cached_node(&cache_key, &self.ctx.store_view())
-        {
+        if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
+            &cache_key,
+            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+        ) {
             if let Some(resolved) = self.host.runtime_consumed_bindings_to_resolution(node) {
                 return resolved;
             }
@@ -1066,6 +1066,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
                     has_unknown_spread,
                     eval_env,
                     self.ctx,
+                    self.dispatch,
                     overrides,
                 );
                 let node = self.host.build_runtime_consumed_bindings_node(&resolved);
@@ -1092,6 +1093,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             usage_index,
             eval_env,
             self.ctx,
+            self.dispatch,
             overrides,
         )
     }
@@ -1111,6 +1113,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             usage_index,
             eval_env,
             self.ctx,
+            self.dispatch,
             overrides,
         )
     }

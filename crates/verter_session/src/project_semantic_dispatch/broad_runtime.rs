@@ -501,11 +501,7 @@ impl ProjectSemanticDispatch<'_> {
                 partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
             };
         };
-        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            canonical,
-            macro_index,
-        ) else {
+        let Some(product) = self.macro_type_arg_hot_ref(canonical, macro_index) else {
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
                 node: self.opaque(QueryError::Miss),

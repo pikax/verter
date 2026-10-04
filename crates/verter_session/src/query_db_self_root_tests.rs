@@ -125,7 +125,7 @@ fn planted_self_root(canonical: &str) -> Arc<[FactVersionRef]> {
 /// indistinguishable and the test would not discriminate.
 fn assert_untracked(host: &VerterHost, canonical: &str) {
     let ctx: &dyn ResolverContext = host;
-    let view = ctx.resolver_store_view();
+    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !StoreView::tracks_file(&view, canonical),
         "fixture invariant: probe canonical {canonical} must be UNTRACKED by the live \
@@ -177,13 +177,14 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
 
     // Prime attempt: a "stale" value paired with an untracked
     // self-root. A lazy validator admits this; the strict one does not.
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         ComputedEntry::Rooted(decl("stale", c), planted_self_root(c))
     });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
         })
@@ -250,25 +251,28 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
         Arc::<str>::from("Probe"),
     );
 
-    let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
-        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-            crate::component_meta_caches::ImportedRegistryEntry {
-                value: Some(Arc::new(imported_symbol(c, "stale"))),
-                fact_dep_signature: planted_self_root(c),
-                validated_at_generation: ctx.project_type_store().current_project_generation(),
-            },
-        )
-    });
+    let _ = db
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(c, "stale"))),
+                    fact_dep_signature: planted_self_root(c),
+                    validated_at_generation: ctx.current_project_generation(),
+                },
+            )
+        });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_admit_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
             cold_ran = true;
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
-                    validated_at_generation: ctx.project_type_store().current_project_generation(),
+                    validated_at_generation: ctx.current_project_generation(),
                 },
             )
         })
@@ -311,13 +315,14 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
         Arc::<str>::from("Probe"),
     );
 
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         ComputedEntry::Rooted(false, planted_self_root(c))
     });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(true, empty_fact_signature())
         })
@@ -382,7 +387,7 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
         Arc::<str>::from("Probe"),
     );
 
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         ComputedEntry::Rooted(
             Some(owner_collection_marker_locator(c, "stale")),
             planted_self_root(c),
@@ -391,7 +396,8 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "recomputed")),
@@ -517,7 +523,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -526,7 +532,8 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -577,7 +584,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -586,7 +593,8 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -655,7 +663,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -664,7 +672,8 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -772,7 +781,8 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     );
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
-        .get_or_compute_traced_for_test(&key, ctx, move || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, move || {
             // `dep` is recorded as `DepVersion::WholeHash`, so the
             // signature builder returns `Some` and the entry is
             // admitted.
@@ -807,7 +817,8 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -905,7 +916,7 @@ fn load_tracked_keyed(host: &VerterHost, canonical: &str) {
         "IndexedReady must materialise for {canonical}",
     );
     let ctx: &dyn ResolverContext = host;
-    let view = ctx.resolver_store_view();
+    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         StoreView::tracks_file(&view, canonical),
         "fixture invariant: {canonical} must be TRACKED so the unrelated-sibling-body \
@@ -960,7 +971,8 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let primed = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -984,7 +996,8 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
         })
@@ -1031,7 +1044,8 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute_admit_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1045,7 +1059,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: sig,
-                    validated_at_generation: ctx.project_type_store().current_project_generation(),
+                    validated_at_generation: ctx.current_project_generation(),
                 },
             )
         })
@@ -1056,13 +1070,14 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_admit_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_admit_traced_for_test(&key, || {
             cold_ran = true;
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
-                    validated_at_generation: ctx2.project_type_store().current_project_generation(),
+                    validated_at_generation: ctx2.current_project_generation(),
                 },
             )
         })
@@ -1107,7 +1122,8 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1126,7 +1142,8 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(true, empty_fact_signature())
         })
@@ -1172,7 +1189,8 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1191,7 +1209,8 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "recomputed")),
@@ -1280,7 +1299,8 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
 
     // ── Populate: cold publish admits exactly one entry (live_count 0 -> 1).
     let _ = db
-        .get_or_compute_traced_for_test(&key, ctx, publish("first"))
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, publish("first"))
         .expect("cold publish succeeds");
     assert_eq!(
         db.live_count(),
@@ -1292,7 +1312,8 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     // its cold closure must NOT run and live_count must stay 1.
     let mut reuse_cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             reuse_cold_ran = true;
             ComputedEntry::Rooted(
                 Some(owner_collection_marker_locator(c, "should-not-run")),
@@ -1333,7 +1354,8 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     let recompute_cold_ran = std::cell::Cell::new(false);
     let recompute_flag = &recompute_cold_ran;
     let recomputed = db
-        .get_or_compute_traced_for_test(&key, ctx, {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, {
             let inner = publish("second");
             move || {
                 recompute_flag.set(true);
@@ -1403,7 +1425,8 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 
     let observed_scope = observe_scope(ctx, c);
     let _ = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             // No observed dependencies — the signature builder returns
             // `Some` (no `RouteGeneration` entry) and the discriminator
             // is the scope canonical's own self-root `FileWholeHash`,
@@ -1425,7 +1448,8 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -1551,17 +1575,19 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // `get_or_compute`'s compute returns `None` and nothing is
     // admitted.
     let primed_dep_sig = Arc::clone(&dep_sig);
-    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
-        let export_set = observed_scope.syntactic_export_set.clone()?;
-        let fact_sig = engine_fact_signature_for_materialize_memo(
-            &observed_scope,
-            export_set,
-            &primed_dep_sig,
-        )
-        .into_cacheable()?
-        .facts;
-        Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
-    });
+    let cold_value = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, move || {
+            let export_set = observed_scope.syntactic_export_set.clone()?;
+            let fact_sig = engine_fact_signature_for_materialize_memo(
+                &observed_scope,
+                export_set,
+                &primed_dep_sig,
+            )
+            .into_cacheable()?
+            .facts;
+            Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
+        });
     // The publish path declined the entry — `get_or_compute` returns
     // `None` because its compute closure short-circuited.
     assert!(
@@ -1583,7 +1609,8 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -1709,7 +1736,8 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     // Prime the memo with the production signature.
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
-        .get_or_compute_traced_for_test(&key, ctx, move || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, move || {
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
                 &observed_scope,
@@ -1751,7 +1779,8 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -2101,17 +2130,19 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     // signature is built from the single pre-edit observation (the
     // publish site threads it in). The provenance-pure builder roots
     // the scope self-root on H1 — the observation's `whole_hash`.
-    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
-        let export_set = observed_scope_h1.syntactic_export_set.clone()?;
-        let fact_sig = engine_fact_signature_for_materialize_memo(
-            &observed_scope_h1,
-            export_set,
-            &empty_dep_signature(),
-        )
-        .into_cacheable()?
-        .facts;
-        Some((materialized("stale", empty_dep_signature()), fact_sig))
-    });
+    let cold_value = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, move || {
+            let export_set = observed_scope_h1.syntactic_export_set.clone()?;
+            let fact_sig = engine_fact_signature_for_materialize_memo(
+                &observed_scope_h1,
+                export_set,
+                &empty_dep_signature(),
+            )
+            .into_cacheable()?
+            .facts;
+            Some((materialized("stale", empty_dep_signature()), fact_sig))
+        });
     assert!(
         cold_value.is_none(),
         "the publish path MUST NOT admit a MaterializeMemoDb entry whose value was \
@@ -2131,7 +2162,8 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -2658,7 +2690,10 @@ fn resolvability_db_producer_overlay_discrimination() {
         &overlay_store_view,
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
-    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+
+    let fixture_dispatch_0 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx, &fixture_dispatch_0);
     let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(
         canonical,
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2672,7 +2707,10 @@ fn resolvability_db_producer_overlay_discrimination() {
     );
 
     let base_ctx: &dyn ResolverContext = host.as_ref();
-    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
+
+    let fixture_dispatch_1 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(base_ctx);
+    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx, &fixture_dispatch_1);
     let base_resolvable = base_engine.can_resolve_registry_symbol(
         canonical,
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2727,7 +2765,10 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         &overlay_store_view,
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
-    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+
+    let fixture_dispatch_2 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx, &fixture_dispatch_2);
     let observed = overlay_engine
         .observed_prepared_type_decl(
             canonical,
@@ -2819,7 +2860,11 @@ fn observe_materialize_scope_is_overlay_view_correct() {
         &overlay_store_view,
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
-    let overlay_observation = ResolverContext::observe_materialize_scope(&overlay_ctx, canonical)
+    let overlay_observation =
+        crate::resolver_core::request_ports::IndexedInputs::observe_materialize_scope(
+            &overlay_ctx,
+            canonical,
+        )
         .expect("overlay-session observe_materialize_scope resolves the overlay-pinned artifact");
     assert_eq!(
         overlay_observation.whole_hash(),
@@ -2925,20 +2970,22 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
         ProjectionMode::Expanded,
     );
     let scope_owned = scope.to_string();
-    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
-        // The production publish closure: a `None` observation refuses
-        // shared-cache admission.
-        let observed_scope = ctx.observe_materialize_scope(scope_owned.as_str())?;
-        let export_set = observed_scope.syntactic_export_set.clone()?;
-        let fact_sig = engine_fact_signature_for_materialize_memo(
-            &observed_scope,
-            export_set,
-            &empty_dep_signature(),
-        )
-        .into_cacheable()?
-        .facts;
-        Some((materialized("stale", empty_dep_signature()), fact_sig))
-    });
+    let cold_value = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, move || {
+            // The production publish closure: a `None` observation refuses
+            // shared-cache admission.
+            let observed_scope = ctx.observe_materialize_scope(scope_owned.as_str())?;
+            let export_set = observed_scope.syntactic_export_set.clone()?;
+            let fact_sig = engine_fact_signature_for_materialize_memo(
+                &observed_scope,
+                export_set,
+                &empty_dep_signature(),
+            )
+            .into_cacheable()?
+            .facts;
+            Some((materialized("stale", empty_dep_signature()), fact_sig))
+        });
     assert!(
         cold_value.is_none(),
         "the publish path threads the None observation through `?`, so get_or_compute \
@@ -2953,7 +3000,8 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute_traced_for_test(&key, ctx2, || {
+        .fixture(ctx2)
+        .get_or_compute_traced_for_test(&key, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -3177,15 +3225,14 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         let db = host.project_type_store().imported_registry_db();
         let base_cold_ran = std::cell::Cell::new(false);
         let resolved = db
-            .get_or_compute_admit_traced_for_test(&key, ctx, || {
+            .fixture(ctx)
+            .get_or_compute_admit_traced_for_test(&key, || {
                 base_cold_ran.set(true);
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
-                        validated_at_generation: ctx
-                            .project_type_store()
-                            .current_project_generation(),
+                        validated_at_generation: ctx.current_project_generation(),
                     },
                 )
             })
@@ -3228,7 +3275,8 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         let db = host.project_type_store().imported_registry_db();
         let overlay_cold_ran = std::cell::Cell::new(false);
         let resolved = db
-            .get_or_compute_admit_traced_for_test(&key, &session_ctx, || {
+            .fixture(&session_ctx)
+            .get_or_compute_admit_traced_for_test(&key, || {
                 overlay_cold_ran.set(true);
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
@@ -3237,7 +3285,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                             canonical_id: canonical.to_string(),
                             hash: overlay_hash,
                         }]),
-                        validated_at_generation: session_ctx
+                        validated_at_generation: host
                             .project_type_store()
                             .current_project_generation(),
                     },
@@ -3274,7 +3322,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
     // The base reader still sees its own symbol (the overlay candidate did
     // not displace it).
     let ctx: &dyn ResolverContext = host.as_ref();
-    let base_again = db.peek(&key, ctx).flatten();
+    let base_again = db.fixture(ctx).peek(&key).flatten();
     assert_eq!(
         base_again.map(|s| s.exported_name.clone()),
         Some("winner-base".to_string()),
@@ -3327,15 +3375,17 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
     {
         let ctx: &dyn ResolverContext = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
-        let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
-                    fact_dep_signature: Arc::clone(&base_self_root),
-                    validated_at_generation: ctx.project_type_store().current_project_generation(),
-                },
-            )
-        });
+        let _ = db
+            .fixture(ctx)
+            .get_or_compute_admit_traced_for_test(&key, || {
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    crate::component_meta_caches::ImportedRegistryEntry {
+                        value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                        fact_dep_signature: Arc::clone(&base_self_root),
+                        validated_at_generation: ctx.current_project_generation(),
+                    },
+                )
+            });
     }
 
     // Overlay publish (distinct flight lane → distinct candidate).
@@ -3360,20 +3410,22 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
             std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         );
         let db = host.project_type_store().imported_registry_db();
-        let _ = db.get_or_compute_admit_traced_for_test(&key, &session_ctx, || {
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
-                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                        canonical_id: canonical.to_string(),
-                        hash: overlay_hash,
-                    }]),
-                    validated_at_generation: session_ctx
-                        .project_type_store()
-                        .current_project_generation(),
-                },
-            )
-        });
+        let _ = db
+            .fixture(&session_ctx)
+            .get_or_compute_admit_traced_for_test(&key, || {
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    crate::component_meta_caches::ImportedRegistryEntry {
+                        value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                        fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                            canonical_id: canonical.to_string(),
+                            hash: overlay_hash,
+                        }]),
+                        validated_at_generation: host
+                            .project_type_store()
+                            .current_project_generation(),
+                    },
+                )
+            });
     }
 
     let db = host.project_type_store().imported_registry_db();
@@ -3647,16 +3699,18 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     // production producer (`registry_decl.rs`) does, and registers the
     // reverse index.
     let g_before = host.project_type_store().current_project_generation();
-    let primed = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
-        let validated_at_generation = host.project_type_store().current_project_generation();
-        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-            crate::component_meta_caches::ImportedRegistryEntry {
-                value: None,
-                fact_dep_signature: empty_fact_signature(),
-                validated_at_generation,
-            },
-        )
-    });
+    let primed = db
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
+            let validated_at_generation = host.project_type_store().current_project_generation();
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: None,
+                    fact_dep_signature: empty_fact_signature(),
+                    validated_at_generation,
+                },
+            )
+        });
     assert!(
         primed.is_some(),
         "fixture invariant: the cold cooperative admission publishes the entry",
@@ -3667,7 +3721,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
         "fixture invariant: the primed entry is admitted to ImportedRegistryDb",
     );
     assert!(
-        db.peek(&key, ctx).is_some(),
+        db.fixture(ctx).peek(&key).is_some(),
         "fixture invariant: the primed entry is a warm peek hit before the generation bump",
     );
 
@@ -3685,7 +3739,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     );
 
     assert!(
-        db.peek(&key, ctx).is_none(),
+        db.fixture(ctx).peek(&key).is_none(),
         "PROJECT-GENERATION STALENESS: `ImportedRegistryDb::peek` served an \
          entry computed under a superseded project generation. A \
          `ProjectGeneration` reset (tsconfig / path-alias / SDK / \
@@ -3750,16 +3804,18 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     // Prime the cache through the production cold path — stamps
     // `validated_at_generation` and registers `key` in the per-canonical
     // reverse index.
-    let primed = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
-        let validated_at_generation = host.project_type_store().current_project_generation();
-        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-            crate::component_meta_caches::ImportedRegistryEntry {
-                value: None,
-                fact_dep_signature: empty_fact_signature(),
-                validated_at_generation,
-            },
-        )
-    });
+    let primed = db
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
+            let validated_at_generation = host.project_type_store().current_project_generation();
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: None,
+                    fact_dep_signature: empty_fact_signature(),
+                    validated_at_generation,
+                },
+            )
+        });
     assert!(
         primed.is_some(),
         "fixture invariant: the cold cooperative admission publishes the candidate",
@@ -3785,13 +3841,15 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     // declined to admit on generation grounds (the project generation
     // advanced between the prime and the second admission).
     let mut cold_ran = false;
-    let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
-        cold_ran = true;
-        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
-            value: None,
-            reason: crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
-        }
-    });
+    let _ = db
+        .fixture(ctx)
+        .get_or_compute_admit_traced_for_test(&key, || {
+            cold_ran = true;
+            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: None,
+                reason: crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+            }
+        });
     assert!(
         cold_ran,
         "DISCRIMINATOR: the warm-hit `lookup_candidate` MUST reject the \
@@ -3891,7 +3949,7 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     // `get_or_compute` snapshotted the generation BEFORE this closure ran,
     // so the entry is stamped with the now-superseded generation and the
     // substrate's `revalidate_after_compute` rejects the publish.
-    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
         ComputedEntry::Rooted(decl("stale", c), empty_fact_signature())
     });
@@ -3937,7 +3995,7 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
         ComputedEntry::Rooted(true, empty_fact_signature())
     });
@@ -3978,7 +4036,7 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
         ComputedEntry::Rooted(None, empty_fact_signature())
     });
@@ -4020,7 +4078,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         host.project_type_store().bump_project_generation();
         Some((
             MaterializedOutputTypeExpr::from_type_expr_for_test(
@@ -4086,62 +4144,70 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         host.project_type_store().bump_project_generation();
     };
 
-    let _ = store.declaration_db().get_or_compute_traced_for_test(
-        &(
-            Arc::<str>::from("/lc_total/decl.ts"),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::<str>::from("P"),
-        ),
-        ctx,
-        || {
-            bump();
-            ComputedEntry::Rooted(decl("stale", "/lc_total/decl.ts"), empty_fact_signature())
-        },
-    );
-    let _ = store.resolvable_db().get_or_compute_traced_for_test(
-        &(
-            Arc::<str>::from("/lc_total/resolv.ts"),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::<str>::from("P"),
-        ),
-        ctx,
-        || {
-            bump();
-            ComputedEntry::Rooted(true, empty_fact_signature())
-        },
-    );
-    let _ = store.owner_collection_db().get_or_compute_traced_for_test(
-        &(
-            Arc::<str>::from("/lc_total/owner.ts"),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::<str>::from("P"),
-        ),
-        ctx,
-        || {
-            bump();
-            ComputedEntry::Rooted(None, empty_fact_signature())
-        },
-    );
-    let _ = store.shape_cache_db().get_or_compute_traced_for_test(
-        &crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-            Arc::<str>::from("/lc_total/memo.ts"),
-            SemanticNodeId(7302),
-            ProjectionMode::Shallow,
-        ),
-        ctx,
-        || {
-            bump();
-            Some((
-                MaterializedOutputTypeExpr::from_type_expr_for_test(
-                    None,
-                    TypeExpr::Unknown(UnknownValue::missing_output()),
-                    Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                    false,
-                ),
-                empty_fact_signature(),
-            ))
-        },
-    );
+    let _ = store
+        .declaration_db()
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(
+            &(
+                Arc::<str>::from("/lc_total/decl.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::<str>::from("P"),
+            ),
+            || {
+                bump();
+                ComputedEntry::Rooted(decl("stale", "/lc_total/decl.ts"), empty_fact_signature())
+            },
+        );
+    let _ = store
+        .resolvable_db()
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(
+            &(
+                Arc::<str>::from("/lc_total/resolv.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::<str>::from("P"),
+            ),
+            || {
+                bump();
+                ComputedEntry::Rooted(true, empty_fact_signature())
+            },
+        );
+    let _ = store
+        .owner_collection_db()
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(
+            &(
+                Arc::<str>::from("/lc_total/owner.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::<str>::from("P"),
+            ),
+            || {
+                bump();
+                ComputedEntry::Rooted(None, empty_fact_signature())
+            },
+        );
+    let _ = store
+        .shape_cache_db()
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(
+            &crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+                Arc::<str>::from("/lc_total/memo.ts"),
+                SemanticNodeId(7302),
+                ProjectionMode::Shallow,
+            ),
+            || {
+                bump();
+                Some((
+                    MaterializedOutputTypeExpr::from_type_expr_for_test(
+                        None,
+                        TypeExpr::Unknown(UnknownValue::missing_output()),
+                        Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                        false,
+                    ),
+                    empty_fact_signature(),
+                ))
+            },
+        );
 
     assert_eq!(
         component_meta_cache_live(&host) as usize,
@@ -4268,8 +4334,19 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     // Same generation — the carrier validates vacuously and the
     // generation matches, so `get_with_view` HITs.
     assert!(
-        db.get_with_view(&host, &view, &key, owner_whole_hash)
-            .is_some(),
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx =
+                crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+            crate::project_semantic_dispatch::memo::MemoRead::for_result(
+                db,
+                &ctx,
+                host.provenance(),
+            )
+            .peek(&key, owner_whole_hash)
+        }
+        .is_some(),
         "an entry with a valid carrier and a matching project \
          generation must warm-hit",
     );
@@ -4297,8 +4374,22 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     // alone still passes (no file content changed) and the stale
     // entry is served.
     assert!(
-        db.get_with_view(&host, &view_after, &key, owner_whole_hash)
-            .is_none(),
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::from_current(
+                &host,
+                &view_after,
+                overlay,
+            );
+            crate::project_semantic_dispatch::memo::MemoRead::for_result(
+                db,
+                &ctx,
+                host.provenance(),
+            )
+            .peek(&key, owner_whole_hash)
+        }
+        .is_none(),
         "STALE-GENERATION READ: `ComponentMetaResultDb::get_with_view` \
          served an entry whose `validated_at_generation` is \
          superseded — a `ProjectGeneration` reset bumps no file \
@@ -4577,7 +4668,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // Prime the slot through member A. A self-root at the scope's real
     // current hash validates, so the entry is ADMITTED.
     let primed = db
-        .get_or_compute_traced_for_test(&key_a, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key_a, || {
             Some((
                 materialized("alpha-shape", empty_dep_signature()),
                 self_root_at(c, scope_hash),
@@ -4598,7 +4690,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // entry primed by member A — its cold closure must NOT run.
     let mut sibling_cold_ran = false;
     let sibling = db
-        .get_or_compute_traced_for_test(&key_b, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key_b, || {
             sibling_cold_ran = true;
             Some((
                 materialized("beta-shape", empty_dep_signature()),
@@ -4638,7 +4731,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     );
     let mut other_cold_ran = false;
     let _ = db
-        .get_or_compute_traced_for_test(&key_other, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key_other, || {
             other_cold_ran = true;
             Some((
                 materialized("other-shape", empty_dep_signature()),
@@ -4706,7 +4800,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         decl_name: std::sync::Arc::from("<sfc-script-setup>"),
     };
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_3);
 
     // First member admits one entry through the production seam.
     let admitted_a = AdmittedPublishedMember::admitted_for_test(
@@ -4831,9 +4926,8 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
     // admitted warm (so the control is a genuine admission). Returns the post-drive
     // ShapeCacheDb `live_count`.
     fn drive_surface_member_seam(host: &VerterHost, scope: &str) -> usize {
-        let ctx: &dyn ResolverContext = host;
         let value_node =
-            ctx.project_type_store()
+            host.project_type_store()
                 .semantic_graph()
                 .intern_node(SemanticNodeData::new_typeof(
                     ValueRootKey {
@@ -4865,7 +4959,10 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
             projection.cursor(),
             PublishedSurfaceKind::Props,
         );
-        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        let fixture_dispatch_4 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_4);
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
@@ -4967,9 +5064,8 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
     use std::sync::atomic::Ordering;
 
     fn drive(host: &VerterHost, scope: &str) -> usize {
-        let ctx: &dyn ResolverContext = host;
         let value_node =
-            ctx.project_type_store()
+            host.project_type_store()
                 .semantic_graph()
                 .intern_node(SemanticNodeData::new_typeof(
                     ValueRootKey {
@@ -5001,7 +5097,10 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
             projection.cursor(),
             PublishedSurfaceKind::Props,
         );
-        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        let fixture_dispatch_5 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_5);
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
@@ -5147,7 +5246,8 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // hash for `c` is the base hash, which mismatches the overlay-rooted
     // entry → fail-closed recompute.
     let _overlay_primed = db
-        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
+        .fixture(&overlay_ctx)
+        .get_or_compute_traced_for_test(&key, || {
             Some((
                 materialized("overlay-shape", empty_dep_signature()),
                 self_root_at(c, overlay_hash),
@@ -5164,7 +5264,8 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // returned value must be the overlay shape, proving admission + same-
     // view reuse.
     let overlay_same_view = db
-        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
+        .fixture(&overlay_ctx)
+        .get_or_compute_traced_for_test(&key, || {
             panic!(
                 "ADMISSION/REUSE BROKEN: the overlay-primed member-value entry did \
                  NOT warm-hit on a same-overlay-view read — its cold closure ran. \
@@ -5182,7 +5283,8 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
 
     let mut base_cold_ran = false;
     let base_read = db
-        .get_or_compute_traced_for_test(&key, base_ctx, || {
+        .fixture(base_ctx)
+        .get_or_compute_traced_for_test(&key, || {
             base_cold_ran = true;
             Some((
                 materialized("base-shape", empty_dep_signature()),
@@ -5214,7 +5316,8 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // slot (which would make the reverse assertion vacuous).
     let mut base_same_view_cold_ran = false;
     let base_same_view = db
-        .get_or_compute_traced_for_test(&key, base_ctx, || {
+        .fixture(base_ctx)
+        .get_or_compute_traced_for_test(&key, || {
             base_same_view_cold_ran = true;
             Some((
                 materialized("base-shape-unexpected", empty_dep_signature()),
@@ -5241,7 +5344,8 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // hash; the overlay read reports the overlay hash → mismatch → recompute.
     let mut overlay_cold_ran = false;
     let overlay_read = db
-        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
+        .fixture(&overlay_ctx)
+        .get_or_compute_traced_for_test(&key, || {
             overlay_cold_ran = true;
             Some((
                 materialized("overlay-shape-2", empty_dep_signature()),
@@ -5342,7 +5446,10 @@ mod fenced_gate_arm_admission_tests {
             projection.cursor(),
             PublishedSurfaceKind::Props,
         );
-        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        let fixture_dispatch_6 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_6);
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
@@ -5581,7 +5688,8 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     let stable_observed = observed_whole_hash(ctx, stable);
     let control_live_before = db.live_count();
     let control = db
-        .get_or_compute_traced_for_test(&stable_key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&stable_key, || {
             let sig =
                 engine_fact_signature_for_exported_type(ctx, stable, "Probe", stable_observed)
                     .into_cacheable()
@@ -5618,7 +5726,7 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     let generation_before = host.project_type_store().current_project_generation();
     let live_before = db.live_count();
 
-    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let outcome = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         let sig = engine_fact_signature_for_exported_type(ctx, owner, "Probe", observed)
             .into_cacheable()
             .expect("fixture invariant: the production signature builds for a tracked owner")
@@ -5658,7 +5766,8 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     let mut rederived = false;
     let fresh_observed = observed_whole_hash(ctx, owner);
     let fresh = db
-        .get_or_compute_traced_for_test(&key, ctx, || {
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&key, || {
             rederived = true;
             let sig = engine_fact_signature_for_exported_type(ctx, owner, "Probe", fresh_observed)
                 .into_cacheable()
@@ -5756,19 +5865,19 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
 
     // The surface's own cold admission is where it appears.
     let view = host.resolver_store_view_read().into_owned_view();
-    let surface = host
-        .project_type_store()
-        .owner_import_surfaces()
-        .get_or_compute(&host, owner, owner_whole_hash, &view, || {
-            ComputeAdmission::Cacheable(build_owner_import_surface(
-                Arc::from(owner),
-                owner_whole_hash,
-                Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
-                Vec::new(),
-                host.project_type_store().current_project_generation(),
-            ))
-        })
-        .expect("the owner surface admits");
+    let surface = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(
+        host.project_type_store().owner_import_surfaces(),
+    )
+    .get_or_compute(&host, owner, owner_whole_hash, &view, || {
+        ComputeAdmission::Cacheable(build_owner_import_surface(
+            Arc::from(owner),
+            owner_whole_hash,
+            Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
+            Vec::new(),
+            host.project_type_store().current_project_generation(),
+        ))
+    })
+    .expect("the owner surface admits");
 
     assert_eq!(
         owner_set_facts(&surface.read_set_signature),

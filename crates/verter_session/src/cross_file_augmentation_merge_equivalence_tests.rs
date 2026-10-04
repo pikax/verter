@@ -28,6 +28,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_eval::AugmentationScopeKind;
@@ -1017,7 +1018,7 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
-    use crate::resolver_core::resolver_context::ResolverContext;
+
     use crate::semantic_query::{ProjectionReductionContext, QueryResult, SemanticQueryKey};
 
     fn prepare_and_read(
@@ -1031,11 +1032,14 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
-        let preparation = ctx
-            .prepared_decl_bundle("/use.ts")
-            .expect("consumer prepared bundle")
-            .prepared_type_decls
-            .get_in_for_projection(verter_type_expr::TopLevelOwnerId::ordinary_file(), "U");
+        let preparation =
+            crate::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
+                &ctx,
+                &ctx.prepared_decl_bundle("/use.ts")
+                    .expect("consumer prepared bundle"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "U",
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(

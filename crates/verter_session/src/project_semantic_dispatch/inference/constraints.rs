@@ -28,6 +28,28 @@ enum CaptureTier {
 }
 
 impl ProjectSemanticDispatch<'_> {
+    pub(in crate::project_semantic_dispatch) fn template_capture(
+        &self,
+        slice: SemanticNodeId,
+        hole: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        super::InferenceTxn::new(self).template_capture(slice, hole)
+    }
+    pub(in crate::project_semantic_dispatch) fn infer_constraints_in(
+        &self,
+        pattern: SemanticNodeId,
+    ) -> FxHashMap<SemanticNodeId, SemanticNodeId> {
+        super::InferenceTxn::new(self).infer_constraints_in(pattern)
+    }
+    pub(in crate::project_semantic_dispatch) fn infer_bindings_within_constraints(
+        &self,
+        bindings: &Arc<[InferBinding]>,
+        constraints: &FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> Option<Arc<[InferBinding]>> {
+        super::InferenceTxn::new(self).infer_bindings_within_constraints(bindings, constraints)
+    }
+}
+impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
     /// The constraint an `infer` declaration writes, if any.
     pub(in crate::project_semantic_dispatch) fn infer_constraint(
         &self,
@@ -102,9 +124,9 @@ impl ProjectSemanticDispatch<'_> {
             let candidate = match kind(member) {
                 Some(SemanticNodeData::TemplateLiteral { .. })
                 | Some(SemanticNodeData::IntrinsicApplication { .. }) => {
-                    self.dispatch_txn.borrow_mut().begin_binding_disabled();
+                    let binding_guard = self.binding.disable();
                     let step = self.execute_relate_pair(slice, member);
-                    self.dispatch_txn.borrow_mut().end_binding_disabled();
+                    drop(binding_guard);
                     match step {
                         RelationStep::Assignable { .. } => {
                             Some((CaptureTier::TemplateOrMapping, slice))
@@ -271,7 +293,7 @@ impl ProjectSemanticDispatch<'_> {
         index: usize,
         args: &[SemanticNodeId],
     ) -> Option<SemanticNodeId> {
-        let prepared = self.ctx.prepared_type_decl_return_only(
+        let prepared = self.source.prepared_type_decl_return_only(
             base.canonical_id.as_ref(),
             base.owner,
             base.decl_name.as_ref(),
@@ -314,9 +336,9 @@ impl ProjectSemanticDispatch<'_> {
             let Some(&constraint) = constraints.get(&binding.param) else {
                 continue;
             };
-            self.dispatch_txn.borrow_mut().begin_binding_disabled();
+            let binding_guard = self.binding.disable();
             let step = self.execute_relate_pair(binding.bound, constraint);
-            self.dispatch_txn.borrow_mut().end_binding_disabled();
+            drop(binding_guard);
             match step {
                 RelationStep::Assignable { .. } => {}
                 RelationStep::NotAssignable => binding.bound = constraint,

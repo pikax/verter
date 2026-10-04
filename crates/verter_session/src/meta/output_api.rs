@@ -238,6 +238,7 @@ impl MetaSession {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let crate::host_manage::ComponentMetaExtractOutcome {
             analysis,
             fallthrough_fact_versions,
@@ -247,6 +248,7 @@ impl MetaSession {
             canonical.as_str(),
             &resolved,
             ctx,
+            dispatch,
         );
         host.merge_extraction_facts_into_admitted_resolved_meta(
             canonical.as_str(),
@@ -307,6 +309,7 @@ impl MetaSession {
                 || {
                     crate::meta_resolve::projectors::build_component_meta_output(
                         ctx,
+                        dispatch,
                         canonical.as_str(),
                         analysis,
                         Some(seed),

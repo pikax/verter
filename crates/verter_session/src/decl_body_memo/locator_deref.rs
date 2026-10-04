@@ -28,7 +28,7 @@ use super::{DeclBodyMemo, DemandOutcome, TransientTypeParts, TransientValueParts
 /// variant is a typed, fail-closed non-result — a deref NEVER fabricates a
 /// body and NEVER falls back to a transient re-parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocatorBodyDerefError {
+pub enum LocatorBodyDerefError {
     /// The locator anchor names a DIFFERENT producing canonical than the memo
     /// serving the deref — a locator must deref through the memo of its OWN
     /// producing canonical (`anchor.canonical_id == memo.key.canonical`). A
@@ -116,7 +116,7 @@ pub(crate) enum DerefedBodyShape {
 /// the correct per-position frame). NEVER a `SemanticNodeId` — graph
 /// lowering is the session phase's job.
 #[derive(Debug, Clone)]
-pub(crate) struct DerefedAuthoredBody {
+pub struct DerefedAuthoredBody {
     pub(crate) shape: DerefedBodyShape,
     pub(crate) lexical_root: Option<DerefedLexicalRoot>,
     /// The owning declaration's FULL header type-parameter list, in source

@@ -434,6 +434,7 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// enumeration convention (a member present in any branch is published).
 pub(crate) fn read_positive_surface_members(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     surface_node: SemanticNodeId,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
     use crate::typeinfo::surface_resolution::SurfaceResolution;
@@ -443,7 +444,7 @@ pub(crate) fn read_positive_surface_members(
     /// whole join incomplete with the union of the arms' typed reasons — the
     /// joined subset is usable but never passes as the complete evidence.
     fn join_arms(
-        ctx: &dyn ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         arms: &[crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
         join: impl FnOnce(
             &crate::semantic_query_memo::SemanticGraphStore,
@@ -471,25 +472,20 @@ pub(crate) fn read_positive_surface_members(
         }
         let mut canonical_evidence =
             crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-        let members = join(
-            ctx.project_type_store().semantic_graph(),
-            &per_arm,
-            &mut canonical_evidence,
-        );
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-            .deposit_canonical_evidence(canonical_evidence);
+        let members = join(dispatch.graph(), &per_arm, &mut canonical_evidence);
+        dispatch.deposit_canonical_evidence(canonical_evidence);
         match incomplete {
             Some(reasons) => SurfaceResolution::incomplete_with(reasons, members),
             None => SurfaceResolution::resolved(members),
         }
     }
 
-    match crate::project_semantic_dispatch::node_data_for(ctx, surface_node).as_deref() {
+    match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), surface_node).as_deref()
+    {
         Some(SemanticNodeData::Object(view)) => {
             SurfaceResolution::resolved(view.positive_members().to_vec())
         }
         Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
-            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let formula = match dispatch.project_object_spread_for_consumer(
                 surface_node,
                 crate::semantic_query::ObjectProjectionSelector::Surface,
@@ -520,7 +516,7 @@ pub(crate) fn read_positive_surface_members(
                 crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
             let members =
                 crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                    ctx.project_type_store().semantic_graph(),
+                    dispatch.graph(),
                     &formula,
                     &mut canonical_evidence,
                 );
@@ -531,9 +527,9 @@ pub(crate) fn read_positive_surface_members(
             let arms = arms.members_arc();
             let per_arm: Vec<_> = arms
                 .iter()
-                .map(|arm| read_positive_surface_members(ctx, *arm))
+                .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
-            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
                 crate::project_semantic_dispatch::walk::presence_union_members(
                     graph, per_arm, evidence,
                 )
@@ -548,9 +544,9 @@ pub(crate) fn read_positive_surface_members(
             let arms = arms.members_arc();
             let per_arm: Vec<_> = arms
                 .iter()
-                .map(|arm| read_positive_surface_members(ctx, *arm))
+                .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
-            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
                 crate::project_semantic_dispatch::walk::presence_intersection_members(
                     graph, per_arm, evidence,
                 )
@@ -562,7 +558,6 @@ pub(crate) fn read_positive_surface_members(
             pending,
             ..
         }) => {
-            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let true_branch = dispatch.apply_conditional_branch_pending(
                 *true_branch_ref,
                 pending.as_deref(),
@@ -574,10 +569,10 @@ pub(crate) fn read_positive_surface_members(
                 false,
             );
             let per_arm = [
-                read_positive_surface_members(ctx, true_branch),
-                read_positive_surface_members(ctx, false_branch),
+                read_positive_surface_members(ctx, dispatch, true_branch),
+                read_positive_surface_members(ctx, dispatch, false_branch),
             ];
-            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
                 crate::project_semantic_dispatch::walk::presence_union_members(
                     graph, per_arm, evidence,
                 )
@@ -708,22 +703,18 @@ pub(crate) fn resolve_macro_payload(
     // (`ResolveMacroPayload`, Navigate) re-enters the ONE shared dispatch
     // from the carrier handle — a different DEMAND on the same producer, NOT
     // a second lowering of the macro arg.
-    let type_args: Arc<[SemanticNodeId]> =
-        match crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            dispatch.ctx,
-            file,
-            macro_index,
-        ) {
-            Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
-            None => {
-                diag_sink.push(macro_expansion_for_query_error(
-                    macro_index,
-                    expansion_kind,
-                    format!("macro-payload-lowering-failed@{:?}", macro_kind),
-                ));
-                return None;
-            }
-        };
+    let type_args: Arc<[SemanticNodeId]> = match dispatch.macro_type_arg_hot_ref(file, macro_index)
+    {
+        Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
+        None => {
+            diag_sink.push(macro_expansion_for_query_error(
+                macro_index,
+                expansion_kind,
+                format!("macro-payload-lowering-failed@{:?}", macro_kind),
+            ));
+            return None;
+        }
+    };
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
         owner: dispatch.type_slot_for(
@@ -737,7 +728,7 @@ pub(crate) fn resolve_macro_payload(
         context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
     crate::request_context::observe_component_meta_read_suppress(&payload_read);
-    emit_dispatch_dep_signature_facts(dispatch.ctx, &payload_read.dep_signature);
+    emit_dispatch_dep_signature_facts(dispatch, &payload_read.dep_signature);
     if !payload_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &payload_read.walker_diagnostics,
@@ -774,7 +765,7 @@ pub(crate) fn resolve_macro_payload(
     // empty surface that's indistinguishable from a successful
     // empty payload.
     if let Some(SemanticNodeData::Opaque(err)) =
-        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node).as_deref()
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node).as_deref()
     {
         diag_sink.push(macro_expansion_for_query_error(
             macro_index,
@@ -803,7 +794,8 @@ pub(crate) fn resolve_macro_payload(
     // non-`Opaque` Object; carrier-stopped payloads (an open mapped
     // surface) are neither empty-Object nor root-`DeclRef` shapes and
     // never reach the probe.
-    let payload_data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node);
+    let payload_data =
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node);
     let payload_is_empty_surface = matches!(
         payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
@@ -840,11 +832,7 @@ pub(crate) fn resolve_macro_payload(
             // ONE Navigate hop through the shared dispatch so the structural
             // root carrier becomes the resolved `DeclRef` / `Opaque(Miss)`
             // the discrimination below inspects.
-            let probe_node = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                dispatch.ctx,
-                file,
-                macro_index,
-            )
+            let probe_node = dispatch.macro_type_arg_hot_ref(file, macro_index)
             .map(|product| {
                 let probe_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                     base: product.hot.node(),
@@ -854,7 +842,7 @@ pub(crate) fn resolve_macro_payload(
                             ProjectionMode::Navigate,
                         ),
                 });
-                emit_dispatch_dep_signature_facts(dispatch.ctx, &probe_read.dep_signature);
+                emit_dispatch_dep_signature_facts(dispatch,  &probe_read.dep_signature);
                 match probe_read.value {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => id,
@@ -863,8 +851,11 @@ pub(crate) fn resolve_macro_payload(
             });
             if let Some(probe_node) = probe_node {
                 let unresolved: Option<String> =
-                    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, probe_node)
-                        .as_deref()
+                    match crate::project_semantic_dispatch::node_data_for(
+                        dispatch.graph(),
+                        probe_node,
+                    )
+                    .as_deref()
                     {
                         Some(SemanticNodeData::Opaque(err)) => Some(format!("{err:?}")),
                         Some(SemanticNodeData::DeclRef { identity }) => {
@@ -882,11 +873,11 @@ pub(crate) fn resolve_macro_payload(
                                     name: std::sync::Arc::clone(&identity.decl_name),
                                 },
                             ));
-                            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+                            emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
                             match read.value {
                                 QueryResult::Value(anchor) => {
                                     match crate::project_semantic_dispatch::node_data_for(
-                                        dispatch.ctx,
+                                        dispatch.graph(),
                                         anchor,
                                     )
                                     .as_deref()
@@ -970,7 +961,7 @@ pub(crate) fn resolve_payload_surface(
         ),
     });
     crate::request_context::observe_component_meta_read_suppress(&surface_read);
-    emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
+    emit_dispatch_dep_signature_facts(dispatch, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &surface_read.walker_diagnostics,

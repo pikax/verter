@@ -43,7 +43,6 @@ use std::sync::Arc;
 use verter_semantic::analysis::Hash16;
 
 use crate::bounded_query_retention::BoundedCandidateMap;
-use crate::resolver_core::StoreView;
 use crate::types::ProjectionMode;
 
 /// Stable fingerprint over output-affecting options. Constructed by the
@@ -90,9 +89,9 @@ pub struct ComponentMetaResultKey {
 /// path-precise fact signature.
 ///
 /// `read_set_signature.facts` is the path-precise signature produced
-/// by the `with_fact_tracer` scope wrapping the cold compute — the
+/// by the engine-owned raw fact-tracer scope wrapping cold compute — the
 /// primary cache-validity rail. Warm-hit reads gate on
-/// [`StoreView::validates_fact_signature`]: a fact-version bump on any
+/// the request-bound `FactValidation::validates_fact_signature`: a fact-version bump on any
 /// cross-file dep invalidates the warm hit.
 ///
 /// `validated_at_generation` is the project-generation snapshot the
@@ -103,14 +102,10 @@ pub struct ComponentMetaResultKey {
 /// this stamp a stale-by-project-generation entry that raced a
 /// `bump_project_generation_and_evict` cold-publish window would
 /// validate forever on file-content terms.
-/// [`ComponentMetaResultDb::get_with_view`] is the view-aware
-/// production read path — it rejects the entry when
-/// `validated_at_generation` differs from the live
-/// [`crate::project_type_store::ProjectTypeStore::current_project_generation`]
-/// before consulting the carrier rail. [`ComponentMetaResultDb::get`]
-/// is the candidate-version-only lookup (no view, no generation gate)
-/// reached only by test fixtures and synthetic publishes; production
-/// readers MUST go through `get_with_view`.
+/// The facade's `MemoRead` rejects entries whose generation or fact signature
+/// no longer validates through the request's `FactValidation` port. The
+/// passive test-only [`ComponentMetaResultDb::get`] checks only the candidate
+/// version; production reads use the selected `MemoRead` capability.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
@@ -193,8 +188,8 @@ pub(crate) struct AdmittedComponentMetaResult<P> {
 
 /// Caller-supplied, value-side portion of a component-meta admission
 /// decision. It deliberately carries no fact signature: only
-/// [`ComponentMetaResultDb::compute_and_admit`] can attach the evidence
-/// finalized from the tracer scope it owns.
+/// the selected engine `MemoPublish` can attach finalized evidence from its
+/// request-local tracer scope.
 pub(crate) enum ComponentMetaPublishDecision<P> {
     /// The cold result is complete and its publish fence is still live.
     Publish {
@@ -239,7 +234,7 @@ impl<P> ComponentMetaPublishDecision<P> {
 /// Remove only the owner's non-round-tripping route-derived fact before the
 /// final-result signature is stored. Cross-file route facts and the owner's
 /// whole-hash root remain part of the validating evidence.
-fn strip_owner_route_fact(
+pub(crate) fn strip_owner_route_fact(
     owner_canonical: &str,
     facts: &[crate::resolver_core::FactVersionRef],
 ) -> Arc<[crate::resolver_core::FactVersionRef]> {
@@ -347,11 +342,9 @@ impl ResolutionTemplate {
     /// Rehydrate the template into a per-request
     /// [`crate::meta_resolve::ResolvedComponentMetaState`]:
     ///
-    /// - **`snapshot`** reloaded from `host.project_type_store().indexed()`
-    ///   at `(canonical_id, whole_hash)`. Returns `None` on a bounded
-    ///   eviction race (snapshot evicted between the dep_signature
-    ///   validation and the reload); callers fall through to the cold
-    ///   resolver.
+    /// - **`snapshot`** supplied by the private request root from exact indexed storage
+    ///   at `(canonical_id, whole_hash)`. A bounded eviction race is handled
+    ///   by that root before this pure reconstruction begins.
     /// - **`request_id`** is the caller-allocated fresh id.
     /// - **`compute_audit`** stays `None` on warm-cache hits — the
     ///   audit-record consumer observes `from_cache = true` and
@@ -359,23 +352,10 @@ impl ResolutionTemplate {
     /// - All other fields are restored from the cached template.
     pub fn rehydrate(
         &self,
-        host: &crate::VerterHost,
-        canonical_id: &str,
-        whole_hash: Hash16,
+        snapshot: crate::types::FileAnalysisSnapshot,
         request_id: u64,
-    ) -> Option<crate::meta_resolve::ResolvedComponentMetaState> {
-        let key = host.authoritative_current_artifact_key(canonical_id)?;
-        if key.content_hash != whole_hash {
-            return None;
-        }
-        let indexed = host.project_type_store().indexed().get(
-            canonical_id,
-            whole_hash,
-            &key.parse_key,
-            &key.file_language_id,
-        )?;
-        let snapshot = (*indexed.snapshot).clone();
-        Some(crate::meta_resolve::ResolvedComponentMetaState {
+    ) -> crate::meta_resolve::ResolvedComponentMetaState {
+        crate::meta_resolve::ResolvedComponentMetaState {
             snapshot,
             mode: self.mode,
             whole_hash: self.whole_hash,
@@ -399,7 +379,7 @@ impl ResolutionTemplate {
             // honest to the stored value rather than fabricating one).
             completeness: self.completeness,
             synthesis_should_suppress: self.completeness.is_partial(),
-        })
+        }
     }
 }
 
@@ -450,6 +430,28 @@ pub struct ComponentMetaResultDb<P> {
 }
 
 impl<P> ComponentMetaResultDb<P> {
+    pub(crate) fn is_current_schema(&self) -> bool {
+        self.schema_version == crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
+    }
+    pub(crate) fn candidate(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+    ) -> Option<
+        Arc<
+            crate::bounded_query_retention::RetentionCandidate<Hash16, ComponentMetaResultEntry<P>>,
+        >,
+    > {
+        self.inner.get_candidate(key, &owner_whole_hash)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture<'a>(
+        &'a self,
+        facts: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, facts)
+    }
+
     /// Per-slot candidate cap. One owner + one options fingerprint is one
     /// slot; concurrent content versions of that owner are candidates in
     /// the slot, capped here. A fifth version evicts the oldest. Four
@@ -626,244 +628,6 @@ impl<P> ComponentMetaResultDb<P> {
         result
     }
 
-    /// View-aware lookup. Returns the cached entry only when a candidate
-    /// matches the owner content version AND that candidate's
-    /// `read_set_signature` validates under the supplied [`StoreView`]
-    /// AND its `validated_at_generation` still equals the live project
-    /// generation; otherwise returns `None` (caller falls through to
-    /// cold recompute).
-    ///
-    /// Fact-precise validation gates file-content edits: a fact-version
-    /// shift on any transitively observed cross-file dep invalidates
-    /// the warm hit. The project-generation gate is the project-shape
-    /// counterpart: a `ProjectGeneration` reset (tsconfig / path-alias /
-    /// SDK / workspace-folder change) bumps no file content, so the
-    /// carrier alone cannot detect it — a `bump_project_generation_and_
-    /// evict` racing a cold publish can otherwise strand a stale entry
-    /// whose carrier still validates on file-content terms.
-    ///
-    /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
-    /// on a validated warm return and
-    /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
-    /// on every miss path (absent candidate, fact-validation failure,
-    /// or project-generation mismatch).
-    ///
-    /// Accepts ONLY a [`crate::resolver_store::CurrentHostStoreView`] —
-    /// the `StoreViewManager`'s type-level proof that the view was
-    /// published under a live-matching token. A known-stale
-    /// `StoreViewRead::ReturnOnly` snapshot CANNOT reach this validator by
-    /// construction, so it can never false-positive a superseded cache
-    /// entry against an already-mutated dependency.
-    /// Record a warm-lookup MISS without a candidate probe.
-    ///
-    /// Used by the consumer warm-validation entry points when the
-    /// store-view read is NON-CURRENT (`StoreViewRead::ReturnOnly`): a
-    /// known-stale view can never serve a sound warm hit, so the lookup
-    /// short-circuits to a miss BEFORE building a `CurrentHostStoreView`.
-    /// Keeping the miss accounting here (rather than only inside
-    /// [`Self::get_with_view`]) means the non-current short-circuit is
-    /// attributed exactly like a fact-validation miss.
-    pub(crate) fn record_non_current_view_miss(&self, host: &crate::VerterHost) {
-        host.provenance()
-            .component_meta_result_cache_misses
-            .fetch_add(1, Ordering::Relaxed);
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.cache_counters
-                .component_meta
-                .misses
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn get_with_view(
-        &self,
-        host: &crate::VerterHost,
-        current_view: &crate::resolver_store::CurrentHostStoreView,
-        key: &ComponentMetaResultKey,
-        owner_whole_hash: Hash16,
-    ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
-        let view = current_view.view();
-        let bump_miss = |host: &crate::VerterHost| {
-            host.provenance()
-                .component_meta_result_cache_misses
-                .fetch_add(1, Ordering::Relaxed);
-            // Keep the per-request `cache_layers.component_meta` audit
-            // counter in sync with the `.get()` accessor so
-            // joiner-accounting assertions continue to attribute a miss
-            // to the cold winner.
-            if let Some(ctx) = crate::request_context::current_request_context() {
-                ctx.cache_counters
-                    .component_meta
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        };
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            bump_miss(host);
-            return None;
-        }
-        // Clone the candidate `Arc` out of the slot before validating —
-        // a concurrent eviction cannot invalidate this borrow.
-        let candidate = match self.inner.get_candidate(key, &owner_whole_hash) {
-            Some(c) => c,
-            None => {
-                bump_miss(host);
-                return None;
-            }
-        };
-        // Project-generation gate. The carrier validates only
-        // file-content whole-hashes; a `ProjectGeneration` reset bumps
-        // no file content, so an entry whose `validated_at_generation`
-        // no longer equals the live generation is stale even though its
-        // carrier still validates. Reject before the fact rail so the
-        // miss is attributed correctly.
-        if candidate.value.validated_at_generation
-            != host.project_type_store().current_project_generation()
-        {
-            bump_miss(host);
-            return None;
-        }
-        // Fact-precise validation: every entry in the signature must
-        // validate under the live view. An empty signature trivially
-        // passes (entries published outside an installed tracer scope —
-        // typically test fixtures — fall through to the legacy validator
-        // on the caller side).
-        if !view.validates_fact_signature(&candidate.value.read_set_signature.facts) {
-            bump_miss(host);
-            return None;
-        }
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.cache_counters
-                .component_meta
-                .hits
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        host.provenance()
-            .component_meta_result_cache_hits
-            .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(candidate.value.clone()))
-    }
-
-    /// Run a complete component-meta cold computation inside the DB-owned
-    /// fact-tracer scope, finalize its evidence, classify the returned value,
-    /// and perform the sole production write when every gate admits.
-    ///
-    /// The caller supplies only the computation and a value-side decision.
-    /// It cannot attach or substitute a fact signature: this owner finalizes
-    /// the tracer after the closure returns and constructs the stored carrier
-    /// immediately before [`Self::insert_owned`].
-    pub(crate) fn compute_and_admit<R, Compute, Decide>(
-        &self,
-        host: &crate::VerterHost,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> R
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
-    {
-        self.compute_and_admit_with_entry(host, canonical, path_label, compute, decide)
-            .0
-    }
-
-    /// Variant of [`Self::compute_and_admit`] that also returns the exact
-    /// entry admitted by this invocation. A refused or non-cacheable result
-    /// returns no carrier even though its fresh value remains caller-visible.
-    pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
-        &self,
-        host: &crate::VerterHost,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> (R, Option<AdmittedComponentMetaResult<P>>)
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
-    {
-        let (value, read_set) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, compute);
-        let finalise = read_set.finalise();
-        let mut admitted = None;
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
-                ComponentMetaPublishDecision::Publish {
-                    key,
-                    owner_whole_hash,
-                    payload,
-                    validated_at_generation,
-                } => {
-                    let admitted_facts = strip_owner_route_fact(&key.owner_canonical, &facts);
-                    let entry = Arc::new(ComponentMetaResultEntry {
-                        payload,
-                        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                            admitted_facts,
-                        ),
-                        validated_at_generation,
-                    });
-                    // A retention refusal leaves `admitted` unset: the
-                    // caller keeps its complete value, and no evidence
-                    // carrier claims an entry the cache never stored.
-                    if self.insert_owned(key.clone(), owner_whole_hash, entry.as_ref().clone()) {
-                        admitted = Some(AdmittedComponentMetaResult {
-                            key,
-                            owner_whole_hash,
-                            entry,
-                        });
-                    }
-                }
-                ComponentMetaPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
-                    tracing::debug!(
-                        target: "verter::audit::record",
-                        file = %canonical,
-                        path = %path_label,
-                        reason = %reason,
-                        "skipping component-meta cache promotion: typed admission refusal",
-                    );
-                }
-                ComponentMetaPublishDecision::NoValue => {}
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
-                let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: fact-signature overflowed cap",
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-                let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: a compaction domain advanced \
-                     mid-compute",
-                );
-            }
-        }
-        (value, admitted)
-    }
-
     /// Insert a final result entry for the given owner content version.
     /// Cancelled, budget-exceeded, or partial results must **not** be
     /// passed here — callers are responsible for filtering. The cache
@@ -880,7 +644,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// returned to its caller, the cache simply does not keep it. No
     /// stale candidate is substituted and no partial is fabricated — the
     /// slot is left exactly as it was.
-    fn insert_owned(
+    pub(crate) fn publish_core(
         &self,
         key: ComponentMetaResultKey,
         owner_whole_hash: Hash16,
@@ -925,8 +689,8 @@ impl<P> ComponentMetaResultDb<P> {
     }
 
     /// Test-support seed seam. Production admission must route through
-    /// [`Self::compute_and_admit`] so the DB owns tracing, finalization, and
-    /// the only write.
+    /// the selected engine `MemoPublish`, which owns tracing, finalization,
+    /// and the admission decision before passive storage accepts the record.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert(
         &self,
@@ -936,7 +700,7 @@ impl<P> ComponentMetaResultDb<P> {
     ) where
         P: crate::semantic_retention_account::RetainedFootprint,
     {
-        self.insert_owned(key, owner_whole_hash, entry);
+        self.publish_core(key, owner_whole_hash, entry);
     }
 
     /// Remove the candidate for one owner content version. Returns the
@@ -1177,23 +941,40 @@ mod tests {
         let base_producer = include_str!("host_manage/component_meta_entry.rs");
         let resolution_producer = include_str!("host_manage/component_meta_entry_resolution.rs");
 
-        let compute_start = db_source
-            .find("\n    pub(crate) fn compute_and_admit")
-            .expect("ComponentMetaResultDb must own the cold trace/finalise/admit funnel");
-        let compute_end = db_source[compute_start..]
-            .find("\n    /// Insert a final result entry")
+        let driver_source = include_str!("project_semantic_dispatch/memo.rs");
+        let compute_start = driver_source
+            .find("    pub(crate) fn compute_and_admit_with_entry")
+            .expect("the selected MemoPublish must own cold trace/finalise/admit");
+        let compute_end = driver_source[compute_start..]
+            .find("\nimpl<P: Send + Sync> MemoPublish")
             .map(|offset| compute_start + offset)
-            .expect("compute-and-admit method must end before the test seed seam");
-        let compute_body = &db_source[compute_start..compute_end];
+            .expect("the result driver must have a bounded implementation");
+        let compute_body = &driver_source[compute_start..compute_end];
         assert!(
-            compute_body.contains("host.with_fact_tracer"),
-            "the DB-owned funnel must install the tracer around the caller's cold closure"
+            compute_body.contains("resolver_context::with_fact_tracer_cell")
+                && compute_body.contains("AggregateBasisSeed::Unvouched"),
+            "the engine-owned funnel must install the original raw tracer around cold compute"
+        );
+        let compact_compute: String = compute_body
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let finalise = compact_compute.find("read_set.finalise()").unwrap();
+        let publish = compact_compute.find("self.db.publish_core(").unwrap();
+        assert!(
+            finalise < publish,
+            "finalized evidence must precede passive publication"
         );
         assert!(
             db_source
                 .lines()
-                .any(|line| line.trim_start().starts_with("fn insert_owned(")),
-            "the production write must be a private DB implementation detail"
+                .any(|line| line.trim_start().starts_with("pub(crate) fn publish_core(")),
+            "the passive production write must remain crate-private"
+        );
+        assert!(
+            !db_source.contains("\n    pub(crate) fn compute_and_admit(")
+                && !db_source.contains("\n    pub(crate) fn get_with_view("),
+            "storage must not own callback compute or request-view validation"
         );
         let test_insert = db_source
             .find("\n    pub fn insert(")
@@ -1204,15 +985,17 @@ mod tests {
             "the raw seed insert must compile only for tests or explicit test-support"
         );
         assert!(
-            compute_body.contains("self.insert_owned("),
-            "only the DB-owned funnel may consume finalized evidence into storage"
+            compact_compute.contains("self.db.publish_core("),
+            "only the selected engine funnel may consume finalized evidence into storage"
         );
         assert!(
-            !base_producer.contains("component_meta_results().insert("),
+            !base_producer.contains("component_meta_results().insert(")
+                && !base_producer.contains(".publish_core("),
             "the base/view producer must not reach the raw result-cache write"
         );
         assert!(
-            !resolution_producer.contains("component_meta_results().insert("),
+            !resolution_producer.contains("component_meta_results().insert(")
+                && !resolution_producer.contains(".publish_core("),
             "the resolution producer must not reach the raw result-cache write"
         );
     }
@@ -1249,8 +1032,7 @@ mod tests {
             hash: owner_hash,
         };
 
-        let value = db.compute_and_admit(
-            &host,
+        let value = db.fixture(&host).compute_and_admit(
             "/w/owner.vue",
             "unit-test",
             || {
@@ -1269,8 +1051,7 @@ mod tests {
 
         let refused_key = mk_result_key("/w/refused.vue", [0u8; 16]);
         let refused_hash = [8u8; 16];
-        let refused_value = db.compute_and_admit(
-            &host,
+        let refused_value = db.fixture(&host).compute_and_admit(
             "/w/refused.vue",
             "unit-test",
             || {

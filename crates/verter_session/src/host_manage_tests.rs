@@ -1,4 +1,5 @@
 use super::*;
+use crate::resolver_core::request_ports::IndexedInputs;
 
 use std::sync::Arc;
 use verter_type_expr::TypeExpr;
@@ -744,7 +745,7 @@ defineProps<Props>()
             "ImportedProps",
         ),
     ] {
-        let prepared = crate::resolver_core::ResolverContext::prepared_type_decl(
+        let prepared = crate::resolver_core::request_ports::OwnedLowering::prepared_type_decl(
             &host, canonical, owner, name,
         )
         .expect("exact-owner preparation should succeed")
@@ -3314,12 +3315,16 @@ import Child from './Child.vue'
         )
         .expect("resolved meta should exist");
     let resolution = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         host.compute_fallthrough_surface_from_resolved_state(
             "/src/App.vue",
             &resolved,
             None,
             &mut visiting,
             ctx,
+            &fixture_dispatch_0,
         )
     })
     .expect("fallthrough should resolve");
@@ -3417,7 +3422,17 @@ import { shared } from './shared'
         .expect("resolved meta should be computed from the captured view");
 
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, ctx)
+        let fixture_dispatch_1 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+        extract_component_meta_from_resolved(
+            &host,
+            "/src/Button.vue",
+            &resolved,
+            true,
+            ctx,
+            &fixture_dispatch_1,
+        )
     })
     .analysis;
 
@@ -12332,7 +12347,6 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
 /// PASSES post-fix: it retargets to `runtime.ts`, matching a fresh materialise.
 #[test]
 fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
-    use crate::resolver_core::ResolverContext;
     use crate::session_view::OverlaidView;
     let ws = Arc::new(CountingWorkspace::new());
     let barrel = "/workspace/index.ts";
@@ -12366,8 +12380,10 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
-    let warm = ResolverContext::indexed_for_current_content(&ctx, barrel)
-        .expect("session context returns overlay indexed");
+    let warm = crate::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(
+        &ctx, barrel,
+    )
+    .expect("session context returns overlay indexed");
     assert!(
         warm.shallow_state.has_wildcard_reexports(),
         "the session context still serves the overlay barrel's wildcard surface"
@@ -12431,7 +12447,7 @@ impl crate::session_view::SessionView for DecliningOverlayView {
 /// even when a complete base artifact for the same canonical is available.
 #[test]
 fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries() {
-    use crate::resolver_core::{ComponentMetaRequestHost, ResolverContext, SessionResolverContext};
+    use crate::resolver_core::{ComponentMetaRequestHost, SessionResolverContext};
     use crate::session_view::SessionView;
     use verter_session_query::{QueryHostError, QueryHostPort};
     use verter_type_expr::locators::{
@@ -14313,7 +14329,12 @@ export interface Props { label: string }
 
     host.provenance().reset();
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/types.vue", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(
+            &host,
+            None,
+            "/src/types.vue",
+            "Props",
+        )
         .expect("a direct local exported declaration should stay on the shallow fast path");
 
     assert_eq!(
@@ -14370,7 +14391,12 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     );
 
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(
+            &host,
+            None,
+            "/src/index.ts",
+            "Props",
+        )
         .expect("direct named reexport should resolve through the fast imported-root path");
 
     assert_eq!(
@@ -14445,7 +14471,12 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
 
     let _view = host.resolver_store_view_read().into_owned_view();
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(
+            &host,
+            None,
+            "/src/index.ts",
+            "Props",
+        )
         .expect(
             "fast imported-root proof should resolve cold child hashes under a current store view",
         );
@@ -14495,7 +14526,12 @@ fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provide
     );
 
     let _ = host
-        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(
+            &host,
+            None,
+            "/src/index.ts",
+            "Props",
+        )
         .expect("exported local imports should resolve through the fast imported-root path");
 
     assert_eq!(
@@ -14531,7 +14567,12 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     );
 
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(
+            &host,
+            None,
+            "/src/index.ts",
+            "Props",
+        )
         .expect("exported local imports should resolve through the fast imported-root path");
 
     assert_eq!(

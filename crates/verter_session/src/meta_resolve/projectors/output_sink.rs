@@ -102,7 +102,7 @@ fn raise_node_to_sealed_carrier(
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
         None => {
-            if crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).is_none() {
+            if crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).is_none() {
                 // GENUINE absence (no typed payload minted for this id): the
                 // exact `missing_output` — NON-partial.
                 wrap_output_type_expr(&cap, TypeExpr::Unknown(UnknownValue::missing_output()))
@@ -134,10 +134,11 @@ fn raise_node_to_sealed_carrier(
 /// shallow export-target resolver — no raw-text recovery.
 fn authored_package_alias_for_carrier(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> Option<String> {
-    let data = crate::project_semantic_dispatch::node_data_for(ctx, node)?;
+    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     let crate::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref() else {
         return None;
     };
@@ -186,8 +187,7 @@ fn reduce_field_value_node(
     input_node: SemanticNodeId,
     publish_mode: ProjectionMode,
 ) -> MaterializedOutputTypeExpr {
-    let ctx: &dyn ResolverContext = query_engine.ctx;
-    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let dispatch = query_engine.dispatch;
 
     let (package_backed, _fence) =
         crate::meta_resolve::node_package_backed_object_like_root_with_fence(
@@ -196,31 +196,31 @@ fn reduce_field_value_node(
             input_node,
         );
     if package_backed {
-        return raise_node_to_sealed_carrier(&dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
     }
-    let gates = super::classify_node_reduction_gates(ctx, input_node);
+    let gates = super::classify_node_reduction_gates(dispatch, input_node);
     if gates.generic_instantiation_ref {
         let (reaches_cycle, _fence) =
             crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
-                ctx,
+                dispatch,
                 scope_canonical_id,
                 input_node,
             );
         if reaches_cycle {
-            return raise_node_to_sealed_carrier(&dispatch, input_node, Arc::from(Vec::new()));
+            return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
         }
     }
     if !(gates.contains_reducible_operator || gates.generic_instantiation_ref) {
-        return raise_node_to_sealed_carrier(&dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
     }
 
     let context = crate::meta_resolve::materialize::node_materialize_reduction_context(
-        ctx,
+        dispatch,
         input_node,
         publish_mode,
     );
     let reduced = crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(
-        ctx,
+        dispatch,
         scope_canonical_id,
         input_node,
         context,
@@ -228,15 +228,15 @@ fn reduce_field_value_node(
 
     let root_is_sentinel = reduced.node_id().is_some_and(|node| {
         crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
-            &dispatch, node,
+            dispatch, node,
         )
     });
     if root_is_sentinel
         && crate::project_semantic_dispatch::raise::node_contains_semantic_miss_with_dispatch(
-            &dispatch, input_node,
+            dispatch, input_node,
         ) == Some(false)
     {
-        return raise_node_to_sealed_carrier(&dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
     }
     reduced
 }
@@ -292,9 +292,8 @@ fn member_shape_peek_or_compute(
     // outside a traced scope and no arm can drop the verdict. Scoping the tracer to
     // the reduce alone left the gates' and the key-classification's serves
     // unobserved.
-    let outer_ctx: &dyn ResolverContext = query_engine.ctx;
-    let cache = outer_ctx.project_type_store().shape_cache_db();
-    let value = cache.with_owner_scope(outer_ctx, |scope| {
+    let dispatch = query_engine.dispatch;
+    let value = dispatch.with_shape_scope(|scope| {
             // The admitted member's value graph node is the raise/reduce subject; the
             // cache key keys on the ADMITTED member (`admitted.member().value`) so an
             // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
@@ -305,7 +304,7 @@ fn member_shape_peek_or_compute(
             // sealed-carrier assembly below. The capability mint + unwrap are the
             // module-private primitives of this terminal `output_sink` sink — they
             // mint from this already-constructed dispatch.
-            let dispatch = ProjectSemanticDispatch::new(ctx);
+            let dispatch = query_engine.dispatch;
             // Key the per-member MemberValueNode slot by the EXACT reduction
             // context the cold path reduces under
             // (`node_materialize_reduction_context(ctx, member_value, mode)` —
@@ -316,8 +315,7 @@ fn member_shape_peek_or_compute(
             // collided a transit-lowered carrier publication with a published
             // consumer over the same `(scope, node)`.
             let member_reduction_context =
-                crate::meta_resolve::materialize::node_materialize_reduction_context(
-                    ctx,
+                crate::meta_resolve::materialize::node_materialize_reduction_context(dispatch,
                     member_value,
                     mode,
                 );
@@ -332,7 +330,7 @@ fn member_shape_peek_or_compute(
             // tracer + dispatch dep-signature accumulator so the request's
             // dep set sees the same facts the cold compute emitted.
             if let Some(cached) = scope.peek(&key) {
-                emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
+                emit_dispatch_dep_signature_facts(dispatch,  cached.dep_signature());
                 return cached;
             }
 
@@ -372,13 +370,13 @@ fn member_shape_peek_or_compute(
                 // the same package-backed parent reuse the verdict at peek time.
                 let Some(package_backed_fence) = package_backed_fence_opt else {
                     return raise_node_to_sealed_carrier(
-                        &dispatch,
+                        dispatch,
                         member_value,
                         Arc::from(Vec::new()),
                     );
                 };
                 let value =
-                    raise_node_to_sealed_carrier(&dispatch, member_value, package_backed_fence);
+                    raise_node_to_sealed_carrier(dispatch, member_value, package_backed_fence);
                 return admit_member_shape_if_possible(ctx, &key, value, &scope);
             }
             // Non-package-backed: the gate returns `Some(empty)` unless a contributing
@@ -386,7 +384,7 @@ fn member_shape_peek_or_compute(
             // refuses (`None`) and the carrier is returned without admission.
             let Some(package_backed_fence) = package_backed_fence_opt else {
                 return raise_node_to_sealed_carrier(
-                    &dispatch,
+                    dispatch,
                     member_value,
                     Arc::from(Vec::new()),
                 );
@@ -394,7 +392,7 @@ fn member_shape_peek_or_compute(
 
             // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
             // reducible-operator facts read off `member_value` directly (no materialise).
-            let gates = super::classify_node_reduction_gates(ctx, member_value);
+            let gates = super::classify_node_reduction_gates(dispatch,  member_value);
 
             // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
             // so the gate fires lazily on that fact. A recursive parameterised helper stays
@@ -405,8 +403,7 @@ fn member_shape_peek_or_compute(
                 .generic_instantiation_ref
             {
                 let (reaches_cycle, fence) =
-                    crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
-                        ctx,
+                    crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(dispatch,
                         scope_canonical_id,
                         member_value,
                     );
@@ -417,7 +414,7 @@ fn member_shape_peek_or_compute(
                     let combined_fence =
                         combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
                     let value =
-                        raise_node_to_sealed_carrier(&dispatch, member_value, combined_fence);
+                        raise_node_to_sealed_carrier(dispatch, member_value, combined_fence);
                     return admit_member_shape_if_possible(ctx, &key, value, &scope);
                 }
                 fence
@@ -441,7 +438,7 @@ fn member_shape_peek_or_compute(
                 // operator nodes) is a STABLE shape — admit it as the shallow carrier so
                 // sibling members hitting the same `SurfaceMember.value` short-circuit at
                 // peek time.
-                let value = raise_node_to_sealed_carrier(&dispatch, member_value, gate_fence);
+                let value = raise_node_to_sealed_carrier(dispatch, member_value, gate_fence);
                 return admit_member_shape_if_possible(ctx, &key, value, &scope);
             }
 
@@ -465,8 +462,7 @@ fn member_shape_peek_or_compute(
             // carrier publication does not collide with a published consumer
             // slot over the same `(scope, node)`.
             let reduction_context =
-                crate::meta_resolve::materialize::node_materialize_reduction_context(
-                    ctx,
+                crate::meta_resolve::materialize::node_materialize_reduction_context(dispatch,
                     member_value,
                     mode,
                 );
@@ -485,8 +481,7 @@ fn member_shape_peek_or_compute(
             // fact-signature overflow (a second, INDEPENDENT non-admission condition that
             // must not be dropped here).
             let materialized =
-                crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(
-                    ctx,
+                crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(dispatch,
                     scope_canonical_id,
                     member_value,
                     reduction_context,
@@ -633,7 +628,7 @@ fn admit_member_shape_if_possible(
     ctx: &dyn ResolverContext,
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    owner_scope: &crate::component_meta_caches::ShapeCacheOwnerScope<'_, '_>,
+    owner_scope: &crate::project_semantic_dispatch::memo::ShapeCacheOwnerScope<'_, '_>,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // The producing compute consumed a non-cacheable read (or overflowed its
     // signature): serve the value, publish nothing. `package_backed_fence_opt` —
@@ -720,7 +715,7 @@ pub(crate) fn surface_member_to_expanded_field(
     let member_name = member
         .published_name()
         .expect("publication authority admits only members with a published name");
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+
     // The publication mode comes from the admitted token's descended member
     // cursor. `Navigate` (carrier) mode means the member's type body is
     // published as a carrier `Ref`, not breadth-expanded.
@@ -734,10 +729,10 @@ pub(crate) fn surface_member_to_expanded_field(
     // classification does NOT expand a generic instantiation to its
     // object surface — that would re-open the breadth leak.
     let exactness = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = query_engine.dispatch;
         let resolved_value =
-            resolve_member_value_for_classification(&dispatch, member.value, carrier_mode);
-        classify_node(&dispatch, resolved_value)
+            resolve_member_value_for_classification(dispatch, member.value, carrier_mode);
+        classify_node(dispatch, resolved_value)
     };
     // Peek the per-member graph-native materialiser cache BEFORE any
     // `raise_node_to_type_expr(member.value)` call. Warm hits return
@@ -767,7 +762,7 @@ pub(crate) fn surface_member_to_expanded_field(
         .clone()
         .map(verter_type_expr::facts::SemanticTypeSource::Authored);
     let r#type = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = query_engine.dispatch;
         // A PAYLOAD-LESS member whose reduced value is an ARGUMENT-BEARING
         // named reference (an imported / heritage-reached
         // `message: MessageBase<string>`) publishes the arg-preserving
@@ -780,7 +775,7 @@ pub(crate) fn surface_member_to_expanded_field(
                 .node_id()
                 .and_then(|node| {
                     crate::meta_resolve::arg_preserving_member_use_site_slot(
-                        &dispatch,
+                        dispatch,
                         &member
                             .key
                             .cloned_known()
@@ -811,7 +806,7 @@ pub(crate) fn surface_member_to_expanded_field(
             // symbolic / package-backed / carrier-stop shape keeps the
             // authored source unchanged.
             None => match published_member_source_upgrade_for_node(
-                &dispatch,
+                dispatch,
                 materialized.node_id(),
                 shallow_source.is_none(),
             )
@@ -852,7 +847,7 @@ pub(crate) fn surface_member_to_expanded_field(
                         // materialized outcome and still refuses cache
                         // admission; it does not erase the best safe carrier.
                         let structural = structural_member_value_source(
-                            &dispatch,
+                            dispatch,
                             member.value,
                             &member
                                 .key
@@ -949,7 +944,7 @@ fn resolve_member_value_for_classification(
     // entry run. Done in `Navigate` (carrier-preserving for deeper structure);
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
     let value =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
+        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), value).as_deref() {
             Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
                 dispatch.resolve_carrier_subject_node(
                     value,
@@ -961,7 +956,7 @@ fn resolve_member_value_for_classification(
             _ => value,
         };
     let should_expand =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
+        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), value).as_deref() {
             Some(SemanticNodeData::DeclRef { .. }) => true,
             // Carrier-mode: do NOT expand a generic instantiation to
             // its shallow object surface — that would breadth-
@@ -983,7 +978,7 @@ fn resolve_member_value_for_classification(
         ),
     });
     crate::request_context::observe_component_meta_read_suppress(&read);
-    emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+    emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
     match read.value {
         QueryResult::Value(id) => id,
         _ => value,
@@ -1033,16 +1028,15 @@ pub(crate) fn project_model(
     let model_key = crate::semantic_query::PropertyKey::identifier(model_name.as_str());
     let _member_cursor = cursor.descend_published_member(&model_key)?;
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
     let (payload_node, presence_outcome, exactness, contains_reducible) = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = query_engine.dispatch;
         // `project_model` is a ROOT publication path that keeps a root cursor
         // (the `descend_published_member` gate above). It resolves + admits the
         // payload INTERNALLY here through the publication-authority token API —
         // it mints the payload token and reads its node, never handing a raw
         // `SemanticNodeId` to a non-sink helper.
         let payload = super::publication_authority::resolve_macro_payload(
-            &dispatch,
+            dispatch,
             owner,
             file,
             macro_index,
@@ -1067,15 +1061,15 @@ pub(crate) fn project_model(
         // branches on that typed state, never on a fabricated sentinel
         // string. No `TypeExpr` is materialised for the decision.
         let presence_outcome: SemanticOutcome<()> =
-            match crate::project_semantic_dispatch::node_data_for(ctx, payload_node) {
+            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node) {
                 Some(_) => SemanticOutcome::Value(()),
                 None => SemanticOutcome::Degraded(QueryError::RaiseMiss),
             };
-        let exactness = classify_node(&dispatch, payload_node);
+        let exactness = classify_node(dispatch, payload_node);
         // Reducibility is decided on the payload NODE (node-domain) —
         // `project_model` makes no decision on any materialised value.
-        let contains_reducible =
-            super::classify_node_reduction_gates(ctx, payload_node).contains_reducible_operator;
+        let contains_reducible = super::classify_node_reduction_gates(dispatch, payload_node)
+            .contains_reducible_operator;
         (
             payload_node,
             presence_outcome,
@@ -1119,8 +1113,8 @@ pub(crate) fn project_model(
         )
     });
     let r#type = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
-        published_source_upgrade_for_node(&dispatch, reduced_node)
+        let dispatch = query_engine.dispatch;
+        published_source_upgrade_for_node(dispatch, reduced_node)
             .or(authored_model_source)
             .map(verter_type_expr::facts::SourcePosition::Present)
             .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated)

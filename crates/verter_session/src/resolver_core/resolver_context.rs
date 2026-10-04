@@ -1,82 +1,42 @@
-//! sealed `ResolverContext` super-trait.
+//! Request-bound adapter implementations for the sealed `ResolverContext`.
 //!
-//! Restricted host facade for resolver-tier code under the
-//! `crates/verter_session/src/{resolver_core, meta_resolve,
-//! project_semantic_dispatch}/` subtree, plus the two top-level files
-//! `component_meta_caches.rs` and the projector pipeline. Every
-//! such file routes its host access through this trait; the
-//! `no_concrete_verter_host_in_seal_scope` architecture guard
-//! (`tests/cases/architecture_guards.rs`) enforces that the seal scope contains
-//! zero production references to `crate::VerterHost`.
+//! The method-free marker composes six dyn-compatible services: indexed
+//! inputs, owned lowering, routing, fact validation, cancellation and execution
+//! submission. Their answers are owned records, typed source demands or an
+//! opaque engine attachment; no ambient host/store/config getter is exposed.
 //!
-//! ## Why a separate trait (not super-trait composition)
-//!
-//! Several domain traits use **associated types** in method positions. A
-//! trait with non-dyn-compatible super-traits inherits non-dyn-compatibility,
-//! so `&dyn ResolverContext` would not compile if any of them were
-//! super-traits. The cascade concern that
-//! motivated super-trait composition was a phantom: every `engine.host` /
-//! `query_engine.host` callsite in the seal scope passes concrete
-//! `&VerterHost` to **concrete-parameter functions** (e.g.,
-//! `ProjectSemanticDispatch::new`,
-//! `project_expr_class_a_via_dispatch`), not to generic-bound
-//! `<H: SomeDomainTrait>` functions. Generic-bound entry points
-//! (`run_component_meta_request<H>`, `run_fallthrough_request<H>`) are
-//! invoked from inside `impl VerterHost { ... }` blocks where
-//! `self: &VerterHost` is concrete and `H` resolves to `VerterHost`.
-//!
-//! Conclusion: the existing domain traits stay UNCHANGED and remain
-//! available as generic bounds; `ResolverContext` is independent and
-//! dyn-compatible.
-//!
-//! ## Sealed against external implementations
-//!
-//! The trait extends `sealed::Sealed`, whose marker is defined in a
-//! private inner module — external crates cannot name it, so they cannot
-//! implement `ResolverContext`. Production implementations are the two
-//! request-bound wrappers, `HostResolverContext` and
-//! `SessionResolverContext`. The direct-host implementation is compiled only
-//! by the explicit test-support configuration.
-//!
-//! ## Architectural guarantees (cross-referenced from CLAUDE.md)
-//!
-//! - **Canonical Dependency Cache Rule:** every method that returns
-//!   analysis or prepared-decl state delivers a cache-owned `Arc<T>`. No
-//!   raw source is exposed.
-//! - **Macro Type Traversal Rule:** symbol-graph walks happen through
-//!   `resolve_named_type_export_target_shallow` /
-//!   `resolve_imported_type_root`, never through ad-hoc parsing.
-//! - **Authority Chain:** workspace mutators are NOT exposed; the trait
-//!   exposes only the narrow ambient capabilities required by
-//!   `ambient_resolve.rs` (`lookup_ambient_symbol`,
-//!   `record_ambient_dependency`).
-//!
-//! Forbidden surface — omitted methods are not only absent here; the
-//! architecture guard ensures resolver-tier code cannot escape the
-//! trait by naming `VerterHost` directly.
+//! Private lifecycle adapters select the captured request view and completion
+//! overlay. The query facade owns execution and output capabilities, and nested
+//! semantic demands reuse that facade. The concrete host remains confined to
+//! these private backend owners. External implementations cannot name the
+//! private sealing marker. Production requests use `HostResolverContext` or
+//! `SessionResolverContext`; direct-host support remains test-only.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_semantic::resolver_core::{AmbientSymbolHit, ProjectStableKey};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::project_type_store::{IndexedReady, ProjectTypeStore};
+use super::fact_validation_port::FactValidation;
+use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInputRecord};
+use super::request_ports::{
+    Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
+};
+use super::shallow_file_state::ShallowInputRecord;
+
+use crate::project_type_store::IndexedReady;
 use crate::resolver_core::fact_tracer_tls;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::ShallowFileState;
 use crate::resolver_core::ValueDeclIdentity;
-use crate::resolver_core::{FactVersionRef, ShallowFileState};
-use crate::resolver_store::HostStoreView;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+
 use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
-use crate::HostConfig;
 
 /// Private markers used to seal `ResolverContext` (and its request-bound
 /// refinement) against external implementations.
-mod sealed {
+pub(super) mod sealed {
     /// Marker trait `ResolverContext` is sealed against. Only types
     /// inside `verter_session` that implement this marker can implement
     /// `ResolverContext`.
@@ -115,14 +75,15 @@ mod sealed {
 /// (`FileArtifactStore` is content-addressed; `indexed.whole_hash ==
 /// indexed.shallow_state.whole_hash`).
 #[derive(Clone)]
-pub(crate) struct MaterializeScopeObservation {
+pub struct MaterializeScopeObservation {
     /// The scope canonical this observation describes.
     pub canonical_id: Arc<str>,
-    /// The single `IndexedReady` artifact whose `whole_hash` roots both
+    /// The content observation whose `whole_hash` roots both
     /// the lowering `NodeScopeId` and the signature self-root.
-    pub indexed: Arc<IndexedReady>,
+    pub observed_whole_hash: Hash16,
+    pub observed_shallow_hash: Hash16,
     /// The scope's `SyntacticExportSet` parse fact, pinned to
-    /// `indexed.whole_hash` via
+    /// the observed content hash via
     /// [`crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content`].
     /// `None` when the observed version's parse-fact registry is not
     /// recoverable — the publish site then refuses shared-cache
@@ -136,7 +97,7 @@ impl MaterializeScopeObservation {
     /// a single source, so the two cannot disagree.
     #[inline]
     pub(crate) fn whole_hash(&self) -> crate::resolver_core::ResolverHash16 {
-        self.indexed.whole_hash
+        self.observed_whole_hash
     }
 }
 
@@ -144,614 +105,22 @@ impl MaterializeScopeObservation {
 /// `meta_resolve/*` post-moves, `component_meta_caches.rs`,
 /// `project_semantic_dispatch/*`).
 ///
-/// `ResolverContext` is the only way for seal-scope code to reach host
-/// state at runtime. Its only super-traits are private structural seals; it
-/// composes no non-dyn-compatible domain traits.
+/// `ResolverContext` composes six request ports and private structural seals.
+/// All service traits are dyn-compatible and expose no ambient host access.
 ///
 /// Visibility is `pub(crate)` because this is purely an internal seal — no
 /// external integrators construct
 /// `&dyn ResolverContext`.
-pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
-    // -------- Identity --------------------------------------------
-
-    /// `true` when this context is request-bound — i.e. a
-    /// [`crate::resolver_core::HostResolverContext`] or
-    /// [`crate::resolver_core::SessionResolverContext`] backed by a
-    /// per-request [`HostStoreView`] (and overlay) constructed at the
-    /// request entry boundary. Production contexts always return `true`;
-    /// the default exists for test doubles and the explicit direct-host
-    /// test-support seam.
-    ///
-    /// Used by `ComponentMetaQueryEngine::new` to bump the
-    /// `bare_engine_constructions` diagnostic counter whenever the
-    /// engine is bound to a non-request-bound ctx — the empirical
-    /// signal the 3-way consult identified as the residual perf-gap
-    /// suspect.
-    fn is_request_bound(&self) -> bool {
-        false
-    }
-
-    /// Cancellation authority for the current semantic execution. A
-    /// scheduler-owned aggregate token with registered owners takes precedence
-    /// over the request token so cancelling one singleflight waiter never
-    /// poisons a live sibling's shared compute. Ordinary ownerless DAG stages
-    /// fall back to their installed request token.
-    fn cancellation_token(&self) -> Option<verter_scheduler::cancellation::CancellationToken> {
-        let job = verter_scheduler::cancellation::current_job_cancellation_token();
-        if job
-            .as_ref()
-            .is_some_and(|token| token.has_registered_owners())
-        {
-            return job;
-        }
-        crate::request_context::current_request_cancellation_token().or(job)
-    }
-
-    /// Cheap cancellation checkpoint used at semantic dispatch/work charges.
-    #[cfg_attr(feature = "test-support", track_caller)]
-    fn is_cancelled(&self) -> bool {
-        let cancelled = self
-            .cancellation_token()
-            .is_some_and(|token| token.is_cancelled());
-        #[cfg(feature = "test-support")]
-        if cancelled {
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
-                std::panic::Location::caller(),
-            );
-        }
-        cancelled
-    }
-
-    // -------- Cache accessors --------------------------------------
-
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>>;
-
-    fn prepared_type_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    >;
-
-    /// Consume a typed preparation failure as a ReturnOnly absence at an
-    /// Option-shaped semantic boundary. The failure stays explicit through
-    /// [`Self::prepared_type_decl`]; this adapter is the sole lossy boundary
-    /// and taints every enclosing cacheability scope before returning `None`.
-    fn prepared_type_decl_return_only(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>> {
-        match self.prepared_type_decl(canonical_id, owner, symbol_name) {
-            Ok(decl) => decl,
-            Err(failure) => {
-                note_non_cacheable_read_fan_out(NonCacheableReadReason::PreparationFailure);
-                tracing::error!(
-                    canonical_id,
-                    ?owner,
-                    symbol_name,
-                    ?failure,
-                    "prepared type declaration failed; serving ReturnOnly absence"
-                );
-                None
-            }
-        }
-    }
-
-    fn prepared_value_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    >;
-
-    /// Consume a typed preparation failure as a ReturnOnly absence at an
-    /// Option-shaped semantic boundary — the value-space mirror of
-    /// [`Self::prepared_type_decl_return_only`]. The failure stays explicit
-    /// through [`Self::prepared_value_decl`]; this adapter is the sole lossy
-    /// boundary and taints every enclosing cacheability scope before
-    /// returning `None`. Callers that must preserve the `Failed` distinction
-    /// (the `defineExpose` admission gate) call [`Self::prepared_value_decl`]
-    /// directly instead.
-    fn prepared_value_decl_return_only(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
-        match self.prepared_value_decl(canonical_id, owner, symbol_name) {
-            Ok(decl) => decl,
-            Err(failure) => {
-                note_non_cacheable_read_fan_out(NonCacheableReadReason::PreparationFailure);
-                tracing::error!(
-                    canonical_id,
-                    ?owner,
-                    symbol_name,
-                    ?failure,
-                    "prepared value declaration failed; serving ReturnOnly absence"
-                );
-                None
-            }
-        }
-    }
-
-    /// Materialise (or warm-read) the canonical post-parse artifact,
-    /// with the publication status flowed BY VALUE — see
-    /// [`crate::host_manage::prepared_decl::IndexedReadyServe`]. This is
-    /// the ONLY resolver-tier accessor for a cold/warm `IndexedReady`:
-    /// a consumer that derives shared-cache entries from the artifact
-    /// gates admission on `serve.store_published`; structurally
-    /// read-only consumers take `serve.indexed` (the fenced consumption
-    /// still reaches every enclosing traced admission point through the
-    /// `note_non_cacheable_read_fan_out` chokepoint flag).
-    fn ensure_indexed_ready_serve(
-        &self,
-        canonical_id: &str,
-    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe>;
-
-    fn ensure_loaded(&self, canonical_id: &str) -> bool;
-
-    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
-
-    fn local_type_declaration_id(
-        &self,
-        canonical_source: &str,
-        resolved_name: &str,
-    ) -> Option<DeclarationId>;
-
-    fn get_whole_hash(&self, canonical: &str) -> Option<Hash16>;
-
-    /// Authoritative current content hash for `canonical` — the hash
-    /// source [`Self::indexed_for_current_content`] pins against.
-    ///
-    /// Unlike [`Self::get_whole_hash`] this accessor has **no
-    /// permissive fallback**: it never derives a hash from a
-    /// content-agnostic `FileArtifactStore` scan
-    /// (`FileArtifactStore::get_any`).
-    /// When only a stale artifact could answer (the canonical was
-    /// evicted/deleted while its `IndexedReady` lingers) it returns
-    /// `None` so the pinned read becomes a miss rather than resolving
-    /// the stale artifact via its own hash.
-    ///
-    /// The default impl delegates to
-    /// [`crate::VerterHost::authoritative_current_content_hash`] on the
-    /// concrete host — the scheduler `parse.whole_hash` gated on the
-    /// `DerivedRawState` entry being non-evicted. The overlay-aware
-    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`]
-    /// overrides it to consult the active [`SessionView`](crate::session_view::SessionView):
-    /// an overlay-covered canonical resolves to the overlay's content
-    /// hash (the hash the overlay `IndexedReady` was prewarmed under),
-    /// not the base host's hash.
-    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
-        self.host_for_fact_tracer_install()
-            .authoritative_current_content_hash(canonical)
-    }
-
-    /// Content-pinned [`IndexedReady`] lookup.
-    ///
-    /// Resolves the canonical's authoritative current content hash via
-    /// [`Self::authoritative_current_content_hash`] (no `get_any`
-    /// fallback; overlay-aware under `SessionResolverContext`) and
-    /// reads the artifact store pinned to that hash via
-    /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
-    /// Returns `None` when the canonical has no authoritative current
-    /// content hash OR when the only cached artifact is a stale
-    /// candidate for an older content hash.
-    ///
-    /// Correctness-sensitive readers in the seal scope —
-    /// materialisation fence seeding
-    /// and the component-meta proof producers
-    /// (`component_meta_caches.rs`) — MUST use this instead of the
-    /// permissive `project_type_store().indexed().get_any(..)`. Seeding
-    /// a fence (or observing a `FileWholeHash` fact) from a stale
-    /// artifact bakes the stale content hash into the cached entry's
-    /// `read_set_signature`, so fact validation would later confirm a
-    /// stale cache entry as valid. Resolving the pin from a `get_any`
-    /// hash, or from the base host's hash while an overlay is active,
-    /// reintroduces exactly that staleness — so the pin is derived
-    /// strictly from the authoritative accessor above.
-    ///
-    /// Defaulted so the base implementer ([`crate::VerterHost`])
-    /// inherits the host's pinned-read body
-    /// ([`crate::VerterHost::current_content_pinned_indexed`]) — which
-    /// resolves the authoritative current content hash and reads the
-    /// artifact store pinned to it, keyed by the **normalised analysis
-    /// canonical** so a RAW requested canonical (the architectural id
-    /// before an overlay-detection point) does not mis-key for a
-    /// non-identity `.js`. The overlay-aware
-    /// [`crate::resolver_core::SessionResolverContext`] overrides this
-    /// method: it gates the overlay branch on the raw id via
-    /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
-    /// and only falls through to the base host (this body) for an
-    /// unmasked canonical.
-    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        self.host_for_fact_tracer_install()
-            .current_content_pinned_indexed(canonical)
-    }
-
-    /// Exact artifact identity for the authority-visible current source.
-    fn artifact_key_for_current_content(
-        &self,
-        canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
-        self.host_for_fact_tracer_install()
-            .authoritative_current_artifact_key(canonical)
-    }
-
-    /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
-    /// materialize-memo scope canonical.
-    ///
-    /// The materialize-memo publish site needs the scope's content
-    /// version for two consumers that must agree (the lowering
-    /// `NodeScopeId` and the signature self-root). This accessor
-    /// produces a single `Arc<IndexedReady>` whose `whole_hash` roots
-    /// BOTH — eliminating the two-oracle tear.
-    ///
-    /// Returns `None` when the scope has no recoverable *current*
-    /// indexed artifact: an evicted / deleted canonical whose stale
-    /// `IndexedReady` lingers, or a tombstoned overlay canonical. A
-    /// `None` observation makes the publish site skip shared-cache
-    /// admission while still returning the freshly-computed value.
-    ///
-    /// The default impl delegates to
-    /// [`crate::VerterHost::observe_materialize_scope`]. The
-    /// overlay-aware `SessionResolverContext` overrides it: an
-    /// overlay-covered canonical is pinned to the overlay
-    /// `IndexedReady` (the overlay content hash), with no base
-    /// fallback; a session tombstone yields `None`; otherwise it
-    /// delegates to the base host.
-    fn observe_materialize_scope(&self, canonical: &str) -> Option<MaterializeScopeObservation> {
-        self.host_for_fact_tracer_install()
-            .observe_materialize_scope(canonical)
-    }
-
-    /// Build an owned [`HostStoreView`] for this context.
-    ///
-    /// Retained for backward compatibility — production resolver-tier
-    /// code on the per-component-meta hot path MUST use
-    /// [`Self::store_view`] (a borrow into the request-bound view)
-    /// instead so the view is built ONCE at the request boundary and
-    /// threaded down.
-    ///
-    /// The host implementation obtains the manager-owned O(1) root capture;
-    /// request contexts retain and reuse that fixed view.
-    #[track_caller]
-    fn resolver_store_view(&self) -> HostStoreView;
-
-    /// Borrowed access to the request-bound [`HostStoreView`].
-    ///
-    /// The view is built ONCE at the request boundary via
-    /// [`crate::VerterHost::resolver_store_view`] and threaded through
-    /// the resolver pipeline by a
-    /// [`crate::resolver_core::HostResolverContext`] (or, for
-    /// session-bearing requests, a
-    /// [`crate::resolver_core::SessionResolverContext`]).
-    /// Resolver-tier consumers consult the borrow on every cache validation;
-    /// no consumer rebuilds or enumerates the host.
-    ///
-    /// Production code constructs a `HostResolverContext` at the request
-    /// entry point. The compile-fenced direct-host test seam supplies an
-    /// owned fixture view.
-    ///
-    /// Returns `&dyn StoreView` (not the concrete [`HostStoreView`]) so
-    /// the trait stays dyn-compatible AND so a request-bound implementer
-    /// can hand back a [`crate::resolver_core::RequestStoreView`]
-    /// wrapper that chains a
-    /// [`crate::resolver_core::CanonicalCompletionOverlay`] in front of
-    /// the request-entry base view. The overlay records additive loads
-    /// observed mid-request (`ensure_loaded` / `ensure_indexed_ready_serve`
-    /// successes) so the self-root validator does not false-miss on
-    /// canonicals loaded after the request-entry snapshot.
-    #[allow(dead_code)]
-    fn store_view(&self) -> &dyn crate::resolver_core::StoreView;
-
-    fn project_type_store(&self) -> &Arc<ProjectTypeStore>;
-
-    fn config(&self) -> &HostConfig;
-
-    // -------- Symbol / route resolution ----------------------------
-
-    /// Fact-DISCARDING import-root resolution (final `(canonical, symbol)`
-    /// tuple only).
-    ///
-    /// MUST NOT be used on a memoized-build path (a `LowerLocator` /
-    /// read-set-validated cold build): the discarded route-chain facts are
-    /// the only proof a barrel/re-export retarget invalidates the enclosing
-    /// cache entry — dropping them false-warms the entry when an
-    /// intermediate barrel changes while the owner file does not. Memoized
-    /// builds call [`Self::resolve_imported_type_root_with_facts`] and
-    /// record the returned facts onto the active tracer.
-    fn resolve_imported_type_root(
-        &self,
-        dep_canonical: &str,
-        imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>;
-
-    /// Like [`Self::resolve_imported_type_root`] but ALSO returns the full
-    /// route-chain fact list the resolution observed (every barrel /
-    /// re-export participant's version).
-    ///
-    /// REQUIRED on any memoized-build path: the caller records the returned
-    /// facts onto the active fact tracer
-    /// ([`Self::observe_borrowed_signature`]) so the enclosing cache
-    /// entry's `ReadSetSignature` carries the route proof and a barrel
-    /// retarget misses the warm entry.
-    fn resolve_imported_type_root_with_facts(
-        &self,
-        dep_canonical: &str,
-        imported_name: &str,
-    ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
-    );
-
-    fn resolve_named_type_export_target_shallow(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<(String, String)>;
-
-    fn resolve_owner_direct_import(
-        &self,
-        owner_canonical: &str,
-        local_name: &str,
-    ) -> Option<(String, String)>;
-
-    fn resolve_type_dependency_canonical(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-    ) -> Option<String>;
-
-    /// fetch the routed shallow state for a canonical id.
-    /// Used by macro-shape materialisation when re-resolving paths
-    /// through cross-file type-import edges.
-    fn routed_shallow_state(
-        &self,
-        canonical_id: &str,
-    ) -> Option<std::sync::Arc<crate::resolver_core::ShallowFileState>>;
-
-    /// resolve a type declaration via the
-    /// `meta_resolve::resolve_type_declaration` host-tier helper. Used by
-    /// the component-meta query engine and `component_meta_registry` to
-    /// resolve named declarations through the host's symbol resolver.
-    fn resolve_type_declaration_for_dep(
-        &self,
-        dep_canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        requested_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration;
-
-    fn resolve_value_export_target(
-        &self,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<ValueDeclIdentity>;
-
-    // -------- Ambient resolution (narrow capabilities) -------------
-
-    fn lookup_ambient_symbol(
-        &self,
-        consumer_project: ProjectStableKey,
-        symbol: &str,
-    ) -> Option<AmbientSymbolHit>;
-
-    fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);
-
-    /// Whether `canonical_id` is workspace-owned per the workspace's
-    /// resolver-classification (NOT a path-substring check on
-    /// `node_modules`). True for workspace package sources, including
-    /// pnpm-symlink hops whose realpath resolves into a workspace
-    /// project, and workspace-linked packages that happen to live under
-    /// `node_modules/`.
-    ///
-    /// Used by Issue #5 (indexed-access early-out) and Issue #11
-    /// (workspace-local canonical cache reuse) to gate fast paths on
-    /// actual workspace ownership. Per CLAUDE.md macro-traversal rule,
-    /// callers MUST NOT substitute `path.contains("/node_modules/")`
-    /// for this method.
-    #[cfg(test)]
-    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool;
-
-    /// Whether `canonical_id` is package-backed per the workspace's
-    /// resolver-classification (NOT a path-substring check on
-    /// `node_modules`). True only when the realpath sits under
-    /// `node_modules/` AND no registered project root claims the file.
-    ///
-    /// Used by Issue #11 (workspace-local canonical cache reuse) and
-    /// the shared symbolic-preservation helper to decide when an
-    /// imported ref must materialize canonically vs. stay symbolic.
-    /// Callers MUST NOT substitute `path.contains("/node_modules/")`
-    /// for this method.
-    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool;
-
-    // -------- Dispatch facade --------------------------------------
-
-    fn dispatch(&self) -> ProjectSemanticDispatch<'_>;
-
-    fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
-
-    // -------- Component-meta-tier bridges --------------------------
-    //
-    // clippy cleanup — these two trait methods are part of
-    // the resolver-context surface contract for component-meta-tier
-    // adapters but have no caller in the landed tree. The trait is
-    // sealed and the methods are
-    // retained for symmetry with the dependency-fact and analysis-snap
-    // bridges defined in the impl block below. `#[allow(dead_code)]` is
-    // applied at the trait definition so the corresponding
-    // implementations do not need
-    // their own `#[allow]` annotations.
-
-    #[allow(dead_code)]
-    fn current_dependency_fact_versions(
-        &self,
-        canonical: &str,
-        tracked_deps: &BTreeSet<String>,
-    ) -> Vec<FactVersionRef>;
-
-    #[allow(dead_code)]
-    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot>;
-
-    // -------- Push-style fact-read tracer (cold-path only) ---------
-    //
-    // Cold-compute callers record each fact they read from a
-    // content-addressed source through [`observe`] /
-    // [`observe_borrowed_signature`]. On warm-hit paths no tracer is
-    // installed; both convenience methods become observable no-ops.
-    //
-    // The tracer is owned by an installer that brackets one cold
-    // compute on one thread; see
-    // [`crate::VerterHost::with_fact_tracer`] for the RAII entry
-    // point. The trait method [`current_fact_tracer`] returns the
-    // active tracer (if any) without exposing the installer
-    // mechanism — implementers may install through TLS, a per-host
-    // map, or any other substrate.
-    //
-    // R24 zero-allocation guarantee: when no tracer is installed,
-    // `current_fact_tracer()` returns `None` and the default-impl
-    // [`observe`] / [`observe_borrowed_signature`] methods short-
-    // circuit without entering any allocator path.
-    //
-    // R25 cold-path-only contract: the tracer is active on cold
-    // compute and write-admission paths only. Warm hits validate
-    // their stored `fact_dep_signature` directly without
-    // instantiating a tracer.
-
-    /// Return the active fact-read tracer if one is installed.
-    ///
-    /// Returns `None` on warm-hit paths and on any non-cold-compute
-    /// caller. Implementations install a tracer for the duration of
-    /// one cold compute via a documented installer (the default
-    /// implementer wires this through
-    /// [`crate::VerterHost::with_fact_tracer`]).
-    ///
-    /// Resolver-tier consumers (route-db lookups, materialiser
-    /// cache hits, audit-event emitters) call this method to
-    /// route their observations onto the active tracer. The
-    /// integration-test surface (`tests/`) and public-API mirror
-    /// [`crate::VerterHost::current_fact_tracer`] exercise this
-    /// method through the same TLS slot the resolver tier uses.
-    #[allow(dead_code)]
-    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell>;
-
-    /// Record one observed fact onto the active tracer, or no-op if
-    /// none is active.
-    ///
-    /// Cold-compute callers MUST call this for each fact they read
-    /// from a content-addressed source. Warm-hit fast-path callers
-    /// SHOULD NOT call it — the call is cheap, but the design
-    /// intent is that warm validation reads the existing
-    /// `fact_dep_signature` directly.
-    #[inline]
-    #[allow(dead_code)]
-    fn observe(&self, fact: crate::resolver_core::FactVersionRef) {
-        fact_tracer_tls::observe_fan_out(fact);
-    }
-
-    /// Bulk-record a routed-hit's existing dep-signature onto the
-    /// active tracer.
-    ///
-    /// Used when a higher-tier cold compute consumes a lower-tier
-    /// cached result; the caller inherits the callee's observations
-    /// without re-walking them.
-    #[inline]
-    #[allow(dead_code)]
-    fn observe_borrowed_signature(&self, sig: &[crate::resolver_core::FactVersionRef]) {
-        fact_tracer_tls::observe_fan_out_borrowed(sig);
-    }
-
-    /// Return the active session view for overlay-aware reads, if any.
-    ///
-    /// The default impl returns `None`; overlay-bearing session contexts
-    /// override this to return their `SessionView` so resolver-tier
-    /// helpers can read overlay content without carrying an explicit
-    /// view parameter. Default is reached today through the
-    /// `for_tests::active_session_view_is_none_for_tests` shim in
-    /// `lib.rs` (see `tests/cases/g_misc0/resolver_context_active_session_view.rs`).
-    fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
-        None
-    }
-
-    /// Return the request-scoped
-    /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
-    /// this context threads through the request, if any.
-    ///
-    /// The overlay is the per-request carrier (constructed once at the
-    /// request boundary, shared across every context the request builds,
-    /// dropped with the request — R18-compliant: passed by explicit
-    /// argument, never via a thread-local). The prepared-decl producers
-    /// consult it for the request-world bundle memo
-    /// (`CanonicalCompletionOverlay::bundle_memo`) — the R17-compliant
-    /// home for values that must never enter host/shared caches.
-    ///
-    /// The default impl returns `None`; request-bound contexts override it to
-    /// expose their request overlay.
-    fn request_completion_overlay(
-        &self,
-    ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
-        None
-    }
-
-    /// Rewrite a raw canonical to its analysis canonical — the identity
-    /// every `FileArtifactStore` artifact (base and overlay) is keyed by.
-    ///
-    /// A raw canonical has two forms: the form the session edited /
-    /// requested, and the `normalized_analysis_canonical` rewrite (a
-    /// runtime `.js` whose `.d.ts` companion is the analysis target). The
-    /// two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file. The
-    /// overlay materialiser publishes under the normalised id, and the
-    /// base [`Self::ensure_indexed_ready_serve`] normalises before publishing,
-    /// so `FileArtifactKey::canonical` is always the normalised id.
-    ///
-    /// Content-addressed `FileArtifactStore` lookups (parse-fact
-    /// recovery in particular) MUST normalise the canonical before
-    /// keying the store — a raw-keyed lookup misses the artifact
-    /// whenever `normalize(raw) != raw`. The default impl delegates to
-    /// [`crate::VerterHost::normalized_analysis_canonical`]; every context
-    /// resolves through the same host method.
-    fn normalized_analysis_canonical<'a>(
-        &self,
-        raw_canonical: &'a str,
-    ) -> std::borrow::Cow<'a, str> {
-        self.host_for_fact_tracer_install()
-            .normalized_analysis_canonical(raw_canonical)
-    }
-
-    /// Reach the concrete `VerterHost` underneath this context.
-    ///
-    /// Used by Family B/C/D producers (`AppConfigNoOverrideProofDb`,
-    /// `OwnerImportSurfaceDb`) to call
-    /// [`crate::VerterHost::with_fact_tracer`] from inside their
-    /// cooperative-admission cold-compute closures. The seal trait
-    /// itself cannot expose `with_fact_tracer` directly because
-    /// `FnOnce<R>` is non-dyn-compatible; this accessor lets
-    /// cold-compute closures install the tracer through the existing
-    /// `fact_signature_helpers::install_fact_tracer(host, ...)`
-    /// surface without bypassing the seal.
-    ///
-    /// Both production request-bound adapters return their inner
-    /// `&crate::VerterHost`; the seal guarantees the trait contract.
-    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost;
-
-    /// This context's contribution to a fact tracer's compaction basis.
-    ///
-    /// The projection is a context-level question with a fail-safe default:
-    /// a test context that is not request-bound vouches for nothing, its
-    /// scopes compact nothing and detect no movement. The two
-    /// request-bound implementers override it by forwarding the view they
-    /// already hold — a borrow, never a `StoreViewManager` read.
-    #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        verter_workspace::AggregateBasisSeed::Unvouched
-    }
+pub(crate) trait ResolverContext:
+    sealed::Sealed
+    + sealed::RequestBoundSealed
+    + IndexedInputs
+    + OwnedLowering
+    + RouteLookup
+    + FactValidation
+    + Cancellation
+    + ExecutionSubmission
+{
 }
 
 // Sealed marker — `VerterHost` is the base implementer,
@@ -835,63 +204,78 @@ static_assertions::assert_impl_all!(crate::VerterHost: ResolverContext);
 /// Test-only direct-host seam. Production builds compile this implementation
 /// out, so every production `ResolverContext` is structurally request-bound.
 #[cfg(any(test, feature = "test-support"))]
-impl ResolverContext for crate::VerterHost {
+impl ResolverContext for crate::VerterHost {}
+#[cfg(any(test, feature = "test-support"))]
+impl IndexedInputs for crate::VerterHost {
+    fn operand_env_epoch(&self) -> super::request_ports::OperandEnvEpoch {
+        let w = self.workspace();
+        super::request_ports::OperandEnvEpoch::new(w.published_root(), w.content_generation())
+    }
+    fn project_stable_key_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+        self.workspace()
+            .project_stable_key(crate::VerterHost::resolve_project_for_canonical(
+                self, canonical,
+            )?)
+    }
+    fn captured_project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        crate::VerterHost::resolver_store_view(self)
+            .into_owned_view()
+            .project_identity_for(canonical)
+    }
+    fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
+        crate::VerterHost::host_view_env_hashes(self)
+    }
+    fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
+        crate::VerterHost::host_view_env_hashes_for(self, canonical)
+    }
+    fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
+        crate::VerterHost::host_view_project_identity(self)
+    }
+    fn host_view_project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        crate::VerterHost::host_view_project_identity_for(self, canonical)
+    }
+    fn semantic_compiler_options_for(
+        &self,
+        canonical: &str,
+    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+        crate::VerterHost::semantic_compiler_options_for(self, canonical)
+    }
+    fn resolve_project_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+        crate::VerterHost::resolve_project_for_canonical(self, canonical)
+    }
+    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        crate::VerterHost::declaration_sequence_rank(self, canonical)
+    }
+
+    fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
+        crate::project_semantic_dispatch::EnginePolicy::from_config(&self.config)
+    }
+
     // Cache accessors -------------------------------------------------
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
+    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
+            .map(|bundle| self.source_input_leases.retain_prepared(bundle))
     }
 
     #[inline]
-    fn prepared_type_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    > {
-        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-        crate::VerterHost::prepared_type_decl_in_with_store_view(
-            self,
-            &view,
-            None,
-            canonical_id,
-            owner,
-            symbol_name,
-        )
-    }
-
-    #[inline]
-    fn prepared_value_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    > {
-        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-        crate::VerterHost::prepared_value_decl_in_with_store_view(
-            self,
-            &view,
-            None,
-            canonical_id,
-            owner,
-            symbol_name,
-        )
-    }
-
-    #[inline]
-    fn ensure_indexed_ready_serve(
-        &self,
-        canonical_id: &str,
-    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+    fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id)
+            .map(|serve| self.source_input_leases.retain(serve))
     }
 
     #[inline]
@@ -900,8 +284,9 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
         crate::VerterHost::shallow_file_state(self, canonical_id)
+            .map(|state| self.source_input_leases.retain_shallow(state))
     }
 
     #[inline]
@@ -919,32 +304,141 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    #[track_caller]
-    fn resolver_store_view(&self) -> HostStoreView {
-        crate::request_context::bump_resolver_store_view_call();
-        // The test-only direct-host seam hands fact validation a proven-current
-        // base view; under churn it falls to the cold-seed's inner view.
-        crate::VerterHost::resolver_store_view(self).into_owned_view()
+    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        crate::VerterHost::get_raw_analysis_snapshot(self, canonical)
     }
-
-    #[inline]
-    fn store_view(&self) -> &dyn crate::resolver_core::StoreView {
-        // Direct-host test fixtures own no request view. The explicit
-        // test-support seam leaks one owned view per call so a borrowed trait
-        // object remains valid without unsafe lifetime fabrication.
-        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-        let leaked: &'static HostStoreView = Box::leak(Box::new(view));
-        leaked as &dyn crate::resolver_core::StoreView
+    /// Authoritative current content hash for `canonical` — the hash
+    /// source [`Self::indexed_for_current_content`] pins against.
+    ///
+    /// Unlike [`Self::get_whole_hash`] this accessor has **no
+    /// permissive fallback**: it never derives a hash from a
+    /// content-agnostic `FileArtifactStore` scan
+    /// (`FileArtifactStore::get_any`).
+    /// When only a stale artifact could answer (the canonical was
+    /// evicted/deleted while its `IndexedReady` lingers) it returns
+    /// `None` so the pinned read becomes a miss rather than resolving
+    /// the stale artifact via its own hash.
+    ///
+    /// The default impl delegates to
+    /// [`crate::VerterHost::authoritative_current_content_hash`] on the
+    /// concrete host — the scheduler `parse.whole_hash` gated on the
+    /// `DerivedRawState` entry being non-evicted. The overlay-aware
+    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`]
+    /// overrides it to consult the active [`SessionView`](crate::session_view::SessionView):
+    /// an overlay-covered canonical resolves to the overlay's content
+    /// hash (the hash the overlay `IndexedReady` was prewarmed under),
+    /// not the base host's hash.
+    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        self.authoritative_current_content_hash(canonical)
     }
-
-    #[inline]
-    fn project_type_store(&self) -> &Arc<ProjectTypeStore> {
-        crate::VerterHost::project_type_store(self)
+    /// Content-pinned [`IndexedReady`] lookup.
+    ///
+    /// Resolves the canonical's authoritative current content hash via
+    /// [`Self::authoritative_current_content_hash`] (no `get_any`
+    /// fallback; overlay-aware under `SessionResolverContext`) and
+    /// reads the artifact store pinned to that hash via
+    /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
+    /// Returns `None` when the canonical has no authoritative current
+    /// content hash OR when the only cached artifact is a stale
+    /// candidate for an older content hash.
+    ///
+    /// Correctness-sensitive readers in the seal scope —
+    /// materialisation fence seeding
+    /// and the component-meta proof producers
+    /// (`component_meta_caches.rs`) — MUST use this instead of the
+    /// permissive `project_type_store().indexed().get_any(..)`. Seeding
+    /// a fence (or observing a `FileWholeHash` fact) from a stale
+    /// artifact bakes the stale content hash into the cached entry's
+    /// `read_set_signature`, so fact validation would later confirm a
+    /// stale cache entry as valid. Resolving the pin from a `get_any`
+    /// hash, or from the base host's hash while an overlay is active,
+    /// reintroduces exactly that staleness — so the pin is derived
+    /// strictly from the authoritative accessor above.
+    ///
+    /// Defaulted so the base implementer ([`crate::VerterHost`])
+    /// inherits the host's pinned-read body
+    /// ([`crate::VerterHost::current_content_pinned_indexed`]) — which
+    /// resolves the authoritative current content hash and reads the
+    /// artifact store pinned to it, keyed by the **normalised analysis
+    /// canonical** so a RAW requested canonical (the architectural id
+    /// before an overlay-detection point) does not mis-key for a
+    /// non-identity `.js`. The overlay-aware
+    /// [`crate::resolver_core::SessionResolverContext`] overrides this
+    /// method: it gates the overlay branch on the raw id via
+    /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
+    /// and only falls through to the base host (this body) for an
+    /// unmasked canonical.
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedInputRecord>> {
+        self.current_content_pinned_indexed(canonical)
+            .map(|indexed| {
+                self.source_input_leases
+                    .retain(crate::host_manage::prepared_decl::IndexedReadyServe {
+                        indexed,
+                        store_published: true,
+                    })
+                    .indexed
+            })
     }
-
-    #[inline]
-    fn config(&self) -> &HostConfig {
-        crate::VerterHost::config(self)
+    /// Exact artifact identity for the authority-visible current source.
+    fn artifact_key_for_current_content(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        self.authoritative_current_artifact_key(canonical)
+    }
+    /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
+    /// materialize-memo scope canonical.
+    ///
+    /// The materialize-memo publish site needs the scope's content
+    /// version for two consumers that must agree (the lowering
+    /// `NodeScopeId` and the signature self-root). This accessor
+    /// produces a single `Arc<IndexedInputRecord>` whose `whole_hash` roots
+    /// BOTH — eliminating the two-oracle tear.
+    ///
+    /// Returns `None` when the scope has no recoverable *current*
+    /// indexed artifact: an evicted / deleted canonical whose stale
+    /// `IndexedReady` lingers, or a tombstoned overlay canonical. A
+    /// `None` observation makes the publish site skip shared-cache
+    /// admission while still returning the freshly-computed value.
+    ///
+    /// The default impl delegates to
+    /// [`crate::VerterHost::observe_materialize_scope`]. The
+    /// overlay-aware `SessionResolverContext` overrides it: an
+    /// overlay-covered canonical is pinned to the overlay
+    /// `IndexedReady` (the overlay content hash), with no base
+    /// fallback; a session tombstone yields `None`; otherwise it
+    /// delegates to the base host.
+    fn observe_materialize_scope(&self, canonical: &str) -> Option<MaterializeScopeObservation> {
+        self.observe_materialize_scope(canonical)
+    }
+    /// Rewrite a raw canonical to its analysis canonical — the identity
+    /// every `FileArtifactStore` artifact (base and overlay) is keyed by.
+    ///
+    /// A raw canonical has two forms: the form the session edited /
+    /// requested, and the `normalized_analysis_canonical` rewrite (a
+    /// runtime `.js` whose `.d.ts` companion is the analysis target). The
+    /// two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file. The
+    /// overlay materialiser publishes under the normalised id, and the
+    /// base [`Self::ensure_indexed_ready_serve`] normalises before publishing,
+    /// so `FileArtifactKey::canonical` is always the normalised id.
+    ///
+    /// Content-addressed `FileArtifactStore` lookups (parse-fact
+    /// recovery in particular) MUST normalise the canonical before
+    /// keying the store — a raw-keyed lookup misses the artifact
+    /// whenever `normalize(raw) != raw`. The default impl delegates to
+    /// [`crate::VerterHost::normalized_analysis_canonical`]; every context
+    /// resolves through the same host method.
+    fn normalized_analysis_canonical(&self, raw_canonical: &str) -> String {
+        crate::VerterHost::normalized_analysis_canonical(self, raw_canonical).into_owned()
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl RouteLookup for crate::VerterHost {
+    fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
+        self.workspace().reverse_deps_for(canonical)
+    }
+    fn observe_owner_import_route_witness(&self, canonical: &str) {
+        crate::VerterHost::observe_owner_import_route_witness(self, canonical);
     }
 
     // Symbol / route resolution --------------------------------------
@@ -977,6 +471,7 @@ impl ResolverContext for crate::VerterHost {
         crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
             self,
             self,
+            None,
             &view,
             dep_canonical,
             imported_name,
@@ -1009,6 +504,7 @@ impl ResolverContext for crate::VerterHost {
         crate::VerterHost::resolve_owner_direct_import_with_store_view(
             self,
             self,
+            None,
             &view,
             owner_canonical,
             local_name,
@@ -1032,8 +528,9 @@ impl ResolverContext for crate::VerterHost {
     fn routed_shallow_state(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+    ) -> Option<Arc<super::shallow_file_state::ShallowInputRecord>> {
         crate::VerterHost::routed_shallow_state(self, canonical_id)
+            .map(|state| self.source_input_leases.retain_shallow(state))
     }
 
     #[inline]
@@ -1089,45 +586,23 @@ impl ResolverContext for crate::VerterHost {
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
         self.workspace().is_package_backed(canonical_id)
     }
-
-    // Dispatch facade ------------------------------------------------
-
-    #[inline]
-    fn dispatch(&self) -> ProjectSemanticDispatch<'_> {
-        ProjectSemanticDispatch::new(self)
-    }
-
-    #[inline]
-    fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        self.project_type_store().semantic_graph().node_data(node)
-    }
-
-    // Component-meta-tier bridges ------------------------------------
-
-    #[inline]
-    fn current_dependency_fact_versions(
-        &self,
-        canonical: &str,
-        tracked_deps: &BTreeSet<String>,
-    ) -> Vec<FactVersionRef> {
-        crate::VerterHost::current_dependency_fact_versions(self, canonical, tracked_deps)
-    }
-
-    #[inline]
-    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
-        crate::VerterHost::get_raw_analysis_snapshot(self, canonical)
-    }
-
-    // Fact tracer ----------------------------------------------------
-
-    #[inline]
-    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
-        fact_tracer_tls::current_tracer()
-    }
-
-    #[inline]
-    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
-        self
+}
+#[cfg(any(test, feature = "test-support"))]
+impl Cancellation for crate::VerterHost {}
+#[cfg(any(test, feature = "test-support"))]
+impl ExecutionSubmission for crate::VerterHost {
+    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding {
+        self.project_type_store().bind_engine(
+            self.engine_observers(),
+            self.source_input_leases.macro_selector(
+                #[cfg(test)]
+                Arc::clone(&self.test_force),
+                #[cfg(test)]
+                Arc::clone(&self.macro_hot_lowering_count),
+            ),
+            self.vue_surface_store_handle(),
+            self.svelte_surface_store_handle(),
+        )
     }
 }
 
@@ -1180,10 +655,6 @@ pub(crate) trait RequestBoundLifecycle {
     /// overlay (epoch-guarded); the session lifecycle threads its view.
     fn complete_canonical(&self, canonical: &str);
 
-    /// Build the owned per-call [`HostStoreView`] (the cold-path rail).
-    #[track_caller]
-    fn owned_store_view(&self) -> HostStoreView;
-
     fn prepared_decl_bundle(
         &self,
         ctx: &dyn ResolverContext,
@@ -1232,8 +703,15 @@ pub(crate) trait RequestBoundLifecycle {
         ctx: &dyn ResolverContext,
         canonical_id: &str,
     ) -> Option<Arc<ShallowFileState>> {
-        self.host()
-            .shallow_file_state_with_context(ctx, canonical_id)
+        self.host().shallow_file_state_with_context(
+            ctx,
+            crate::host_manage::prepared_decl::SourceRequestServices {
+                session_view: self.session_view(),
+                completion_overlay: Some(self.request_view().overlay()),
+                base_view: Some(self.request_view().base()),
+            },
+            canonical_id,
+        )
     }
 
     fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
@@ -1281,95 +759,130 @@ pub(crate) trait RequestBoundLifecycle {
 /// [`RequestBoundLifecycle::request_view`] (the request-bound view) into
 /// every view-aware host entry, so both lifecycles validate warm caches
 /// against the view built at their request boundary.
-pub(crate) struct RequestBoundAdapter<L>(pub(crate) L);
+pub struct RequestBoundAdapter<L>(pub(super) L);
 
-impl<L: RequestBoundLifecycle> RequestBoundAdapter<L> {
-    /// Borrow the inner host.
-    #[allow(dead_code)]
-    pub(crate) fn host(&self) -> &crate::VerterHost {
-        self.0.host()
+#[cfg(any(test, feature = "test-support"))]
+impl<L> RequestBoundAdapter<L> {
+    pub(crate) fn has_session_view_for_tests(&self) -> bool
+    where
+        L: RequestBoundLifecycle,
+    {
+        self.0.session_view().is_some()
     }
+}
 
-    /// Borrow the request-scoped overlay. Cooperative-admission lanes
-    /// that inherit the context clone the `Arc` to seed a sibling
-    /// wrapper sharing the same per-request completion state.
-    #[allow(dead_code)]
-    pub(crate) fn overlay(&self) -> &Arc<crate::resolver_core::CanonicalCompletionOverlay> {
-        self.0.request_view().overlay()
-    }
-
-    /// Explicitly complete a canonical in the request overlay.
-    /// Production completion is driven by the shared load/materialise
-    /// methods; tests also exercise the overlay transition directly.
-    #[allow(dead_code)]
-    pub(crate) fn complete_canonical(&self, canonical: &str) {
+#[cfg(test)]
+impl<L> RequestBoundAdapter<L> {
+    pub(crate) fn complete_canonical(&self, canonical: &str)
+    where
+        L: RequestBoundLifecycle,
+    {
         self.0.complete_canonical(canonical);
     }
 }
 
-impl<L: RequestBoundLifecycle> ResolverContext for RequestBoundAdapter<L>
+impl<L: RequestBoundLifecycle> ResolverContext for RequestBoundAdapter<L> where
+    Self: sealed::Sealed + sealed::RequestBoundSealed
+{
+}
+
+impl<L: RequestBoundLifecycle> IndexedInputs for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
+    fn operand_env_epoch(&self) -> super::request_ports::OperandEnvEpoch {
+        let w = self.0.host().workspace();
+        super::request_ports::OperandEnvEpoch::new(w.published_root(), w.content_generation())
+    }
+    fn project_stable_key_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+        self.0
+            .host()
+            .workspace()
+            .project_stable_key(self.0.host().resolve_project_for_canonical(canonical)?)
+    }
+    fn captured_project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        self.0.request_view().base().project_identity_for(canonical)
+    }
+    fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
+        self.0.host().host_view_env_hashes()
+    }
+    fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
+        self.0.host().host_view_env_hashes_for(canonical)
+    }
+    fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
+        self.0.host().host_view_project_identity()
+    }
+    fn host_view_project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        self.0.host().host_view_project_identity_for(canonical)
+    }
+    fn semantic_compiler_options_for(
+        &self,
+        canonical: &str,
+    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+        self.0.host().semantic_compiler_options_for(canonical)
+    }
+    fn resolve_project_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+        self.0.host().resolve_project_for_canonical(canonical)
+    }
+    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        self.0.host().declaration_sequence_rank(canonical)
+    }
+
+    fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
+        crate::project_semantic_dispatch::EnginePolicy::from_config(&self.0.host().config)
+    }
+
+    fn normalized_analysis_canonical(&self, raw_canonical: &str) -> String {
+        self.0
+            .host()
+            .normalized_analysis_canonical(raw_canonical)
+            .into_owned()
+    }
+
     #[inline]
     fn is_request_bound(&self) -> bool {
         true
     }
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
-        self.0.prepared_decl_bundle(self, canonical_id)
-    }
-
-    /// Request-bound contexts own the request's completion overlay, and
-    /// therefore the request-world bundle memo — the only reuse tier that
-    /// can hold a value the shared cache is not allowed to hold.
-    #[inline]
-    fn request_completion_overlay(
-        &self,
-    ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
-        Some(self.0.request_view().overlay())
-    }
-
-    #[inline]
-    fn prepared_type_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    > {
+    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
         self.0
-            .prepared_type_decl(self, canonical_id, owner, symbol_name)
+            .prepared_decl_bundle(self, canonical_id)
+            .map(|bundle| {
+                self.0
+                    .request_view()
+                    .overlay()
+                    .input_artifacts
+                    .retain_prepared(bundle)
+            })
     }
 
     #[inline]
-    fn prepared_value_decl(
-        &self,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
-    > {
-        self.0
-            .prepared_value_decl(self, canonical_id, owner, symbol_name)
-    }
-
-    #[inline]
-    fn ensure_indexed_ready_serve(
-        &self,
-        canonical_id: &str,
-    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+    fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
         let result = self.0.materialize_indexed_ready_serve(canonical_id);
         if result.is_some() {
             // Eager canonical completion, idempotent + epoch-guarded.
             self.0.complete_canonical(canonical_id);
         }
-        result
+        result.map(|serve| {
+            self.0
+                .request_view()
+                .overlay()
+                .input_artifacts
+                .retain(serve)
+        })
     }
 
     #[inline]
@@ -1382,8 +895,14 @@ where
     }
 
     #[inline]
-    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        self.0.shallow_file_state(self, canonical_id)
+    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
+        self.0.shallow_file_state(self, canonical_id).map(|state| {
+            self.0
+                .request_view()
+                .overlay()
+                .input_artifacts
+                .retain_shallow(state)
+        })
     }
 
     #[inline]
@@ -1406,8 +925,20 @@ where
     }
 
     #[inline]
-    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        self.0.indexed_for_current_content(canonical)
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedInputRecord>> {
+        self.0
+            .indexed_for_current_content(canonical)
+            .map(|indexed| {
+                self.0
+                    .request_view()
+                    .overlay()
+                    .input_artifacts
+                    .retain(crate::host_manage::prepared_decl::IndexedReadyServe {
+                        indexed,
+                        store_published: true,
+                    })
+                    .indexed
+            })
     }
 
     #[inline]
@@ -1423,34 +954,20 @@ where
         self.0.observe_materialize_scope(self, canonical)
     }
 
-    /// Owned-view variant — clones the request-bound fixed snapshot.
-    /// Hot-path callers use [`Self::store_view`] (the borrow into the same
-    /// fixed view) for zero-allocation cache-validity reads.
     #[inline]
-    #[track_caller]
-    fn resolver_store_view(&self) -> HostStoreView {
-        crate::request_context::bump_resolver_store_view_call();
-        self.0.owned_store_view()
+    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        crate::VerterHost::get_raw_analysis_snapshot(self.0.host(), canonical)
     }
-
-    #[inline]
-    fn store_view(&self) -> &dyn crate::resolver_core::StoreView {
-        self.0.request_view()
+}
+impl<L: RequestBoundLifecycle> RouteLookup for RequestBoundAdapter<L>
+where
+    Self: sealed::Sealed + sealed::RequestBoundSealed,
+{
+    fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
+        self.0.host().workspace().reverse_deps_for(canonical)
     }
-
-    #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        crate::resolver_core::StoreView::aggregate_basis_seed(self.0.request_view())
-    }
-
-    #[inline]
-    fn project_type_store(&self) -> &Arc<ProjectTypeStore> {
-        crate::VerterHost::project_type_store(self.0.host())
-    }
-
-    #[inline]
-    fn config(&self) -> &HostConfig {
-        crate::VerterHost::config(self.0.host())
+    fn observe_owner_import_route_witness(&self, canonical: &str) {
+        self.0.host().observe_owner_import_route_witness(canonical);
     }
 
     #[inline]
@@ -1461,9 +978,12 @@ where
     ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         // The context-bound shim validates the cached imported-root entry
         // against this request's view instead of rebuilding a snapshot.
-        self.0
-            .host()
-            .resolve_imported_type_root_with_context(self, dep_canonical, imported_name)
+        self.0.host().resolve_imported_type_root_with_context(
+            self,
+            self.0.session_view(),
+            dep_canonical,
+            imported_name,
+        )
     }
 
     #[inline]
@@ -1477,7 +997,12 @@ where
     ) {
         self.0
             .host()
-            .resolve_imported_type_root_with_facts_with_context(self, dep_canonical, imported_name)
+            .resolve_imported_type_root_with_facts_with_context(
+                self,
+                self.0.session_view(),
+                dep_canonical,
+                imported_name,
+            )
     }
 
     #[inline]
@@ -1504,6 +1029,7 @@ where
     ) -> Option<(String, String)> {
         self.0.host().resolve_owner_direct_import_with_store_view(
             self,
+            self.0.session_view(),
             self.0.request_view(),
             owner_canonical,
             local_name,
@@ -1521,8 +1047,17 @@ where
     }
 
     #[inline]
-    fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        crate::VerterHost::routed_shallow_state(self.0.host(), canonical_id)
+    fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
+        self.0
+            .host()
+            .routed_shallow_state_with_view(canonical_id, self.0.session_view())
+            .map(|state| {
+                self.0
+                    .request_view()
+                    .overlay()
+                    .input_artifacts
+                    .retain_shallow(state)
+            })
     }
 
     #[inline]
@@ -1585,50 +1120,31 @@ where
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
         self.0.host().workspace().is_package_backed(canonical_id)
     }
-
-    #[inline]
-    fn dispatch(&self) -> ProjectSemanticDispatch<'_> {
-        // Anchoring at `self` threads the request-bound view (and any
-        // session view) through every dispatch-tier call.
-        ProjectSemanticDispatch::new(self)
-    }
-
-    #[inline]
-    fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        self.0
-            .host()
-            .project_type_store()
-            .semantic_graph()
-            .node_data(node)
-    }
-
-    #[inline]
-    fn current_dependency_fact_versions(
-        &self,
-        canonical: &str,
-        tracked_deps: &BTreeSet<String>,
-    ) -> Vec<FactVersionRef> {
-        crate::VerterHost::current_dependency_fact_versions(self.0.host(), canonical, tracked_deps)
-    }
-
-    #[inline]
-    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
-        crate::VerterHost::get_raw_analysis_snapshot(self.0.host(), canonical)
-    }
-
-    #[inline]
-    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
-        fact_tracer_tls::current_tracer()
-    }
-
-    #[inline]
-    fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
-        self.0.session_view()
-    }
-
-    #[inline]
-    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
-        self.0.host()
+}
+impl<L: RequestBoundLifecycle> Cancellation for RequestBoundAdapter<L> where
+    Self: sealed::Sealed + sealed::RequestBoundSealed
+{
+}
+impl<L: RequestBoundLifecycle> ExecutionSubmission for RequestBoundAdapter<L>
+where
+    Self: sealed::Sealed + sealed::RequestBoundSealed,
+{
+    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding {
+        self.0.host().project_type_store().bind_engine(
+            self.0.host().engine_observers(),
+            self.0
+                .request_view()
+                .overlay()
+                .input_artifacts
+                .macro_selector(
+                    #[cfg(test)]
+                    Arc::clone(&self.0.host().test_force),
+                    #[cfg(test)]
+                    Arc::clone(&self.0.host().macro_hot_lowering_count),
+                ),
+            self.0.host().vue_surface_store_handle(),
+            self.0.host().svelte_surface_store_handle(),
+        )
     }
 }
 
@@ -1909,6 +1425,12 @@ pub(crate) struct OwnedFactTracer {
 }
 
 impl OwnedFactTracer {
+    pub(crate) fn new(basis: verter_workspace::AggregateGenerations) -> Self {
+        let cell = Box::new(crate::resolver_core::FactReadSetCell::new());
+        cell.set_aggregate_basis(basis);
+        Self { cell }
+    }
+
     /// Install the cell until the returned scope drops, unwinding included.
     pub(crate) fn install(&self) -> OwnedTracerScope<'_> {
         fact_tracer_tls::install(&self.cell);
@@ -1934,21 +1456,31 @@ impl Drop for OwnedTracerScope<'_> {
     }
 }
 
+/// Install a request-owned basis without granting host access to the compute.
+pub(crate) fn with_fact_tracer_cell<F, R>(
+    basis: verter_workspace::AggregateGenerations,
+    f: F,
+) -> (R, crate::resolver_core::FactReadSet)
+where
+    F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+{
+    let cell = crate::resolver_core::FactReadSetCell::new();
+    cell.set_aggregate_basis(basis);
+    // Push onto the tracer stack. The RAII guard pops on drop
+    // (including on panic unwind) so no dangling pointer remains.
+    fact_tracer_tls::install(&cell);
+    let scope = TracerScope;
+    let result = f(&cell);
+    // Explicit drop so the stack is popped before we consume
+    // `cell.into_inner()`. After this point no `&FactReadSetCell`
+    // can leak out of TLS.
+    drop(scope);
+    (result, cell.into_inner())
+}
+
 impl crate::VerterHost {
     /// A fact tracer for a compute that runs in steps, its basis installed
     /// now exactly as [`Self::with_fact_tracer_cell`] installs one.
-    pub(crate) fn owned_fact_tracer(
-        &self,
-        seed: verter_workspace::AggregateBasisSeed,
-    ) -> OwnedFactTracer {
-        let cell = Box::new(crate::resolver_core::FactReadSetCell::new());
-        cell.set_aggregate_basis(verter_workspace::AggregateGenerations::from_seed(
-            &seed,
-            &self.live_aggregate_counters(),
-        ));
-        OwnedFactTracer { cell }
-    }
-
     /// Run `f` with a fact tracer installed; return
     /// `(R, FactReadSet)`.
     ///
@@ -2010,21 +1542,13 @@ impl crate::VerterHost {
     where
         F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
     {
-        let cell = crate::resolver_core::FactReadSetCell::new();
-        cell.set_aggregate_basis(verter_workspace::AggregateGenerations::from_seed(
-            &seed,
-            &self.live_aggregate_counters(),
-        ));
-        // Push onto the tracer stack. The RAII guard pops on drop
-        // (including on panic unwind) so no dangling pointer remains.
-        fact_tracer_tls::install(&cell);
-        let scope = TracerScope;
-        let result = f(&cell);
-        // Explicit drop so the stack is popped before we consume
-        // `cell.into_inner()`. After this point no `&FactReadSetCell`
-        // can leak out of TLS.
-        drop(scope);
-        (result, cell.into_inner())
+        self::with_fact_tracer_cell(
+            verter_workspace::AggregateGenerations::from_seed(
+                &seed,
+                &self.live_aggregate_counters(),
+            ),
+            f,
+        )
     }
 
     /// Public accessor for the active fact tracer.

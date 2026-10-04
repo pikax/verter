@@ -241,7 +241,7 @@ impl VerterHost {
     /// Return the registered carrier structure owned by the active view.
     /// Overlay source is registered through the same authority used by
     /// materialization; an unmasked file reuses the committed base envelope.
-    pub(super) fn registered_structure_for_view(
+    pub(crate) fn registered_structure_for_view(
         &self,
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
@@ -992,6 +992,7 @@ impl VerterHost {
             declares_interface_app_config,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         });
 
         // Publish via the multi-candidate surface — base candidate (if

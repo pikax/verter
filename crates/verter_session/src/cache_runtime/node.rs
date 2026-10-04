@@ -32,7 +32,8 @@ use super::singleflight::{
     cooperative_admit_with_post_publish_by_flight_key, ComputeAdmission, InflightTable,
 };
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompatToken};
+use crate::resolver_core::fact_validation_port::FactValidation;
+use crate::resolver_core::{FactReadSetFinalise, StoreViewCompatToken};
 
 /// Per-compute context threaded into a node's `compute` / `validate`.
 ///
@@ -46,7 +47,7 @@ use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompat
 /// to drive an artifact lookup.
 pub(crate) struct ComputeCtx<'a> {
     /// The resolver / view the compute runs under.
-    pub resolver: &'a dyn ResolverContext,
+    pub resolver: &'a dyn FactValidation,
     /// Store-view compat token — the flight-lane dimension that keeps
     /// distinct overlays on the same cache key from coalescing.
     ///
@@ -74,10 +75,10 @@ impl<'a> ComputeCtx<'a> {
     /// constructor is for callers that already hold only a resolver. It
     /// is exercised by the `cache_runtime` tests.
     #[allow(dead_code)]
-    pub(crate) fn from_resolver(resolver: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn from_resolver(resolver: &'a dyn FactValidation) -> Self {
         Self {
-            compat_token: resolver.store_view().compat_token(),
-            generation: resolver.project_type_store().current_project_generation(),
+            compat_token: resolver.compat_token(),
+            generation: resolver.current_project_generation(),
             resolver,
         }
     }
@@ -169,9 +170,9 @@ pub(crate) trait ArtifactNode {
 pub(crate) fn lookup<N: ArtifactNode>(
     node: &N,
     key: N::Key,
-    resolver: &dyn ResolverContext,
+    resolver: &dyn FactValidation,
 ) -> Option<N::Value> {
-    let compat_token = resolver.store_view().compat_token();
+    let compat_token = resolver.compat_token();
     // The compute-time generation snapshot, captured BEFORE the cold
     // build dispatches any work. The freshly built entry is STAMPED with
     // this snapshot (`compute` reads `cx.generation()`). The validity
@@ -180,7 +181,7 @@ pub(crate) fn lookup<N: ArtifactNode>(
     // to the entry's stamp: a project-generation bump that lands during
     // the cold window leaves the stamp behind the live generation, so
     // the entry is rejected (no stale publish, no warm hit).
-    let snapshot_generation = resolver.project_type_store().current_project_generation();
+    let snapshot_generation = resolver.current_project_generation();
     let flight_key = QueryFlightKey {
         key: key.clone(),
         compat_token,
@@ -196,7 +197,7 @@ pub(crate) fn lookup<N: ArtifactNode>(
             let cx = ComputeCtx {
                 resolver,
                 compat_token,
-                generation: resolver.project_type_store().current_project_generation(),
+                generation: resolver.current_project_generation(),
             };
             node.validate(&key, entry, &cx)
         },
@@ -238,8 +239,7 @@ pub(crate) fn lookup<N: ArtifactNode>(
             // Post-compute revalidation: gate the freshly built entry's
             // stamp against the LIVE generation. A generation bump that
             // landed during the cold window rejects the publish.
-            entry.validated_at_generation
-                == resolver.project_type_store().current_project_generation()
+            entry.validated_at_generation == resolver.current_project_generation()
                 && entry
                     .signature
                     .validate_with_self_roots(resolver, &entry.self_root_canonicals)
@@ -386,15 +386,15 @@ pub(crate) mod query {
     pub(crate) fn lookup<N: QueryNode>(
         node: &N,
         key: N::Key,
-        resolver: &dyn ResolverContext,
+        resolver: &dyn FactValidation,
     ) -> Option<N::Value> {
-        let compat_token = resolver.store_view().compat_token();
+        let compat_token = resolver.compat_token();
         // Compute-time snapshot stamps the candidate; the validity gates
         // (`lookup_candidate` on warm hits / joiners, and the post-compute
         // revalidation) re-read the LIVE generation each time so a
         // mid-compute generation bump rejects the candidate. See the
         // artifact `lookup` for the snapshot-vs-live rationale.
-        let snapshot_generation = resolver.project_type_store().current_project_generation();
+        let snapshot_generation = resolver.current_project_generation();
         let flight_key = QueryFlightKey {
             key: key.clone(),
             compat_token,
@@ -411,7 +411,7 @@ pub(crate) mod query {
                 let cx = ComputeCtx {
                     resolver,
                     compat_token,
-                    generation: resolver.project_type_store().current_project_generation(),
+                    generation: resolver.current_project_generation(),
                 };
                 node.lookup_candidate(&key, &cx)
             },
@@ -476,8 +476,7 @@ pub(crate) mod query {
                 })
             },
             |candidate: &Candidate<N::Discriminant, N::Value>| {
-                candidate.validated_at_generation
-                    == resolver.project_type_store().current_project_generation()
+                candidate.validated_at_generation == resolver.current_project_generation()
                     && candidate
                         .signature
                         .validate_with_self_roots(resolver, &candidate.self_root_canonicals)

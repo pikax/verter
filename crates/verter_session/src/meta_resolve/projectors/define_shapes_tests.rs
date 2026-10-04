@@ -46,7 +46,10 @@ fn save_payload_source(project: &MetaProject) -> verter_type_expr::facts::Source
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
-    let shape = define_emits_shape(&ctx, "/App.vue", 0).expect("the emits macro surface resolves");
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let shape = define_emits_shape(&ctx, &fixture_dispatch_0, "/App.vue", 0)
+        .expect("the emits macro surface resolves");
     shape
         .value
         .properties
@@ -318,8 +321,11 @@ defineEmits<{ save: [id: number] }>()
 
     // Sanity: the UNTAMPERED analysis materializes cleanly — the typed
     // failure asserted below is not unconditional.
+
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_1,
         "/App.vue",
         analysis.clone(),
         None,
@@ -363,6 +369,7 @@ defineEmits<{ save: [id: number] }>()
     );
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_1,
         "/App.vue",
         tampered,
         None,
@@ -405,6 +412,7 @@ defineEmits<{ save: [id: number] }>()
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_1,
         "/App.vue",
         absent,
         None,
@@ -439,8 +447,9 @@ defineEmits<{ save: [id: number] }>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    let shape =
-        define_emits_shape(&ctx, "/App.vue", 0).expect("the authored emits macro surface resolves");
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let shape = define_emits_shape(&ctx, &fixture_dispatch_2, "/App.vue", 0)
+        .expect("the authored emits macro surface resolves");
     let save = shape
         .value
         .properties
@@ -492,8 +501,9 @@ defineEmits<ImportedEmits>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    let shape =
-        define_emits_shape(&ctx, "/App.vue", 0).expect("the imported emits macro surface resolves");
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let shape = define_emits_shape(&ctx, &fixture_dispatch_3, "/App.vue", 0)
+        .expect("the imported emits macro surface resolves");
     let save = shape
         .value
         .properties

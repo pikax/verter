@@ -161,20 +161,11 @@ impl AppConfigNoOverrideProofDb {
     /// `cfg(any(test, feature = "test-support"))` to match (no dead surface in
     /// release).
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn peek(
+    pub(crate) fn candidate(
         &self,
         key: &AppConfigNoOverrideProofKey,
-        ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> Option<Arc<AppConfigNoOverrideProofEntry>> {
-        let entry = self.entries.get(key)?;
-        if crate::fact_signature_helpers::validate_fact_signature(ctx, &entry.fact_dep_signature) {
-            crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
-            Some(Arc::clone(entry.value()))
-        } else {
-            // Stale; drop reference to allow eviction by other paths.
-            drop(entry);
-            None
-        }
+        Some(Arc::clone(self.entries.get(key)?.value()))
     }
 
     /// Publish a freshly-computed proof entry. Called by the

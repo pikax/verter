@@ -171,6 +171,9 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// request-world memo covering the base, session-overlay and
     /// `RequestOnly` worlds. See [`RequestBundleMemo`].
     bundle_memo: RequestBundleMemo,
+    /// Source lifetime bookkeeping only: excluded from revision, compatibility
+    /// and validation population. Includes unpublished inputs until request end.
+    pub(crate) input_artifacts: super::request_inputs::InputArtifactLeases,
     #[cfg(test)]
     verify_write_protocol: AtomicBool,
     /// How many completions promoted a content version (test-only).
@@ -365,6 +368,7 @@ impl CanonicalCompletionOverlay {
             derived_hashes_nonempty: AtomicBool::new(false),
             file_facts_nonempty: AtomicBool::new(false),
             bundle_memo: RequestBundleMemo::default(),
+            input_artifacts: super::request_inputs::InputArtifactLeases::default(),
             #[cfg(test)]
             verify_write_protocol: AtomicBool::new(false),
             #[cfg(test)]
@@ -883,9 +887,8 @@ impl CanonicalCompletionOverlay {
 /// The wrapper owns the overlay via `Arc` and borrows the base view.
 /// Constructed once at request entry; the
 /// `HostResolverContext` / `SessionResolverContext` owns the wrapper as
-/// a field so [`crate::resolver_core::ResolverContext::store_view`]
-/// returns a borrow into the owned field — there is no temporary view
-/// built per call.
+/// a private field. The [`super::fact_validation_port::FactValidation`] adapter
+/// validates against that field without building a temporary view per call.
 ///
 /// ### Shadowing semantics
 ///

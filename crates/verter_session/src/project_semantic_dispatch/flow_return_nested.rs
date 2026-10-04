@@ -27,6 +27,7 @@ use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
 
 use super::contextual::ContextualSignature;
+use super::FlowDemandDriver;
 use super::*;
 
 /// A nested function value demanded where an evaluator suspends: what it
@@ -208,8 +209,8 @@ impl<'a, T> NestedStore<'a, T> {
 }
 
 /// A nested function's body under evaluation by its own evaluator.
-pub(super) struct NestedActivation<'d, 'a> {
-    evaluator: Box<FlowEvaluator<'d, 'a>>,
+pub(super) struct NestedActivation<'d, 'a, D: FlowDemandDriver> {
+    evaluator: Box<FlowEvaluator<'d, 'a, D>>,
     run: RegionRun<'a>,
     owned: &'a NestedOwned,
     finish: NestedFinish,
@@ -256,11 +257,11 @@ pub(super) enum NestedSignatureStep {
 }
 
 /// A nested function prepared for evaluation.
-pub(super) enum NestedPrepared<'d, 'a> {
+pub(super) enum NestedPrepared<'d, 'a, D: FlowDemandDriver> {
     /// Its signature, with nothing to evaluate.
     Value(SemanticNodeId),
     /// Its body, to evaluate on its own evaluator.
-    Child(Box<NestedActivation<'d, 'a>>),
+    Child(Box<NestedActivation<'d, 'a, D>>),
 }
 
 /// How a drive ends.
@@ -271,7 +272,7 @@ enum DriveEnd {
     Nested(SemanticNodeId),
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Evaluate a region, driving the nested functions its return
     /// statements reach from the stack (see the module docs).
     pub(super) fn eval_region(
@@ -333,7 +334,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         store: &'a NestedStore<'a>,
         mut root: Option<RegionRun<'r>>,
-        mut stack: Vec<NestedActivation<'d, 'a>>,
+        mut stack: Vec<NestedActivation<'d, 'a, D>>,
     ) -> DriveEnd
     where
         'b: 'a,
@@ -396,7 +397,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         demand: NestedDemand,
         outer_env: &FlowBinderEnv,
         store: &'a NestedStore<'a>,
-    ) -> NestedPrepared<'d, 'a>
+    ) -> NestedPrepared<'d, 'a, D>
     where
         'b: 'a,
     {
@@ -427,53 +428,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let key = self.dispatch.flow_return_key_for(&identity);
         let prepared = (|| {
             let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
-            let flow_slice = self.dispatch.ctx.project_type_store().flow_slice();
-            let index = site
-                .indexed
-                .shallow_state
-                .decl_bodies()
-                .function_program_index();
+            let index = site.source_demand.function_program_index();
             let entry = index.get(function)?.entry();
-            let skeleton = flow_slice.skeleton_for(&site.slice_key_function, self.dispatch.ctx)?;
-            let bound = flow_slice.bound_graph_for(&site.slice_key_function)?;
+            let skeleton = self
+                .dispatch
+                .flow_slice_skeleton(&site.slice_key_function)?;
+            let bound = self
+                .dispatch
+                .flow_bound_graph_for(&site.slice_key_function)?;
             let planned_and_selection = if has_declared_return {
                 None
             } else {
                 let crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned) =
-                    crate::cache_runtime::lookup(
-                        flow_slice.hash_node(),
-                        site.slice_key.clone(),
-                        self.dispatch.ctx,
-                    )?
+                    self.dispatch.flow_slice_hash(site.slice_key.clone())?
                 else {
                     return None;
                 };
-                let lowered = crate::cache_runtime::lookup(
-                    flow_slice.lowered_node(),
+                let lowered = self.dispatch.flow_slice_lowered(
                     crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
-                    self.dispatch.ctx,
                 )?;
                 Some((
                     planned,
                     crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered),
                 ))
             };
-            let content = site
-                .indexed
-                .shallow_state
-                .decl_bodies()
-                .flow_slice_content_with_context(
-                    entry,
-                    planned_and_selection
-                        .as_ref()
-                        .map(|(_, selection)| selection.clone()),
-                    &bound,
-                    Some(Arc::clone(context)),
-                    self.policy(),
-                )?;
+            let content = site.source_demand.flow_slice_content_with_context(
+                entry,
+                planned_and_selection
+                    .as_ref()
+                    .map(|(_, selection)| selection.clone()),
+                &bound,
+                Some(Arc::clone(context)),
+                self.policy(),
+            )?;
             Some((
                 content,
                 skeleton,
@@ -655,7 +645,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// from its body's evaluation, `outcome`, and release its evaluator.
     fn finish_nested(
         &mut self,
-        activation: NestedActivation<'d, '_>,
+        activation: NestedActivation<'d, '_, D>,
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
     ) -> SemanticNodeId {
         let NestedActivation {
@@ -692,9 +682,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 #[cfg(test)]
                 if self
                     .dispatch
-                    .ctx
-                    .host_for_fact_tracer_install()
-                    .flow_fault_injection
+                    .observers
+                    .flow
                     .short_nested_execution_ledger
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
@@ -706,7 +695,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .finish(nested_evaluator.plan.as_deref())
                 .and_then(|evidence| {
                     #[cfg(test)]
-                    let evidence = if self.dispatch.ctx.host_for_fact_tracer_install().flow_fault_injection
+                    let evidence = if self.dispatch.observers.flow
                         .drop_binding_domain_product.load(std::sync::atomic::Ordering::Relaxed) {
                         None
                     } else { evidence };

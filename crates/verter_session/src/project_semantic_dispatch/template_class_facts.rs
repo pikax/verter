@@ -470,7 +470,7 @@ fn classify_binding(
         context,
     );
     let read = dispatch.execute_read(key);
-    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
     crate::request_context::observe_component_meta_read_suppress(&read);
     match read.value {
         QueryResult::Value(node) if !read.result_is_partial => {
@@ -497,11 +497,7 @@ fn classify_prop(
     payload: &verter_type_expr::locators::MacroPayloadLocator,
     subject: TemplateClassSubject,
 ) -> TemplateClassSemanticFactRow {
-    let mirror = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-        dispatch.ctx,
-        canonical,
-        payload.macro_index as usize,
-    );
+    let mirror = dispatch.macro_type_arg_hot_ref(canonical, payload.macro_index as usize);
     // The AUTHORED head of this prop member, from whichever producer holds it.
     //
     // A DIRECT object-literal macro type argument (`defineProps<{ x: Ref<…> }>()`)

@@ -215,13 +215,12 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
 /// never poisons a cross-request cache), matching the ephemeral-guard
 /// contract documented on this module.
 fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
-    let resolver = ctx.resolver_ctx();
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
     let mut seen: rustc_hash::FxHashMap<SemanticNodeId, u64> = rustc_hash::FxHashMap::default();
     bridge.write_u64(args.len() as u64);
     for arg in args {
-        hash_node_rec(resolver, *arg, &mut bridge, &mut seen, 0);
+        hash_node_rec(ctx.engine.dispatch, *arg, &mut bridge, &mut seen, 0);
     }
     hasher.digest()
 }
@@ -232,7 +231,7 @@ fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash
 fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
-    hash_semantic_node_structurally(ctx.resolver_ctx(), node, &mut bridge);
+    hash_semantic_node_structurally(ctx.engine.dispatch, node, &mut bridge);
     hasher.digest()
 }
 
@@ -251,7 +250,7 @@ fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
 /// literal values, and composite structural shape stay distinct). It is an
 /// ephemeral recursion-guard identity only — never a cache key.
 pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     root: SemanticNodeId,
     hasher: &mut H,
 ) {
@@ -260,11 +259,11 @@ pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
     // Pre-order ordinals for back-reference encoding on shared / cyclic
     // child edges.
     let mut seen: FxHashMap<SemanticNodeId, u64> = FxHashMap::default();
-    hash_node_rec(ctx, root, hasher, &mut seen, 0);
+    hash_node_rec(dispatch, root, hasher, &mut seen, 0);
 }
 
 fn hash_node_rec<H: std::hash::Hasher>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     hasher: &mut H,
     seen: &mut rustc_hash::FxHashMap<SemanticNodeId, u64>,
@@ -284,7 +283,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
     let ordinal = seen.len() as u64;
     seen.insert(node, ordinal);
 
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
         hasher.write_u8(0xFD);
         return;
     };
@@ -301,7 +300,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
         let args = data.carrier_type_args();
         hasher.write_u64(args.len() as u64);
         for arg in args {
-            hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
         }
         return;
     }
@@ -315,14 +314,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(op.stable_hash_tag());
             hasher.write_u64(args.len() as u64);
             for arg in args.iter() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             base.hash(hasher);
             hasher.write_u64(args.len() as u64);
             for arg in args.iter() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::ClassExpressionInstance {
@@ -333,9 +332,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
             identity.hash(hasher);
             hasher.write_u64(type_arguments.len() as u64);
             for argument in type_arguments.iter() {
-                hash_node_rec(ctx, *argument, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *argument, hasher, seen, depth + 1);
             }
-            hash_node_rec(ctx, *surface, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *surface, hasher, seen, depth + 1);
         }
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
@@ -348,7 +347,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             kind.hash(hasher);
         }
         SemanticNodeData::Alias(target) => {
-            hash_node_rec(ctx, *target, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *target, hasher, seen, depth + 1);
         }
         SemanticNodeData::Object(surface) => {
             hasher.write_u64(surface.positive_members().len() as u64);
@@ -368,49 +367,49 @@ fn hash_node_rec<H: std::hash::Hasher>(
                     }
                     AuthoredPropertyKey::Computed(node) => {
                         hasher.write_u8(3);
-                        hash_node_rec(ctx, *node, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, *node, hasher, seen, depth + 1);
                     }
                 }
                 hasher.write_u8(u8::from(member.optional));
                 hasher.write_u8(u8::from(member.readonly));
                 member.method_kind.hash(hasher);
-                hash_node_rec(ctx, member.value, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, member.value, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.call_signatures.len() as u64);
             for signature in surface.call_signatures.iter() {
-                hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.construct_signatures.len() as u64);
             for signature in surface.construct_signatures.iter() {
-                hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.index_signatures.len() as u64);
             for signature in surface.index_signatures.iter() {
-                hash_node_rec(ctx, signature.key_type, hasher, seen, depth + 1);
-                hash_node_rec(ctx, signature.value_type, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, signature.key_type, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, signature.value_type, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
             program.hash(hasher);
             for child in program.child_nodes() {
-                hash_node_rec(ctx, child, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, child, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Union(arms) => {
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
-                hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Intersection(arms) => {
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
-                hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Array { element, readonly } => {
             hasher.write_u8(u8::from(*readonly));
-            hash_node_rec(ctx, *element, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *element, hasher, seen, depth + 1);
         }
         SemanticNodeData::Tuple { elements, readonly } => {
             hasher.write_u8(u8::from(*readonly));
@@ -424,7 +423,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 hasher.write_u8(u8::from(element.optional));
                 hasher.write_u8(u8::from(element.rest));
-                hash_node_rec(ctx, element.value, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, element.value, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::TemplateLiteral {
@@ -437,14 +436,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
             hasher.write_u64(expressions.len() as u64);
             for expr in expressions.iter() {
-                hash_node_rec(ctx, *expr, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *expr, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::KeyOf { base } => {
-            hash_node_rec(ctx, *base, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *base, hasher, seen, depth + 1);
         }
         SemanticNodeData::IndexedAccess { object, index } => {
-            hash_node_rec(ctx, *object, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *object, hasher, seen, depth + 1);
             match index {
                 IndexKey::String(key) => {
                     hasher.write_u8(1);
@@ -460,12 +459,12 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 IndexKey::Computed(index_node) => {
                     hasher.write_u8(4);
-                    hash_node_rec(ctx, *index_node, hasher, seen, depth + 1);
+                    hash_node_rec(dispatch, *index_node, hasher, seen, depth + 1);
                 }
             }
         }
         SemanticNodeData::Mapped { source, mapper } => {
-            hash_node_rec(ctx, *source, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *source, hasher, seen, depth + 1);
             mapper.hash(hasher);
         }
         SemanticNodeData::TypeOf(_) => {
@@ -477,7 +476,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
             }
             for arg in data.carrier_type_args() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         // The nominal terminal hashes its DECLARING IDENTITY: the identity
@@ -515,7 +514,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write(name.as_bytes());
             binder.write_stable_fingerprint(hasher);
             if let Some(constraint) = constraint {
-                hash_node_rec(ctx, *constraint, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *constraint, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::InferRef { name, binder } => {
@@ -531,24 +530,24 @@ fn hash_node_rec<H: std::hash::Hasher>(
             pending,
         } => {
             hasher.write_u8(u8::from(*distributive));
-            hash_node_rec(ctx, *check, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *extends, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *true_branch_ref, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *false_branch_ref, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *check, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *extends, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *true_branch_ref, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *false_branch_ref, hasher, seen, depth + 1);
             match pending {
                 None => hasher.write_u8(0),
                 Some(frame) => {
                     hasher.write_u8(1);
                     hasher.write_usize(frame.true_branch().pairs().len());
                     for &(param, arg) in frame.true_branch().pairs() {
-                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
-                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, param, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, arg, hasher, seen, depth + 1);
                     }
                     hasher.write_u8(2);
                     hasher.write_usize(frame.false_branch().pairs().len());
                     for &(param, arg) in frame.false_branch().pairs() {
-                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
-                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, param, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, arg, hasher, seen, depth + 1);
                     }
                 }
             }
@@ -577,9 +576,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 hasher.write_u8(u8::from(param.optional));
                 hasher.write_u8(u8::from(param.rest));
-                hash_node_rec(ctx, param.ty, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, param.ty, hasher, seen, depth + 1);
             }
-            hash_node_rec(ctx, *return_type, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *return_type, hasher, seen, depth + 1);
             hasher.write_u64(type_parameters.len() as u64);
             for param in type_parameters.iter() {
                 hasher.write(param.name.as_bytes());
@@ -590,14 +589,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 predicate.subject.hash(hasher);
                 hasher.write_u8(u8::from(predicate.asserts));
                 if let Some(target) = predicate.ty {
-                    hash_node_rec(ctx, target, hasher, seen, depth + 1);
+                    hash_node_rec(dispatch, target, hasher, seen, depth + 1);
                 }
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {
             hasher.write_u64(contributors.len() as u64);
             for contributor in contributors.iter() {
-                hash_node_rec(ctx, *contributor, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *contributor, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Opaque(error) => {
@@ -616,7 +615,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hasher.write_u8(u8::from(typeof_query));
             }
             for arg in data.carrier_type_args() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::SyntheticBinding { id, .. } => {
@@ -677,7 +676,9 @@ mod tests {
         let mut hasher = xxhash_rust::xxh3::Xxh3::new();
         let mut bridge = LiteralHashBridge(&mut hasher);
         crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-            hash_semantic_node_structurally(ctx, node, &mut bridge);
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+            hash_semantic_node_structurally(dispatch, node, &mut bridge);
         });
         hasher.digest()
     }
@@ -1012,7 +1013,10 @@ mod tests {
         let empty_idents: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
 
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            let mut engine = ComponentMetaQueryEngine::new(ctx);
+            let fixture_dispatch_0 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+            let mut engine = ComponentMetaQueryEngine::new(ctx, &fixture_dispatch_0);
             let mut pctx = PolicyCtx {
                 registry: &policy_registry,
                 engine: &mut engine,

@@ -209,12 +209,12 @@ pub(crate) enum MacroPathOutputExpansion {
 /// different DEMAND on its handle, never a second lowering of the macro argument.
 fn lower_macro_arg_carrier_head(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
     mode: ProjectionMode,
 ) -> Option<crate::semantic_query::SemanticNodeId> {
-    crate::structural_carrier_producer::macro_type_arg_hot_ref(ctx, owner_canonical, macro_index)
+    dispatch
+        .macro_type_arg_hot_ref(owner_canonical, macro_index)
         .map(|product| dispatch.resolve_hot_handle_at_mode(product.hot, mode))
 }
 
@@ -228,12 +228,11 @@ fn lower_macro_arg_carrier_head(
 /// former branch (produced-node-id audit parity + the `parsed` fallback) EXACTLY.
 #[must_use]
 pub(crate) fn expand_define_model_output(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> DefineModelOutputExpansion {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     // Read the macro arg's mode-neutral mirror handle (the ONE producer) and
     // resolve it through the shared dispatch at `Navigate` — publication demand
     // is Navigate-only (a full `get_component_meta` records ZERO
@@ -241,8 +240,7 @@ pub(crate) fn expand_define_model_output(
     // a carrier and consumers re-resolve it on demand. A different DEMAND on
     // the same handle, not a second lowering of the macro arg.
     let Some(base_id) = lower_macro_arg_carrier_head(
-        &dispatch,
-        ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         ProjectionMode::Navigate,
@@ -251,7 +249,7 @@ pub(crate) fn expand_define_model_output(
     };
     let artifact =
         AdmittedExpansionNode::new(base_id, Arc::from(Vec::new().into_boxed_slice()), false);
-    match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
+    match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
         Some(normalized) => DefineModelOutputExpansion::Materialized {
             produced_node_id: base_id,
             normalized,
@@ -273,7 +271,7 @@ pub(crate) fn expand_define_model_output(
 /// accepting a raw node or a forgeable wrapper.
 #[must_use]
 pub(crate) fn expand_generic_project_path_output(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
@@ -283,14 +281,9 @@ pub(crate) fn expand_generic_project_path_output(
     use crate::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    let Some(base_id) = lower_macro_arg_carrier_head(
-        &dispatch,
-        ctx,
-        owner_canonical,
-        macro_index,
-        carrier_lower_mode,
-    ) else {
+    let Some(base_id) =
+        lower_macro_arg_carrier_head(dispatch, owner_canonical, macro_index, carrier_lower_mode)
+    else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -314,7 +307,7 @@ pub(crate) fn expand_generic_project_path_output(
                 Arc::from(Vec::new().into_boxed_slice()),
                 false,
             );
-            match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
+            match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {
                     produced_node_id: node_id,
                     normalized,
@@ -339,7 +332,7 @@ pub(crate) fn expand_generic_project_path_output(
 /// wrapper.
 #[must_use]
 pub(crate) fn expand_slot_binding_output(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
@@ -348,14 +341,9 @@ pub(crate) fn expand_slot_binding_output(
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use crate::semantic_query::QueryResult;
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    let Some(base_id) = lower_macro_arg_carrier_head(
-        &dispatch,
-        ctx,
-        owner_canonical,
-        macro_index,
-        carrier_lower_mode,
-    ) else {
+    let Some(base_id) =
+        lower_macro_arg_carrier_head(dispatch, owner_canonical, macro_index, carrier_lower_mode)
+    else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
     let slot_binding = dispatch.project_slot_binding_member_with_terminal_id(
@@ -371,7 +359,7 @@ pub(crate) fn expand_slot_binding_output(
                 slot_binding.dep_signature,
                 slot_binding.result_is_partial,
             );
-            match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
+            match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {
                     produced_node_id: terminal_id,
                     normalized,

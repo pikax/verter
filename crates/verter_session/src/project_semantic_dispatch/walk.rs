@@ -2617,7 +2617,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // existing behavior. This keeps production hosts on the
         // existing graph-size + cycle-set bound while letting
         // hermetic tests construct a small budget for discrimination.
-        let budget = self.dispatch.ctx.config().depth_budget;
+        let budget = self.dispatch.policy.depth_budget;
         let cap_active = budget > 0 && budget < crate::project_semantic_dispatch::MAX_DEPTH;
 
         while index < path.len() {
@@ -6078,9 +6078,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         const PATHOLOGICAL_CAP_DEFAULT: usize = 10_000;
         let pathological_cap: usize = self
             .dispatch
-            .ctx
-            .config()
-            .recursion_budget_overrides
+            .policy
             .walker_pathological_cap
             .unwrap_or(PATHOLOGICAL_CAP_DEFAULT);
 
@@ -7782,7 +7780,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let mut folded: Option<SemanticNodeId> = None;
         for iteration_key in &iteration_keys {
             // Cancellation before each selected-value force.
-            if self.dispatch.ctx.is_cancelled() {
+            if self.dispatch.cancellation.is_cancelled() {
                 return None;
             }
             let literal = iteration_key.literal.as_ref()?;
@@ -7854,7 +7852,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // Cancellation BEFORE key enumeration — the Shallow mirror of the
         // `build_mapped_type` entry check. A cancelled request must not
         // start enumerating a key domain, let alone force values for it.
-        if self.dispatch.ctx.is_cancelled() {
+        if self.dispatch.cancellation.is_cancelled() {
             self.mark_cancelled_partial();
             return None;
         }
@@ -8105,7 +8103,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // observe the cancellation, so every remaining key is
             // substituted and its value forced for a result that can
             // never be published.
-            if self.dispatch.ctx.is_cancelled() {
+            if self.dispatch.cancellation.is_cancelled() {
                 self.mark_cancelled_partial();
                 return None;
             }
@@ -8138,7 +8136,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // been decided, so this key survives, but forcing its value
             // operand is the expensive half and a cancelled request has
             // no use for the answer.
-            if self.dispatch.ctx.is_cancelled() {
+            if self.dispatch.cancellation.is_cancelled() {
                 self.mark_cancelled_partial();
                 return None;
             }

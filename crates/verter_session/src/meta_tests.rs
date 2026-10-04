@@ -4646,8 +4646,15 @@ fn extract_scope_captures_cold_macro_dto_partial_into_merged_gate_signal() {
         ctx.projection_budget.check_projection_op_count();
         let _guard = crate::request_context::RequestContextGuard::install(ctx);
         crate::resolver_core::with_bare_host_ctx_for_test(host, |rc| {
+            let fixture_dispatch_0 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(rc);
             crate::host_manage::extract_component_meta_from_resolved(
-                host, canonical, &resolved, false, rc,
+                host,
+                canonical,
+                &resolved,
+                false,
+                rc,
+                &fixture_dispatch_0,
             )
         })
     };
@@ -5877,7 +5884,15 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/GateIndex.vue",
@@ -5946,7 +5961,15 @@ defineProps<Props>()
         .expect("defineProps macro should exist");
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     let roots =
         resolver_host.projectable_owner_local_macro_roots("/PreFilterIndex.vue", define_props);
     assert_eq!(
@@ -6000,7 +6023,15 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CtorRoot.vue",
@@ -6047,7 +6078,15 @@ defineProps<Root>()
         .unwrap();
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/IdxKind.vue",
@@ -6103,7 +6142,15 @@ defineProps<Root>()
         .unwrap();
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CallRoot.vue",
@@ -6154,7 +6201,15 @@ defineProps<Root>()
         .unwrap();
 
     let host = project.host();
-    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolver_host = HostComponentMetaResolver {
+        host,
+        ctx: host,
+        engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+            dispatch: &dispatch,
+            session_view: None,
+        },
+    };
     assert!(resolver_host.owner_local_macro_root_has_surface(
         "/OwnerGateIsolation.vue",
         verter_type_expr::TopLevelOwnerId::module(0),
@@ -16009,12 +16064,16 @@ defineEmits<Emits>()
         .expect("resolved component meta should exist");
 
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_1 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_1,
         )
     })
     .analysis;
@@ -16268,12 +16327,16 @@ defineSlots<TabsSlots<T>>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_2 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_2,
         )
     })
     .analysis;
@@ -16463,12 +16526,16 @@ defineEmits<Emits>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_3 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_3,
         )
     })
     .analysis;
@@ -16727,12 +16794,16 @@ defineSlots<TabsSlots<T>>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_4 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_4,
         )
     })
     .analysis;
@@ -16949,12 +17020,16 @@ defineSlots<TabsSlots<T>>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_5 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_5,
         )
     })
     .analysis;
@@ -17198,12 +17273,16 @@ defineSlots<TabsSlots<T>>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_6 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_6,
         )
     })
     .analysis;
@@ -17310,12 +17389,16 @@ defineProps<{
     );
 
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_7 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             true,
             ctx,
+            &fixture_dispatch_7,
         )
     })
     .analysis;
@@ -17393,12 +17476,16 @@ defineProps<{
         .expect("resolved component meta should exist");
     let started = std::time::Instant::now();
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_8 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             false,
             ctx,
+            &fixture_dispatch_8,
         )
     })
     .analysis;
@@ -17503,12 +17590,16 @@ defineSlots<Slots<M>>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_9 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             false,
             ctx,
+            &fixture_dispatch_9,
         )
     })
     .analysis;
@@ -24179,12 +24270,16 @@ defineProps<WidgetProps>()
         })
     };
     let extraction = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let fixture_dispatch_10 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             host,
             "/src/Widget.vue",
             cached.state.as_ref(),
             true,
             ctx,
+            &fixture_dispatch_10,
         )
     });
     assert!(
@@ -28897,8 +28992,11 @@ defineEmits<{ change: [value: number]; close: [] }>()
 
     // Sanity: the UNTAMPERED analysis materializes cleanly — the typed
     // failure asserted below is not unconditional.
+
+    let fixture_dispatch_11 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let ok = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_11,
         "/App.vue",
         analysis.clone(),
         None,
@@ -28933,6 +29031,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_11,
         "/App.vue",
         tampered,
         None,
@@ -29015,8 +29114,10 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
             &verter_type_expr::PublicationPolicy::exact_only(),
         ));
 
+    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_12,
         "/App.vue",
         analysis,
         None,
@@ -30010,8 +30111,10 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         }],
     };
 
+    let fixture_dispatch_13 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_13,
         "/App.vue",
         analysis,
         None,
@@ -30101,8 +30204,10 @@ fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
         completeness: cm::PublicInstanceCompleteness::Exact,
     });
 
+    let fixture_dispatch_14 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_14,
         "/App.vue",
         analysis,
         None,
@@ -30156,8 +30261,10 @@ fn component_meta_output_exposed_required_source_unavailable_still_fails_closed(
         tags: Vec::new(),
     });
 
+    let fixture_dispatch_15 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_15,
         "/App.vue",
         analysis,
         None,
@@ -30228,8 +30335,11 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             tags: Vec::new(),
             declared_in_macro_type_arg: true,
         });
+
+    let fixture_dispatch_16 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_16,
         "/App.vue",
         analysis,
         None,
@@ -30291,6 +30401,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
         };
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_16,
         "/App.vue",
         analysis,
         None,
@@ -30341,8 +30452,10 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
             declared_in_macro_type_arg: false,
         });
 
+    let fixture_dispatch_17 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_17,
         "/App.vue",
         analysis.clone(),
         None,
@@ -30357,6 +30470,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_17,
         "/App.vue",
         analysis,
         None,
@@ -30412,8 +30526,11 @@ fn build_output_with_prop_source(
             tags: Vec::new(),
             declared_in_macro_type_arg: false,
         });
+
+    let fixture_dispatch_18 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_18,
         "/App.vue",
         analysis,
         None,
@@ -31350,8 +31467,10 @@ defineProps<{ own: SharedAlias }>()
         kind: cm::AcceptedPropKind::Attr,
     });
 
+    let fixture_dispatch_19 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_19,
         "/Parent.vue",
         analysis,
         None,
@@ -31470,8 +31589,10 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
         },
     );
 
+    let fixture_dispatch_20 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_20,
         "/App.vue",
         analysis,
         None,
@@ -31565,8 +31686,10 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
             });
     }
 
+    let fixture_dispatch_21 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_21,
         "/App.vue",
         analysis,
         None,
@@ -31712,8 +31835,11 @@ const cond = true
             },
         ],
     };
+
+    let fixture_dispatch_22 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_22,
         "/App.vue",
         probe,
         None,
@@ -31787,8 +31913,10 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
         },
     };
 
+    let fixture_dispatch_23 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_23,
         "/App.vue",
         analysis,
         Some(seed),
@@ -32656,8 +32784,11 @@ defineEmits<{ save: [id: number] }>()
     assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
 
     // PRESENT arm: the untampered analysis materializes the real source.
+
+    let fixture_dispatch_24 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_24,
         "/App.vue",
         analysis.clone(),
         None,
@@ -32678,6 +32809,7 @@ defineEmits<{ save: [id: number] }>()
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_24,
         "/App.vue",
         absent,
         None,
@@ -32702,6 +32834,7 @@ defineEmits<{ save: [id: number] }>()
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
+        &fixture_dispatch_24,
         "/App.vue",
         failed,
         None,

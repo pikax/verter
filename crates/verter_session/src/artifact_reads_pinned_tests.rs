@@ -29,6 +29,7 @@
 //! scenario. The test then asserts the pinned read and Route oracle reject
 //! the stale artifact. A pre-fix `get_any` tree returns the planted stale
 //! hash and the assertions FAIL.
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use crate::resolver_core::DerivedFactKind;
@@ -330,7 +331,7 @@ fn import_route_witness_ignores_a_planted_stale_artifact() {
 /// artifact whose `whole_hash == overlay_hash`.
 #[test]
 fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
-    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
 

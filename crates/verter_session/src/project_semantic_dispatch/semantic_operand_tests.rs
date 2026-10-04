@@ -1676,7 +1676,7 @@ fn content_edit_invalidates_unchanged_locator_identity() {
     assert_eq!(dispatch_cold_for(&key), 2);
     assert_eq!(dispatch_cold_for(&forced_family), 2);
 
-    let incremental = crate::typeinfo::raise::render_node_display_with_ctx(&host, after)
+    let incremental = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, after)
         .expect("incremental result must render");
     let fresh_host = make_host();
     upsert(&fresh_host, SOURCE_V2);
@@ -1686,7 +1686,7 @@ fn content_edit_invalidates_unchanged_locator_identity() {
         &mint(&fresh_dispatch, whole("Owned")),
         ProjectionMode::Expanded,
     );
-    let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&fresh_host, fresh)
+    let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, fresh)
         .expect("fresh result must render");
     assert_eq!(incremental.text, fresh.text);
     assert_eq!(incremental.degraded, fresh.degraded);

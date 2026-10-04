@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use super::macro_type_arg_hot_ref as macro_type_arg_hot_product;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -24,7 +23,10 @@ fn macro_type_arg_hot_ref(
     canonical: &str,
     macro_index: usize,
 ) -> Option<HotTypeRef> {
-    macro_type_arg_hot_product(host, canonical, macro_index).map(|product| product.hot)
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    fixture_dispatch_0
+        .macro_type_arg_hot_ref(canonical, macro_index)
+        .map(|product| product.hot)
 }
 
 fn host() -> VerterHost {

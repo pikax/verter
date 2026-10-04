@@ -67,11 +67,7 @@ type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
 /// no-warm signal a cache-admitting consumer must NOT persist as absence, so a
 /// later demand under a live lease recovers. Never collapse the two at a
 /// warm-admission boundary (the write-once prepared-decl slot).
-pub(crate) enum PreparedDeclOutcome<T> {
-    Ready(Option<T>),
-    LeaseMiss,
-    Failed(PreparationFailure),
-}
+pub(crate) use super::request_inputs::PreparedDeclOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationFailure {
@@ -120,7 +116,7 @@ impl<T> PreparedDeclOutcome<T> {
     /// enclosing traced compute that folds this transient miss refuses its
     /// own shared-cache admission; a `Ready(None)` cacheable absence marks
     /// nothing.
-    fn into_result(self) -> Result<Option<T>, PreparationFailure> {
+    pub(crate) fn into_result(self) -> Result<Option<T>, PreparationFailure> {
         match self {
             PreparedDeclOutcome::Ready(value) => Ok(value),
             PreparedDeclOutcome::LeaseMiss => {
@@ -1354,6 +1350,8 @@ pub struct PreparedOwnerScope {
 /// import graph or file content changes.
 #[derive(Clone)]
 pub struct PreparedDeclBundle {
+    input_projection:
+        super::request_inputs::CachedProjection<super::request_inputs::PreparedInputRecord>,
     /// The content version (`ShallowFileState::whole_hash`) of the
     /// canonical file this bundle was built from. A consumer that
     /// resolves a declaration through this bundle and roots a cache
@@ -1370,10 +1368,23 @@ pub struct PreparedDeclBundle {
     /// Exact declaration-scope surfaces partitioned by lexical owner.
     /// There is deliberately no ordinary-owner fallback: an absent owner has
     /// an empty scope rather than inheriting module-zero declarations.
-    pub owner_scopes: FxHashMap<TopLevelOwnerId, PreparedOwnerScope>,
+    pub owner_scopes: Arc<FxHashMap<TopLevelOwnerId, PreparedOwnerScope>>,
 }
 
 impl PreparedDeclBundle {
+    pub(crate) fn input_record(&self) -> Arc<super::request_inputs::PreparedInputRecord> {
+        self.input_projection
+            .get_or_init(|| super::request_inputs::PreparedInputRecord {
+                observation_id: {
+                    static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    NEXT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                },
+                owner_whole_hash: self.owner_whole_hash,
+                owner_scopes: Arc::clone(&self.owner_scopes),
+            })
+    }
+
     /// Exact declaration scope for `owner`.
     #[must_use]
     pub fn owner_scope(&self, owner: TopLevelOwnerId) -> Option<&PreparedOwnerScope> {
@@ -1408,18 +1419,9 @@ impl PreparedDeclBundle {
     /// Plain result-shaped sibling of
     /// [`Self::prepare_augmentation_value_decl_outcome_in`] for locator
     /// replay.
-    pub(crate) fn prepare_augmentation_value_decl_in(
-        &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
-        owner: TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Result<Option<PreparedValueDecl>, PreparationFailure> {
-        self.prepare_augmentation_value_decl_outcome_in(scope, owner, symbol_name)
-            .into_result()
-    }
-
     /// Plain result-shaped sibling for locator replay. Lease misses retain the
     /// existing non-cacheability fan-out performed by `into_result`.
+    #[cfg(test)]
     pub(crate) fn prepare_augmentation_type_decl_in(
         &self,
         scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
@@ -1452,7 +1454,7 @@ pub fn build_prepared_decl_bundle(
     let dep_edges = Arc::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 
-    let header_index = state.decl_bodies().header_index();
+    let header_index = &state.headers;
     let mut owner_scopes: FxHashMap<TopLevelOwnerId, PreparedOwnerScope> = FxHashMap::default();
 
     // Same-file inventories are already keyed by exact lexical owner.
@@ -1513,6 +1515,7 @@ pub fn build_prepared_decl_bundle(
 
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
+        input_projection: super::request_inputs::CachedProjection::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(
             canonical_id,
@@ -1529,7 +1532,7 @@ pub fn build_prepared_decl_bundle(
             interner,
         ),
         dep_edges,
-        owner_scopes,
+        owner_scopes: Arc::new(owner_scopes),
     }
 }
 
@@ -1542,8 +1545,7 @@ pub fn build_prepared_type_decl_cache(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedTypeDeclCache {
     let mut slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedTypeDeclSlot> = state
-        .decl_bodies()
-        .header_index()
+        .headers
         .type_headers
         .keys()
         .cloned()
@@ -1603,8 +1605,7 @@ pub fn build_prepared_value_decl_cache(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedValueDeclCache {
     let mut slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot> = state
-        .decl_bodies()
-        .header_index()
+        .headers
         .value_headers
         .keys()
         .filter(|key| !state.is_import_local_in(key.owner, key.name.as_ref()))
@@ -1618,8 +1619,7 @@ pub fn build_prepared_value_decl_cache(
     // although they never enter the file surface; a file symbol of the same
     // name keeps its own slot and takes precedence.
     let ambient_keys: Vec<verter_type_expr::DeclBindingKey> = state
-        .decl_bodies()
-        .header_index()
+        .headers
         .augmentation_value_headers
         .values()
         .flat_map(|values| values.keys())

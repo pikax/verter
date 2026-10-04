@@ -27,8 +27,8 @@ use crate::VerterHost;
 /// was computed FROM the superseded surface, an entry the read-side
 /// fact rail cannot reject.
 #[derive(Clone)]
-pub(crate) struct RoutedShallowServe {
-    pub(crate) state: Arc<crate::resolver_core::ShallowFileState>,
+pub(crate) struct RoutedShallowServe<T = crate::resolver_core::ShallowFileState> {
+    pub(crate) state: Arc<T>,
     pub(crate) store_published: bool,
 }
 
@@ -44,14 +44,21 @@ pub(crate) struct RoutedShallowServe {
 /// persisted). Every serve exit in `route_shallow_state_serve` records
 /// itself here, including the edge-stale rebuild arm that bypasses the
 /// memo, so the accumulator cannot under-report.
-#[derive(Default)]
-pub(crate) struct RouteShallowStateCache {
-    states: rustc_hash::FxHashMap<String, RoutedShallowServe>,
+pub(crate) struct RouteShallowStateCache<T = crate::resolver_core::ShallowFileState> {
+    states: rustc_hash::FxHashMap<String, RoutedShallowServe<T>>,
     fenced_serve_observed: bool,
 }
 
-impl RouteShallowStateCache {
-    pub(crate) fn get(&self, canonical: &str) -> Option<&RoutedShallowServe> {
+impl<T> Default for RouteShallowStateCache<T> {
+    fn default() -> Self {
+        Self {
+            states: Default::default(),
+            fenced_serve_observed: false,
+        }
+    }
+}
+impl<T> RouteShallowStateCache<T> {
+    pub(crate) fn get(&self, canonical: &str) -> Option<&RoutedShallowServe<T>> {
         let cached = self.states.get(canonical)?;
         if !cached.store_published {
             // A memoized FENCED serve consumed by a traced cold compute
@@ -65,11 +72,11 @@ impl RouteShallowStateCache {
         Some(cached)
     }
 
-    pub(crate) fn insert(&mut self, canonical: String, serve: RoutedShallowServe) {
+    pub(crate) fn insert(&mut self, canonical: String, serve: RoutedShallowServe<T>) {
         self.states.insert(canonical, serve);
     }
 
-    pub(crate) fn observe_serve(&mut self, serve: &RoutedShallowServe) {
+    pub(crate) fn observe_serve(&mut self, serve: &RoutedShallowServe<T>) {
         self.fenced_serve_observed |= !serve.store_published;
     }
 

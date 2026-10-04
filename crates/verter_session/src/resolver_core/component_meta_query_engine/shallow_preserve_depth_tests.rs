@@ -34,7 +34,10 @@ fn under_nested_arrays<R: Send + 'static>(
                     readonly: false,
                 });
             }
-            let mut engine = ComponentMetaQueryEngine::new(&host);
+
+            let fixture_dispatch_0 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+            let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_0);
             probe(&mut engine, node)
         })
         .expect("spawn the probing thread")
@@ -67,7 +70,7 @@ fn a_type_param_reference_is_found_at_any_depth() {
         },
         |engine, node| {
             let names: FxHashSet<&str> = FxHashSet::from_iter(["T"]);
-            super::node_references_type_param_names(engine.ctx, node, &names)
+            super::node_references_type_param_names(engine.dispatch, node, &names)
         },
     );
     assert!(referenced);

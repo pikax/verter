@@ -55,7 +55,7 @@ use crate::resolver_core::ResolverContext;
 /// to carry is redundant.
 #[derive(Clone)]
 pub(crate) struct DeclarationScopePayload {
-    bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    bundle: Arc<super::request_inputs::PreparedInputRecord>,
     owner: verter_type_expr::TopLevelOwnerId,
 }
 
@@ -74,11 +74,11 @@ impl std::fmt::Debug for DeclarationScopePayload {
 
 impl DeclarationScopePayload {
     pub(crate) fn from_bundle(
-        bundle: &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+        bundle: &impl super::request_inputs::PreparedInputSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         Self {
-            bundle: Arc::clone(bundle),
+            bundle: bundle.scope_inputs(),
             owner,
         }
     }
@@ -90,9 +90,7 @@ impl DeclarationScopePayload {
 
     /// The prepared bundle this payload views.
     #[cfg(test)]
-    pub(crate) fn bundle_for_tests(
-        &self,
-    ) -> &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle> {
+    pub(crate) fn bundle_for_tests(&self) -> &Arc<super::request_inputs::PreparedInputRecord> {
         &self.bundle
     }
 
@@ -155,6 +153,7 @@ impl DeclarationScopePayload {
 /// ctx-owned state.
 pub(crate) fn resolve_bare_name_in_scope(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
@@ -162,14 +161,7 @@ pub(crate) fn resolve_bare_name_in_scope(
 ) -> Option<ResolvedRootIdentity> {
     // Identity mints below go through the store-owned intern pool so a
     // repeated `(scope, name)` resolution reuses one shared allocation.
-    let interner = ctx.project_type_store().identity_interner();
-    let mint_in_owner = |owner| {
-        ResolvedRootIdentity::new_in_owner(
-            interner.intern(scope_canonical_id),
-            owner,
-            interner.intern(name),
-        )
-    };
+    let mint_in_owner = |owner| dispatch.intern_resolved_identity(scope_canonical_id, owner, name);
     // 1. Declaration-scope payload lookup (scope-local type/value,
     //    script-setup type bindings).
     if let Some(payload) = scope_payload.filter(|payload| payload.owner() == scope_owner) {
@@ -233,6 +225,7 @@ pub(crate) fn resolve_bare_name_in_scope(
     // 4. Namespace-qualified: `Ns.Member`.
     if let Some(resolved) = resolve_namespace_member_from_facts(
         ctx,
+        dispatch,
         scope_canonical_id,
         scope_owner,
         scope_payload,
@@ -257,6 +250,7 @@ pub(crate) fn resolve_bare_name_in_scope(
             .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, parent_owner));
         if let Some(resolved) = resolve_bare_name_in_scope(
             ctx,
+            dispatch,
             scope_canonical_id,
             parent_owner,
             parent_payload.as_ref(),
@@ -284,7 +278,7 @@ pub(crate) fn resolve_bare_name_in_scope(
 }
 
 fn symbol_exists_in_facts(
-    entry: &crate::project_type_store::IndexedReady,
+    entry: &crate::resolver_core::request_inputs::IndexedInputRecord,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
 ) -> bool {
@@ -368,6 +362,7 @@ fn resolve_import_binding_from_facts(
 
 fn resolve_namespace_member_from_facts(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
@@ -402,7 +397,7 @@ fn resolve_namespace_member_from_facts(
         }
         let declaring =
             resolve_import_binding_from_facts(ctx, canonical_id, owner, scope_payload, prefix)?;
-        return qualified_member_declaration(ctx, &declaring, member);
+        return qualified_member_declaration(ctx, dispatch, &declaring, member);
     };
 
     let (resolved, route_facts) =
@@ -426,21 +421,16 @@ fn resolve_namespace_member_from_facts(
         let (declaring, route_facts) =
             ctx.resolve_imported_type_root_with_facts(&target_canonical, export);
         ctx.observe_borrowed_signature(&route_facts);
-        if let Some(found) =
-            declaring.and_then(|declaring| qualified_member_declaration(ctx, &declaring, rest))
+        if let Some(found) = declaring
+            .and_then(|declaring| qualified_member_declaration(ctx, dispatch, &declaring, rest))
         {
             return Some(found);
         }
     }
 
-    let interner = ctx.project_type_store().identity_interner();
     ctx.resolve_value_export_target(&target_canonical, member)
         .map(|target| {
-            ResolvedRootIdentity::new_in_owner(
-                interner.intern(&target.canonical_id),
-                target.owner,
-                interner.intern(&target.name),
-            )
+            dispatch.intern_resolved_identity(&target.canonical_id, target.owner, &target.name)
         })
 }
 
@@ -450,6 +440,7 @@ fn resolve_namespace_member_from_facts(
 /// namespace's file, and only an exported one is visible here.
 fn qualified_member_declaration(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     declaring: &ResolvedRootIdentity,
     member: &str,
 ) -> Option<ResolvedRootIdentity> {
@@ -460,17 +451,15 @@ fn qualified_member_declaration(
     if !symbol_exists_in_facts(entry.as_ref(), declaring.owner, &qualified)
         || !entry
             .shallow_state
-            .decl_bodies()
-            .header_index()
+            .headers
             .namespace_member_is_exported(declaring.owner, &qualified)
     {
         return None;
     }
-    let interner = ctx.project_type_store().identity_interner();
-    Some(ResolvedRootIdentity::new_in_owner(
-        interner.intern(declaring.canonical_id.as_ref()),
+    Some(dispatch.intern_resolved_identity(
+        declaring.canonical_id.as_ref(),
         declaring.owner,
-        interner.intern(&qualified),
+        &qualified,
     ))
 }
 
@@ -556,9 +545,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
         let Some(bundle) = ctx.prepared_decl_bundle(identity.canonical_id.as_ref()) else {
             return PreparedTypeDeclResolution::Missing;
         };
-        bundle
-            .prepared_type_decls
-            .get_in_for_projection(identity.owner, identity.symbol_name.as_ref())
+        ctx.prepared_type_for_projection(&bundle, identity.owner, identity.symbol_name.as_ref())
     };
 
     let direct = read(root_identity);
@@ -623,7 +610,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
 #[allow(dead_code)]
 pub(crate) fn resolve_namespace_sibling_in_scope(
     payload: &crate::semantic_query::LocalScopePayload,
-    state: &crate::resolver_core::ShallowFileState,
+    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
     scope_canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,

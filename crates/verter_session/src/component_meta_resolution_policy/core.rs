@@ -21,7 +21,7 @@ use verter_type_expr::TopLevelOwnerId;
 
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::component_meta_registry::{
     component_meta_registry_node_ref_head, source_bare_ref_name,
@@ -170,7 +170,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         scope_canonical_id: &str,
         scope_owner: TopLevelOwnerId,
     ) -> Option<HotTypeRef> {
-        let dispatch = ProjectSemanticDispatch::new(self.resolver_ctx());
+        let dispatch = self.engine.dispatch;
         dispatch
             .raise_semantic_type_source_to_hot(
                 source,
@@ -188,7 +188,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
     /// Node data reader (the shared dispatch-owned arena read).
     pub(super) fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        crate::project_semantic_dispatch::node_data_for(self.resolver_ctx(), node)
+        crate::project_semantic_dispatch::node_data_for(self.engine.dispatch.graph(), node)
     }
 
     /// The node's reference HEAD: `(name, type-argument nodes)` for the
@@ -197,7 +197,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         &self,
         node: SemanticNodeId,
     ) -> Option<(String, Vec<SemanticNodeId>)> {
-        component_meta_registry_node_ref_head(self.resolver_ctx(), node)
+        component_meta_registry_node_ref_head(self.engine.dispatch, node)
     }
 
     /// Locate `name`'s declaration body SOURCE. The body lookup itself is
@@ -317,6 +317,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     pub(super) fn is_macro_participating(&self, name: &str) -> bool {
         if let Some(identity) = resolve_ref_to_root_identity(
             self.resolver_ctx(),
+            self.engine.dispatch,
             self.owner_canonical,
             self.owner,
             name,

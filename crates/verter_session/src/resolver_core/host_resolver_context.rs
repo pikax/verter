@@ -11,7 +11,7 @@ use crate::resolver_core::resolver_context::{
 };
 use crate::resolver_store::HostStoreView;
 
-pub(crate) struct HostRequestLifecycle<'a> {
+pub struct HostRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
     view: RequestStoreView<'a>,
 }
@@ -21,7 +21,7 @@ pub(crate) struct HostRequestLifecycle<'a> {
 /// Both base and session requests use the single `ResolverContext`
 /// implementation on `RequestBoundAdapter`; this type supplies only the
 /// lifecycle-specific construction and observation hooks.
-pub(crate) type HostResolverContext<'a> = RequestBoundAdapter<HostRequestLifecycle<'a>>;
+pub type HostResolverContext<'a> = RequestBoundAdapter<HostRequestLifecycle<'a>>;
 
 impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     #[must_use]
@@ -93,11 +93,6 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         self.view
             .overlay()
             .complete_canonical(self.inner, self.view.base(), canonical);
-    }
-
-    #[track_caller]
-    fn owned_store_view(&self) -> HostStoreView {
-        self.view.base().clone()
     }
 
     fn prepared_decl_bundle(

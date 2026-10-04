@@ -387,14 +387,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         names.contains(&"nested"),
         "object-alias-typed member `nested` present; got {names:?}"
     );
-    let graph_store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
     let nested = member(&surface, "nested");
     assert!(
         !matches!(
@@ -450,14 +443,7 @@ fn nested_object_member_stays_shallow_reference_not_materialized() {
         .resolve_shallow_surface(NESTED, "Nested")
         .expect("Nested must resolve to a one-level surface");
 
-    let graph_store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
 
     // The nested-object member `outer` MUST stay a shallow reference — its value
     // node is NOT an `Object` surface. An Expanded / eager projection would have
@@ -583,14 +569,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     const FILE: &str = "/src/idx_decl.ts";
 
     let host = make_host_with_footprint();
-    let graph_store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
 
     // SCOPE-LESS key + value nodes (interned via the unscoped `intern_node` →
     // `NodeScopeId::Global` → `node_scope` is `None`).
@@ -687,14 +666,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     const FILE: &str = "/src/member_decl.ts";
 
     let host = make_host_with_footprint();
-    let graph_store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
-    let graph = {
-        use crate::resolver_core::ResolverContext;
-        host_ctx.project_type_store().semantic_graph()
-    };
+    let graph = { host.project_type_store().semantic_graph() };
 
     // SCOPE-LESS value node — `node_origin_file(value)` is `None` (pre-fix path).
     let value_node = graph.intern_node(SemanticNodeData::Opaque(

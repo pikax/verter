@@ -43,7 +43,7 @@ use crate::resolver_core::ResolverContext;
 /// that owns the reusable component-meta signature. The local counter lets
 /// behavioral tests prove this traversal contributed evidence.
 fn emit_slot_binding_graph_dispatch_facts(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -53,7 +53,7 @@ fn emit_slot_binding_graph_dispatch_facts(
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
-    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
+    if let Some(prov) = dispatch.graph().provenance() {
         prov.slot_binding_graph_fact_tracer_emissions
             .fetch_add(1, Relaxed);
     }
@@ -364,7 +364,7 @@ fn macro_expansion_for_budget_exceeded(
 /// referential lowered shape (e.g. `type R = { next: R }` in Navigate
 /// mode) terminates after the first visit.
 fn accumulate_lowered_node_carrier_deps(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     owner_canonical: &str,
 ) {
@@ -375,7 +375,8 @@ fn accumulate_lowered_node_carrier_deps(
         if !visited.insert(current) {
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)
+        else {
             continue;
         };
         match data.as_ref() {
@@ -459,7 +460,7 @@ fn accumulate_lowered_node_carrier_deps(
         .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
         .collect();
     let signature: DepSignature = Arc::from(entries.into_boxed_slice());
-    emit_slot_binding_graph_dispatch_facts(ctx, &signature);
+    emit_slot_binding_graph_dispatch_facts(dispatch, &signature);
 }
 
 /// Read the [`SurfaceView`] members backing `node`, if `node` resolves
@@ -522,7 +523,7 @@ fn slot_param_root_step(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> SlotRootStep {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
         return SlotRootStep::Symbolic(false);
     };
     SlotRootStep::Symbolic(match data.as_ref() {
@@ -563,7 +564,7 @@ fn slot_param_root_step(
                 ),
             });
             crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
+            emit_slot_binding_graph_dispatch_facts(dispatch, &read.dep_signature);
             match read.value {
                 // Decidable: reduced to a concrete terminal — classify it (a
                 // concrete branch root is enumerable, not symbolic).
@@ -620,7 +621,7 @@ fn slot_param_root_step(
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
             crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
+            emit_slot_binding_graph_dispatch_facts(dispatch, &read.dep_signature);
             match read.value {
                 QueryResult::Value(body_id) if body_id != node => {
                     return SlotRootStep::Next(body_id)
@@ -658,7 +659,8 @@ fn node_contains_free_type_param(
 ) -> bool {
     use crate::graph_walk::Reach;
     crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             return Reach::Parts(Vec::new());
         };
         Reach::Parts(match data.as_ref() {
@@ -757,7 +759,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     );
 
     let mut ledger = SuppressionLedger::default();
-    let dispatch = ProjectSemanticDispatch::new(ctx.ctx);
+    let dispatch = ctx.dispatch;
     // Synthesis-step budget. Production code leaves
     // `synthesis_steps` `None` so the synthesis runs at full
     // budget. Tests use a small override to drive the budget-
@@ -769,8 +771,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     // `ExpansionStopReason::BudgetExceeded` and marks the run for
     // suppression so the result is not promoted into the final
     // `ComponentMetaResultDb` cache.
-    let synthesis_step_budget: Option<u32> =
-        ctx.ctx.config().recursion_budget_overrides.synthesis_steps;
+    let synthesis_step_budget: Option<u32> = dispatch.policy.synthesis_steps;
     let mut synthesis_steps_executed: u32 = 0;
     // Returns `true` when consuming a step exhausted the budget. The
     // closure increments the counter unconditionally so successive
@@ -841,11 +842,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             break 'macro_loop;
         }
         let type_args: Arc<[SemanticNodeId]> =
-            match crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                ctx.ctx,
-                owner_canonical,
-                macro_index,
-            ) {
+            match dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) {
                 Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
                 None => continue,
             };
@@ -861,7 +858,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // carrier does not invalidate the warm cache through the
         // dep-signature validator.
         for arg in type_args.iter() {
-            accumulate_lowered_node_carrier_deps(ctx.ctx, *arg, owner_canonical);
+            accumulate_lowered_node_carrier_deps(dispatch, *arg, owner_canonical);
         }
 
         // Step 2: ResolveMacroPayload. USE execute_read; ACCUMULATE deps.
@@ -893,7 +890,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
         crate::request_context::observe_component_meta_read_suppress(&macro_payload_read);
-        emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);
+        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature);
         if !macro_payload_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
                 &macro_payload_read.walker_diagnostics,
@@ -936,7 +933,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
         // Step 3: enumerate slots via empty-path Shallow.
         let bindings = compute_bindings_via_graph(
-            &dispatch,
+            dispatch,
             ctx.ctx,
             macro_payload_node,
             SlotMacroIdentity {
@@ -1008,7 +1005,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         ctx.ctx,
         owner_canonical,
         snapshot,
-        &dispatch,
+        dispatch,
         &graph_native_bindings,
         resolved_macros,
         expanded,
@@ -1077,7 +1074,7 @@ pub(crate) fn compute_bindings_via_graph(
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
     crate::request_context::observe_component_meta_read_suppress(&slot_surface_read);
-    emit_slot_binding_graph_dispatch_facts(ctx, &slot_surface_read.dep_signature);
+    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature);
     if !slot_surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &slot_surface_read.walker_diagnostics,
@@ -1114,27 +1111,28 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = match super::projectors::read_positive_surface_members(ctx, slot_surface) {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-            members.into_inner()
-        }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
-        // An unresolvable slot-surface member read suppresses warm promotion
-        // and records its typed reason; the usable subset still publishes.
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            ledger.suppress(incomplete.non_empty_reasons());
-            diag_sink.push(macro_expansion_for_query_error(
-                owner_macro.macro_index,
-                MacroExpansionKind::DefineSlots,
-                format!(
-                    "slot-surface-members-unresolved::{:?}",
-                    incomplete.reasons()
-                ),
-            ));
-            incomplete.into_recorded_partial().unwrap_or_default()
-        }
-    };
+    let slot_members =
+        match super::projectors::read_positive_surface_members(ctx, dispatch, slot_surface) {
+            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+                members.into_inner()
+            }
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
+            // An unresolvable slot-surface member read suppresses warm promotion
+            // and records its typed reason; the usable subset still publishes.
+            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                ledger.suppress(incomplete.non_empty_reasons());
+                diag_sink.push(macro_expansion_for_query_error(
+                    owner_macro.macro_index,
+                    MacroExpansionKind::DefineSlots,
+                    format!(
+                        "slot-surface-members-unresolved::{:?}",
+                        incomplete.reasons()
+                    ),
+                ));
+                incomplete.into_recorded_partial().unwrap_or_default()
+            }
+        };
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1193,7 +1191,9 @@ pub(crate) fn compute_bindings_via_graph(
         // bindings (the realize fallback above hands back the raw member
         // value, so the kind must be re-asserted here).
         let param0_ty =
-            match crate::project_semantic_dispatch::node_data_for(ctx, realized).as_deref() {
+            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), realized)
+                .as_deref()
+            {
                 Some(SemanticNodeData::Signature {
                     kind: crate::semantic_query::SignatureKind::Call,
                     params,
@@ -1248,7 +1248,7 @@ pub(crate) fn compute_bindings_via_graph(
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
         crate::request_context::observe_component_meta_read_suppress(&param_surface_read);
-        emit_slot_binding_graph_dispatch_facts(ctx, &param_surface_read.dep_signature);
+        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature);
         if !param_surface_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
                 &param_surface_read.walker_diagnostics,
@@ -1286,7 +1286,7 @@ pub(crate) fn compute_bindings_via_graph(
             }
         };
         let binding_members =
-            match super::projectors::read_positive_surface_members(ctx, param_surface) {
+            match super::projectors::read_positive_surface_members(ctx, dispatch, param_surface) {
                 crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
                 | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
                     members.into_inner()
@@ -1328,7 +1328,7 @@ pub(crate) fn compute_bindings_via_graph(
             // unrelated file is ever walked. A carrier that does not
             // resolve keeps the original node (fail-closed shallow).
             let value_node = match crate::project_semantic_dispatch::node_data_for(
-                ctx,
+                dispatch.graph(),
                 binding.value,
             )
             .as_deref()
@@ -1343,7 +1343,7 @@ pub(crate) fn compute_bindings_via_graph(
                     });
                     // Dual-emit: legacy accumulator + fact-tracer fan-out.
                     crate::request_context::observe_component_meta_read_suppress(&value_read);
-                    emit_slot_binding_graph_dispatch_facts(ctx, &value_read.dep_signature);
+                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
                     if value_read.result_is_partial {
                         ledger.suppress_partial_read(value_read.partial_reason_classes());
                     }
@@ -1404,6 +1404,7 @@ pub(crate) fn compute_bindings_via_graph(
 /// longer leaks the base host's slot bindings.
 fn typeinfo_macro_dtos(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
@@ -1411,6 +1412,7 @@ fn typeinfo_macro_dtos(
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
     let read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from(owner_canonical),
             macro_index,
@@ -1469,7 +1471,7 @@ fn named_reference_carrier_source(
     let mut current = value_node;
     // Peel aliases (bounded).
     for _ in 0..16 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::DeclRef { identity } => {
@@ -1565,7 +1567,7 @@ fn closed_leaf_object_source(
     use verter_type_expr::facts::{ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact};
     use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value_node)?;
+    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), value_node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
@@ -1623,7 +1625,7 @@ fn closed_member_path_route_source(
     // Bounded: an authored indexed-access chain is short; the cap only
     // guards against pathological graph shapes.
     for _ in 0..64 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => {
                 current = *inner;
@@ -1755,7 +1757,8 @@ fn node_reaches_non_owner_ref(
 ) -> bool {
     use crate::graph_walk::Reach;
     crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             return Reach::Parts(Vec::new());
         };
         let hit = |hit: bool| {
@@ -2027,7 +2030,7 @@ mod parser_binding_index_tests {
 #[cfg(test)]
 mod publish_order_tests {
     use super::*;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+
     use crate::resolver_core::component_meta::ResolvedMacroMeta;
     use crate::resolver_core::{
         with_bare_host_ctx_for_test, ResolvedDeclarationKind, ResolvedTypeDeclaration,
@@ -2114,6 +2117,8 @@ defineSlots<{ default(props: { item: string }): any }>()
         );
 
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
@@ -2140,10 +2145,20 @@ defineSlots<{ default(props: { item: string }): any }>()
                 "mixed-source discriminator is same-owner"
             );
 
-            let first_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
-            let second_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, second_index, AnalyzedMacroKind::DefineSlots);
+            let first_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                first_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
+            let second_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                second_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
             assert_eq!(
                 binding_annotation(&first_dtos, "default", "item"),
                 Some("number"),
@@ -2155,10 +2170,8 @@ defineSlots<{ default(props: { item: string }): any }>()
                 "macro 1 parser metadata must carry item: string"
             );
 
-            let dispatch = ProjectSemanticDispatch::new(ctx);
-            let string_node = ctx
-                .project_type_store()
-                .semantic_graph()
+            let string_node = dispatch
+                .graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
             let graph_native = vec![(
                 (
@@ -2193,7 +2206,7 @@ defineSlots<{ default(props: { item: string }): any }>()
                 ctx,
                 OWNER,
                 snapshot.as_ref(),
-                &dispatch,
+                dispatch,
                 &graph_native,
                 &resolved_macros,
                 &mut expanded,
@@ -2260,6 +2273,8 @@ defineSlots<{ default(props: { item: string }): any }>()
         );
 
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
@@ -2292,15 +2307,19 @@ defineSlots<{ default(props: { item: string }): any }>()
                  second=({second_index},{second_owner:?})"
             );
 
-            let first_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
+            let first_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                first_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
             assert_eq!(
                 binding_annotation(&first_dtos, "default", "item"),
                 Some("number"),
                 "the earlier macro's parser metadata must carry item: number"
             );
 
-            let dispatch = ProjectSemanticDispatch::new(ctx);
             let resolved_macros = vec![
                 dummy_slots_meta(first_index, first_owner),
                 dummy_slots_meta(second_index, second_owner),
@@ -2311,7 +2330,7 @@ defineSlots<{ default(props: { item: string }): any }>()
                 ctx,
                 OWNER,
                 snapshot.as_ref(),
-                &dispatch,
+                dispatch,
                 &[],
                 &resolved_macros,
                 &mut expanded,
@@ -2392,6 +2411,7 @@ pub(crate) fn publish_merged_bindings(
                 resolved.macro_index,
                 typeinfo_macro_dtos(
                     ctx,
+                    dispatch,
                     owner_canonical,
                     resolved.macro_index,
                     AnalyzedMacroKind::DefineSlots,
@@ -2745,12 +2765,14 @@ mod synthesis_claim_tests {
         let host = host_with_vue(src);
         let mut claim = None;
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
                 .indexed;
             let snapshot = Arc::clone(&indexed.snapshot);
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             let mut expanded = ExpandedComponentTypes::default();
             let mut diags = Vec::new();
             let result = resolve_slot_bindings_graph_native(

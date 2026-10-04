@@ -373,8 +373,15 @@ defineProps<Props>()
     assert!(indexed.shallow_state.has_type_symbol_in(owner, "Base"));
     assert!(indexed.shallow_state.has_value_symbol_in(owner, "Base"));
     assert!(indexed.shallow_state.has_value_symbol_in(owner, "seed"));
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-        &host, canonical, owner, None, "Props",
+        &host,
+        &fixture_dispatch_0,
+        canonical,
+        owner,
+        None,
+        "Props",
     )
     .expect("exact-owner header facts must resolve the local Props root");
     assert_eq!(resolved.canonical_id.as_ref(), canonical);
@@ -388,11 +395,14 @@ defineProps<Props>()
     assert_eq!(deps.owner_value_deps, ["seed"]);
     assert_eq!(deps.retained_value_carrier_deps, ["Base"]);
 
-    let product =
-        crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
-            .expect("macro payload carrier must be present");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, product.hot.node())
-        .expect("macro payload carrier node must be interned");
+    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+        .macro_type_arg_hot_ref(canonical, macro_index)
+        .expect("macro payload carrier must be present");
+    let data = crate::project_semantic_dispatch::node_data_for(
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host).graph(),
+        product.hot.node(),
+    )
+    .expect("macro payload carrier node must be interned");
     let (name, scope) = data
         .bare_ref_head()
         .expect("defineProps<Props> must preserve its unresolved bare carrier");
@@ -414,8 +424,11 @@ defineProps<Props>()
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
         );
-        let data = crate::project_semantic_dispatch::node_data_for(ctx, resolved)
-            .expect("direct carrier resolution must preserve exact declaration identity");
+        let data = crate::project_semantic_dispatch::node_data_for(
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+            resolved,
+        )
+        .expect("direct carrier resolution must preserve exact declaration identity");
         let crate::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref() else {
             panic!("local Props carrier must resolve to an exact DeclRef: {data:?}");
         };
@@ -446,8 +459,11 @@ defineProps<CompanionOnly & Shared>()
     let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let instance = verter_type_expr::TopLevelOwnerId::instance(0);
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         let companion = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             ctx,
+            dispatch,
             canonical,
             instance,
             None,
@@ -458,7 +474,7 @@ defineProps<CompanionOnly & Shared>()
         assert_eq!(companion.symbol_name.as_ref(), "CompanionOnly");
 
         let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            ctx, canonical, instance, None, "Shared",
+            ctx, dispatch, canonical, instance, None, "Shared",
         )
         .expect("the exact setup declaration must win before companion lookup");
         assert_eq!(shadowed.owner, instance);
@@ -466,6 +482,7 @@ defineProps<CompanionOnly & Shared>()
         assert!(
             crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 ctx,
+                dispatch,
                 canonical,
                 module,
                 None,
@@ -495,9 +512,11 @@ defineProps<Before>()
     let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let instance = verter_type_expr::TopLevelOwnerId::instance(0);
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         for _ in 0..2 {
             let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                ctx, canonical, instance, None, "Before",
+                ctx, dispatch, canonical, instance, None, "Before",
             )
             .expect("cold and warm lookup must retain the exact companion owner");
             assert_eq!(resolved.owner, module);
@@ -515,15 +534,17 @@ defineProps<After>()
 </script>"#,
     );
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         assert!(
             crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                ctx, canonical, instance, None, "Before",
+                ctx, dispatch, canonical, instance, None, "Before",
             )
             .is_none(),
             "the removed companion header must not survive the edit"
         );
         let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            ctx, canonical, instance, None, "After",
+            ctx, dispatch, canonical, instance, None, "After",
         )
         .expect("the replacement companion header must resolve after invalidation");
         assert_eq!(resolved.owner, module);

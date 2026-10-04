@@ -2556,6 +2556,8 @@ mod resolver_context_seal {
     pub(super) struct SealVisitor<'a> {
         path: &'a Path,
         cfg_test_depth: u32,
+        source_boundary_depth: u32,
+        fact_adapter_depth: u32,
         violations: &'a mut Vec<Violation>,
     }
 
@@ -2564,6 +2566,8 @@ mod resolver_context_seal {
             Self {
                 path,
                 cfg_test_depth: 0,
+                source_boundary_depth: 0,
+                fact_adapter_depth: 0,
                 violations,
             }
         }
@@ -2624,41 +2628,93 @@ mod resolver_context_seal {
             }
         }
 
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            let boundary = self.path.ends_with("resolver_core/owned_lowering_port.rs")
+                && item.ident == "SourceInputProvider";
+            if boundary {
+                self.source_boundary_depth += 1;
+            }
+            syn::visit::visit_item_trait(self, item);
+            if boundary {
+                self.source_boundary_depth -= 1;
+            }
+        }
+
         fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+            let boundary = self.path.ends_with("resolver_core/owned_lowering_port.rs")
+                && f.sig.ident == "observed_fact_hash";
+            if boundary {
+                self.source_boundary_depth += 1;
+            }
             let entered_test = has_cfg_test(&f.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
             syn::visit::visit_item_fn(self, f);
+            if boundary {
+                self.source_boundary_depth -= 1;
+            }
             if entered_test {
                 self.cfg_test_depth -= 1;
             }
         }
 
         fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let trait_name = item
+                .trait_
+                .as_ref()
+                .and_then(|(_, path, _)| path.segments.last())
+                .map(|s| s.ident.to_string());
+            let adapter = matches!(item.self_ty.as_ref(), syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "RequestBoundAdapter"));
+            let boundary = self.path.ends_with("resolver_core/owned_lowering_port.rs")
+                && trait_name.as_deref() == Some("SourceInputProvider")
+                && adapter;
+            let fact_adapter = self.path.ends_with("resolver_core/fact_validation_port.rs")
+                && trait_name.as_deref() == Some("FactValidation")
+                && adapter;
+            if boundary {
+                self.source_boundary_depth += 1;
+            }
+            if fact_adapter {
+                self.fact_adapter_depth += 1;
+            }
             let entered_test = has_cfg_test(&item.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
             syn::visit::visit_item_impl(self, item);
+            if boundary {
+                self.source_boundary_depth -= 1;
+            }
+            if fact_adapter {
+                self.fact_adapter_depth -= 1;
+            }
             if entered_test {
                 self.cfg_test_depth -= 1;
             }
         }
 
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            let boundary =
+                self.fact_adapter_depth > 0 && item.sig.ident == "current_dependency_fact_versions";
+            if boundary {
+                self.source_boundary_depth += 1;
+            }
             let entered_test = has_cfg_test(&item.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
             syn::visit::visit_impl_item_fn(self, item);
+            if boundary {
+                self.source_boundary_depth -= 1;
+            }
             if entered_test {
                 self.cfg_test_depth -= 1;
             }
         }
 
         fn visit_use_path(&mut self, p: &'ast UsePath) {
-            if self.cfg_test_depth > 0 {
+            if self.cfg_test_depth > 0 || self.source_boundary_depth > 0 {
                 return;
             }
             if p.ident == "VerterHost" {
@@ -2671,7 +2727,7 @@ mod resolver_context_seal {
         }
 
         fn visit_type_path(&mut self, tp: &'ast TypePath) {
-            if self.cfg_test_depth > 0 {
+            if self.cfg_test_depth > 0 || self.source_boundary_depth > 0 {
                 return;
             }
             if last_segment_is_verter_host(&tp.path) {
@@ -2684,7 +2740,7 @@ mod resolver_context_seal {
         }
 
         fn visit_expr_path(&mut self, ep: &'ast ExprPath) {
-            if self.cfg_test_depth > 0 {
+            if self.cfg_test_depth > 0 || self.source_boundary_depth > 0 {
                 return;
             }
             if any_segment_is_verter_host(&ep.path) {
@@ -2706,6 +2762,37 @@ mod resolver_context_seal {
             syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
         let mut visitor = SealVisitor::new(path, violations);
         visitor.visit_file(&parsed);
+    }
+
+    #[test]
+    fn source_adapter_regions_do_not_exempt_sibling_engine_code() {
+        fn violations(path: &str, source: &str) -> Vec<Violation> {
+            let parsed = syn::parse_file(source).expect("guard fixture");
+            let mut violations = Vec::new();
+            SealVisitor::new(Path::new(path), &mut violations).visit_file(&parsed);
+            violations
+        }
+        let source_owner = "crates/verter_session/src/resolver_core/owned_lowering_port.rs";
+        assert!(violations(source_owner, "trait SourceInputProvider { fn source_host(&self) -> &crate::VerterHost; } impl<L> SourceInputProvider for RequestBoundAdapter<L> { fn source_host(&self) -> &crate::VerterHost { todo!() } } fn observed_fact_hash(host: &crate::VerterHost) {} ").is_empty());
+        assert!(!violations(source_owner, "fn evaluator(host: &crate::VerterHost) {}").is_empty());
+        assert!(
+            !violations(
+                "crates/verter_session/src/project_semantic_dispatch/owned_lowering_port.rs",
+                "trait SourceInputProvider { fn source_host(&self) -> &crate::VerterHost; }"
+            )
+            .is_empty(),
+            "same basename outside owner is scanned"
+        );
+        assert!(!violations(source_owner, "impl SourceInputProvider for Other { fn source_host(&self) -> &crate::VerterHost { todo!() } }").is_empty());
+        let fact_owner = "crates/verter_session/src/resolver_core/fact_validation_port.rs";
+        assert!(violations(fact_owner, "impl<L> FactValidation for RequestBoundAdapter<L> { fn current_dependency_fact_versions(&self) { crate::VerterHost::current_dependency_fact_versions(); } }").is_empty());
+        assert!(!violations(fact_owner, "impl<L> FactValidation for RequestBoundAdapter<L> { fn evaluator(&self) { crate::VerterHost::evaluate(); } }").is_empty());
+        assert!(
+            !is_seal_bridge_file(Path::new(
+                "crates/verter_session/src/project_semantic_dispatch/resolver_context.rs"
+            )),
+            "lifecycle exemption requires exact ownership path"
+        );
     }
 
     pub(super) fn walk_rs_files(root: &Path) -> Vec<PathBuf> {
@@ -2756,38 +2843,18 @@ mod resolver_context_seal {
         )
     }
 
-    /// `resolver_context.rs` is the bridging trait file: it references
-    /// `VerterHost` for the request-bound adapter and compile-fenced test seam.
+    /// These exact request-lifecycle owners may reach their private host backend.
+    /// Other port implementations are scanned, with only the selected source
+    /// adapter regions above exempted.
     fn is_seal_bridge_file(path: &Path) -> bool {
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| {
-                // `resolver_context.rs` carries the trait surface and its
-                // request-bound host adapter.
-                // `session_resolver_context.rs` is the session-bound
-                // wrapper that owns the `&VerterHost` borrow needed to
-                // reach view-aware host internals
-                // (`prepared_decl_bundle_with_context` etc.) without
-                // widening the trait surface.
-                // `host_resolver_context.rs` is the request-bound
-                // wrapper that owns the `&VerterHost` borrow needed to
-                // reach the view-taking `*_with_store_view` helpers
-                // and the canonical-completion hook.
-                // `request_store_view.rs` owns the
-                // `CanonicalCompletionOverlay::complete_canonical`
-                // helper, which threads through the host's
-                // `current_store_view_epoch` / `scheduler` /
-                // `derived_raw_cache` / `project_type_store` to
-                // promote freshly-loaded canonicals into the request
-                // overlay.
-                // All four are seal-bridge exemptions per sub-plan
-                // §10a.0.A.
-                n == "resolver_context.rs"
-                    || n == "session_resolver_context.rs"
-                    || n == "host_resolver_context.rs"
-                    || n == "request_store_view.rs"
-            })
-            .unwrap_or(false)
+        [
+            "crates/verter_session/src/resolver_core/resolver_context.rs",
+            "crates/verter_session/src/resolver_core/session_resolver_context.rs",
+            "crates/verter_session/src/resolver_core/host_resolver_context.rs",
+            "crates/verter_session/src/resolver_core/request_store_view.rs",
+        ]
+        .iter()
+        .any(|owner| path.ends_with(owner))
     }
 
     pub(super) fn run() {
@@ -2816,11 +2883,9 @@ mod resolver_context_seal {
 
         if !violations.is_empty() {
             panic!(
-                "Phase 10a seal violation:\n{}\n\nResolver-tier files \
-                 must reach host state through `&dyn ResolverContext` \
-                 (`crate::resolver_core::ResolverContext`), not through \
-                 the concrete `VerterHost` type. See sub-plan §10a for \
-                 the migration recipe.",
+                "Request-port seal violation:\n{}\n\nResolver-tier files \
+                 must use the six narrow request ports; concrete host access \
+                 belongs only to their selected private source adapters.",
                 format_violations(&violations)
             );
         }
@@ -2829,12 +2894,9 @@ mod resolver_context_seal {
 
 #[test]
 fn no_concrete_verter_host_in_seal_scope() {
-    // Phase 10a — un-ignored at commit 13 after the resolver-context
-    // seal migration landed. Resolver-tier files
-    // (`resolver_core/`, `meta_resolve/`, `project_semantic_dispatch/`,
-    // `component_meta_caches.rs`) must reach host state through `&dyn ResolverContext`, never
-    // through the concrete `VerterHost` type. Re-introduction of a
-    // `VerterHost` reference in a seal-scope file fails this test.
+    // Resolver-tier algorithms use six narrow ports. Concrete host references
+    // are confined to exact request lifecycle owners and private source adapter
+    // regions; a new reference anywhere else fails this test.
     resolver_context_seal::run();
 }
 
@@ -12394,31 +12456,39 @@ fn cold_seed_store_view_exposes_no_validation_surface() {
 
 #[test]
 fn warm_validation_entry_points_require_current_store_view() {
-    // Part C — the top-level warm-validation entry points (no outer
-    // publish fence) accept ONLY a proven-`CurrentHostStoreView`. A
-    // regression that loosened any of these to a raw `&HostStoreView`
-    // would let a known-stale `ReturnOnly` snapshot validate a cache
-    // entry's fact signature against already-mutated dependency state.
-    let checks: &[(&str, &str)] = &[
-        (
-            "crates/verter_session/src/component_meta_result_db.rs",
-            "current_view: &crate::resolver_store::CurrentHostStoreView",
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_methods.rs",
-            "current_view: &crate::resolver_store::CurrentHostStoreView",
-        ),
-    ];
-    for (rel, needle) in checks {
-        let src = read_workspace_file(rel);
-        assert!(
-            src.contains(needle),
-            "{rel} must keep a warm-validation entry point that requires \
-             `{needle}` — a proven-current view is the type-level proof that a \
-             `ReturnOnly` snapshot cannot reach fact validation. Did a warm \
-             validator regress to a raw `&HostStoreView`?"
-        );
-    }
+    // The request root proves currentness before binding its fact port. The
+    // passive final-result DB has no validation service; the facade memo
+    // driver validates only through that selected request port.
+    let root =
+        read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
+    assert!(
+        root.contains("current_view: &crate::resolver_store::CurrentHostStoreView"),
+        "warm request root still requires proven currentness"
+    );
+    let memo = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/memo.rs");
+    assert!(
+        memo.contains("facts: &'a dyn FactValidation")
+            && memo
+                .contains(".validates_fact_signature(&candidate.value.read_set_signature.facts)"),
+        "facade owns final-result fact validation through the narrow port"
+    );
+    let db = read_workspace_file("crates/verter_session/src/component_meta_result_db.rs");
+    let forbidden = ident_hits_in_production_body(
+        &db,
+        &[
+            "HostStoreView",
+            "CurrentHostStoreView",
+            "validates_fact_signature",
+            "with_fact_tracer",
+            "get_or_compute",
+        ],
+    );
+    let shape_start = db
+        .find("pub struct ComponentMetaResultDb<P>")
+        .expect("passive DB nominal");
+    let shape_end = db[shape_start..].find("\n}").expect("passive DB fields") + shape_start;
+    assert!(!db[shape_start..shape_end].contains("FactValidation"), "storage cannot retain a validation port; support-only fixture adapters may select the actual memo driver");
+    assert!(forbidden.is_empty(), "passive final-result storage cannot capture a view, validate, or execute work: {forbidden:?}");
 }
 
 #[test]
@@ -13809,11 +13879,37 @@ mod lazy_decl_body_storage_guards {
             "anti-vacuity: `ShallowFileState` must own the
              `ClassifiedTypeDeps` dependency-edge cache"
         );
+        // Header fields moved into the shared immutable request record. Scan
+        // both parts of the worker shape; the projection may own syntax facts
+        // but never the worker's body/cache authority.
+        let inputs = struct_body(&state_src, "ShallowInputRecord");
+        assert!(
+            state.contains("inputs: ShallowInputRecord"),
+            "worker owns the shared header record"
+        );
+        assert!(
+            inputs.contains("headers") && inputs.contains("synthesised_value_symbols"),
+            "pure record retains the header inventory"
+        );
+        for forbidden in [
+            "DeclBodyMemo",
+            "LoweredTypeDecl",
+            "LoweredValueDecl",
+            "EvalEnv",
+            "DashMap",
+            "TypeDeclBody",
+        ] {
+            assert!(
+                !inputs.contains(forbidden),
+                "ShallowInputRecord must not carry worker/body authority `{forbidden}`"
+            );
+        }
+        let state_and_inputs = format!("{state},{inputs}");
         // Fields split on depth-0 commas (types span multiple lines).
         let mut fields: Vec<String> = Vec::new();
         let mut nesting = 0i32;
         let mut current = String::new();
-        for ch in state.chars() {
+        for ch in state_and_inputs.chars() {
             match ch {
                 '<' | '(' | '[' | '{' => nesting += 1,
                 '>' | ')' | ']' | '}' => nesting -= 1,
@@ -17660,6 +17756,77 @@ fn crate_visible_producer_fn_names(src: &str) -> Vec<String> {
     names
 }
 
+/// The mirror may mint its opaque storage attachment without executing work.
+/// This exact literal-only shape has no calls except cloning the shared cell
+/// handle. A changed body is counted as an additional producer entry.
+fn is_mirror_attachment_mint(imp: &syn::ItemImpl, method: &syn::ImplItemFn) -> bool {
+    if type_path_last_segment(&imp.self_ty).as_deref() != Some("MacroHotMirror")
+        || method.sig.ident != "attach"
+    {
+        return false;
+    }
+    let syn::ReturnType::Type(_, output) = &method.sig.output else {
+        return false;
+    };
+    if type_path_last_segment(output).as_deref() != Some("MacroMirrorAttachment") {
+        return false;
+    }
+    let [syn::Stmt::Expr(syn::Expr::Struct(literal), None)] = method.block.stmts.as_slice() else {
+        return false;
+    };
+    if !literal.path.is_ident("MacroMirrorAttachment") || literal.rest.is_some() {
+        return false;
+    }
+    let mut saw_cells = false;
+    for field in &literal.fields {
+        let syn::Member::Named(name) = &field.member else {
+            return false;
+        };
+        match name.to_string().as_str() {
+            "cells" => {
+                let syn::Expr::Call(call) = &field.expr else {
+                    return false;
+                };
+                let syn::Expr::Path(path) = call.func.as_ref() else {
+                    return false;
+                };
+                if path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    != ["Arc", "clone"]
+                    || call.args.len() != 1
+                {
+                    return false;
+                }
+                let Some(syn::Expr::Reference(reference)) = call.args.first() else {
+                    return false;
+                };
+                let syn::Expr::Field(source) = reference.expr.as_ref() else {
+                    return false;
+                };
+                if !matches!(source.base.as_ref(), syn::Expr::Path(p) if p.path.is_ident("self"))
+                    || !matches!(&source.member, syn::Member::Named(n) if n == "cells")
+                {
+                    return false;
+                }
+                saw_cells = true;
+            }
+            "forcing" | "cold_builds" => {
+                if !attrs_test_gate(&field.attrs)
+                    || !matches!(&field.expr, syn::Expr::Path(p) if p.path.is_ident(name))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_cells
+}
+
 /// Recursive worker for [`crate_visible_producer_fn_names`]: walk a slice of
 /// items, collecting crate-visible free fns + `impl`-block associated fns and
 /// descending into non-test inline modules.
@@ -17692,7 +17859,8 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
                         if attrs_test_gate(&m.attrs) {
                             continue;
                         }
-                        if visibility_is_crate_visible(&m.vis) {
+                        if visibility_is_crate_visible(&m.vis) && !is_mirror_attachment_mint(imp, m)
+                        {
                             names.push(m.sig.ident.to_string());
                         }
                     }
@@ -18169,11 +18337,10 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
     out
 }
 
-/// Whether a `use` item in mod.rs deviates from the EXACT sanctioned re-export
-/// `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`.
-/// Returns `Some(reason)` on any deviation (wrong visibility, wrong root, an
-/// alias, a glob, an extra/missing leaf, a re-exported restricted helper), `None`
-/// when it is exactly the sanctioned re-export.
+/// Require the sole producer function and mirror nominal, allowing only the
+/// owned `MacroHotProduct` and opaque `MacroMirrorAttachment` record names.
+/// Wrong visibility/root, aliases, globs, duplicate/unknown leaves, and private
+/// builder exports remain violations.
 fn mod_rs_use_violation(u: &syn::ItemUse) -> Option<String> {
     // Visibility must be EXACTLY `pub(crate)` (the crate-root restricted path).
     let vis_ok = match &u.vis {
@@ -18235,10 +18402,16 @@ fn mod_rs_use_violation(u: &syn::ItemUse) -> Option<String> {
         "MacroHotMirror".to_string(),
         "macro_type_arg_hot_ref".to_string(),
     ];
-    if leaves != expected {
+    let required_present = expected.iter().all(|leaf| leaves.contains(leaf));
+    let finite_nominals = ["MacroHotProduct", "MacroMirrorAttachment"];
+    let allowed_only = leaves
+        .iter()
+        .all(|leaf| expected.contains(leaf) || finite_nominals.contains(&leaf.as_str()));
+    let unique = leaves.windows(2).all(|pair| pair[0] != pair[1]);
+    if !required_present || !allowed_only || !unique {
         return Some(format!(
             "the mod.rs re-export leaves must be EXACTLY `{{macro_type_arg_hot_ref, \
-             MacroHotMirror}}`, found {leaves:?}"
+             MacroHotMirror}}` with only optional owned `MacroHotProduct` / opaque `MacroMirrorAttachment` nominal leaves, found {leaves:?}"
         ));
     }
     None
@@ -18418,8 +18591,9 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         mod_violations.is_empty(),
         "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare PRIVATE \
          `mod infer_binder_names;` + `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
-         macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};` — no aliases, globs, \
-         extra leaves, re-exported restricted helpers, or a `pub`-widened module decl. \
+         macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};` with only the fixed \
+         `MacroHotProduct` / `MacroMirrorAttachment` nominal leaves — no aliases, globs, \
+         unknown leaves, private builders, or a `pub`-widened module decl. \
          Violations:\n  {}",
         mod_violations.join("\n  ")
     );
@@ -18450,6 +18624,35 @@ fn mirror_entry_surface_classifier_discriminates() {
         vec!["macro_type_arg_hot_ref".to_string()],
         "only the `pub(crate)` free fn is a crate-visible entry; the restricted-subtree helper, the \
          module-private `impl`-block `new`, and the `#[cfg(test)]` `demanded_count` are not"
+    );
+    let attachment = "impl MacroHotMirror { pub(crate) fn attach(&self) -> MacroMirrorAttachment { MacroMirrorAttachment { cells: Arc::clone(&self.cells) } } }";
+    assert!(
+        crate_visible_producer_fn_names(attachment).is_empty(),
+        "fixed opaque attachment mint executes no producer work"
+    );
+    let widened_attachment = "impl MacroHotMirror { pub(crate) fn attach(&self) -> MacroMirrorAttachment { build_macro_hot_ref(); MacroMirrorAttachment { cells: Arc::clone(&self.cells) } } }";
+    assert_eq!(
+        crate_visible_producer_fn_names(widened_attachment),
+        ["attach"],
+        "adding producer work closes the mint exemption"
+    );
+    let wrong_field = "impl MacroHotMirror { pub(crate) fn attach(&self) -> MacroMirrorAttachment { MacroMirrorAttachment { cells: Arc::clone(&self.other_cells) } } }";
+    assert_eq!(
+        crate_visible_producer_fn_names(wrong_field),
+        ["attach"],
+        "only the existing cells authority can be minted"
+    );
+    let production_cfg = "#[cfg(any(test, debug_assertions))] impl MacroHotMirror { pub(crate) fn attach(&self) -> MacroMirrorAttachment { build_macro_hot_ref(); MacroMirrorAttachment { cells: Arc::clone(&self.cells) } } }";
+    assert_eq!(
+        crate_visible_producer_fn_names(production_cfg),
+        ["attach"],
+        "production-satisfiable cfg cannot hide producer work"
+    );
+    let foreign_attachment = "impl Other { pub(crate) fn attach(&self) -> MacroMirrorAttachment { MacroMirrorAttachment { cells: Arc::clone(&self.cells) } } }";
+    assert_eq!(
+        crate_visible_producer_fn_names(foreign_attachment),
+        ["attach"],
+        "same method name on another owner is not exempt"
     );
     // INJECT a second module-level `pub(crate)` FREE producer → now TWO entries.
     let two = "pub(crate) fn macro_type_arg_hot_ref(ctx: &C) -> Option<H> { None }\n\
@@ -18867,6 +19070,11 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     assert!(
         mod_rs_reexport_shape_violations(ok_mod).is_empty(),
         "the exact sanctioned mod.rs shape must pass"
+    );
+    let owned_nominals = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, MacroHotProduct, MacroMirrorAttachment};\n";
+    assert!(
+        mod_rs_reexport_shape_violations(owned_nominals).is_empty(),
+        "only the two fixed owned nominal records extend the re-export"
     );
     // An EXTRA re-exported leaf reddens.
     let extra_leaf = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";

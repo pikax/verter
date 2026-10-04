@@ -41,7 +41,8 @@ export interface AvatarProps {
     );
     assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_0);
 
     let declaration = engine
         .resolve_direct_prepared_type_declaration(
@@ -97,7 +98,8 @@ export interface AvatarProps {
     );
     assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_1);
 
     let declaration = engine
         .resolve_direct_prepared_type_declaration_metadata(
@@ -197,7 +199,8 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the title field's payload locator"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_2);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
@@ -291,7 +294,8 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the content field's payload locator"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_3);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
@@ -378,7 +382,8 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the contentId field's payload locator"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_4);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
@@ -443,7 +448,9 @@ export interface LinkProps extends NuxtLinkProps {
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_5);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -454,7 +461,9 @@ export interface LinkProps extends NuxtLinkProps {
             "LinkProps",
             &route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
         .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
@@ -524,7 +533,9 @@ export class MixedClass {
     );
     assert!(host.ensure_loaded("/src/Mixed.vue"));
     let _store_view = host.resolver_store_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_6);
 
     let member_names = |projected: &TypeExpr| -> std::collections::BTreeSet<String> {
         match projected {
@@ -555,7 +566,9 @@ export class MixedClass {
             "MixedClass",
             &pub_route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
     {
         assert!(
             member_names(&projected).contains("open"),
@@ -574,7 +587,7 @@ export class MixedClass {
                 &route,
             )
             .and_then(|node| {
-                super::surface::materialize_route_projection_node(query_engine.ctx, &node)
+                super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
             });
         if let Some(projected) = projected {
             assert!(
@@ -594,7 +607,9 @@ export class MixedClass {
             "MixedClass",
             &omit_route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
     {
         let names = member_names(&projected);
         assert!(
@@ -648,7 +663,9 @@ export interface LinkProps extends NuxtLinkProps {
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_7);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -659,7 +676,9 @@ export interface LinkProps extends NuxtLinkProps {
             "LinkProps",
             &route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
         .expect("package-backed inherited pick route should project");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
@@ -755,7 +774,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_8);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -766,7 +787,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "LinkProps",
             &route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.dispatch,  &node))
         .expect(
             "local inherited members should project without deepening unrelated imported utility bases",
         );
@@ -892,7 +913,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_9);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -903,7 +926,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "LinkProps",
             &route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
         .expect("realistic inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
@@ -1026,7 +1051,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         ],
     );
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_10);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -1037,7 +1064,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "LinkProps",
             &route,
         )
-        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
         .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
@@ -1112,7 +1141,9 @@ type F<T> = <T>(x: T) => T
     assert!(host.ensure_loaded("/src/App.vue"));
 
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let fixture_dispatch_11 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_11);
 
     // `F<string>` — instantiate the generic function-typed alias with the
     // outer `T` bound to `string`.
@@ -1123,12 +1154,14 @@ type F<T> = <T>(x: T) => T
     // `build_instantiate` binds the outer `T -> string` and substitutes while
     // lowering, then materialise the instantiated function body once.
     let instantiated = crate::resolver_core::lower_and_project_to_expanded_node(
-        query_engine.ctx,
+        query_engine.dispatch,
         "/src/App.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
         &expr,
     )
-    .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+    .and_then(|node| {
+        super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+    })
     .expect(
         "F<string> over a function-typed generic alias should instantiate to the function body \
          via the shared dispatch instantiation path",
@@ -2042,7 +2075,8 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
         }],
     );
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_12);
     // Prime the wildcard-route fuse so exactly ONE further slow-lane
     // `allow_wildcard_route()` stays within budget — a second
     // resolution tips it past `wildcard_route_fanout` and trips. This
@@ -2182,7 +2216,8 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
         .ensure_indexed_ready("/concurrent_pub/index.ts")
         .is_some());
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_13 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_13);
 
     // The value a concurrent request validated-and-published into the
     // shared DB for the SAME key while this request was cold.
@@ -2384,7 +2419,12 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
                 .map(|_| {
                     let host_ref = &host;
                     scope.spawn(move || {
-                        let mut engine = ComponentMetaQueryEngine::new(host_ref);
+                        let fixture_dispatch_14 =
+                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                host_ref,
+                            );
+                        let mut engine =
+                            ComponentMetaQueryEngine::new(host_ref, &fixture_dispatch_14);
                         // Give each worker's wildcard-route fuse ample
                         // budget: the discriminator is the SUMMED
                         // consumption count, not a near-fanout trip.
@@ -2527,7 +2567,9 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     // Request 1 — fuse primed to 0: the slow-lane `allow_wildcard_route()`
     // trips immediately, so the symbol is never looked up (PARTIAL).
     {
-        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+        let fixture_dispatch_15 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_15);
         engine.prime_wildcard_route_fuse_for_tests(0);
         let resolved = engine.resolve_imported_registry_symbol(
             "/m4_src/index.ts",
@@ -2554,7 +2596,9 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
 
     // Request 2 — FRESH engine WITH budget. The symbol resolves (proving
     // no warm negative short-circuited it to None).
-    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
+    let fixture_dispatch_15 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_15);
     let resolved2 = engine2.resolve_imported_registry_symbol(
         "/m4_src/index.ts",
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2599,7 +2643,10 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
         use crate::request_context::{RequestContext, RequestContextGuard};
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+
+        let fixture_dispatch_16 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_16);
         engine.prime_wildcard_route_fuse_for_tests(0);
         let _ = engine.can_resolve_registry_symbol(
             "/m4_src/index.ts",
@@ -2625,7 +2672,9 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
     );
 
     // Request 2 — FRESH engine WITH budget. The symbol IS resolvable.
-    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
+    let fixture_dispatch_16 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_16);
     let resolvable2 = engine2.can_resolve_registry_symbol(
         "/m4_src/index.ts",
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2671,7 +2720,10 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
     {
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+
+        let fixture_dispatch_17 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_17);
         assert!(
             engine.can_resolve_registry_symbol(
                 "/m4_src/index.ts",
@@ -2698,7 +2750,10 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
     {
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+
+        let fixture_dispatch_18 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_18);
         host.test_force
             .force_indexed_ready_serve_fence_for_tests
             .store(true, Ordering::Relaxed);
@@ -2756,7 +2811,10 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
     {
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+
+        let fixture_dispatch_19 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_19);
         assert!(
             engine.can_resolve_registry_symbol(
                 "/m4_src/index.ts",
@@ -2782,7 +2840,10 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
     {
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+
+        let fixture_dispatch_20 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_20);
         host.test_force
             .force_fact_tracer_overflow_observations
             .store(
@@ -2865,7 +2926,8 @@ fn scope_shadowing_is_built_once_per_scope_and_memoized() {
     assert!(host.ensure_loaded("/src/A.vue"));
     assert!(host.ensure_loaded("/src/B.vue"));
 
-    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let fixture_dispatch_21 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_21);
 
     // Two probes for the SAME scope reuse ONE cached instance — the
     // discriminating identity check. A per-field `from_scope_payload` rebuild
@@ -2932,7 +2994,9 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
     let control_db = control.project_type_store().declaration_db();
     let control_before = control_db.live_count();
     let control_resolved = {
-        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        let fixture_dispatch_22 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_22);
         engine
             .resolve_type_declaration(
                 "/m4_src/types.ts",
@@ -2964,7 +3028,9 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
         .force_indexed_ready_serve_fence_for_tests
         .store(true, Ordering::Relaxed);
     let fenced_resolved = {
-        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
+        let fixture_dispatch_23 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(fenced.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref(), &fixture_dispatch_23);
         engine
             .resolve_type_declaration(
                 "/m4_src/types.ts",
@@ -3028,7 +3094,9 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
     let control_db = control.project_type_store().imported_registry_db();
     let control_before = control_db.live_count();
     let control_resolved = {
-        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        let fixture_dispatch_24 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_24);
         engine
             .resolve_imported_registry_symbol(
                 "/m4_src/index.ts",
@@ -3059,7 +3127,9 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
         .force_indexed_ready_serve_fence_for_tests
         .store(true, Ordering::Relaxed);
     let fenced_resolved = {
-        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
+        let fixture_dispatch_25 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(fenced.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref(), &fixture_dispatch_25);
         engine
             .resolve_imported_registry_symbol(
                 "/m4_src/index.ts",
@@ -3149,7 +3219,9 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let control_db = control.project_type_store().owner_collection_db();
     let control_before = control_db.live_count();
     let control_locator = {
-        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        let fixture_dispatch_26 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_26);
         engine.owner_collection_expr(
             "/oc_src/types.ts",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -3192,7 +3264,9 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let broken_db = broken.project_type_store().owner_collection_db();
     let broken_before = broken_db.live_count();
     let broken_locator = {
-        let mut engine = ComponentMetaQueryEngine::new(broken.as_ref());
+        let fixture_dispatch_27 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(broken.as_ref());
+        let mut engine = ComponentMetaQueryEngine::new(broken.as_ref(), &fixture_dispatch_27);
         engine.owner_collection_expr(
             "/oc_src/types.ts",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -3259,7 +3333,9 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
     );
     state.decl_bodies().release_retained_snapshot_for_test();
 
-    let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+    let fixture_dispatch_28 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_28);
     let degraded = engine.prepared_type_decl(
         "/oc_src/types.ts",
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -3292,7 +3368,7 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
     // CONTROL — a fresh engine (no scratch entry) reaches the recovered
     // declaration, so the host-side recovery is real.
     let control = {
-        let mut fresh = ComponentMetaQueryEngine::new(host.as_ref());
+        let mut fresh = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_28);
         fresh.prepared_type_decl(
             "/oc_src/types.ts",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),

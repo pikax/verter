@@ -111,7 +111,7 @@ pub(super) fn published_member_source_upgrade_for_node(
         ));
     }
     let identity =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
             Some(crate::semantic_query::SemanticNodeData::DeclRef { identity }) => {
                 Some(identity.clone())
             }
@@ -179,7 +179,7 @@ pub(crate) fn structural_member_value_source(
     member_key: &crate::semantic_query::PropertyKey,
     type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
+    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     if matches!(
         data.as_ref(),
         crate::semantic_query::SemanticNodeData::Opaque(error)

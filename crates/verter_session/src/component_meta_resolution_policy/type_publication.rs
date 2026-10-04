@@ -14,7 +14,6 @@ use verter_type_expr::{
     SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof, TypePublication,
 };
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     DeclIdentity, IndexKey, NodeScopeId, ProjectionMode, ProjectionReductionContext, QueryError,
     SemanticNodeData, SemanticNodeId,
@@ -505,7 +504,7 @@ fn normalized_projection_shape_equivalent(
     right: SemanticNodeId,
     ctx: &PolicyCtx<'_, '_>,
 ) -> Option<bool> {
-    let dispatch = ProjectSemanticDispatch::new(ctx.resolver_ctx());
+    let dispatch = ctx.engine.dispatch;
     let reduction = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let mut visited = rustc_hash::FxHashSet::default();
     let mut stack = vec![(left, right)];

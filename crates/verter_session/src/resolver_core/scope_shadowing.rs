@@ -38,10 +38,7 @@
 //! the two lowering entry points agree on which builtin names are
 //! shadowed in any given owner scope.
 
-use std::sync::Arc;
-
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
-use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 // `from_host_scope` migrates to `&dyn ResolverContext`; the
 // `crate::VerterHost` type is no longer needed in this file.
 
@@ -122,7 +119,7 @@ impl ScopeShadowing {
     /// aligned is the load-bearing invariant: the dispatch path and the
     /// materialise path MUST observe the same shadow set per scope.
     pub(crate) fn from_prepared_decl_bundle(
-        bundle: &Arc<PreparedDeclBundle>,
+        bundle: &impl crate::resolver_core::request_inputs::PreparedInputSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         Self::from_scope_payload(Some(&DeclarationScopePayload::from_bundle(bundle, owner)))
@@ -159,8 +156,10 @@ impl ScopeShadowing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolver_core::prepared_decl::PreparedDeclBundle;
     use crate::resolver_core::prepared_decl::TypeParamBinding;
     use rustc_hash::FxHashMap;
+    use std::sync::Arc;
 
     fn make_binding(name: &str, ordinal: u16) -> TypeParamBinding {
         TypeParamBinding {
@@ -221,7 +220,10 @@ mod tests {
             &interner,
         );
         let owner = verter_type_expr::TopLevelOwnerId::instance(0);
-        let owner_scope = bundle.owner_scopes.entry(owner).or_default();
+        let owner_scope = Arc::get_mut(&mut bundle.owner_scopes)
+            .expect("fixture owns its scope collection before projection")
+            .entry(owner)
+            .or_default();
         owner_scope.scope_type_names = scope_type_names;
         owner_scope.import_bindings = import_bindings;
         owner_scope.script_setup_type_bindings = bindings;
@@ -318,22 +320,29 @@ mod tests {
         let names: Vec<String> = (0..3000).map(|index| format!("T{index}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let (bundle, owner) = bundle_with_imports(&names, &[], &[]);
-        let before = Arc::strong_count(&bundle);
+        let pure_bundle = bundle.input_record();
+        let raw_before = Arc::strong_count(&bundle);
+        let before = Arc::strong_count(&pure_bundle);
         let shadows: Vec<ScopeShadowing> = (0..8)
             .map(|_| ScopeShadowing::from_prepared_decl_bundle(&bundle, owner))
             .collect();
         assert_eq!(
-            Arc::strong_count(&bundle),
+            Arc::strong_count(&pure_bundle),
             before + shadows.len(),
             "each shadow set holds the bundle it reads"
         );
         for shadow in &shadows {
             let payload = shadow.payload.as_ref().expect("a bundle-backed shadow set");
-            assert!(Arc::ptr_eq(payload.bundle_for_tests(), &bundle));
+            assert!(Arc::ptr_eq(payload.bundle_for_tests(), &pure_bundle));
             assert!(shadow.is_shadowing_lib("T2999"));
         }
         drop(shadows);
-        assert_eq!(Arc::strong_count(&bundle), before);
+        assert_eq!(Arc::strong_count(&pure_bundle), before);
+        assert_eq!(
+            Arc::strong_count(&bundle),
+            raw_before,
+            "pure shadow views never retain source workers"
+        );
     }
 
     #[test]

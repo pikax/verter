@@ -21,11 +21,14 @@ use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::TopLevelOwnerId;
 
 use super::*;
-use crate::cache_runtime::lookup;
+use crate::project_semantic_dispatch::flow_slice_driver::{
+    FlowBodySkeletonSource, FlowSliceDriver,
+};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_semantic::analysis::flow::FlowBindingMapError;
 
 fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
@@ -85,7 +88,6 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
     fn build_bundle(
         &self,
         key: &FlowSliceFunctionKey,
-        _resolver: &dyn ResolverContext,
     ) -> Result<Option<FlowGraphBundle>, FlowBindingMapError> {
         let Some(source) = self
             .fixtures
@@ -208,10 +210,12 @@ fn parse_key_and_language_are_function_key_axes() {
     );
     let ctx: &dyn ResolverContext = &rig.host;
     for key in [&baseline, &parse_key_changed, &language_changed] {
-        lookup(rig.hash_node.as_ref(), hash_key(key.clone(), &["b"]), ctx).expect("build");
+        rig.driver(ctx)
+            .lookup_hash(hash_key(key.clone(), &["b"]))
+            .expect("build");
     }
     assert_eq!(
-        rig.graphs.build_count(),
+        rig.stores.graphs.build_count(),
         3,
         "parse-key and language variants never share a memoized graph"
     );
@@ -299,11 +303,9 @@ fn skeleton_source_verifies_parse_key_and_language() {
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
-    let index = serve
-        .indexed
-        .shallow_state
-        .decl_bodies()
-        .function_program_index();
+    let index = ctx
+        .function_program_index(&serve.indexed.shallow_state)
+        .expect("the retained source index is available");
     let entry = index
         .matches_named("myType")
         .next()
@@ -332,11 +334,13 @@ fn skeleton_source_verifies_parse_key_and_language() {
         build_toolchain_fingerprint:
             crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     };
-    let stores = ctx.project_type_store().flow_slice();
+    let stores = host.project_type_store().flow_slice();
 
     // The exact key serves.
     assert!(
-        stores.skeleton_for(&key, ctx).is_some(),
+        FlowSliceDriver::new(stores, ctx)
+            .skeleton_for(&key)
+            .is_some(),
         "the key whose source axes match the served artifact is served"
     );
     let first = stores.bound_graph_for(&key).expect("built graph is bound");
@@ -375,7 +379,9 @@ fn skeleton_source_verifies_parse_key_and_language() {
         ..key.clone()
     };
     assert!(
-        stores.skeleton_for(&foreign_parse_key, ctx).is_none(),
+        FlowSliceDriver::new(stores, ctx)
+            .skeleton_for(&foreign_parse_key)
+            .is_none(),
         "a parse key the serving artifact does not carry is a typed miss"
     );
 
@@ -385,7 +391,9 @@ fn skeleton_source_verifies_parse_key_and_language() {
         ..key.clone()
     };
     assert!(
-        stores.skeleton_for(&foreign_language, ctx).is_none(),
+        FlowSliceDriver::new(stores, ctx)
+            .skeleton_for(&foreign_language)
+            .is_none(),
         "a language row the serving artifact does not carry is a typed miss"
     );
     // Neither refusal populated the memoized store under the foreign keys.
@@ -416,11 +424,14 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
         FlowSliceBudget::default(),
     );
     let ctx: &dyn ResolverContext = &rig.host;
-    lookup(rig.hash_node.as_ref(), hash_key(baseline, &["b"]), ctx).expect("baseline build");
-    lookup(rig.hash_node.as_ref(), hash_key(changed, &["b"]), ctx)
+    rig.driver(ctx)
+        .lookup_hash(hash_key(baseline, &["b"]))
+        .expect("baseline build");
+    rig.driver(ctx)
+        .lookup_hash(hash_key(changed, &["b"]))
         .expect("fingerprint-changed build");
     assert_eq!(
-        rig.graphs.build_count(),
+        rig.stores.graphs.build_count(),
         2,
         "a private-shape fingerprint change must miss the prior flow graph"
     );
@@ -445,34 +456,24 @@ const MYTYPE_FIXTURE: &str =
 
 struct Rig {
     host: VerterHost,
-    graphs: Arc<FunctionFlowGraphStore>,
     source: Arc<FixtureSkeletonSource>,
-    hash_node: Arc<FlowSliceHashNode>,
-    lowered_node: FlowSliceLoweredBodyNode,
+    stores: FlowSliceStores,
+}
+
+impl Rig {
+    fn driver<'a>(&'a self, ctx: &'a dyn ResolverContext) -> FlowSliceDriver<'a> {
+        FlowSliceDriver::new(&self.stores, ctx).with_fixture(self.source.as_ref())
+    }
 }
 
 fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBudget) -> Rig {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let graphs = Arc::new(FunctionFlowGraphStore::new());
-    let source = Arc::new(FixtureSkeletonSource::new(fixtures));
-    let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
-    let budget: FlowSliceBudgetCell = Arc::new(parking_lot::RwLock::new(budget));
-    let hash_node = Arc::new(FlowSliceHashNode::new(
-        Arc::clone(&graphs),
-        Arc::clone(&skeletons),
-        Arc::clone(&budget),
-    ));
-    let lowered_node = FlowSliceLoweredBodyNode::new(
-        Arc::clone(&graphs),
-        Arc::clone(&skeletons),
-        Arc::clone(&hash_node),
-    );
+    let stores = FlowSliceStores::new();
+    stores.set_budget_for_test(budget);
     Rig {
         host,
-        graphs,
-        source,
-        hash_node,
-        lowered_node,
+        source: Arc::new(FixtureSkeletonSource::new(fixtures)),
+        stores,
     }
 }
 
@@ -488,23 +489,27 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
     );
 
     // Discriminates: a `peek` that fell through to `source.build_bundle`
-    // on a miss would silently become `get_or_build` under a different
+    // on a miss would silently become a blocking demand under a different
     // name, defeating the whole point of a non-blocking observation
     // backing primitive.
     assert!(
-        rig.graphs.peek(&key).is_none(),
+        rig.stores.graphs.peek(&key).is_none(),
         "peek must never trigger a build"
     );
     assert_eq!(rig.source.build_calls(), 0);
 
     let built = rig
-        .graphs
-        .get_or_build(&key, rig.source.as_ref(), &rig.host as &dyn ResolverContext)
+        .driver(&rig.host)
+        .graph_bundle(&key)
         .expect("valid fixture correspondence")
         .expect("fixture key must build");
     assert_eq!(rig.source.build_calls(), 1);
 
-    let peeked = rig.graphs.peek(&key).expect("peek must see the warm entry");
+    let peeked = rig
+        .stores
+        .graphs
+        .peek(&key)
+        .expect("peek must see the warm entry");
     assert!(
         Arc::ptr_eq(&peeked, &built),
         "peek must return the SAME memoized bundle, not a fresh build"
@@ -522,31 +527,34 @@ fn invalid_binding_correspondence_never_publishes_or_caches_absence() {
     );
     rig.source.invalid_bindings.store(true, Ordering::SeqCst);
     assert!(matches!(
-        rig.graphs
-            .get_or_build(&key, rig.source.as_ref(), &rig.host),
+        rig.driver(&rig.host).graph_bundle(&key),
         Err(FlowBindingMapError::MissingDeclaration)
     ));
     let demand = hash_key(key.clone(), &["b"]);
     for _ in 0..2 {
-        assert!(lookup(rig.hash_node.as_ref(), demand.clone(), &rig.host).is_none());
-        assert!(rig.graphs.peek(&key).is_none());
-        assert!(rig.hash_node.published_entry(&demand).is_none());
+        assert!(rig.driver(&rig.host).lookup_hash(demand.clone()).is_none());
+        assert!(rig.stores.graphs.peek(&key).is_none());
+        assert!(rig.stores.hash_node.published_entry(&demand).is_none());
     }
-    assert_eq!(rig.graphs.build_count(), 0);
+    assert_eq!(rig.stores.graphs.build_count(), 0);
     assert_eq!(rig.source.build_calls(), 3, "invalid builds remain cold");
-    assert_eq!(rig.lowered_node.entry_count(), 0);
+    assert_eq!(rig.stores.lowered_node.entry_count(), 0);
 
     rig.source.invalid_bindings.store(false, Ordering::SeqCst);
-    assert!(lookup(rig.hash_node.as_ref(), demand, &rig.host).is_some());
-    let recovered = rig.graphs.bound_graph(&key).expect("valid retry publishes");
+    assert!(rig.driver(&rig.host).lookup_hash(demand).is_some());
+    let recovered = rig
+        .stores
+        .graphs
+        .bound_graph(&key)
+        .expect("valid retry publishes");
     assert_eq!(recovered.bundle().bindings.value_count(), 2);
-    assert_eq!(rig.graphs.build_count(), 1);
+    assert_eq!(rig.stores.graphs.build_count(), 1);
     assert_eq!(rig.source.build_calls(), 4);
 }
 
 /// `FlowSliceStores::peek_skeleton_for` — the store-level wrapper's
 /// equivalence to `FunctionFlowGraphStore::peek`, built directly (not
-/// through `FlowSliceStores::new`'s production `RetainedSnapshotSkeletonSource`)
+/// through the production owned-lowering demand)
 /// so a `FixtureSkeletonSource` can drive the warm-build half without a
 /// real host/indexed artifact.
 #[test]
@@ -557,26 +565,13 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
         key.clone(),
         MYTYPE_FIXTURE,
     )]));
-    let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
     let budget: FlowSliceBudgetCell =
         Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-    let hash_node = Arc::new(FlowSliceHashNode::new(
-        Arc::clone(&graphs),
-        Arc::clone(&skeletons),
-        Arc::clone(&budget),
-    ));
-    let lowered_node = FlowSliceLoweredBodyNode::new(
-        Arc::clone(&graphs),
-        Arc::clone(&skeletons),
-        Arc::clone(&hash_node),
-    );
     let stores = FlowSliceStores {
         graphs: Arc::clone(&graphs),
-        skeletons: Arc::clone(&skeletons),
-        hash_node,
-        lowered_node,
+        hash_node: Arc::new(FlowSliceHashNode::new(Arc::clone(&budget))),
+        lowered_node: FlowSliceLoweredBodyNode::new(),
         demand_plans: std::sync::atomic::AtomicU64::new(0),
-        #[cfg(test)]
         budget,
     };
 
@@ -587,8 +582,9 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     assert_eq!(source.build_calls(), 0);
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let built = stores
-        .skeleton_for(&key, &host as &dyn ResolverContext)
+    let built = FlowSliceDriver::new(&stores, &host as &dyn ResolverContext)
+        .with_fixture(source.as_ref())
+        .skeleton_for(&key)
         .expect("fixture key must build");
     assert_eq!(source.build_calls(), 1);
 
@@ -624,7 +620,7 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 ///   producer any compute could call — so the guard binds it to the
 ///   per-thread invocation counter: the lowered-node lookup below
 ///   performs ZERO hash computations (a `compute_flow_slice_hash` call
-///   inserted into `FlowSliceLoweredBodyNode::compute` flips exactly
+///   inserted into the request-local lowered demand flips exactly
 ///   this assertion).
 #[test]
 pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
@@ -641,7 +637,10 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     let key = hash_key(function, &["b"]);
     let invocations_before_hash = compute_flow_slice_hash_thread_invocations();
     let plans_before_hash = return_path_peeker_plan_thread_invocations();
-    let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash lookup");
+    let outcome = rig
+        .driver(ctx)
+        .lookup_hash(key.clone())
+        .expect("hash lookup");
     let planned = planned(outcome);
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
@@ -661,7 +660,10 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     };
     let invocations_before_lowered = compute_flow_slice_hash_thread_invocations();
     let plans_before_lowered = return_path_peeker_plan_thread_invocations();
-    let ir = lookup(&rig.lowered_node, lowered_key, ctx).expect("lowered lookup");
+    let ir = rig
+        .driver(ctx)
+        .lookup_lowered(lowered_key)
+        .expect("lowered lookup");
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
         invocations_before_lowered,
@@ -700,8 +702,8 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     ));
     assert!(ir.slots.iter().all(|slot| slot.name.as_ref() != "a"));
 
-    assert_eq!(rig.hash_node.entry_count(), 1);
-    assert_eq!(rig.lowered_node.entry_count(), 1);
+    assert_eq!(rig.stores.hash_node.entry_count(), 1);
+    assert_eq!(rig.stores.lowered_node.entry_count(), 1);
 }
 
 /// Share-vs-split check 4 (`function_flow_graph_built_once_per_function_skeleton`),
@@ -720,13 +722,15 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
 
     let key_a = hash_key(function.clone(), &["a"]);
     let key_b = hash_key(function.clone(), &["b"]);
-    let planned_a = planned(lookup(rig.hash_node.as_ref(), key_a.clone(), ctx).expect("a"));
+    let planned_a = planned(rig.driver(ctx).lookup_hash(key_a.clone()).expect("a"));
     let first = rig
+        .stores
         .graphs
         .bound_graph(&function)
         .expect("first demand builds");
-    let planned_b = planned(lookup(rig.hash_node.as_ref(), key_b.clone(), ctx).expect("b"));
+    let planned_b = planned(rig.driver(ctx).lookup_hash(key_b.clone()).expect("b"));
     let second = rig
+        .stores
         .graphs
         .bound_graph(&function)
         .expect("second demand reuses");
@@ -739,24 +743,20 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         "distinct demands select distinct slices"
     );
 
-    let _ir_a = lookup(
-        &rig.lowered_node,
-        FlowSliceLoweredKey {
+    let _ir_a = rig
+        .driver(ctx)
+        .lookup_lowered(FlowSliceLoweredKey {
             hash_key: key_a,
             slice_hash: planned_a,
-        },
-        ctx,
-    )
-    .expect("lowered a");
-    let _ir_b = lookup(
-        &rig.lowered_node,
-        FlowSliceLoweredKey {
+        })
+        .expect("lowered a");
+    let _ir_b = rig
+        .driver(ctx)
+        .lookup_lowered(FlowSliceLoweredKey {
             hash_key: key_b,
             slice_hash: planned_b,
-        },
-        ctx,
-    )
-    .expect("lowered b");
+        })
+        .expect("lowered b");
 
     assert_eq!(
         rig.source.build_calls(),
@@ -764,12 +764,12 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         "the skeleton is produced once per function content version"
     );
     assert_eq!(
-        rig.graphs.build_count(),
+        rig.stores.graphs.build_count(),
         1,
         "the FunctionFlowGraph is built once; every further demand re-plans only"
     );
-    assert_eq!(rig.hash_node.entry_count(), 2);
-    assert_eq!(rig.lowered_node.entry_count(), 2);
+    assert_eq!(rig.stores.hash_node.entry_count(), 2);
+    assert_eq!(rig.stores.lowered_node.entry_count(), 2);
 }
 
 /// Budget non-admission at every layer this substrate owns: the planner
@@ -790,7 +790,9 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
 
     let key = hash_key(function, &["b"]);
     for _ in 0..2 {
-        let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx)
+        let outcome = rig
+            .driver(ctx)
+            .lookup_hash(key.clone())
             .expect("a budget refusal is RETURNED, never a silent None");
         let FlowSliceHashOutcome::BudgetExceeded(exceeded) = outcome else {
             panic!("a one-node budget cannot hold this slice");
@@ -799,13 +801,13 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
         assert_eq!(exceeded.limit, 1);
 
         assert_eq!(
-            rig.hash_node.entry_count(),
+            rig.stores.hash_node.entry_count(),
             0,
             "ReturnOnly never publishes a hash entry"
         );
-        assert!(rig.hash_node.published_entry(&key).is_none());
+        assert!(rig.stores.hash_node.published_entry(&key).is_none());
         assert_eq!(
-            rig.lowered_node.entry_count(),
+            rig.stores.lowered_node.entry_count(),
             0,
             "no slice hash exists, so the lowered store is unaddressable and empty"
         );
@@ -824,14 +826,14 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let first = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold"));
-    let second = planned(lookup(rig.hash_node.as_ref(), key, ctx).expect("warm"));
+    let first = planned(rig.driver(ctx).lookup_hash(key.clone()).expect("cold"));
+    let second = planned(rig.driver(ctx).lookup_hash(key).expect("warm"));
     assert_eq!(
         first, second,
         "the warm hit serves the published slice identity, not a recompute"
     );
     assert_eq!(rig.source.build_calls(), 1);
-    assert_eq!(rig.hash_node.entry_count(), 1);
+    assert_eq!(rig.stores.hash_node.entry_count(), 1);
 }
 
 /// Content-version keying: two keys differing only in
@@ -868,8 +870,8 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
 
     let key_v1 = hash_key(v1, &["b"]);
     let key_v2 = hash_key(v2, &["b"]);
-    let planned_v1 = planned(lookup(rig.hash_node.as_ref(), key_v1.clone(), ctx).expect("v1"));
-    let planned_v2 = planned(lookup(rig.hash_node.as_ref(), key_v2.clone(), ctx).expect("v2"));
+    let planned_v1 = planned(rig.driver(ctx).lookup_hash(key_v1.clone()).expect("v1"));
+    let planned_v2 = planned(rig.driver(ctx).lookup_hash(key_v2.clone()).expect("v2"));
 
     // The slice SELECTION is identical across the literal edit — the
     // content difference is pinned by `flow_body_stable_hash` in the
@@ -885,10 +887,14 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
         slice_hash: planned_v2,
     };
     assert_ne!(lowered_v1, lowered_v2, "content versions never collide");
-    let _ = lookup(&rig.lowered_node, lowered_v1, ctx).expect("v1 IR");
-    let _ = lookup(&rig.lowered_node, lowered_v2, ctx).expect("v2 IR");
-    assert_eq!(rig.graphs.build_count(), 2, "one graph per content version");
-    assert_eq!(rig.lowered_node.entry_count(), 2);
+    let _ = rig.driver(ctx).lookup_lowered(lowered_v1).expect("v1 IR");
+    let _ = rig.driver(ctx).lookup_lowered(lowered_v2).expect("v2 IR");
+    assert_eq!(
+        rig.stores.graphs.build_count(),
+        2,
+        "one graph per content version"
+    );
+    assert_eq!(rig.stores.lowered_node.entry_count(), 2);
 }
 
 /// The published entries carry an EMPTY fact rail: these are
@@ -905,8 +911,12 @@ fn published_entries_carry_empty_fact_rail() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash");
-    let entry = rig.hash_node.published_entry(&key).expect("published");
+    let _ = rig.driver(ctx).lookup_hash(key.clone()).expect("hash");
+    let entry = rig
+        .stores
+        .hash_node
+        .published_entry(&key)
+        .expect("published");
     assert!(
         entry.signature.facts.is_empty(),
         "no fact rail — and in particular no slice-identity fact — rides the signature"
@@ -926,14 +936,14 @@ fn graph_store_remove_canonical_evicts_bundles() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold");
-    assert_eq!(rig.graphs.build_count(), 1);
-    rig.graphs.remove_canonical("/fixtures/my-type.ts");
+    let _ = rig.driver(ctx).lookup_hash(key.clone()).expect("cold");
+    assert_eq!(rig.stores.graphs.build_count(), 1);
+    rig.stores.graphs.remove_canonical("/fixtures/my-type.ts");
     // A different demand misses the hash store and rebuilds the bundle
     // once more.
     let key2 = hash_key(key.function.clone(), &["a"]);
-    let _ = lookup(rig.hash_node.as_ref(), key2, ctx).expect("recold");
-    assert_eq!(rig.graphs.build_count(), 2);
+    let _ = rig.driver(ctx).lookup_hash(key2).expect("recold");
+    assert_eq!(rig.stores.graphs.build_count(), 2);
 }
 
 /// Share-vs-split check 5 through the PRODUCTION storage: the
@@ -965,11 +975,9 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
-    let index = serve
-        .indexed
-        .shallow_state
-        .decl_bodies()
-        .function_program_index();
+    let index = ctx
+        .function_program_index(&serve.indexed.shallow_state)
+        .expect("the retained source index is available");
     let entry = index
         .matches_named("myType")
         .next()
@@ -1003,7 +1011,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             projection_path: Arc::from(vec![Arc::<str>::from("b")].into_boxed_slice()),
         },
     };
-    let stores = ctx.project_type_store().flow_slice();
+    let stores = host.project_type_store().flow_slice();
 
     // Bracket the WHOLE hash-then-lower chain with a REAL fact tracer:
     // the slice path must observe no fact naming `Mytype` (no
@@ -1012,17 +1020,16 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     let (ir, finalise) = crate::fact_signature_helpers::install_fact_tracer(
         &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
-            let outcome = lookup(stores.hash_node(), key.clone(), ctx).expect("hash lookup");
+            let outcome = FlowSliceDriver::new(stores, ctx)
+                .lookup_hash(key.clone())
+                .expect("hash lookup");
             let slice_hash = planned(outcome);
-            lookup(
-                stores.lowered_node(),
-                FlowSliceLoweredKey {
+            FlowSliceDriver::new(stores, ctx)
+                .lookup_lowered(FlowSliceLoweredKey {
                     hash_key: key.clone(),
                     slice_hash,
-                },
-                ctx,
-            )
-            .expect("lowered lookup")
+                })
+                .expect("lowered lookup")
         },
     );
     let observed: Vec<String> = match &finalise {
@@ -1324,16 +1331,14 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     );
     let ctx: &dyn ResolverContext = &rig.host;
     let key = hash_key(function, &["b"]);
-    let slice_hash = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash"));
-    let ir = lookup(
-        &rig.lowered_node,
-        FlowSliceLoweredKey {
+    let slice_hash = planned(rig.driver(ctx).lookup_hash(key.clone()).expect("hash"));
+    let ir = rig
+        .driver(ctx)
+        .lookup_lowered(FlowSliceLoweredKey {
             hash_key: key,
             slice_hash,
-        },
-        ctx,
-    )
-    .expect("lowered IR");
+        })
+        .expect("lowered IR");
     // The parse arena that produced this IR dropped inside `skeleton_of`;
     // reading the IR here is the runtime detach witness.
     assert!(!ir.exprs.is_empty(), "the detached IR carries owned data");
@@ -1561,11 +1566,9 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
         let serve = ctx
             .ensure_indexed_ready_serve(canonical)
             .expect("the fixture file is served");
-        let index = serve
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .function_program_index();
+        let index = ctx
+            .function_program_index(&serve.indexed.shallow_state)
+            .expect("the retained source index is available");
         let hash = index
             .matches_named("shiftedSecond")
             .next()

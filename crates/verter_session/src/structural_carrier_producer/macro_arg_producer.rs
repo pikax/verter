@@ -124,7 +124,7 @@ use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember,
 use super::infer_binder_names::{
     collect_extends_infer_declarations, BinderScope, InferSyntaxPathStep, StructuralLowerContext,
 };
-use crate::resolver_core::ResolverContext;
+
 use crate::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
@@ -1124,17 +1124,24 @@ fn register_structural_function_alias(
 /// / default lowers through [`lower_type_expr_structural`] DIRECTLY — the
 /// binder-seed lowering is part of building the macro handle's scope, NOT a
 /// second macro-arg producer.
+#[cfg(test)]
 fn build_script_setup_seed_frames(
     indexed: &crate::project_type_store::IndexedReady,
     graph: &SemanticGraphStore,
     scope: &NodeScopeId,
 ) -> Vec<BinderScope> {
-    // Re-source the `<script setup generic="…">` clause from the owner's local
-    // route-free parse artifact through the ONE transient producer. The
-    // clause-position index IS the ordinal (the same `param_index` the eager
-    // path / prepared-decl bundle assigns), so the interned `TypeParam`
-    // identity tuple matches.
-    let params = crate::host_resolve::indexed_script_setup_type_params(indexed);
+    let params = crate::host_resolve::sfc_script_setup_type_params(
+        indexed.raw_source.as_ref(),
+        indexed.framework_parse.as_deref(),
+    );
+    build_script_setup_seed_frames_from_params(&params, graph, scope)
+}
+
+fn build_script_setup_seed_frames_from_params(
+    params: &[verter_type_expr::TypeParam],
+    graph: &SemanticGraphStore,
+    scope: &NodeScopeId,
+) -> Vec<BinderScope> {
     if params.is_empty() {
         return Vec::new();
     }
@@ -1240,7 +1247,7 @@ pub(crate) struct MacroHotProduct {
 /// Lazy, singleflight storage for one file's macro type-argument handles.
 #[derive(Default)]
 pub(crate) struct MacroHotMirror {
-    cells: OnceLock<Box<[MacroSlot]>>,
+    cells: Arc<OnceLock<Box<[MacroSlot]>>>,
 }
 
 #[derive(Default)]
@@ -1252,7 +1259,15 @@ struct MacroSlot {
     build_lock: parking_lot::Mutex<()>,
 }
 
-impl MacroHotMirror {
+pub(crate) struct MacroMirrorAttachment {
+    cells: Arc<OnceLock<Box<[MacroSlot]>>>,
+    #[cfg(test)]
+    forcing: Arc<crate::host_test_force::TestForceKnobs>,
+    #[cfg(test)]
+    cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl MacroMirrorAttachment {
     fn slot(&self, macro_count: usize, macro_index: usize) -> Option<MacroMirrorSlot<'_>> {
         let cells = self.cells.get_or_init(|| {
             (0..macro_count)
@@ -1261,6 +1276,22 @@ impl MacroHotMirror {
                 .into_boxed_slice()
         });
         cells.get(macro_index).map(MacroMirrorSlot)
+    }
+}
+
+impl MacroHotMirror {
+    pub(crate) fn attach(
+        &self,
+        #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
+        #[cfg(test)] cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> MacroMirrorAttachment {
+        MacroMirrorAttachment {
+            cells: Arc::clone(&self.cells),
+            #[cfg(test)]
+            forcing,
+            #[cfg(test)]
+            cold_builds,
+        }
     }
 
     #[cfg(test)]
@@ -1314,14 +1345,12 @@ impl MacroMirrorBuildGuard<'_> {
 /// releases each parent of a released node with it. A committed absence
 /// names no node and stays servable.
 fn committed_is_servable(
-    ctx: &dyn ResolverContext,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     committed: &Option<Arc<MacroHotProduct>>,
 ) -> bool {
-    committed.as_ref().is_none_or(|product| {
-        ctx.project_type_store()
-            .semantic_graph()
-            .node_is_live(product.hot.node())
-    })
+    committed
+        .as_ref()
+        .is_none_or(|product| graph.node_is_live(product.hot.node()))
 }
 
 impl std::fmt::Debug for MacroHotMirror {
@@ -1341,7 +1370,7 @@ impl std::fmt::Debug for MacroHotMirror {
 impl Clone for MacroHotMirror {
     fn clone(&self) -> Self {
         Self {
-            cells: OnceLock::new(),
+            cells: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -1357,19 +1386,24 @@ impl Clone for MacroHotMirror {
 /// has no faithful unresolved structural representation (a stable negative
 /// cell).
 pub(crate) fn macro_type_arg_hot_ref(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<MacroHotProduct> {
-    macro_hot_product(ctx, owner_canonical, macro_index).map(|product| product.as_ref().clone())
+    macro_hot_product(ctx, graph, selector, owner_canonical, macro_index)
+        .map(|product| product.as_ref().clone())
 }
 
 fn macro_hot_product(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<Arc<MacroHotProduct>> {
-    let serve = ctx.ensure_indexed_ready_serve(owner_canonical)?;
+    let (serve, source_demand) = ctx.indexed_flow_source(owner_canonical)?;
     let indexed = serve.indexed;
 
     // Lazily allocate the dense cell table once, sized to the owner's macro
@@ -1381,7 +1415,7 @@ fn macro_hot_product(
         .as_ref()
         .map(|script| script.macros.len())
         .unwrap_or(0);
-    let mirror = &indexed.macro_hot_mirror;
+    let mirror = selector.attachment(&indexed.identity)?;
     let cell = mirror.slot(macro_count, macro_index)?;
 
     // The mirror is a PURE producer of the UNRESOLVED structural carrier graph
@@ -1401,7 +1435,7 @@ fn macro_hot_product(
     // Lock-free warm read first. A committed handle a document close released
     // is not served: the cold path below re-lowers it in place.
     if let Some(committed) = cell.committed() {
-        if committed_is_servable(ctx, &committed) {
+        if committed_is_servable(graph, &committed) {
             return committed;
         }
     }
@@ -1412,9 +1446,7 @@ fn macro_hot_product(
     // invariant this cold path upholds: the builder below produces inert carrier
     // nodes and resolves nothing, so it never re-enters this demand).
     #[cfg(test)]
-    ctx.host_for_fact_tracer_install()
-        .test_force
-        .wait_macro_hot_post_warm_miss_barrier();
+    mirror.forcing.wait_macro_hot_post_warm_miss_barrier();
     // Cold path: SINGLEFLIGHT the lowering under the per-slot build lock so
     // concurrent first demands of ONE macro collapse onto a single
     // `build_macro_hot_ref` (the slot is no `get_or_init` cell: a
@@ -1423,11 +1455,19 @@ fn macro_hot_product(
     // committed while this thread waited on the lock.
     let build_guard = cell.lock_build();
     if let Some(committed) = cell.committed() {
-        if committed_is_servable(ctx, &committed) {
+        if committed_is_servable(graph, &committed) {
             return committed;
         }
     }
-    match build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index) {
+    match build_macro_hot_ref(
+        source_demand.as_ref(),
+        graph,
+        owner_canonical,
+        &indexed,
+        macro_index,
+        #[cfg(test)]
+        &mirror,
+    ) {
         MacroHotRefOutcome::Ready(result) => {
             // Commit under the build lock: every commit takes this lock, so
             // `result` IS the committed value (it replaces a released one).
@@ -1466,16 +1506,18 @@ enum MacroHotRefOutcome {
 /// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
 /// only this module's own producer paths can reach them.
 fn build_macro_hot_ref(
-    ctx: &dyn ResolverContext,
+    source_demand: Option<&crate::decl_body_memo::IndexedExpressionDemand>,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     owner_canonical: &str,
-    indexed: &crate::project_type_store::IndexedReady,
+    indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,
     macro_index: usize,
+    #[cfg(test)] mirror: &MacroMirrorAttachment,
 ) -> MacroHotRefOutcome {
     // Singleflight probe: count each COLD build entry. The per-slot build lock
     // must collapse concurrent first demands of one macro onto ONE entry.
     #[cfg(test)]
-    ctx.host_for_fact_tracer_install()
-        .macro_hot_lowering_count
+    mirror
+        .cold_builds
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Genuine, cacheable absences (no script analysis, no macro at the index,
     // no authored type argument): commit `Ready(None)`.
@@ -1492,11 +1534,10 @@ fn build_macro_hot_ref(
     let Some(payload_locator) = mac.parsed_type_argument.as_ref() else {
         return MacroHotRefOutcome::Ready(None);
     };
-    let parsed_arg = match indexed
-        .shallow_state
-        .decl_bodies()
-        .transient_macro_type_argument(mac.span)
-    {
+    let Some(source_demand) = source_demand else {
+        return MacroHotRefOutcome::LeaseMiss;
+    };
+    let parsed_arg = match source_demand.transient_macro_type_argument(mac.span) {
         crate::decl_body_memo::DemandOutcome::Ready(Some(expr)) => expr,
         // A genuine, cacheable absence: the position lowered to no argument.
         crate::decl_body_memo::DemandOutcome::Ready(None) => {
@@ -1518,7 +1559,6 @@ fn build_macro_hot_ref(
         })
         .collect::<Vec<_>>();
 
-    let graph = ctx.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(owner_canonical),
         owner: mac.owner,
@@ -1541,7 +1581,14 @@ fn build_macro_hot_ref(
     // a `BareRef(T)`. Built from the owner's ROUTE-FREE local `IndexedReady`
     // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
     // mirror stays a pure producer.
-    let seed_frames = build_script_setup_seed_frames(indexed, graph, &scope);
+    let seed_frames = build_script_setup_seed_frames_from_params(
+        &crate::host_resolve::sfc_script_setup_type_params(
+            &indexed.raw_source,
+            indexed.framework_parse.as_deref(),
+        ),
+        graph,
+        &scope,
+    );
     let infer_source =
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload_locator.clone());
     let lower_ctx = StructuralLowerContext::new(&seed_frames)

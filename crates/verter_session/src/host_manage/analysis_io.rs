@@ -11,6 +11,8 @@
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use crate::instant::Instant;
@@ -159,7 +161,6 @@ impl VerterHost {
                 crate::resolver_core::HostResolverContext::from_cold_seed(self, &base, overlay);
             #[cfg(any(test, feature = "test-support"))]
             {
-                use crate::resolver_core::ResolverContext;
                 record_template_class_lane_binding(TemplateClassLaneBinding {
                     indexed_present: true,
                     request_bound: ctx.is_request_bound(),
@@ -192,7 +193,6 @@ impl VerterHost {
         );
         #[cfg(any(test, feature = "test-support"))]
         {
-            use crate::resolver_core::ResolverContext as _;
             record_template_class_lane_binding(TemplateClassLaneBinding {
                 indexed_present: false,
                 request_bound: ctx.is_request_bound(),
@@ -1579,7 +1579,8 @@ impl VerterHost {
             );
         Some(crate::resolver_core::MaterializeScopeObservation {
             canonical_id: Arc::from(canonical),
-            indexed,
+            observed_whole_hash: indexed.whole_hash,
+            observed_shallow_hash: indexed.shallow_state.whole_hash,
             syntactic_export_set,
         })
     }

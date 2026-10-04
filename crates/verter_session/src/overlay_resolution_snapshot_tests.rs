@@ -3,11 +3,12 @@
 //! witness and its validator refer to the same effective resolution
 //! snapshot.
 
+use crate::resolver_core::request_ports::RouteLookup;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::resolver_core::{CanonicalCompletionOverlay, ResolverContext, SessionResolverContext};
+use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext};
 use crate::resolver_store::HostStoreView;
 use crate::session_view::OverlaidViewRef;
 use crate::{HostConfig, UpsertRequest, VerterHost};

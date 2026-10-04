@@ -227,7 +227,6 @@ impl ProjectSemanticDispatch<'_> {
         use crate::semantic_query::NullabilityPolicy;
         let strict = declaring_file.is_none_or(|canonical| {
             self.ctx
-                .host_for_fact_tracer_install()
                 .semantic_compiler_options_for(canonical)
                 .strict_null_checks
         });
@@ -499,7 +498,6 @@ impl ProjectSemanticDispatch<'_> {
         // `globalCallableFunctionType` / `globalNewableFunctionType`).
         let strict_bind_call_apply = self
             .ctx
-            .host_for_fact_tracer_install()
             .semantic_compiler_options_for(canonical.as_ref())
             .strict_bind_call_apply;
         let strict_interface = if strict_bind_call_apply {
@@ -599,12 +597,14 @@ impl ProjectSemanticDispatch<'_> {
         canonical: &str,
         demand_scope: ApparentDemandScope,
     ) -> ApparentTypeContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         ApparentTypeContext {
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity_for(canonical).fold_u32(),
+            project_identity: self
+                .ctx
+                .host_view_project_identity_for(canonical)
+                .fold_u32(),
             demand_scope,
         }
     }
@@ -685,9 +685,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         canonical: &str,
     ) -> Option<ProjectStableKey> {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let project = host.resolve_project_for_canonical(canonical)?;
-        host.workspace().project_stable_key(project)
+        self.ctx.project_stable_key_for_canonical(canonical)
     }
 }
 

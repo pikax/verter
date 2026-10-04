@@ -185,11 +185,11 @@ fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
     );
 
     // Same gen + permissive view ⇒ warm hit.
-    assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_some());
+    assert!(super::read_script_fact(&store, &key, &PermissiveStoreView, 5).is_some());
     // Generation bump ⇒ miss (strict same-generation gate).
-    assert!(store.get_with_view(&key, &PermissiveStoreView, 6).is_none());
+    assert!(super::read_script_fact(&store, &key, &PermissiveStoreView, 6).is_none());
     // Right gen but a view that rejects the tracked fact ⇒ miss (fact rail).
-    assert!(store.get_with_view(&key, &RejectingView, 5).is_none());
+    assert!(super::read_script_fact(&store, &key, &RejectingView, 5).is_none());
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn overflowed_admission_never_warms_the_store_return_only() {
         .is_some());
     // ...but the store stays empty — the overflowed result was NOT warmed.
     assert!(store.is_empty());
-    assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_none());
+    assert!(super::read_script_fact(&store, &key, &PermissiveStoreView, 5).is_none());
 }
 
 #[test]

@@ -157,7 +157,8 @@ impl WorldSnapshot {
         source_map_policy_hash: Hash16,
     ) -> Self {
         Self {
-            compat_token: ctx.store_view().compat_token(),
+            compat_token: crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)
+                .compat_token(),
             project_identity: dims.project_identity,
             parse_env_hash: dims.parse_env_hash,
             resolve_env_hash: dims.resolve_env_hash,
@@ -509,7 +510,7 @@ mod tests {
     #[test]
     fn from_request_threads_dims_and_reads_compat_token_through_store_view() {
         // `from_request` takes `&dyn ResolverContext` and reads
-        // `compat_token` through `ctx.store_view().compat_token()`.
+        // `compat_token` through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`.
         // The inline test uses the compile-fenced direct-host fixture context.
         let host = VerterHost::new_standalone(HostConfig::default());
         let ctx: &dyn crate::resolver_core::ResolverContext = &host;
@@ -545,12 +546,14 @@ mod tests {
         assert_eq!(snap.source_map_policy_hash, [0xBBu8; 16]);
         assert_eq!(snap.overlay_identity, Some(OverlayIdentity(7)));
 
-        // `compat_token` reads through `ctx.store_view().compat_token()`
+        // `compat_token` reads through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`
         // — verify by re-reading directly and comparing.
-        let expected_token = crate::resolver_core::StoreView::compat_token(ctx.store_view());
+        let expected_token = crate::resolver_core::StoreView::compat_token(
+            &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+        );
         assert_eq!(
             snap.compat_token, expected_token,
-            "from_request must read compat_token through ctx.store_view().compat_token()",
+            "from_request must read compat_token through (&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()",
         );
     }
 

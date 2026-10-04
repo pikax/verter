@@ -97,8 +97,12 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineProps<Props>() must resolve a macro surface");
-    let props =
-        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let props = props_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_0,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
@@ -194,8 +198,12 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_1,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -276,8 +284,12 @@ fn define_emits_callsig_rich_params_mint_the_callable_occurrence_replay_source()
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_2,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // A leaf-param signature keeps the complete CLOSED tuple source.
     let change = emits.iter().find(|e| e.name == "change").unwrap();
@@ -369,8 +381,12 @@ fn define_emits_normalizer_property_style_fallback() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("property-style defineEmits must resolve a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_3,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -415,8 +431,12 @@ fn define_emits_normalizer_mixed_callsig_unions_property_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("mixed defineEmits resolves a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_4,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
@@ -521,8 +541,12 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("imported emit interface resolves a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_5,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     assert_eq!(
         emits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
@@ -567,7 +591,14 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let local_emits = {
         let request = props_request(&host, LOCAL, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
+
+        let fixture_dispatch_6 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        emits_from_typeinfo_surface(
+            &*host,
+            &fixture_dispatch_6,
+            &resolved_vue_surface_for_test(surface.clone()),
+        )
     };
     let change = local_emits.iter().find(|e| e.name == "change").unwrap();
     // The display is the bracketed payload tuple (event-name param stripped),
@@ -598,7 +629,13 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let cross_emits = {
         let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
+        let fixture_dispatch_6 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        emits_from_typeinfo_surface(
+            &*host,
+            &fixture_dispatch_6,
+            &resolved_vue_surface_for_test(surface.clone()),
+        )
     };
     let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
     assert_eq!(
@@ -651,8 +688,12 @@ fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits with an aliased event-name union resolves a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_7,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -711,8 +752,12 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         "defineModel macro surface carries no object members"
     );
 
-    let props =
-        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let props = props_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_8,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
     assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
     let model = &props[0];
     assert_eq!(
@@ -778,8 +823,12 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("withDefaults' inner defineProps resolves a surface");
-    let props =
-        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let props = props_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_9,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
@@ -896,8 +945,13 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("cross-file heritage defineProps resolves a surface");
-    let props =
-        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_10 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let props = props_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_10,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
@@ -983,8 +1037,13 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("generic heritage defineProps resolves a surface");
-    let props =
-        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_11 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let props = props_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_11,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let val = props
         .iter()
@@ -1069,8 +1128,13 @@ fn define_emits_over_local_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<Class> resolves a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_12 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_12,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
 
     assert!(
@@ -1112,8 +1176,13 @@ fn define_emits_over_imported_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<ImportedClass> resolves a surface");
-    let emits =
-        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_13 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let emits = emits_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_13,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
 
     assert!(
@@ -1150,8 +1219,13 @@ fn define_slots_over_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<Class> resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_14 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_14,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
@@ -1188,8 +1262,13 @@ fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_15 =
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_15,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let default_slot = slots
         .iter()

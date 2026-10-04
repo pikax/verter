@@ -361,13 +361,11 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
 
     let scope_canonical_id = observed_scope.canonical_id.as_ref();
     let observed_scope_whole_hash = observed_scope.whole_hash();
-    // The observation carries one `Arc<IndexedReady>`; its top-level
-    // `whole_hash` and its `shallow_state.whole_hash` are the same
-    // parse by construction (`FileArtifactStore` is content-addressed).
+    // Both hashes were sampled from the same retained source observation.
     verter_debug_assert_eq!(
-        observed_scope.indexed.shallow_state.whole_hash,
+        observed_scope.observed_shallow_hash,
         observed_scope_whole_hash,
-        "MaterializeScopeObservation must carry one internally-consistent IndexedReady",
+        "MaterializeScopeObservation must describe one internally-consistent source",
     );
 
     if observed_scope_syntactic_export_set.canonical_id.as_str() != scope_canonical_id {
@@ -534,6 +532,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// tracked debt noted above.
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext,
+    pub(crate) dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
     // The caches below are read-through views over the host-owned
     // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
@@ -913,7 +912,10 @@ pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) 
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(
+        ctx: &'a dyn ResolverContext,
+        dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+    ) -> Self {
         // Bump `bare_engine_constructions` whenever the engine is
         // bound to a non-request-bound ctx. Final-state invariant:
         // `0` — every production engine binds to a request-bound
@@ -923,6 +925,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         Self {
             ctx,
+            dispatch,
             imported_registry_symbols: RefCell::new(FxHashMap::default()),
             declarations: RefCell::new(FxHashMap::default()),
             resolvable: RefCell::new(FxHashMap::default()),

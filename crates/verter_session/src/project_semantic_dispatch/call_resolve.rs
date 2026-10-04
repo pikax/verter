@@ -1516,8 +1516,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 serve
                     .indexed
                     .shallow_state
-                    .decl_bodies()
-                    .header_index()
+                    .headers
                     .abstract_classes
                     .contains(&verter_type_expr::DeclBindingKey::new(
                         class.owner,
@@ -1560,20 +1559,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     ..
                 } => {
-                    let serve = self
+                    let (_serve, source_demand) = self
                         .ctx
-                        .ensure_indexed_ready_serve(point.canonical_id.as_ref())
+                        .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    let memo = serve.indexed.shallow_state.decl_bodies();
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
                         canonical_id: Arc::clone(&point.canonical_id),
                         offset: point.offset,
                     };
-                    let program_index = memo.function_program_index();
+                    let program_index = source_demand.function_program_index();
                     let record = program_index
                         .expression(&indexed_point)
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    let expression = memo
+                    let expression = source_demand
                         .indexed_program_expression_ir(record)
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let node = self
@@ -2887,7 +2885,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// literal, and TypeScript checks a type argument against its constraint
     /// without excess-property checking.
     #[allow(clippy::too_many_arguments)]
-    fn call_relation(
+    pub(super) fn call_relation(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,

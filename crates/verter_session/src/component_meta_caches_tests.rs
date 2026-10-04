@@ -1046,7 +1046,8 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
         shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", false);
     let live_before_complete = db.live_count();
     let returned_complete =
-        db.admit_computed_traced_for_test(&complete_key, ctx, complete_value, complete_sig);
+        db.fixture(ctx)
+            .admit_computed_traced_for_test(&complete_key, complete_value, complete_sig);
     assert_eq!(
         returned_complete.type_expr_for_test(),
         &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
@@ -1059,7 +1060,7 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
          non-cacheability) — over-suppression would break benign warming",
     );
     assert!(
-        db.peek(&complete_key, ctx).is_some(),
+        db.fixture(ctx).peek(&complete_key).is_some(),
         "baseline: a COMPLETE shape MUST be peekable after admission",
     );
 
@@ -1073,7 +1074,8 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
         shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", true);
     let live_before_partial = db.live_count();
     let returned_partial =
-        db.admit_computed_traced_for_test(&partial_key, ctx, partial_value, partial_sig);
+        db.fixture(ctx)
+            .admit_computed_traced_for_test(&partial_key, partial_value, partial_sig);
     assert_eq!(
         returned_partial.type_expr_for_test(),
         &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
@@ -1086,7 +1088,7 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
          (reverting the get_or_compute gate makes this fail)",
     );
     assert!(
-        db.peek(&partial_key, ctx).is_none(),
+        db.fixture(ctx).peek(&partial_key).is_none(),
         "a PARTIAL shape MUST NOT be peekable — it was refused admission",
     );
 }
@@ -1140,7 +1142,9 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
         let _guard = RequestContextGuard::install(rctx);
         crate::request_context::mark_request_result_partial();
         let (value, sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
-        let _ = db.admit_computed_traced_for_test(&key, ctx, value, sig);
+        let _ = db
+            .fixture(ctx)
+            .admit_computed_traced_for_test(&key, value, sig);
     }
     assert_eq!(
         db.live_count(),
@@ -1150,7 +1154,7 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
          authority (re-adding the retired sticky OR-in makes this refuse)",
     );
     assert!(
-        db.peek(&key, ctx).is_some(),
+        db.fixture(ctx).peek(&key).is_some(),
         "the value-complete shape MUST be peekable after admission despite the sticky",
     );
 }
@@ -1199,8 +1203,9 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     let (control_value, control_sig) =
         shape_value_and_fact_sig_for_scope(ctx, "/m3_hole.ts", false);
     let control_before = db.live_count();
-    let control_returned =
-        db.get_or_compute_traced_for_test(&control_key, ctx, || Some((control_value, control_sig)));
+    let control_returned = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&control_key, || Some((control_value, control_sig)));
     assert!(
         control_returned.is_some(),
         "fixture invariant: the control compute produces a value",
@@ -1234,29 +1239,41 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
          content-neutral, so a fenced serve must not be what refuses it",
     );
     let state = Arc::clone(&serve.indexed.shallow_state);
+    let raw_state = host
+        .source_input_leases
+        .get(&serve.indexed.identity)
+        .expect("the fixture pins the observed raw source")
+        .shallow_state
+        .clone();
     assert!(
-        state
-            .decl_bodies()
-            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
-            .is_some(),
+        ctx.lowered_type_decl(
+            &state,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Pin"
+        )
+        .is_some(),
         "fixture invariant: the pin demand must acquire the retained-snapshot lease",
     );
-    state.decl_bodies().release_retained_snapshot_for_test();
+    raw_state.decl_bodies().release_retained_snapshot_for_test();
 
     let poison_before = db.live_count();
-    let poison_returned = db.get_or_compute_traced_for_test(&poison_key, ctx, || {
-        // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
-        // funnel-entry check would have run and passed.
-        let leased = state
-            .decl_bodies()
-            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Probe");
-        assert!(
-            leased.is_none(),
-            "fixture invariant: the broken lease must actually miss (a `Some` here means the \
+    let poison_returned = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&poison_key, || {
+            // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
+            // funnel-entry check would have run and passed.
+            let leased = ctx.lowered_type_decl(
+                &state,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Probe",
+            );
+            assert!(
+                leased.is_none(),
+                "fixture invariant: the broken lease must actually miss (a `Some` here means the \
              compute consumed no non-cacheable read and the test proves nothing)",
-        );
-        Some((poison_value, poison_sig))
-    });
+            );
+            Some((poison_value, poison_sig))
+        });
 
     assert!(
         poison_returned.is_some(),
@@ -1273,7 +1290,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
          enough: `compute()` runs later, inside the flight",
     );
     assert!(
-        db.peek(&poison_key, ctx).is_none(),
+        db.fixture(ctx).peek(&poison_key).is_none(),
         "the refused shape MUST NOT be peekable — nothing was published",
     );
 }
@@ -1343,10 +1360,12 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     );
     let control_computes = Cell::new(0usize);
     let control_before = db.live_count();
-    let control_first = db.get_or_compute_traced_for_test(&control_key, ctx, || {
-        control_computes.set(control_computes.get() + 1);
-        ComputedEntry::Rooted(declaration("rooted"), Arc::clone(&facts))
-    });
+    let control_first = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&control_key, || {
+            control_computes.set(control_computes.get() + 1);
+            ComputedEntry::Rooted(declaration("rooted"), Arc::clone(&facts))
+        });
     assert_eq!(
         control_first.as_ref().and_then(|d| d.text.as_deref()),
         Some("rooted"),
@@ -1358,10 +1377,12 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         "fixture invariant: a rootable compute ADMITS through this funnel (otherwise the \
          no-publication assertion below is vacuous)",
     );
-    let control_second = db.get_or_compute_traced_for_test(&control_key, ctx, || {
-        control_computes.set(control_computes.get() + 1);
-        ComputedEntry::Rooted(declaration("recomputed"), Arc::clone(&facts))
-    });
+    let control_second = db
+        .fixture(ctx)
+        .get_or_compute_traced_for_test(&control_key, || {
+            control_computes.set(control_computes.get() + 1);
+            ComputedEntry::Rooted(declaration("recomputed"), Arc::clone(&facts))
+        });
     assert_eq!(
         control_computes.get(),
         1,
@@ -1382,7 +1403,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     );
     let computes = Cell::new(0usize);
     let before = db.live_count();
-    let returned = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let returned = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         computes.set(computes.get() + 1);
         ComputedEntry::Unrooted(
             declaration("computed-once"),
@@ -1411,7 +1432,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
 
     // Nothing was published, so the next read is cold again — and it, too, gets
     // its own computed value back.
-    let again = db.get_or_compute_traced_for_test(&key, ctx, || {
+    let again = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         computes.set(computes.get() + 1);
         ComputedEntry::Unrooted(
             declaration("computed-again"),
@@ -1687,16 +1708,22 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         node_b,
         ProjectionMode::Expanded,
     );
-    let _ = db.admit_computed_traced_for_test(&key_rooted_a, ctx, value_a, sig_a);
-    let _ = db.admit_computed_traced_for_test(
+    let _ = db
+        .fixture(ctx)
+        .admit_computed_traced_for_test(&key_rooted_a, value_a, sig_a);
+    let _ = db.fixture(ctx).admit_computed_traced_for_test(
         &key_b_by_released_node,
-        ctx,
         value_b.clone(),
         Arc::clone(&sig_b),
     );
-    let _ =
-        db.admit_computed_traced_for_test(&key_b_depends_on_a, ctx, value_b.clone(), sig_b_and_a);
-    let _ = db.admit_computed_traced_for_test(&key_b, ctx, value_b, sig_b);
+    let _ = db.fixture(ctx).admit_computed_traced_for_test(
+        &key_b_depends_on_a,
+        value_b.clone(),
+        sig_b_and_a,
+    );
+    let _ = db
+        .fixture(ctx)
+        .admit_computed_traced_for_test(&key_b, value_b, sig_b);
     assert_eq!(db.live_count(), 4, "fixture: all four entries admitted");
     for key in [
         &key_rooted_a,
@@ -1705,7 +1732,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         &key_b,
     ] {
         assert!(
-            db.peek(key, ctx).is_some(),
+            db.fixture(ctx).peek(key).is_some(),
             "fixture: every entry peeks warm"
         );
     }
@@ -1723,19 +1750,19 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
     );
     assert_eq!(db.live_count(), 1);
     assert!(
-        db.peek(&key_rooted_a, ctx).is_none(),
+        db.fixture(ctx).peek(&key_rooted_a).is_none(),
         "rooted in the closed document"
     );
     assert!(
-        db.peek(&key_b_by_released_node, ctx).is_none(),
+        db.fixture(ctx).peek(&key_b_by_released_node).is_none(),
         "keyed by a released node"
     );
     assert!(
-        db.peek(&key_b_depends_on_a, ctx).is_none(),
+        db.fixture(ctx).peek(&key_b_depends_on_a).is_none(),
         "its shape was lowered through the closed document's facts"
     );
     assert!(
-        db.peek(&key_b, ctx).is_some(),
+        db.fixture(ctx).peek(&key_b).is_some(),
         "the neighbour's own entry stays warm"
     );
 }

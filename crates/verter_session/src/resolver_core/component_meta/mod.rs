@@ -345,13 +345,14 @@ pub enum ComponentMetaResolutionPurpose {
 /// the ACTIVE context, so an overlay session reads its overlay content (an
 /// overlay-added prop surfaces here; it never leaks into a base-view read,
 /// which keys a distinct `whole_hash`). The DTO core validates its own cached
-/// entry against `ctx.store_view()` and bubbles the entry's fact signature into
+/// entry against `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
 /// any active outer fact tracer (so an outer component-meta cold trace inherits
 /// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
@@ -362,6 +363,7 @@ pub(crate) fn component_meta_resolved_macros(
         }
         let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
             ctx,
+            dispatch,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
                 macro_index,
@@ -431,16 +433,9 @@ pub(crate) fn component_meta_resolved_macros(
         );
     }
 
-    let host = ctx.host_for_fact_tracer_install();
-    let is_svelte = host
-        .scheduler
-        .try_get_source(owner_canonical)
-        .and_then(|snapshot| {
-            snapshot
-                .downcast_data::<crate::host_executor::HostSourceData>()
-                .map(|data| data.file_language.clone())
-        })
-        .and_then(|language| language.adapter_id().cloned())
+    let is_svelte = ctx
+        .ensure_indexed_ready_serve(owner_canonical)
+        .and_then(|serve| serve.indexed.file_language.adapter_id().cloned())
         .is_some_and(|adapter| adapter.is_svelte());
     if is_svelte {
         use crate::typeinfo::framework_surface::SvelteSurfaceSource;
@@ -464,8 +459,8 @@ pub(crate) fn component_meta_resolved_macros(
             SvelteSurfaceSource::LegacySlotInventory,
         ] {
             let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-                host,
                 ctx,
+                dispatch,
                 owner_canonical,
                 source,
             );

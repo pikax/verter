@@ -76,14 +76,14 @@ use crate::typeinfo::surface::{TypeInfoSurfaceEntry, TypeInfoSurfaceMember};
 #[must_use]
 pub(crate) fn props_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> {
     let macro_surface = resolved.macro_surface();
     // Host-level reads (graph node scope, JSDoc source slicing) go through the
     // host the active `ctx` is installed against; the view-sensitive type
     // resolution (`raise_member_value`) flows through `ctx`.
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
+
     // `defineModel` contributes its synthesized model prop directly from the
     // analyzer facts (the type argument is the model VALUE type).
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
@@ -119,7 +119,7 @@ pub(crate) fn props_from_typeinfo_surface(
             // Display-only render of the member's one-level value, minted ONCE
             // at this terminal sink (the by-name `.and_then` form — no decision
             // on the materialized value).
-            let raised = raise_member_value(ctx, member);
+            let raised = raise_member_value(dispatch,  member);
             let type_annotation = raised.as_ref().and_then(render_type_expr_display);
             // LOCAL authored position candidates: analyzer prop fields
             // addressing this member name WITH a stamped payload locator.
@@ -156,7 +156,7 @@ pub(crate) fn props_from_typeinfo_surface(
             // its Navigate-raised authored form, so an unconditional proof
             // would false-negative the single-contributor classes).
             let member_value_is_merge_capable = matches!(
-                node_data_for(dispatch.ctx, member.value).as_deref(),
+                node_data_for(dispatch.graph(), member.value).as_deref(),
                 Some(
                     SemanticNodeData::Intersection(_)
                         | SemanticNodeData::Union(_)
@@ -167,7 +167,7 @@ pub(crate) fn props_from_typeinfo_surface(
                 [candidate] if !member_value_is_merge_capable => candidate.payload.clone(),
                 [candidate] => candidate.payload.clone().filter(|locator| {
                     authored_candidate_matches_member_value(
-                        &dispatch,
+                        dispatch,
                         macro_surface.owner_canonical.as_ref(),
                         locator,
                         member.value,
@@ -183,7 +183,7 @@ pub(crate) fn props_from_typeinfo_surface(
             // value carries no scope.
             let type_expr_scope = type_annotation
                 .as_ref()
-                .map(|_| macro_surface.member_expr_scope(host, member))
+                .map(|_| macro_surface.member_expr_scope(dispatch, member))
                 .or_else(|| {
                     authored_payload
                         .as_ref()
@@ -223,12 +223,12 @@ pub(crate) fn props_from_typeinfo_surface(
                         )
                     })
                 })
-                .or_else(|| member_value_source(&dispatch, member, type_arg_base))
+                .or_else(|| member_value_source(dispatch, member, type_arg_base))
                 .map(verter_type_expr::facts::SourcePosition::Present)
                 .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                     verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
                 ));
-            let (description, tags) = member_jsdoc_from_spans(host, member);
+            let (description, tags) = member_jsdoc_from_spans(ctx, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
             // body iff it is NOT heritage-reached. The terminal
             // `MacroTypeArgOwnBody` synthesis already stamps this correctly. The
@@ -238,7 +238,7 @@ pub(crate) fn props_from_typeinfo_surface(
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
             let member_type = crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
-                &dispatch,
+                dispatch,
                 member.value,
             )
             .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow);
@@ -344,10 +344,9 @@ fn member_value_source(
 /// the member's one-level value node and does not eagerly expand it.
 #[must_use]
 pub(crate) fn object_members_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
-    let dispatch = ctx.dispatch();
     let macro_surface = resolved.macro_surface();
     macro_surface
         .surface
@@ -363,7 +362,7 @@ pub(crate) fn object_members_from_typeinfo_surface(
                     name: member.published_name()?.to_string(),
                     is_optional: member.optional,
                     value: crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
-                        &dispatch,
+                        dispatch,
                         member.value,
                     )
                     .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow),
@@ -401,11 +400,11 @@ pub(crate) fn object_members_from_typeinfo_surface(
 #[must_use]
 pub(crate) fn exposed_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<crate::typeinfo::framework_surface::results::ResolvedExposeField> {
     let macro_surface = resolved.macro_surface();
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
+
     // The macro's STAMPED type-argument locator — the authored base the
     // projected member-path route replays off.
     let type_arg_base = ctx
@@ -421,14 +420,14 @@ pub(crate) fn exposed_from_typeinfo_surface(
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
             let member_name = member.published_name()?.to_string();
-            let (description, tags) = member_jsdoc_from_spans(host, member);
+            let (description, tags) = member_jsdoc_from_spans(ctx, member);
             // The published member-value SOURCE POSITION: the graph-native
             // closed / shallow-ref / projected member-path source. An
             // exposed type-argument member's value-type position is
             // REQUIRED — with no faithful source the position is the typed
             // source-construction FAILURE, never a fabricated `unknown`
             // success.
-            let type_source = member_value_source(&dispatch, member, type_arg_base.as_ref())
+            let type_source = member_value_source(dispatch, member, type_arg_base.as_ref())
                 .map(verter_type_expr::facts::SourcePosition::Present)
                 .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                     verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
@@ -458,10 +457,11 @@ pub(crate) fn exposed_from_typeinfo_surface(
 /// [`index_position_source`] for the faithful-vs-failed decision.
 pub(crate) fn index_signatures_from_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<ExpandedIndexSignature> {
     let macro_surface = resolved.macro_surface();
-    let dispatch = ctx.dispatch();
+
     // The macro's STAMPED type-argument locator — the authored base the
     // projected INDEX-POSITION replay route addresses (mirrors the emit
     // callable-params base read; a parse-domain fact lookup through the
@@ -479,14 +479,14 @@ pub(crate) fn index_signatures_from_surface(
         .enumerate()
         .map(|(signature_ordinal, sig)| ExpandedIndexSignature {
             key_type: index_position_source(
-                &dispatch,
+                dispatch,
                 sig.key_type,
                 type_arg_base.as_ref(),
                 signature_ordinal as u32,
                 verter_type_expr::facts::IndexSignaturePosition::Key,
             ),
             value_type: index_position_source(
-                &dispatch,
+                dispatch,
                 sig.value_type,
                 type_arg_base.as_ref(),
                 signature_ordinal as u32,
@@ -589,7 +589,7 @@ fn closed_tuple_fact(
     node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::TuplePayloadFact> {
     use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
-    let data = node_data_for(dispatch.ctx, node)?;
+    let data = node_data_for(dispatch.graph(), node)?;
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
         return None;
     };
@@ -703,14 +703,14 @@ pub(crate) fn model_prop_fields(
 #[must_use]
 pub(crate) fn emits_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<ResolvedEmitOccurrence> {
     let macro_surface = resolved.macro_surface();
     // View-sensitive type resolution flows through the active `ctx`
-    // (`ctx.dispatch()`). Host-level reads (JSDoc source slicing, node scope)
+    // (`dispatch`). Host-level reads (JSDoc source slicing, node scope)
     // use the host the `ctx` is installed against.
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
+
     // Publication sink (DTO emit payload tuples): the event-name decide and the
     // payload param selection are made ENTIRELY in the node domain through the
     // shared `CallableNodeView`; materialization happens ONCE at the terminal
@@ -756,7 +756,8 @@ pub(crate) fn emits_from_typeinfo_surface(
             }
             TypeInfoSurfaceEntry::CallSignature(_) => continue,
             TypeInfoSurfaceEntry::Member(member) => {
-                if let Some(occurrence) = property_style_emit_field(ctx, resolved, member) {
+                if let Some(occurrence) = property_style_emit_field(ctx, dispatch, resolved, member)
+                {
                     emits.push(occurrence);
                 }
                 continue;
@@ -764,7 +765,7 @@ pub(crate) fn emits_from_typeinfo_surface(
             TypeInfoSurfaceEntry::ConstructSignature(_)
             | TypeInfoSurfaceEntry::IndexSignature(_) => continue,
         };
-        let view = CallableNodeView::new(&dispatch, sig.node);
+        let view = CallableNodeView::new(dispatch, sig.node);
         // The event name(s): the realized callable's FIRST-param string literal /
         // union, carrier-resolved (fail-closed-whole). `NoSurface` (no first
         // param, or a fully-enumerated first param carrying no string literal)
@@ -797,7 +798,7 @@ pub(crate) fn emits_from_typeinfo_surface(
         // signature's params — it has no flat authored macro-payload position,
         // so the `payload` LOCATOR stays the honest `None`; typed payload
         // demand is host-raised through the graph surface.
-        let payload_tuple = materialize_payload_tuple(ctx, &raw_params[1..]);
+        let payload_tuple = materialize_payload_tuple(dispatch, &raw_params[1..]);
         // `payload_type` (→ `rawType`) is DISPLAY-ONLY — no consumer parses it.
         // It mirrors the payload TUPLE rendered as `[label: T, ...]`.
         let payload_type = render_type_expr_display(&payload_tuple);
@@ -902,13 +903,13 @@ pub(crate) fn emits_from_typeinfo_surface(
                     return false;
                 };
                 authored_candidate_matches_call_signature_payload(
-                    &dispatch,
+                    dispatch,
                     macro_surface.owner_canonical.as_ref(),
                     locator,
                     &raw_params[1..],
                 )
             });
-        let (surface_description, surface_tags) = signature_jsdoc_from_spans(host, sig);
+        let (surface_description, surface_tags) = signature_jsdoc_from_spans(ctx, sig);
         let description = surface_description
             .or_else(|| authored_field.and_then(|field| field.description.as_ref().cloned()));
         let tags = if surface_tags.is_empty() {
@@ -965,14 +966,14 @@ pub(crate) fn emits_from_typeinfo_surface(
 /// all materialize — so the fallback is position-safety robustness only, never a
 /// fabricated meaningful element.
 pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tuple(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     params: &[FunctionParam],
 ) -> TypeExpr {
     // Construct the mint cap INTERNALLY from the active `ctx` (the
     // `raise_member_value` pattern): a cap is a genuine mint AUTHORITY that must
     // not cross into a `TypeExpr`-producing sink from the non-terminal caller.
-    let dispatch = ctx.dispatch();
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
     let elements = params
         .iter()
         .map(|param| {
@@ -1037,6 +1038,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
 ///   degraded fallback applies — never a partial or fabricated fact).
 pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_field(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
     member: &TypeInfoSurfaceMember,
 ) -> Option<ResolvedEmitOccurrence> {
@@ -1044,8 +1046,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         return None;
     }
     let macro_surface = resolved.macro_surface();
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
+
     // The SFC's analyzer macro facts: the byte-precise authored payload
     // positions the analyzer could address in THIS file (locally-declared
     // property events and local-registry-resolved bodies; cross-file members
@@ -1064,7 +1065,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
     {
         let member_name = member.published_name()?.to_string();
-        let raised = raise_member_value(ctx, member);
+        let raised = raise_member_value(dispatch, member);
         let payload_type = raised.as_ref().and_then(render_type_expr_display);
         // LOCAL authored position candidates: analyzer emit fields
         // addressing this event name WITH a stamped payload locator
@@ -1090,7 +1091,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
                     return false;
                 };
                 authored_candidate_matches_member_value(
-                    &dispatch,
+                    dispatch,
                     macro_surface.owner_canonical.as_ref(),
                     locator,
                     member.value,
@@ -1104,7 +1105,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         // value carries no scope.
         let payload_expr_scope = payload_type
             .as_ref()
-            .map(|_| macro_surface.member_expr_scope(host, member))
+            .map(|_| macro_surface.member_expr_scope(dispatch, member))
             .or_else(|| {
                 authored_payload
                     .as_ref()
@@ -1125,12 +1126,12 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
                     verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator),
                 )
             })
-            .or_else(|| inherited_emit_payload_source(&dispatch, member, type_arg_base))
+            .or_else(|| inherited_emit_payload_source(dispatch, member, type_arg_base))
             .map(verter_type_expr::facts::SourcePosition::Present)
             .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
-        let (surface_description, surface_tags) = member_jsdoc_from_spans(host, member);
+        let (surface_description, surface_tags) = member_jsdoc_from_spans(ctx, member);
         let description = surface_description
             .or_else(|| authored_field.and_then(|field| field.description.as_ref().cloned()));
         let tags = if surface_tags.is_empty() {
@@ -1272,7 +1273,7 @@ fn authored_candidate_matches_call_signature_payload(
     else {
         return false;
     };
-    let Some(data) = node_data_for(dispatch.ctx, raised.node()) else {
+    let Some(data) = node_data_for(dispatch.graph(), raised.node()) else {
         return false;
     };
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
@@ -1342,7 +1343,7 @@ fn authored_candidate_matches_member_value(
     // (an agree-duplicate merge). A single non-matching arm — a different
     // shape or a stable unresolved carrier — fails the proof and therefore
     // selects the graph-native merged replay source.
-    match node_data_for(dispatch.ctx, member_value).as_deref() {
+    match node_data_for(dispatch.graph(), member_value).as_deref() {
         Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
             let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()

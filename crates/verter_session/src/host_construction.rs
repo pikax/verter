@@ -525,7 +525,7 @@ impl VerterHost {
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
         #[cfg(test)]
-        let test_force = crate::host_test_force::TestForceKnobs::default();
+        let test_force = Arc::new(crate::host_test_force::TestForceKnobs::default());
         #[cfg(test)]
         project_type_store
             .indexed()
@@ -585,6 +585,9 @@ impl VerterHost {
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
         let host = Self {
+            #[cfg(any(test, feature = "test-support"))]
+            source_input_leases: crate::resolver_core::request_inputs::InputArtifactLeases::default(),
+
             instance_id,
             config,
             carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
@@ -656,19 +659,19 @@ impl VerterHost {
                 decl_lowering_policy.size.resolve(),
             )),
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
-            relation_knobs: RelationHostKnobs::default(),
+            relation_knobs: Arc::new(RelationHostKnobs::default()),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             flow_fault_injection:
-                crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default(),
+                Arc::new(crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
             #[cfg(test)]
             test_force,
             #[cfg(test)]
-            macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
+            macro_hot_lowering_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
-            signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
+            signature_overflow_at_install: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             _test_worker_pool_lease: test_worker_pool_lease,
         };
@@ -1245,6 +1248,45 @@ impl VerterHost {
     /// surface store erased to the wrong concrete type) — neither is reachable
     /// on a correctly-constructed host (`framework_registry_complete` +
     /// `vue_registration_carries_every_leg` pin the registration).
+    pub(crate) fn vue_surface_store_handle(
+        &self,
+    ) -> Arc<
+        crate::framework::surface_store::FrameworkSurfaceStore<
+            crate::typeinfo::framework_surface::VueSurfaceKey,
+            crate::typeinfo::framework_surface::MacroSurfaceDtos,
+        >,
+    > {
+        Arc::clone(
+            &self
+                .framework_registry()
+                .get(&verter_language::FrameworkAdapterId::vue())
+                .expect("the Vue adapter is registered")
+                .surface_store,
+        )
+        .into_any_arc()
+        .downcast()
+        .expect("typed Vue surface store")
+    }
+    pub(crate) fn svelte_surface_store_handle(
+        &self,
+    ) -> Arc<
+        crate::framework::surface_store::FrameworkSurfaceStore<
+            crate::typeinfo::framework_surface::SvelteSurfaceKey,
+            crate::typeinfo::framework_surface::MacroSurfaceDtos,
+        >,
+    > {
+        Arc::clone(
+            &self
+                .framework_registry()
+                .get(&verter_language::FrameworkAdapterId::svelte())
+                .expect("the Svelte adapter is registered")
+                .surface_store,
+        )
+        .into_any_arc()
+        .downcast()
+        .expect("typed Svelte surface store")
+    }
+    #[cfg(test)]
     pub(crate) fn vue_surface_store(
         &self,
     ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
@@ -1271,23 +1313,6 @@ impl VerterHost {
     /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
     /// to materialize each Svelte source surface once per `(canonical, content,
     /// source, level)`.
-    pub(crate) fn svelte_surface_store(
-        &self,
-    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
-        crate::typeinfo::framework_surface::SvelteSurfaceKey,
-        crate::typeinfo::framework_surface::MacroSurfaceDtos,
-    > {
-        self.framework_registry()
-            .get(&verter_language::FrameworkAdapterId::svelte())
-            .expect("the Svelte adapter is registered")
-            .surface_store
-            .as_any()
-            .downcast_ref()
-            .expect(
-                "the Svelte surface store is FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>",
-            )
-    }
-
     /// The framework adapter registry — the executor / synth-injection /
     /// public-API-projection dispatch authority. Built once at host
     /// construction and immutable thereafter.
@@ -1386,7 +1411,7 @@ impl VerterHost {
             module_region,
             framework_mode_hint,
             source_type,
-            state.decl_bodies().owner_table(),
+            &state.owners,
         );
         let cx = crate::framework::synth::ComponentDefaultSynthCtx {
             canonical_id,
@@ -1724,6 +1749,262 @@ mod resource_policy_lazy_tests {
                 "host-held canonical grammar for adapter '{adapter_id}' must equal the \
                  catalog fact"
             );
+        }
+    }
+}
+
+impl crate::VerterHost {
+    pub(crate) fn engine_observers(&self) -> crate::project_semantic_dispatch::EngineObservers {
+        crate::project_semantic_dispatch::EngineObservers::new(
+            Arc::clone(&self.signature_overflow_at_install),
+            Arc::clone(&self.provenance),
+            Arc::clone(&self.relation_knobs),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.flow_fault_injection),
+            #[cfg(test)]
+            Arc::clone(&self.test_force),
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod fact_validation_authority {
+    use crate::resolver_core::fact_validation_port::FactValidation;
+    use crate::resolver_core::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+        ResolveImportsFactRef, ResolverHash16, RouteSurfaceFactRef, StoreView,
+        StoreViewCompatToken,
+    };
+    use std::collections::BTreeSet;
+    impl FactValidation for crate::VerterHost {
+        fn current_external_supersession_fingerprint(&self) -> u64 {
+            crate::VerterHost::current_external_supersession_fingerprint(self)
+        }
+        fn source_environment(
+            &self,
+            key: &crate::file_artifact_store::FileArtifactKey,
+        ) -> crate::resolver_store::SourceEnvIdentity {
+            crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self, key)
+        }
+        fn current_project_generation(&self) -> u64 {
+            self.project_type_store().current_project_generation()
+        }
+        fn complete_graph_signature(
+            &self,
+            roots: &[(std::sync::Arc<str>, crate::types::Hash16)],
+            facts: &[FactVersionRef],
+        ) -> Result<
+            crate::fact_signature_helpers::StructuralCarrierReadSet,
+            crate::cache_runtime::NonAdmissionReason,
+        > {
+            let view = match self.resolver_store_view_read() {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+            crate::semantic_query_memo::semantic_graph_read_set_signature(&view, roots, facts)
+        }
+        fn aggregate_clock_reader(&self) -> crate::resolver_store::AggregateClockReader {
+            crate::VerterHost::aggregate_clock_reader(self)
+        }
+        fn record_signature_overflow(&self) {
+            self.signature_overflow_at_install
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        fn tracer_forcing(&self) -> (bool, usize) {
+            (
+                self.test_force
+                    .force_fact_tracer_non_cacheable_read
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.test_force
+                    .force_fact_tracer_overflow_observations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        // Component-meta-tier bridges ------------------------------------
+
+        #[inline]
+        fn current_dependency_fact_versions(
+            &self,
+            canonical: &str,
+            tracked_deps: &BTreeSet<String>,
+        ) -> Vec<FactVersionRef> {
+            crate::VerterHost::current_dependency_fact_versions(self, canonical, tracked_deps)
+        }
+        fn compat_token(&self) -> StoreViewCompatToken {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.compat_token()
+        }
+        fn validates(&self, fact: &FactVersionRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates(fact)
+        }
+        fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_parse_domain(fact)
+        }
+        fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_resolve_imports_domain(fact)
+        }
+        fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_route_surface_domain(fact)
+        }
+        fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_program_analysis_domain(fact)
+        }
+        fn validates_file_source_env(
+            &self,
+            canonical_id: &str,
+            parse_env_hash: crate::locator_identity::ParseEnvHash,
+            parse_key: &verter_language::ParseKey,
+            file_language_id: &verter_language::FileLanguage,
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_file_source_env(
+                canonical_id,
+                parse_env_hash,
+                parse_key,
+                file_language_id,
+            )
+        }
+        fn validates_self_root_whole_hash(
+            &self,
+            canonical_id: &str,
+            hash: &ResolverHash16,
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_self_root_whole_hash(canonical_id, hash)
+        }
+        fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.strict_self_root_world_identity()
+        }
+        fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.strict_self_root_is_witnessable(canonical_id)
+        }
+        fn mint_strict_self_root_world(
+            &self,
+            roots: &[(&str, ResolverHash16)],
+        ) -> Option<verter_workspace::StrictSelfRootWorld> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.mint_strict_self_root_world(roots)
+        }
+        fn tracks_file(&self, canonical_id: &str) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.tracks_file(canonical_id)
+        }
+        fn derived_hash_for(
+            &self,
+            canonical_id: &str,
+            kind: DerivedFactKind,
+        ) -> Option<ResolverHash16> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.derived_hash_for(canonical_id, kind)
+        }
+        fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+            verter_workspace::AggregateBasisSeed::Unvouched
+        }
+        fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_fact_signature(sig)
+        }
+        fn validate_fact_signature(
+            &self,
+            sig: &[FactVersionRef],
+            self_root_canonicals: &[&str],
+        ) -> Result<(), usize> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validate_fact_signature(sig, self_root_canonicals)
+        }
+        fn validates_fact_signature_with_self_roots(
+            &self,
+            sig: &[FactVersionRef],
+            self_root_canonicals: &[&str],
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+        }
+        fn promote_route_completion(
+            &self,
+            canonical: &str,
+            whole_hash: crate::types::Hash16,
+            route_hash: Option<crate::types::Hash16>,
+        ) {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.promote_route_completion(canonical, whole_hash, route_hash)
         }
     }
 }

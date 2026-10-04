@@ -676,9 +676,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn lib_global_is_available(&self, scope_canonical_id: &str, name: &str) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .ctx
-            .host_for_fact_tracer_install()
-            .flow_fault_injection
+            .binding
+            .observers
+            .flow
             .lib_global_unavailable
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -779,6 +779,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             resolve_bare_name_in_scope(
                 self.ctx,
+                self,
                 canonical_id.as_ref(),
                 *owner,
                 scope_payload,
@@ -802,6 +803,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (!self.unresolved_head_is_authored_import(scope, name.as_ref())
                     && resolve_bare_name_in_scope(
                         self.ctx,
+                        self,
                         canonical_id.as_ref(),
                         *owner,
                         scope_payload,
@@ -845,9 +847,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 #[cfg(test)]
                 if serve.is_some()
                     && self
-                        .ctx
-                        .host_for_fact_tracer_install()
-                        .test_force
+                        .binding
+                        .observers
+                        .forcing
                         .force_carrier_direct_serve_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                 {
@@ -886,7 +888,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // completeness with member-level partiality.
             if let NodeScopeId::File { canonical_id, .. } = scope {
                 self.ctx
-                    .host_for_fact_tracer_install()
                     .observe_owner_import_route_witness(canonical_id.as_ref());
             }
         }

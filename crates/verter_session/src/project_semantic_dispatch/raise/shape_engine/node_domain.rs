@@ -1627,8 +1627,7 @@ pub(super) fn project_root_summary(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<RootOnlySummary> {
-    let ctx = dispatch.ctx;
-    let data = node_data_for(ctx, node)?;
+    let data = node_data_for(dispatch.graph(), node)?;
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
@@ -1899,7 +1898,7 @@ pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failur
     // Derived from the SINGLE `QueryError` disposition authority — never a
     // local re-listing of which arms are publishable.
     matches!(
-        node_data_for(dispatch.ctx, node).as_deref(),
+        node_data_for(dispatch.graph(), node).as_deref(),
         Some(SemanticNodeData::Opaque(err))
             if crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(
                 err,

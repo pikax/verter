@@ -2,6 +2,8 @@
 //! executor and its tests remain independently readable.
 
 use super::*;
+use crate::resolver_core::request_ports::IndexedInputs;
+use crate::VerterHost;
 use verter_compiler::svelte::parser::parse_svelte;
 
 /// The owner canonical id the legacy `<slot>` walk tests thread as the
@@ -168,7 +170,12 @@ fn runes_props_surface(canonical: &str, source: &str) -> ResolvedMacroPayload {
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-    resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::RunesProps)
+    resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        canonical,
+        SvelteSurfaceSource::RunesProps,
+    )
 }
 
 /// The published `(name, is_optional)` rows of a resolved props surface.
@@ -285,8 +292,8 @@ fn an_unresolvable_callback_event_source_publishes_partial_not_supported_empty()
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         "/UnresolvableEvents.svelte",
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -307,8 +314,8 @@ fn a_resolved_props_type_with_no_callbacks_publishes_supported_empty_events() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         "/NoCallbackEvents.svelte",
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -330,7 +337,12 @@ fn unavailable_script_facts_surface_is_partial_not_missing() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
-    let outcome = resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::RunesProps);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        canonical,
+        SvelteSurfaceSource::RunesProps,
+    );
     let ResolvedOutcome::Partial { value, diagnostics } = outcome else {
         panic!("unavailable script facts must surface as Partial, got {outcome:?}");
     };
@@ -367,7 +379,12 @@ fn recovered_script_syntax_taints_every_syntax_owned_surface() {
         SvelteSurfaceSource::CallbackPropEvents,
         SvelteSurfaceSource::InstanceExports,
     ] {
-        let outcome = resolve_svelte_surface(&host, &ctx, canonical, source);
+        let outcome = resolve_svelte_surface(
+            &ctx,
+            &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+            canonical,
+            source,
+        );
         assert!(
             matches!(outcome, ResolvedOutcome::Partial { .. }),
             "recovered syntax must not publish an exact {source:?} surface: {outcome:?}"
@@ -387,8 +404,8 @@ fn recovered_script_syntax_taints_every_syntax_owned_surface() {
         legacy_overlay,
     );
     let outcome = resolve_svelte_surface(
-        &legacy_host,
         &legacy_ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&legacy_ctx),
         legacy_canonical,
         SvelteSurfaceSource::LegacyExportLet,
     );
@@ -427,8 +444,12 @@ fn instance_export_type_resolution_uses_the_exact_binding_owner() {
         "the capture preserves the instance binding owner"
     );
 
-    let outcome =
-        resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::InstanceExports);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        canonical,
+        SvelteSurfaceSource::InstanceExports,
+    );
     let ResolvedOutcome::Resolved(dtos) = outcome else {
         panic!("the instance-export surface must resolve, got {outcome:?}");
     };
@@ -667,8 +688,8 @@ fn an_unresolvable_dispatcher_event_map_publishes_partial_not_supported_empty() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
         resolve_svelte_surface(
-            &host,
             &ctx,
+            &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
             canonical,
             SvelteSurfaceSource::LegacyDispatcher,
         )
@@ -735,15 +756,18 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_0, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
     let row_member = surface
         .members
         .iter()
         .find(|m| m.string_name().expect("string-key fixture") == "row")
         .expect("the `row` member is present");
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
         &dispatch,
         row_member.value,
@@ -786,7 +810,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
     assert_eq!(labels, vec![Some("item"), Some("index")]);
     let bindings = materialize_snippet_slot_bindings(
-        &ctx,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new(component),
         &params,
     );
@@ -936,7 +960,7 @@ fn snippet_carrier_params_tuple_expands_to_ordered_dto_bindings() {
     );
 
     let bindings = materialize_snippet_slot_bindings(
-        &host,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
         &params,
     );
@@ -989,7 +1013,7 @@ fn snippet_carrier_empty_params_tuple_yields_present_bindingless_slot() {
 
     assert!(
         materialize_snippet_slot_bindings(
-            &host,
+            &dispatch,
             &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
             &params,
         )
@@ -1055,7 +1079,7 @@ fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings()
     );
 
     let bindings = materialize_snippet_slot_bindings(
-        &host,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
         &params,
     );
@@ -1107,7 +1131,7 @@ fn snippet_function_empty_rest_tuple_yields_no_dto_bindings() {
 
     assert!(
         materialize_snippet_slot_bindings(
-            &host,
+            &dispatch,
             &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
             &params,
         )
@@ -1139,7 +1163,7 @@ fn snippet_unlabelled_tuple_elements_fall_back_to_arg_index_names() {
     );
 
     let bindings = materialize_snippet_slot_bindings(
-        &host,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
         &params,
     );
@@ -1194,7 +1218,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     // PROVABLY disjoint at tag level, so the canonical intersection reduces
     // it to `never` (checker-confirmed: `IsNever<string & number>` is
     // `true`) — never a first-arm override.
-    match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
+    match node_data_for(dispatch.graph(), params[0].ty).as_deref() {
         Some(crate::semantic_query::SemanticNodeData::Primitive(
             crate::semantic_query::PrimitiveKind::Never,
         )) => {}
@@ -1202,7 +1226,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     }
 
     let bindings = materialize_snippet_slot_bindings(
-        &host,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
         &params,
     );
@@ -1258,7 +1282,12 @@ fn userland_snippet_lookalike_is_not_published_as_a_slot() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
-    let outcome = resolve_svelte_surface(&host, &ctx, component, SvelteSurfaceSource::SnippetProps);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        component,
+        SvelteSurfaceSource::SnippetProps,
+    );
     assert!(
         matches!(outcome, ResolvedOutcome::Missing),
         "a userland `Snippet` look-alike must NOT publish a slot surface, got {outcome:?}"
@@ -1286,7 +1315,12 @@ fn inline_local_props_carry_a_local_member_declaration_origin() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
-    let outcome = resolve_svelte_surface(&host, &ctx, component, SvelteSurfaceSource::RunesProps);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        component,
+        SvelteSurfaceSource::RunesProps,
+    );
     let ResolvedOutcome::Resolved(dtos) = outcome else {
         panic!("the PROPS surface must resolve, got {outcome:?}");
     };
@@ -1335,7 +1369,12 @@ fn prop_defaults_sidecar_carries_default_values_on_the_resolved_bundle() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
-    let outcome = resolve_svelte_surface(&host, &ctx, component, SvelteSurfaceSource::RunesProps);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        component,
+        SvelteSurfaceSource::RunesProps,
+    );
     let ResolvedOutcome::Resolved(dtos) = outcome else {
         panic!("the PROPS surface must resolve, got {outcome:?}");
     };
@@ -1415,7 +1454,12 @@ fn imported_props_members_carry_an_import_member_declaration_origin() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
-    let outcome = resolve_svelte_surface(&host, &ctx, component, SvelteSurfaceSource::RunesProps);
+    let outcome = resolve_svelte_surface(
+        &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+        component,
+        SvelteSurfaceSource::RunesProps,
+    );
     let ResolvedOutcome::Resolved(dtos) = outcome else {
         panic!("the PROPS surface must resolve, got {outcome:?}");
     };
@@ -1483,15 +1527,18 @@ fn assert_callback_row_param_resolves_precisely(
         .props_type
         .as_ref()
         .expect("props type payload");
-    let props_surface = navigate_param_to_object_surface(ctx, canonical, props_type)
-        .resolved_for_tests()
-        .expect("the `$props` object surface resolves");
+
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let props_surface =
+        navigate_param_to_object_surface(ctx, &fixture_dispatch_1, canonical, props_type)
+            .resolved_for_tests()
+            .expect("the `$props` object surface resolves");
     let member = props_surface
         .members
         .iter()
         .find(|m| m.string_name().expect("string-key fixture") == member_name)
         .unwrap_or_else(|| panic!("the `{member_name}` member is on the props surface"));
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let signature = CallableNodeView::new(&dispatch, member.value)
         .signature(nav_context())
         .expect("the callback member realizes to a callable signature");
@@ -1500,19 +1547,18 @@ fn assert_callback_row_param_resolves_precisely(
         .first()
         .map(|p| p.ty)
         .expect("the `(row: Row)` callback has one parameter");
-    let resolved = host
-        .project_shallow_surface_from_base(
-            ctx,
-            &dispatch,
-            row_param_ty,
-            Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
-            ),
-            None,
-        )
-        .resolved_for_tests()
-        .expect("`Row` resolves to an object surface in its declaring scope");
+    let resolved = crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+        ctx,
+        &dispatch,
+        row_param_ty,
+        Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+        None,
+    )
+    .resolved_for_tests()
+    .expect("`Row` resolves to an object surface in its declaring scope");
     assert!(
         resolved
             .members
@@ -1551,8 +1597,8 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1612,8 +1658,8 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1680,8 +1726,8 @@ fn union_with_no_callable_arm_is_not_an_event() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1725,8 +1771,8 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1798,8 +1844,8 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1870,8 +1916,8 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -1924,8 +1970,8 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
-        &host,
         &ctx,
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
         canonical,
         SvelteSurfaceSource::CallbackPropEvents,
     );
@@ -2003,13 +2049,16 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
+
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_2, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
     let filtered = retain_test_snippet_members(&surface, &["row"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
 
-    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&fixture_dispatch_2, &resolved);
     let row = slots
         .iter()
         .find(|s| s.name == "row")
@@ -2074,15 +2123,18 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
+
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_3, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
     let row = surface
         .members
         .iter()
         .find(|m| m.string_name().expect("string-key fixture") == "row")
         .expect("the `row` member is present");
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
     );
@@ -2101,7 +2153,7 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
     // Terminal DTO sink: the SAME nodes publish as the two ordered Svelte slot
     // bindings (exact names, each paired with the member scope).
     let bindings = materialize_snippet_slot_bindings(
-        &ctx,
+        &dispatch,
         &verter_type_expr::TypeExprScope::new(component),
         &params,
     );
@@ -2156,11 +2208,14 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
-    let preparation = ctx
-        .prepared_decl_bundle(component)
-        .expect("prepared declaration bundle")
-        .prepared_type_decls
-        .get_in_for_projection(props_owner, "Props");
+    let preparation =
+        crate::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
+            &ctx,
+            &ctx.prepared_decl_bundle(component)
+                .expect("prepared declaration bundle"),
+            props_owner,
+            "Props",
+        );
     match preparation {
         crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
             root_identity,
@@ -2193,9 +2248,12 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     // the demand-time `ImportRoute` fact rail (asserted end-to-end below),
     // not by a blanket partial.
     let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
+
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_4, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
     let completeness = crate::request_context::current_cold_compute_completeness();
     assert!(
         !completeness.is_partial(),
@@ -2204,7 +2262,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
          got {completeness:?}"
     );
     drop(completeness_scope);
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
     );
@@ -2215,7 +2273,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .iter()
         .find(|m| m.string_name().expect("string-key fixture") == "bad")
         .expect("the `bad` member is present");
-    let graph = ctx.project_type_store().semantic_graph();
+    let graph = host.project_type_store().semantic_graph();
     let bad_data = graph.node_data(bad.value).expect("bad member graph node");
     let crate::semantic_query::SemanticNodeData::InstantiationRef { base, args } =
         bad_data.as_ref()
@@ -2277,7 +2335,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
     let filtered = retain_test_snippet_members(&surface, &["bad", "good"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
-    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&dispatch, &resolved);
     let slot_names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert!(
         !slot_names.contains(&"bad"),
@@ -2329,7 +2387,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .as_ref()
         .expect("props type");
     let recovered_surface =
-        navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
+        navigate_param_to_object_surface(&recovered_ctx, &dispatch, component, recovered_props)
             .resolved_for_tests()
             .expect("props surface after recovery");
     let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
@@ -2339,7 +2397,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         component,
     );
     let recovered_slots =
-        svelte_snippet_slot_fields_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
+        svelte_snippet_slot_fields_from_typeinfo_surface(&dispatch, &recovered_resolved);
     let recovered_bad = recovered_slots
         .iter()
         .find(|s| s.name == "bad")
@@ -2386,11 +2444,14 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
     let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
     let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
 
-    let preparation = ctx
-        .prepared_decl_bundle(component)
-        .expect("prepared declaration bundle")
-        .prepared_type_decls
-        .get_in_for_projection(props_owner, "Props");
+    let preparation =
+        crate::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
+            &ctx,
+            &ctx.prepared_decl_bundle(component)
+                .expect("prepared declaration bundle"),
+            props_owner,
+            "Props",
+        );
     let crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(declaration) =
         preparation
     else {
@@ -2406,9 +2467,12 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
+
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_5, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
     assert_eq!(
         crate::request_context::current_cold_compute_completeness(),
         crate::semantic_query::ResultCompleteness::Complete,
@@ -2420,7 +2484,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         .iter()
         .find(|member| member.string_name().expect("string-key fixture") == "row")
         .expect("resolved row member");
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let params = CallableNodeView::new(&dispatch, row.value)
         .validated_snippet_positional_params(
             crate::semantic_query::ProjectionReductionContext::published(
@@ -2470,7 +2534,6 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
     use crate::resolver_core::FactReadSetFinalise;
     use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember};
-    use crate::VerterHost;
     use std::sync::Arc;
 
     let host = VerterHost::new_standalone(Default::default());
