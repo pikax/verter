@@ -30726,6 +30726,7 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
 struct ScanPublicationFixture {
     _temp: tempfile::TempDir,
     service: tower_lsp_server::LspService<VerterLanguageServer>,
+    provider: Arc<MockTypeProvider>,
     root: String,
     ready: Arc<parking_lot::Mutex<Vec<u64>>>,
     sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
@@ -30861,7 +30862,8 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
         verter_workspace::FilesystemOptions::default(),
     ));
     let host = Arc::new(VerterHost::new(HostConfig::default(), Arc::clone(&ws) as _));
-    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let mock = Arc::new(MockTypeProvider::new());
+    let provider: Arc<dyn TypeProvider> = Arc::clone(&mock) as _;
     let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
         VerterLanguageServer::new(
             client,
@@ -30923,6 +30925,7 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
     ScanPublicationFixture {
         _temp: temp,
         service,
+        provider: mock,
         root,
         ready,
         sync_complete,
@@ -31050,6 +31053,127 @@ async fn a_scan_keeps_a_document_unready_while_its_imported_dependency_is_parked
         .await;
     assert!(server.sync_coordinator.workspace_scan_in_progress());
     assert!(fixture.sync_complete.lock().is_empty());
+
+    release_scan.notify_one();
+    fixture.await_sync_complete().await;
+}
+
+/// An edit is no exemption from the scan's dependency gate. With the target's
+/// real imported child parked mid-delivery and the production scan parked on
+/// unrelated work, the target is edited through the production `didChange`
+/// handler: the edited revision is synced to the provider and its publication
+/// decided, yet it stays not-ready while the child is parked. Once the child
+/// settles, the edit's own import publication mints the receipt and the edited
+/// revision is certified while the unrelated scan item is still parked and
+/// level 2 is still unannounced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_keeps_an_edited_document_unready_while_its_imported_dependency_is_parked() {
+    const EDIT_MARKER: &str = "edited_revision_marker";
+    let fixture = scan_publication_fixture(false).await;
+    let server = fixture.server();
+    let (scan_parked, release_scan) = crate::sync_coordinator::test_hooks::block_after_ide_compile(
+        &fixture.id("far/Unrelated.vue"),
+    );
+    let child_lane = server.ide_sync_lifecycle_lease(&fixture.id("src/Child.vue"));
+    let child_parked = child_lane.lock().await;
+    let target = fixture.open("src/Target.vue").await;
+    let holds_before = server.sync_coordinator.dependency_holds();
+
+    server.spawn_background_init(None, "parked edit").await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
+        .await
+        .expect("the workspace scan must reach the unrelated item");
+    fixture.await_ready_announced().await;
+    fixture
+        .await_while_polling(
+            &target,
+            || server.sync_coordinator.dependency_holds() > holds_before,
+            "the opened target's publication must be decided, and held, during the scan",
+        )
+        .await;
+
+    // The user edits the target while the scan is parked; it still imports the
+    // parked child.
+    let holds_at_edit = server.sync_coordinator.dependency_holds();
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: target.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: format!(
+                    "<script setup lang=\"ts\">\nimport Child from './Child.vue';\nconst {EDIT_MARKER} = 'edited';\n</script>\n<template><Child :label=\"{EDIT_MARKER}\" /></template>"
+                ),
+            }],
+        },
+    )
+    .await;
+    let edit_synced = |calls: &[MockCall]| {
+        calls.iter().position(|call| match call {
+            MockCall::RegisterCarrierMetadata {
+                source_path,
+                content,
+                ..
+            } => source_path.ends_with("Target.vue") && content.contains(EDIT_MARKER),
+            _ => false,
+        })
+    };
+
+    // The edited revision is synced, and the tick that synced it has decided
+    // its publication: either held it, or certified it.
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                edit_synced(&fixture.provider.calls()).is_some()
+                    && (server.sync_coordinator.dependency_holds() > holds_at_edit
+                        || server.documents.diagnostics_ready(&target))
+            },
+            "the edited revision must be synced and its publication decided during the scan",
+        )
+        .await;
+    assert_eq!(
+        server
+            .documents
+            .get(&target)
+            .map(|document| document.version),
+        Some(2)
+    );
+    assert!(
+        !server.documents.diagnostics_ready(&target),
+        "an edited document whose imported dependency is parked must stay not-ready"
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+
+    drop(child_parked);
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                server.documents.diagnostics_ready(&target)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            "the edited target must be certified once its dependency is delivered",
+        )
+        .await;
+    let calls = fixture.provider.calls();
+    let synced_at = edit_synced(&calls).expect("the edited revision was synced");
+    assert!(
+        calls[synced_at..].iter().any(|call| matches!(
+            call,
+            MockCall::GetDiagnostics { path } if path.contains("Target.vue")
+        )),
+        "the certified diagnostics must be pulled for the edited revision: {calls:?}"
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    assert!(
+        fixture.sync_complete.lock().is_empty(),
+        "level 2 must stay unannounced while a scan item is parked"
+    );
 
     release_scan.notify_one();
     fixture.await_sync_complete().await;
