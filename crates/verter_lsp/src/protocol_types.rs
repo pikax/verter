@@ -380,6 +380,10 @@ pub struct StatisticsRequestParams {
     #[serde(default)]
     pub include_events: bool,
     pub scope: Option<String>,
+    /// The open document whose diagnostics status the caller is waiting on.
+    /// Recorded as demand for that document; absent for a plain snapshot.
+    #[serde(default)]
+    pub uri: Option<String>,
 }
 
 /// What the host RETAINS at the instant of a `$/verter/getStatistics`

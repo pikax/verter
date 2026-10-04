@@ -2277,7 +2277,8 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
   if (process.env.VERTER_E2E_TEST) {
     lifetime.add(
       commands.registerCommand("verter._getDiagnosticStatus", async (uri: string) => {
-        const snapshot = await getClient().sendRequest(RequestType.GetStatistics, {});
+        // Naming the document makes the poll itself the demand for it.
+        const snapshot = await getClient().sendRequest(RequestType.GetStatistics, { uri });
         return snapshot.diagnostics?.[uri];
       }),
       commands.registerCommand("verter._getDecorationState", () => ({

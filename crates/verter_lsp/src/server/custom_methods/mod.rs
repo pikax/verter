@@ -440,11 +440,24 @@ impl VerterLanguageServer {
     /// Handle `$/verter/getStatistics` request.
     ///
     /// Returns basic statistics about the LSP session.
+    ///
+    /// A request naming a `uri` is a caller waiting on that document's
+    /// diagnostics status: it is recorded as demand for the document first
+    /// (see [`Self::demand_document`]), so the status it polls for is served
+    /// ahead of unrelated owed work.
     pub async fn get_statistics(
         &self,
-        _params: Option<StatisticsRequestParams>,
+        params: Option<StatisticsRequestParams>,
     ) -> Result<StatisticsSnapshot> {
         tracing::debug!("$/verter/getStatistics");
+
+        if let Some(uri) = params
+            .as_ref()
+            .and_then(|params| params.uri.as_deref())
+            .and_then(|uri| uri.parse::<Uri>().ok())
+        {
+            self.demand_document(&uri).await;
+        }
 
         let mut by_type = serde_json::Map::new();
         let mut by_file = serde_json::Map::new();

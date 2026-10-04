@@ -30583,6 +30583,438 @@ async fn promoting_a_rootless_receipt_releases_the_publication_a_scan_held() {
         .set_workspace_scan_in_progress(false);
 }
 
+/// A restart replays every document the client still holds as an open, and
+/// nothing in a replayed open singles out the one a caller is about to assert
+/// on. Its diagnostics-status request names it, and that request alone must
+/// move it ahead of every newer replayed open: no fresh open and no other
+/// editor request against it is involved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let inflight = crate::sync_coordinator::max_inflight_diagnostics(&server.type_provider_kind);
+    let names: Vec<String> = (0..inflight + 3)
+        .map(|index| format!("Replayed{index}"))
+        .collect();
+    let source = "<template><p>replayed</p></template>";
+    let docs: Vec<(String, Uri)> = names
+        .iter()
+        .map(|name| {
+            std::fs::write(
+                fixture._temp.path().join("src").join(format!("{name}.vue")),
+                source,
+            )
+            .unwrap();
+            (
+                format!("{}/src/{name}.vue", fixture.root),
+                workspace_uri(&fixture.root, &format!("src/{name}.vue")),
+            )
+        })
+        .collect();
+    let pulled = |calls: &[MockCall]| -> Vec<String> {
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::GetDiagnostics { path } => path
+                    .split("/src/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('.').next())
+                    .filter(|name| name.starts_with("Replayed"))
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Every pull waits at the provider, so the replayed opens fill the window
+    // and stay there. Each open's debounced work is held by a change ticket
+    // until every open's quiet window has elapsed, so the coordinator ranks the
+    // whole replay at once: newest open first, and `Replayed0` — the document
+    // the caller asserts on, and the first the client replays — last.
+    let gate = fixture.provider.gate_diagnostics();
+    fixture.provider.clear_calls();
+    let held: Vec<_> = docs
+        .iter()
+        .map(|(id, _)| server.sync_coordinator.change_received(id.clone()))
+        .collect();
+    for (_, uri) in &docs {
+        super::lifecycle::handle_did_open(
+            server,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".into(),
+                    version: 1,
+                    text: source.into(),
+                },
+            },
+        )
+        .await;
+    }
+    tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW * 2).await;
+    for ticket in held.into_iter().rev() {
+        drop(ticket);
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        fixture
+            .provider
+            .wait_until_calls(|calls| pulled(calls).len() >= inflight),
+    )
+    .await
+    .expect("the replayed opens never filled the pull window");
+    assert!(
+        !pulled(&fixture.provider.calls()).contains(&names[0]),
+        "the asserted document is the oldest replayed open, so it must still be unpulled: {:?}",
+        pulled(&fixture.provider.calls())
+    );
+
+    // The caller polls the asserted document's status, naming it.
+    let status = server
+        .get_statistics(Some(
+            crate::server::protocol_types::StatisticsRequestParams {
+                include_events: false,
+                scope: None,
+                uri: Some(docs[0].1.to_string()),
+            },
+        ))
+        .await
+        .expect("the status request must answer");
+    assert_eq!(
+        status.diagnostics[docs[0].1.as_str()]["ready"],
+        serde_json::json!(false)
+    );
+
+    // One pull finishes: the slot it frees goes to the document the status
+    // request named, not to the newer replayed opens still owed a pull.
+    gate.add_permits(1);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        fixture
+            .provider
+            .wait_until_calls(|calls| pulled(calls).len() > inflight),
+    )
+    .await
+    .expect("a freed slot must be refilled");
+    let order = pulled(&fixture.provider.calls());
+    assert_eq!(
+        order[inflight], names[0],
+        "the status request must put its document ahead of the replay: {order:?}"
+    );
+
+    gate.add_permits(names.len() * 4);
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                docs.iter()
+                    .all(|(_, uri)| server.documents.diagnostics_ready(uri))
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the replay must still drain completely"),
+        )
+        .await;
+}
+
+struct ScanPublicationFixture {
+    _temp: tempfile::TempDir,
+    service: tower_lsp_server::LspService<VerterLanguageServer>,
+    root: String,
+    ready: Arc<parking_lot::Mutex<Vec<u64>>>,
+    sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
+    signals: Arc<tokio::sync::Notify>,
+    drain: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ScanPublicationFixture {
+    fn drop(&mut self) {
+        self.drain.abort();
+    }
+}
+
+impl ScanPublicationFixture {
+    fn server(&self) -> &VerterLanguageServer {
+        self.service.inner()
+    }
+
+    fn id(&self, path: &str) -> String {
+        format!("{}/{path}", self.root)
+    }
+
+    /// Open `path` through the production `didOpen` handler, as a restarted
+    /// client replays it.
+    async fn open(&self, path: &str) -> Uri {
+        let uri = workspace_uri(&self.root, path);
+        let text = std::fs::read_to_string(self._temp.path().join(path)).unwrap();
+        super::lifecycle::handle_did_open(
+            self.server(),
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".into(),
+                    version: 1,
+                    text,
+                },
+            },
+        )
+        .await;
+        uri
+    }
+
+    async fn await_announced(&self, announced: &parking_lot::Mutex<Vec<u64>>, what: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let signalled = self.signals.notified();
+                tokio::pin!(signalled);
+                signalled.as_mut().enable();
+                if !announced.lock().is_empty() {
+                    return;
+                }
+                signalled.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what} was never announced"));
+    }
+
+    /// Level 1 of the readiness ladder. Init re-arms every open document's
+    /// diagnostics just before announcing it, with the scan flag already
+    /// raised, so a receipt observed after this point was certified during the
+    /// scan.
+    async fn await_ready_announced(&self) {
+        self.await_announced(&self.ready, "$/verter/ready").await;
+    }
+
+    async fn await_sync_complete(&self) {
+        self.await_announced(&self.sync_complete, "level 2").await;
+    }
+
+    /// Wait for `ready` while polling `uri`'s diagnostics status by name, the
+    /// way a restarted client waiting on that document does. The poll cadence
+    /// is the client's; the coordinator's own receipts decide the wait.
+    async fn await_while_polling(&self, uri: &Uri, ready: impl FnMut() -> bool, what: &str) {
+        let poll = async {
+            loop {
+                let _ = self
+                    .server()
+                    .get_statistics(Some(
+                        crate::server::protocol_types::StatisticsRequestParams {
+                            include_events: false,
+                            scope: None,
+                            uri: Some(uri.to_string()),
+                        },
+                    ))
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        tokio::select! {
+            () = poll => unreachable!("the status poll never ends"),
+            () = self.server().sync_coordinator.await_until(ready, || panic!("{what}")) => {}
+        }
+    }
+}
+
+/// A real workspace for the production init path: a `Target` carrier that
+/// imports a `Child` carrier, and an `Unrelated` carrier in another directory
+/// that only the workspace scan ever touches.
+///
+/// `eager_import_warmup: false` turns off the `didOpen` handler's own inline
+/// warmup of imported carriers, which would otherwise deliver `Child` inside
+/// the open itself. The import-dependency publication — the route that mints
+/// the DependencyReady receipt — is unaffected.
+async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::test_utils::canonical_test_path(temp.path());
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::create_dir_all(temp.path().join("far")).unwrap();
+    std::fs::write(temp.path().join("tsconfig.json"), "{}").unwrap();
+    for (path, source) in [
+        (
+            "src/Child.vue",
+            "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\n</script>\n<template><p>{{ label }}</p></template>",
+        ),
+        (
+            "src/Target.vue",
+            "<script setup lang=\"ts\">\nimport Child from './Child.vue';\n</script>\n<template><Child label=\"target\" /></template>",
+        ),
+        ("far/Unrelated.vue", "<template><p>unrelated</p></template>"),
+    ] {
+        std::fs::write(temp.path().join(path), source).unwrap();
+    }
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), Arc::clone(&ws) as _));
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host),
+                type_provider: Some(Arc::clone(&provider)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::Tsserver,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: !eager_import_warmup,
+            },
+        )
+    });
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({ "processId": null, "rootUri": null, "capabilities": {} }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+
+    let ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sync_complete = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let signals = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let ready = Arc::clone(&ready);
+        let sync_complete = Arc::clone(&sync_complete);
+        let signals = Arc::clone(&signals);
+        async move {
+            while let Some(message) = socket.next().await {
+                let announced = match message.method() {
+                    "$/verter/ready" => &ready,
+                    "$/verter/typeProviderSyncComplete" => &sync_complete,
+                    _ => continue,
+                };
+                let params = serde_json::to_value(message.params().unwrap()).unwrap();
+                announced.lock().push(params["gen"].as_u64().unwrap());
+                signals.notify_waiters();
+            }
+        }
+    });
+
+    let server = service.inner();
+    server.swap_vfs_workspace(ws);
+    server.vite_config_options.lock().await.enabled = false;
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+    ScanPublicationFixture {
+        _temp: temp,
+        service,
+        root,
+        ready,
+        sync_complete,
+        signals,
+        drain,
+    }
+}
+
+/// With the production workspace scan parked on an unrelated item, a replayed
+/// open document whose own sync and dependencies settle is certified — a
+/// current merged-diagnostics receipt — while level 2 of the readiness ladder
+/// is still unannounced, and level 2 follows only once the parked item lets
+/// the scan finish.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagnostics() {
+    let fixture = scan_publication_fixture(true).await;
+    let server = fixture.server();
+    let (scan_parked, release_scan) = crate::sync_coordinator::test_hooks::block_after_ide_compile(
+        &fixture.id("far/Unrelated.vue"),
+    );
+    let target = fixture.open("src/Target.vue").await;
+
+    server.spawn_background_init(None, "parked scan").await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
+        .await
+        .expect("the workspace scan must reach the unrelated item");
+    fixture.await_ready_announced().await;
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                server.documents.diagnostics_ready(&target)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            "the target must be certified while the scan is parked elsewhere",
+        )
+        .await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    assert!(
+        fixture.sync_complete.lock().is_empty(),
+        "level 2 must stay unannounced while a scan item is parked"
+    );
+
+    release_scan.notify_one();
+    fixture.await_sync_complete().await;
+    assert!(!server.sync_coordinator.workspace_scan_in_progress());
+}
+
+/// With an import the target actually depends on parked mid-delivery, the
+/// production scan holds the target's publication fail-closed: its tick
+/// decides, and holds, but the target is never certified. Once that
+/// dependency's delivery settles the target is certified with the scan still
+/// running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_keeps_a_document_unready_while_its_imported_dependency_is_parked() {
+    let fixture = scan_publication_fixture(false).await;
+    let server = fixture.server();
+    let (scan_parked, release_scan) = crate::sync_coordinator::test_hooks::block_after_ide_compile(
+        &fixture.id("far/Unrelated.vue"),
+    );
+    // The child's delivery serializes on its own lifecycle lane; holding it
+    // parks every import publication that would deliver it, and so the
+    // target's receipt.
+    let child_lane = server.ide_sync_lifecycle_lease(&fixture.id("src/Child.vue"));
+    let child_parked = child_lane.lock().await;
+    let target = fixture.open("src/Target.vue").await;
+    let holds_before = server.sync_coordinator.dependency_holds();
+
+    server
+        .spawn_background_init(None, "parked dependency")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
+        .await
+        .expect("the workspace scan must reach the unrelated item");
+    fixture.await_ready_announced().await;
+    fixture
+        .await_while_polling(
+            &target,
+            || server.sync_coordinator.dependency_holds() > holds_before,
+            "the target's publication must be decided, and held, during the scan",
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&target),
+        "a document whose imported dependency is parked must stay not-ready"
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+
+    drop(child_parked);
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                server.documents.diagnostics_ready(&target)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            "the target must be certified once its dependency is delivered",
+        )
+        .await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    assert!(fixture.sync_complete.lock().is_empty());
+
+    release_scan.notify_one();
+    fixture.await_sync_complete().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document() {
     let fixture = watched_dependency_fixture(true).await;
