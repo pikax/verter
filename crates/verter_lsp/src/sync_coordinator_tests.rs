@@ -223,6 +223,7 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(provider, ProjectSyncMode::FullProject)),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -267,6 +268,7 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -339,6 +341,7 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -402,6 +405,7 @@ async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() 
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -501,6 +505,7 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -559,6 +564,7 @@ async fn merged_diagnostics_surface_verter_project_warning_on_carrier_path_confl
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -646,6 +652,7 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -736,6 +743,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -897,6 +905,7 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1009,6 +1018,7 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1124,6 +1134,7 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1223,6 +1234,7 @@ defineProps<{ msg: string }>()
 
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1337,6 +1349,7 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1458,6 +1471,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1583,6 +1597,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1677,6 +1692,7 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1759,6 +1775,7 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1904,6 +1921,7 @@ async fn make_carrier_diagnostics_fixture() -> (
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2568,6 +2586,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2701,6 +2720,7 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     let cached_verter_diags = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync,
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -2775,6 +2795,7 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
     let cached_verter_diags = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2830,6 +2851,7 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
 fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -3081,6 +3103,7 @@ fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
     let needs_provider_sync = Arc::new(DashSet::new());
     let deps = SyncCoordinatorDeps {
         documents,
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::clone(&needs_provider_sync),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -3856,14 +3879,21 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
         .await;
 }
 
-/// While a workspace scan is publishing hundreds of documents into the provider,
-/// every background diagnostic pull makes the engine rebuild its program against
-/// a moving target — and buys nothing, because every open document is re-armed
-/// when the scan completes. A restart replays every open editor as an OPEN, so
-/// only a document the user is EDITING is pulled during a scan; the rest are
-/// still SYNCED, and are pulled once it ends.
+/// A restart replays every open editor as an OPEN to a server that is also
+/// scanning the whole workspace. A replayed document must not wait for that
+/// scan: once its own sync has landed AND its DependencyReady receipt is
+/// current, the imports its diagnostics read are already in the engine, and it
+/// is certified while the scan is still running. One whose receipt is not
+/// current stays fail-closed — synced, never pulled, never certified — until
+/// the receipt is minted or the scan ends. An edited document is pulled as it
+/// always was.
+///
+/// The scan flag stays raised throughout the first two phases, and level 2 of
+/// the readiness ladder is announced only after it is lowered
+/// (`complete_post_scan`), so every certification asserted before the last
+/// phase happened with level 2 still unannounced.
 #[tokio::test(flavor = "multi_thread")]
-async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
+async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_current() {
     let (documents, _states, provider, _app_id, _ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
     let source = |marker: &str| {
@@ -3873,15 +3903,18 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
         )
     };
     let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let receipts = Arc::clone(&deps.dependency_receipts);
+    let vfs_workspace = Arc::clone(&deps.vfs_workspace);
     let handle = spawn_sync_coordinator(deps);
     handle.set_workspace_scan_in_progress(true);
 
-    let overdue = Instant::now() - Duration::from_secs(60);
-    let names = ["ReplayedA", "ReplayedB", "Active"];
+    // `Current` has its dependency closure delivered; `Parked` is waiting on a
+    // dependency the scan has not reached; `Unsettled` never gets a receipt
+    // during the scan; `Active` is being edited.
+    let names = ["Current", "Parked", "Unsettled", "Active"];
     let docs: Vec<(String, Uri)> = names
         .iter()
-        .enumerate()
-        .map(|(index, name)| {
+        .map(|name| {
             let uri: Uri = format!("file:///workspace/src/{name}.vue")
                 .parse()
                 .expect("test uri");
@@ -3895,21 +3928,33 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
                 .get_canonical_id(&uri)
                 .expect("the document must be open");
             needs_provider_sync.insert(canonical_id.clone());
-            if *name == "Active" {
-                // The one document the user is typing in.
-                let change = handle.change_received(canonical_id.clone());
-                let _ = documents.did_change(&uri, 2, &source("Active edited"));
-                change.signal(uri.as_str().to_string());
-            } else {
-                handle.signal(
-                    canonical_id.clone(),
-                    uri.as_str().to_string(),
-                    overdue + Duration::from_millis(index as u64),
-                );
-            }
             (canonical_id, uri)
         })
         .collect();
+    let (active_id, active_uri) = &docs[3];
+    let change = handle.change_received(active_id.clone());
+    let _ = documents.did_change(active_uri, 2, &source("Active edited"));
+
+    // Minted only after every content change above, under the key the
+    // workspace is published at now.
+    let record_receipt = |canonical_id: &str| {
+        let key = crate::server::dependency_freshness_key(&documents, &vfs_workspace)
+            .expect("the fixture publishes a resolver, so receipts have a key");
+        receipts.record_delivered(canonical_id.to_string(), key);
+        assert!(receipts.is_current(canonical_id, &documents, &vfs_workspace));
+    };
+    record_receipt(&docs[0].0);
+
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in docs[..3].iter().enumerate() {
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    change.signal(active_uri.as_str().to_string());
+    drop(change);
 
     let synced = |calls: &[MockCall], name: &str| {
         calls.iter().any(|call| match call {
@@ -3934,26 +3979,51 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
     .expect("every replayed document is still SYNCED during a scan");
     handle
         .await_until(
-            || documents.diagnostics_ready(&docs[2].1) && handle.diag_tasks_live() == 0,
-            || panic!("the edited document must be certified during the scan"),
+            || {
+                documents.diagnostics_ready(&docs[0].1)
+                    && documents.diagnostics_ready(active_uri)
+                    && handle.diag_tasks_live() == 0
+            },
+            || {
+                panic!(
+                    "a document whose dependencies are current, and the edited one, must be \
+                     certified while the scan is still running"
+                )
+            },
         )
         .await;
+    assert!(handle.workspace_scan_in_progress());
     let calls = provider.calls();
-    assert!(pulled(&calls, "Active"));
-    assert!(
-        !pulled(&calls, "ReplayedA") && !pulled(&calls, "ReplayedB"),
-        "documents the user is not looking at are not pulled while the scan runs: {calls:?}"
-    );
-
-    // The scan ends and the open documents are re-armed: now they are pulled.
-    handle.set_workspace_scan_in_progress(false);
-    for (canonical_id, uri) in &docs[..2] {
-        handle.signal_diagnostics_only(
-            canonical_id.clone(),
-            uri.as_str().to_string(),
-            Instant::now() - Duration::from_secs(1),
+    assert!(pulled(&calls, "Current") && pulled(&calls, "Active"));
+    for (index, name) in [(1, "Parked"), (2, "Unsettled")] {
+        assert!(
+            !pulled(&calls, name),
+            "{name} has no current dependency receipt and must not be pulled: {calls:?}"
+        );
+        assert!(
+            !documents.diagnostics_ready(&docs[index].1),
+            "{name} must stay fail-closed while its dependencies are not current"
         );
     }
+
+    // The parked dependency is delivered: `Parked` is certified at once, while
+    // the scan still runs and `Unsettled` is still held.
+    record_receipt(&docs[1].0);
+    handle.dependencies_settled(&docs[1].0);
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[1].1) && handle.diag_tasks_live() == 0,
+            || panic!("a minted receipt must release the publication the scan held back"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(
+        !pulled(&provider.calls(), "Unsettled"),
+        "a receipt minted for one document releases only that document"
+    );
+
+    // The scan ends: whatever it still held is released with no re-arm signal.
+    handle.set_workspace_scan_in_progress(false);
     handle
         .await_until(
             || {
@@ -4462,6 +4532,7 @@ async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
         let provider = Arc::new(MockTypeProvider::new());
         let mut deps = SyncCoordinatorDeps {
             documents: Arc::clone(&documents),
+            dependency_receipts: Default::default(),
             project_sync: None,
             needs_provider_sync: Arc::new(DashSet::new()),
             pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -4540,6 +4611,7 @@ async fn await_projection_via_coordinator(
 fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
         documents: Arc::clone(documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -5215,6 +5287,7 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new_with_kind(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6013,6 +6086,7 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6112,6 +6186,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6154,6 +6229,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
             changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             scanning: Arc::default(),
+            settled_dependencies: Arc::default(),
         },
         deps,
         receipts.clone(),
@@ -6231,6 +6307,7 @@ fn lane_test_deps(
 ) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
         documents: Arc::clone(documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             Arc::clone(provider) as Arc<dyn crate::type_provider::traits::TypeProvider>,
             ProjectSyncMode::FullProject,

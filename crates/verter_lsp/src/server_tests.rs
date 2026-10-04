@@ -38127,6 +38127,7 @@ fn lane_interleaving_deps(
 ) -> crate::sync_coordinator::SyncCoordinatorDeps {
     crate::sync_coordinator::SyncCoordinatorDeps {
         documents: Arc::clone(&server.documents),
+        dependency_receipts: Default::default(),
         project_sync: server.project_sync.clone(),
         needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
         pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),

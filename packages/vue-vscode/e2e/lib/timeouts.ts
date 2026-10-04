@@ -203,18 +203,15 @@ export const POLL_BUDGETS = {
       "passed explicitly by the same root `beforeAll`: the provider handshake is a suite-level " +
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
-  restartTypeProviderSync: {
-    budgetMs: 45_000,
+  restartEntryDiagnostics: {
+    budgetMs: 30_000,
     parentTimeoutMs: 60_000,
     reason:
-      "passed explicitly by `restartParityReady`: an explicit language-server restart repeats the " +
-      "root provider handshake (process start, workspace scan, provider project) AND serves a " +
-      "did_open replay of every document VS Code still holds, about fifty by the time the parity " +
-      "suites restart, concurrently with that scan. It is therefore slower than the cold root " +
-      "handshake and must not share its 30s: CI restarts take 15-18s on a healthy runner and " +
-      "19-36s on a loaded one, and every 30s timeout seen in CI was a sync that completed 0.2-6.4s " +
-      "after the deadline with the scanner still advancing, not a stuck one. 45s is what the 60s " +
-      "suiteSetup leaves after the entry document's readiness wait and the margin",
+      "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
+      "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
+      "import closure. It takes the cold root handshake's 30s and nothing wider: the restarted " +
+      "server certifies the entry while its workspace scan is still running, so neither the scan " +
+      "nor the replay of every held document is on this path",
   },
   waitForExtensionReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForTypeProviderSync: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -361,24 +358,24 @@ export const POLL_SEQUENCES = {
       "under ONE deadline. At 60s the second and third could be killed before reaching their own.",
   },
   restartedSuiteSetup: {
-    members: ["restartTypeProviderSync", "waitForFileReady"],
+    members: ["restartEntryDiagnostics"],
     parentTimeoutMs: 60_000,
     reason:
-      "a state-sensitive suite's suiteSetup restarts the language server, waits for the NEW " +
-      "server's provider sync, and may then wait for its entry document — in series under the " +
-      "hook's declared 60s deadline",
+      "a state-sensitive suite's suiteSetup restarts the language server and waits for the NEW " +
+      "server to certify its entry document's diagnostics, under the hook's declared 60s deadline",
   },
   restartedProviderOwnedWitnesses: {
     members: [
-      "restartTypeProviderSync",
+      "restartEntryDiagnostics",
       "waitForFileReady",
-      "restartTypeProviderSync",
+      "restartEntryDiagnostics",
       "waitForFileReady",
     ],
-    parentTimeoutMs: 120_000,
+    parentTimeoutMs: 90_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
-      "server epoch: restart, provider sync, file ready — twice, in series, under its own 120s",
+      "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
+      "own 90s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],
