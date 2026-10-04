@@ -17,7 +17,7 @@
 //! (`SemanticQueryKey` → `ProjectSemanticDispatch::execute`).
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
+
 use std::sync::Arc;
 
 /// Build a string-literal-union node from a list of keys
@@ -157,8 +157,8 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
     node: crate::semantic_query::SemanticNodeId,
 ) -> (bool, Option<crate::semantic_query::DepSignature>) {
     let root_identity = {
-        let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
-        node_root_identity(&dispatch, node, 0)
+        let dispatch = query_engine.dispatch;
+        node_root_identity(dispatch, node, 0)
     };
     let Some(root_identity) = root_identity else {
         return (false, Some(Arc::from(Vec::new())));
@@ -281,7 +281,7 @@ fn collect_node_root_identities(
 /// node carries resolved identities, so no name-resolution engine is
 /// needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     scope_canonical_id: &str,
     node: crate::semantic_query::SemanticNodeId,
 ) -> (bool, crate::semantic_query::DepSignature) {
@@ -290,10 +290,9 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
         MaterializationCycleGateOutcome, MaterializationCycleGateVerdict,
     };
 
-    let dispatch = ProjectSemanticDispatch::new(ctx);
     let mut roots: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
     let mut truncated = false;
-    collect_node_root_identities(&dispatch, node, 0, &mut roots, &mut truncated);
+    collect_node_root_identities(dispatch, node, 0, &mut roots, &mut truncated);
     if roots.is_empty() {
         if truncated {
             // A truncated collection with no collected roots cannot
@@ -335,7 +334,10 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
     }
     let aggregate = MaterializationCycleGateOutcome::aggregate(outcomes);
     let fence_signature: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
-    crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(ctx, &fence_signature);
+    crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(
+        dispatch,
+        &fence_signature,
+    );
     (
         matches!(aggregate.verdict(), MaterializationCycleGateVerdict::Stop),
         fence_signature,

@@ -212,6 +212,9 @@ pub struct IndexedReady {
     /// demand reaches) reads it here instead of hashing the whole source
     /// again.
     pub(crate) source_parse_key: SourceParseKey,
+    pub(crate) input_projection: crate::resolver_core::request_inputs::CachedProjection<
+        crate::resolver_core::request_inputs::IndexedInputRecord,
+    >,
 }
 
 /// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
@@ -219,6 +222,10 @@ pub struct IndexedReady {
 pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
 
 impl IndexedReady {
+    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
+        self.source_parse_key.0.get().cloned()
+    }
+
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
     /// derived from the whole source the first time it is asked for. The
@@ -293,6 +300,7 @@ impl IndexedReady {
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
     }
 
@@ -330,6 +338,7 @@ impl IndexedReady {
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
     }
 }
@@ -916,7 +925,7 @@ pub struct ProjectTypeStoreCounterSnapshot {
 /// **not** bump the project generation — they bump the per-canonical
 /// `whole_hash` and invalidate keys by identity.
 pub struct ProjectTypeStore {
-    project_generation: AtomicU64,
+    project_generation: Arc<AtomicU64>,
     /// Canonical [`IndexedReady`] cache.
     indexed: FileArtifactStore,
     /// Analysis augmentation cache keyed by `AnalysisScope`.
@@ -946,23 +955,23 @@ pub struct ProjectTypeStore {
     /// short-circuits `get_component_meta_with_resolution` so
     /// audit-mode warm replays return in near-zero time.
     component_meta_results:
-        ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>,
+        Arc<ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>>,
     /// TypeScript `intrinsic` registry. Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
-    intrinsic_registry: IntrinsicRegistry,
+    intrinsic_registry: Arc<IntrinsicRegistry>,
     // 10 host-owned typed DB wrappers for the component-meta engine's
     // previously engine-local caches. Each DB consumes the
     // [`crate::cache_runtime::singleflight::cooperative_get_or_insert`]
     // primitive (admission-control, panic safety, post-compute
     // revalidation). The engine keeps a per-request
     // `RefCell<FxHashMap>` mirror as non-authoritative scratch.
-    imported_registry_db: ImportedRegistryDb,
-    declaration_lookup_db: DeclarationLookupDb,
-    resolvability_db: ResolvabilityDb,
-    owner_collection_db: OwnerCollectionDb,
+    imported_registry_db: Arc<ImportedRegistryDb>,
+    declaration_lookup_db: Arc<DeclarationLookupDb>,
+    resolvability_db: Arc<ResolvabilityDb>,
+    owner_collection_db: Arc<OwnerCollectionDb>,
     /// Universal shape cache. Replaces the previously-split
     /// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
     /// (SemanticNode-keyed) with a single store keyed on
@@ -973,7 +982,7 @@ pub struct ProjectTypeStore {
     /// segments slice + terminal mode + key filter + surface kind so
     /// per-hop path-precise demands narrow naturally.
     /// See [`crate::component_meta_caches::ShapeCacheDb`].
-    shape_cache_db: ShapeCacheDb,
+    shape_cache_db: Arc<ShapeCacheDb>,
     /// Issue #6 — host-owned proof cache for the ComponentConfig
     /// theme variant fast path. Keyed by
     /// `(app_config_decl_canonical_id, component_key_literal)`. An
@@ -984,7 +993,7 @@ pub struct ProjectTypeStore {
     /// path consults this DB before projecting the prepared theme
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
-    app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
+    app_config_no_override_proof: Arc<crate::app_config_proof_db::AppConfigNoOverrideProofDb>,
     /// Profile-domain DB for the per-canonical compile cache (D48). Holds
     /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
     /// matrix governs eviction triggers.
@@ -1006,7 +1015,7 @@ pub struct ProjectTypeStore {
     /// per-canonical eviction rides the `evict_canonical` cascade.
     /// Memory-side only; persistent registration of the two nodes is
     /// separately owed and nothing here builds a persistence tier.
-    flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores,
+    flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
     /// Holds [`crate::types::DerivedRawState`] entries (the
     /// caller-supplied route table plus source-derived analyses); the
@@ -1046,7 +1055,7 @@ pub struct ProjectTypeStore {
     /// provenance). Keyed `(canonical, parse_stable_hash, parse_env_hash)`
     /// so cosmetic edits preserve the entry. See
     /// [`crate::binder_identity_facts::BinderIdentityFactsStore`].
-    binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore,
+    binder_identity_facts: Arc<crate::binder_identity_facts::BinderIdentityFactsStore>,
     /// Host-owned mapped-binder ordinal registry. The
     /// registry hands out STABLE `param_index` ordinals for each
     /// `(canonical, display_name, fingerprint)` triple so two
@@ -1183,24 +1192,24 @@ impl ProjectTypeStore {
                 &counters.component_meta_cache_live,
             ));
         Self {
-            project_generation: AtomicU64::new(0),
+            project_generation: Arc::new(AtomicU64::new(0)),
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph,
             owner_import_surfaces,
-            component_meta_results,
-            intrinsic_registry: IntrinsicRegistry::with_defaults(),
-            imported_registry_db,
-            declaration_lookup_db,
-            resolvability_db,
-            owner_collection_db,
-            shape_cache_db,
-            app_config_no_override_proof,
+            component_meta_results: Arc::new(component_meta_results),
+            intrinsic_registry: Arc::new(IntrinsicRegistry::with_defaults()),
+            imported_registry_db: Arc::new(imported_registry_db),
+            declaration_lookup_db: Arc::new(declaration_lookup_db),
+            resolvability_db: Arc::new(resolvability_db),
+            owner_collection_db: Arc::new(owner_collection_db),
+            shape_cache_db: Arc::new(shape_cache_db),
+            app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
-            flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores::new(),
+            flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
@@ -1210,7 +1219,9 @@ impl ProjectTypeStore {
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
-            binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore::new(),
+            binder_identity_facts: Arc::new(
+                crate::binder_identity_facts::BinderIdentityFactsStore::new(),
+            ),
             mapper_binder_registry: Arc::new(
                 crate::mapper_binder_registry::MapperBinderRegistry::new(),
             ),
@@ -1226,12 +1237,56 @@ impl ProjectTypeStore {
     /// The store-owned identity intern pool. Minting boundaries clone the
     /// `Arc` handle; the pool's lifetime is the store's.
     #[must_use]
+    pub(crate) fn bind_engine(
+        &self,
+        observers: crate::project_semantic_dispatch::EngineObservers,
+        macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
+        vue_surfaces: Arc<
+            crate::framework::surface_store::FrameworkSurfaceStore<
+                crate::typeinfo::framework_surface::VueSurfaceKey,
+                crate::typeinfo::framework_surface::MacroSurfaceDtos,
+            >,
+        >,
+        svelte_surfaces: Arc<
+            crate::framework::surface_store::FrameworkSurfaceStore<
+                crate::typeinfo::framework_surface::SvelteSurfaceKey,
+                crate::typeinfo::framework_surface::MacroSurfaceDtos,
+            >,
+        >,
+    ) -> crate::project_semantic_dispatch::EngineBinding {
+        crate::project_semantic_dispatch::EngineBinding::new(
+            observers,
+            macro_mirrors,
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.app_config_no_override_proof),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.binder_identity_facts),
+            Arc::clone(&self.semantic_graph),
+            Arc::clone(&self.flow_slice),
+            Arc::clone(&self.intrinsic_registry),
+            Arc::clone(&self.imported_registry_db),
+            Arc::clone(&self.declaration_lookup_db),
+            Arc::clone(&self.resolvability_db),
+            Arc::clone(&self.owner_collection_db),
+            Arc::clone(&self.shape_cache_db),
+            Arc::clone(&self.component_meta_results),
+            vue_surfaces,
+            svelte_surfaces,
+            Arc::clone(&self.identity_interner),
+            Arc::clone(&self.mapper_binder_registry),
+        )
+    }
+
     pub(crate) fn identity_interner(&self) -> &Arc<crate::identity_interner::IdentityInterner> {
         &self.identity_interner
     }
 
     /// Current monotonic project generation. Owned by the host / workspace
     /// layer — queries read it but never mutate it.
+    pub(crate) fn project_generation_reader(&self) -> crate::resolver_store::ProjectGenerationRead {
+        crate::resolver_store::ProjectGenerationRead::new(Arc::clone(&self.project_generation))
+    }
+
     pub fn project_generation(&self) -> u64 {
         self.project_generation.load(Ordering::Acquire)
     }
@@ -1512,9 +1567,12 @@ impl ProjectTypeStore {
         // per-canonical caches stay fact-validated and recompute on the
         // reload, exactly as after an edit).
         let mut report = self.semantic_graph.release_canonical(canonical_id);
-        report.shape_entries_released = self
-            .shape_cache_db
-            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report.shape_entries_released =
+            crate::project_semantic_dispatch::memo::release_shape_canonical(
+                self.shape_cache_db.as_ref(),
+                canonical_id,
+                self.semantic_graph.as_ref(),
+            );
         report
     }
 
@@ -1530,9 +1588,12 @@ impl ProjectTypeStore {
         let mut report = self
             .semantic_graph
             .release_canonical_payloads_below(canonical_id, below);
-        report.shape_entries_released = self
-            .shape_cache_db
-            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report.shape_entries_released =
+            crate::project_semantic_dispatch::memo::release_shape_canonical(
+                self.shape_cache_db.as_ref(),
+                canonical_id,
+                self.semantic_graph.as_ref(),
+            );
         report
     }
 
@@ -1907,14 +1968,14 @@ impl ProjectTypeStore {
             &*self.imported_roots,
             &*self.semantic_graph,
             &self.owner_import_surfaces,
-            &self.component_meta_results,
-            &self.intrinsic_registry,
-            &self.imported_registry_db,
-            &self.declaration_lookup_db,
-            &self.resolvability_db,
-            &self.owner_collection_db,
-            &self.shape_cache_db,
-            &self.app_config_no_override_proof,
+            self.component_meta_results.as_ref(),
+            &*self.intrinsic_registry,
+            &*self.imported_registry_db,
+            &*self.declaration_lookup_db,
+            &*self.resolvability_db,
+            &*self.owner_collection_db,
+            &*self.shape_cache_db,
+            self.app_config_no_override_proof.as_ref(),
             &self.compile_cache_db,
             // Source-content-domain and dep-closure-domain siblings of
             // `compile_cache_db`.
@@ -2125,6 +2186,7 @@ mod tests {
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
                 source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             }),
         );
         assert!(db
@@ -2179,6 +2241,7 @@ mod tests {
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
                 source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             })
         };
 

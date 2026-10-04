@@ -520,14 +520,16 @@ pub fn dispatch_evaluate_deferred_for_tests(
     dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
 }
 
-/// Returns `true` iff `host.active_session_view()` returns `None`.
-///
-/// This shim is needed because `ResolverContext` is sealed — integration
-/// tests cannot call the trait method directly. The shim calls through the
-/// sealed trait on the concrete `VerterHost` impl.
+/// Observe whether a base request's private lifecycle carries a session view.
+/// The lifecycle stays behind the request ports even in integration tests.
 pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
-    use crate::resolver_core::ResolverContext;
-    host.active_session_view().is_none()
+    let view = host.resolver_store_view().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        host,
+        &view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    !ctx.has_session_view_for_tests()
 }
 
 /// Drive the AppConfigNoOverrideProofDb production producer
@@ -617,6 +619,7 @@ pub fn component_meta_cold_traced_read_set_for_tests(
                         &resolved,
                         true,
                         ctx,
+                        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
                     );
                 })
             })
@@ -1338,3 +1341,11 @@ pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
             context,
         })
 }
+
+pub use crate::resolver_core::fact_validation_port::FactValidation;
+pub use crate::resolver_core::host_resolver_context::HostResolverContext;
+/// Compile-contract access to the actual request ports and base-host adapter.
+/// Their production owner modules remain private; fields and construction stay sealed.
+pub use crate::resolver_core::request_ports::{
+    Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
+};

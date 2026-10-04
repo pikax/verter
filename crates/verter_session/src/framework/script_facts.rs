@@ -568,23 +568,10 @@ impl FrameworkScriptFactStore {
         Self::default()
     }
 
-    /// The cached resolved fact for `key` IFF it still validates under the live
-    /// `view` and project `generation` — BOTH gates must pass.
+    /// Clone the cached resolved fact for request-owned validation.
     #[must_use]
-    pub fn get_with_view<V: StoreView + ?Sized>(
-        &self,
-        key: &ResolvedFactKey,
-        view: &V,
-        generation: u64,
-    ) -> Option<Arc<StoredResolvedFact>> {
-        let candidate = Arc::clone(self.entries.get(key)?.value());
-        if candidate.validated_at_generation != generation {
-            return None;
-        }
-        if !view.validates_fact_signature(&candidate.read_set_signature.facts) {
-            return None;
-        }
-        Some(candidate)
+    pub fn candidate(&self, key: &ResolvedFactKey) -> Option<Arc<StoredResolvedFact>> {
+        Some(Arc::clone(self.entries.get(key)?.value()))
     }
 
     /// Admit `entry` under `key` ONLY when `admission` is
@@ -815,7 +802,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             .map(|serve| serve.indexed),
         None => host
             .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed),
+            .map(|serve| serve.indexed.input_record()),
     }) else {
         return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
             ScriptFactUnavailableReason::SourceUnavailable,
@@ -1082,7 +1069,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // (so the warm read + publish gate on the SAME generation the executor's
     // surface entry validates under), else the live project generation.
     let generation = match request_ctx {
-        Some(ctx) => ctx.project_type_store().current_project_generation(),
+        Some(ctx) => ctx.current_project_generation(),
         None => host.project_type_store().project_generation(),
     };
 
@@ -1093,9 +1080,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // generation, so a stale entry misses.
     if candidates.is_exact() {
         if let Some(ctx) = request_ctx {
-            if let Some(stored) = host.framework_script_caches().facts.get_with_view(
+            if let Some(stored) = read_script_fact(
+                &host.framework_script_caches().facts,
                 &fact_key,
-                ctx.store_view(),
+                &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
                 generation,
             ) {
                 // Bubble the facts entry's import-route / package-provenance fact
@@ -1118,9 +1106,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 &current_view,
                 overlay,
             );
-            if let Some(stored) = host.framework_script_caches().facts.get_with_view(
+            if let Some(stored) = read_script_fact(
+                &host.framework_script_caches().facts,
                 &fact_key,
-                host_ctx.store_view(),
+                &crate::resolver_core::fact_validation_port::FactValidationView::new(&host_ctx),
                 generation,
             ) {
                 stored.read_set_signature.bubble_via_tls();
@@ -1602,3 +1591,20 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 #[path = "script_facts_tests.rs"]
 mod tests;
+
+/// Read selected script-fact evidence under the requesting view's generation.
+pub(crate) fn read_script_fact<V: StoreView + ?Sized>(
+    store: &FrameworkScriptFactStore,
+    key: &ResolvedFactKey,
+    view: &V,
+    generation: u64,
+) -> Option<Arc<StoredResolvedFact>> {
+    let candidate = store.candidate(key)?;
+    if candidate.validated_at_generation != generation {
+        return None;
+    }
+    if !view.validates_fact_signature(&candidate.read_set_signature.facts) {
+        return None;
+    }
+    Some(candidate)
+}

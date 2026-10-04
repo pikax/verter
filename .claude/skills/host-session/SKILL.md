@@ -25,7 +25,27 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 Host view: resolver-path helpers receive `&HostStoreView` directly as result-DB fence authority; `IndexedReady` is the single canonical post-parse artifact (former `ModuleFactsDb` deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate it against the live `StoreView` before returning. Full store-view contract: "Host Store View" + "Store-View Token, Lane Identity, and Singleflight" below.
 
-**Resolver-context seal:** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (`sealed::Sealed` marker closed at trait definition). Guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New trait-surface methods are an architectural decision; widen with care.
+**Resolver-context seal:** `ResolverContext` is a method-free sealed composition
+of six request-bound ports: `IndexedInputs`, `OwnedLowering`, `RouteLookup`,
+`FactValidation`, `Cancellation`, and `ExecutionSubmission`. Production contexts
+are `HostResolverContext` and `SessionResolverContext`; the direct-host seam is
+compiled only for tests or explicit `test-support`. Ports return owned input
+records, typed source demands, validation answers, or an opaque engine binding.
+They expose no host, store, config, AST borrow, or second query driver. Private
+request lifecycle adapters retain source artifacts for the request so lowering
+an observed record keeps its original source identity across edits.
+
+`ProjectSemanticDispatch` owns graph/result capabilities and immutable
+`EnginePolicy`. Its static `FlowCx`, `RelationCx`, and `InferenceTxn` views use
+generic demand drivers and selected arena operations. Request-local `MemoRead`
+and `MemoPublish` coordinate fact validation and publication; durable storage
+does not invoke source services or evaluate types. The six request-bound ports in `resolver_core::request_ports` are the
+resolver-tier boundary: each returns owned records or typed demands and none
+returns a host, store or config handle, so only their implementations reach
+ambient host state. The
+session feature-variants compile-contract lane proves each actual port cannot
+expose ambient host/worker/store state. See the type-resolution
+[ownership reference](../type-resolution/references/relation-ownership.md).
 
 ## Vue Macro Codegen Producer
 

@@ -85,6 +85,10 @@ use verter_type_expr::PrimitiveName;
 //   - `substitute`— generic type-parameter substitution into the graph.
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
+mod arena_ops;
+mod engine_binding;
+pub(crate) mod flow_slice_driver;
+pub(crate) use engine_binding::{EngineBinding, EngineObservers, EnginePolicy};
 pub(crate) mod absorb;
 mod apparent_type;
 mod broad_runtime;
@@ -360,6 +364,9 @@ impl ActiveInstantiation {
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a> {
+    binding: EngineBinding,
+    pub(crate) policy: EnginePolicy,
+    cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
     /// The operands each awaited relation is unwrapping on the current
@@ -745,6 +752,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::request_context::bump_bare_engine_construction();
         }
         Self {
+            binding: ctx.attach_engine(),
+            policy: ctx.engine_policy(),
+            cancellation: ctx.cancellation_checkpoint(),
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
@@ -1245,9 +1255,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         seed: crate::semantic_query::DeclarationSlotSeed,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(seed.defining_canonical.as_ref());
-        let project_identity = host
+        let env = self
+            .ctx
+            .host_view_env_hashes_for(seed.defining_canonical.as_ref());
+        let project_identity = self
+            .ctx
             .host_view_project_identity_for(seed.defining_canonical.as_ref())
             .fold_u32();
         seed.finalize(crate::locator_identity::SlotEnvIdentity::from_raw(
@@ -1316,10 +1328,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// index key is not request-scoped — it is the store-view basis.
     #[must_use]
     pub(crate) fn request_view_env_hashes(&self) -> crate::session_view::EnvHashes {
-        let host = self.ctx.host_for_fact_tracer_install();
         match crate::request_context::current_request_canonical() {
-            Some(canonical) => host.host_view_env_hashes_for(&canonical),
-            None => host.host_view_env_hashes(),
+            Some(canonical) => self.ctx.host_view_env_hashes_for(&canonical),
+            None => self.ctx.host_view_env_hashes(),
         }
     }
 
@@ -1330,10 +1341,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn request_view_project_identity(
         &self,
     ) -> crate::file_artifact_store::ProjectIdentity {
-        let host = self.ctx.host_for_fact_tracer_install();
         match crate::request_context::current_request_canonical() {
-            Some(canonical) => host.host_view_project_identity_for(&canonical),
-            None => host.host_view_project_identity(),
+            Some(canonical) => self.ctx.host_view_project_identity_for(&canonical),
+            None => self.ctx.host_view_project_identity(),
         }
     }
 
@@ -1345,7 +1355,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     #[must_use]
     pub(crate) fn resolve_env_hash_for(&self, canonical: &str) -> crate::semantic_query::HashValue {
         self.ctx
-            .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical)
             .resolve_env_hash
     }
@@ -1363,14 +1372,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitution: crate::semantic_query::SubstitutionCanonicalHash,
         optional_property_policy: crate::semantic_query::ExactOptionalPropertyPolicy,
     ) -> crate::semantic_query::ObjectSpreadProjectionContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         crate::semantic_query::ObjectSpreadProjectionContext::new(
             projection_reduction,
             env.resolve_env_hash,
             env.type_env_hash,
             env.lib_env_hash,
-            host.host_view_project_identity_for(canonical).0,
+            self.ctx.host_view_project_identity_for(canonical).0,
             substitution,
             optional_property_policy,
             ObjectSpreadProjectionContextWitness::mint_for_dispatch_factory(),
@@ -1384,13 +1392,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
     ) -> crate::semantic_query::BroadRuntimeContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         crate::semantic_query::BroadRuntimeContext {
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity_for(canonical).fold_u32(),
+            project_identity: self
+                .ctx
+                .host_view_project_identity_for(canonical)
+                .fold_u32(),
         }
     }
 
@@ -1450,10 +1460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::semantic_query::InstantiateContext {
-        let env = self
-            .ctx
-            .host_for_fact_tracer_install()
-            .host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         if crate::semantic_query::is_non_file_base(canonical) {
             crate::semantic_query::InstantiateContext::non_file(
                 prc,
@@ -1491,7 +1498,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// node carries no occurrence — an occurrence-less candidate is an
     /// honest `Miss`, never a fabricated occurrence.
     fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
-        let graph = self.ctx.project_type_store().semantic_graph();
+        let graph = self.graph();
         let data = graph.node_data(node)?;
         let to_ref = |sig: SemanticNodeId| -> Option<SignatureRef> {
             let sig_data = graph.node_data(sig)?;
@@ -1600,10 +1607,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         mode: crate::semantic_query::ProjectionMode,
     ) -> crate::semantic_query::ClassSurfaceContext {
-        let env = self
-            .ctx
-            .host_for_fact_tracer_install()
-            .host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         crate::semantic_query::ClassSurfaceContext {
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
@@ -1644,10 +1648,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         path: Arc<[Arc<str>]>,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticQueryKey {
-        let host = self.ctx.host_for_fact_tracer_install();
         let canonical = root.scope.canonical_id.as_ref();
-        let env = host.host_view_env_hashes_for(canonical);
-        let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
+        let env = self.ctx.host_view_env_hashes_for(canonical);
+        let project_identity = self
+            .ctx
+            .host_view_project_identity_for(canonical)
+            .fold_u32();
         SemanticQueryKey::TypeOf {
             value_root: crate::semantic_query::ValueRootSlotIdentity::new(
                 root,
@@ -1748,8 +1754,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
-        self.ctx.project_type_store().semantic_graph()
+    pub(super) fn flow_slice_driver(&self) -> flow_slice_driver::FlowSliceDriver<'_> {
+        flow_slice_driver::FlowSliceDriver::new(self.binding.flow_slice.as_ref(), self.ctx)
+    }
+
+    pub(crate) fn graph(&self) -> &Arc<SemanticGraphStore> {
+        &self.binding.graph
     }
 
     /// Integration-test shim for
@@ -1813,7 +1823,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical_id: &Arc<str>,
         hash: [u8; 16],
     ) -> DepSignature {
-        let project_gen = self.ctx.project_type_store().project_generation();
+        let project_gen = self.ctx.current_project_generation();
         Arc::from(
             vec![
                 (canonical_id.clone(), DepVersion::WholeHash(hash)),
@@ -1832,7 +1842,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
-        let project_gen = self.ctx.project_type_store().project_generation();
+        let project_gen = self.ctx.current_project_generation();
         Arc::from(
             vec![(
                 Arc::<str>::from("<project>"),
@@ -2060,7 +2070,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
             context,
         });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         match read.value {
             QueryResult::Value(id) => id,
             QueryResult::Recursive(id) => id,
@@ -2095,7 +2105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.instantiate_context_for(canonical, prc),
             ),
         ));
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         match read.value {
             QueryResult::Value(id) | QueryResult::Recursive(id) => {
                 Some(crate::semantic_query::HotTypeRef::new(id))
@@ -2378,9 +2388,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // without a superseded-artifact fixture. Zero-cost when unset.
                     #[cfg(test)]
                     if self
-                        .ctx
-                        .host_for_fact_tracer_install()
-                        .test_force
+                        .binding
+                        .observers
+                        .forcing
                         .carrier_normalization_force_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
@@ -2435,13 +2445,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // be read (a torn node payload) is an honest `Miss`;
                     // only a genuinely non-signature node (a poisoned
                     // synthetic publish) is a domain mismatch.
-                    match self
-                        .ctx
-                        .project_type_store()
-                        .semantic_graph()
-                        .node_data(node)
-                        .as_deref()
-                    {
+                    match self.graph().node_data(node).as_deref() {
                         Some(SemanticNodeData::Signature { .. })
                         | Some(SemanticNodeData::Object(_)) => QueryResult::Error(QueryError::Miss),
                         _ => QueryResult::Error(QueryError::ValueDomainMismatch {
@@ -2493,8 +2497,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// test forcing seams, and the runtime evidence an active operand force
     /// merges into the EXACT key it targets.
     fn open_cold_build(&self, evidence_target_key: Option<&SemanticQueryKey>) {
-        #[cfg(test)]
-        let host = self.ctx.host_for_fact_tracer_install();
         // Test-only fact-injection hook. When the
         // `dispatch_test_inject_parse_fact` slot is non-None,
         // observe the recorded `Parse(...)` fact onto the
@@ -2510,8 +2512,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // qualified-path `ProjectPath`). Per-host, so concurrent
         // tests on distinct hosts never contaminate one another.
         #[cfg(test)]
-        if host
-            .test_force
+        if self
+            .binding
+            .observers
+            .forcing
             .force_fenced_serve_for_tests
             .load(std::sync::atomic::Ordering::Relaxed)
         {
@@ -2525,15 +2529,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // budget-/recursion-truncated nested read). Folds inline
         // because it needs the dispatch's taint frame. Per-host.
         #[cfg(test)]
-        if host
-            .test_force
+        if self
+            .binding
+            .observers
+            .forcing
             .force_result_partial_for_tests
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             self.fold_into_top_build_local_taint(true, false);
         }
         #[cfg(test)]
-        host.test_force.semantic_operand_cold_build_seam.fire_once();
+        self.binding
+            .observers
+            .forcing
+            .semantic_operand_cold_build_seam
+            .fire_once();
         if let Some(target) = evidence_target_key {
             self.merge_active_operand_evidence_for_build(target);
         }
@@ -2577,7 +2587,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &finalise,
             crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
         );
-        let provenance = &self.ctx.host_for_fact_tracer_install().provenance;
+        let provenance = &self.binding.observers.provenance;
         provenance
             .memo_entry_fact_tracer_installs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3632,13 +3642,8 @@ fn finalise_traced_build_output<T>(
                     }
                     merged
                 };
-            let completed = crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
-                crate::semantic_query_memo::semantic_graph_read_set_signature(
-                    view,
-                    &output.observed_self_roots,
-                    &merged_facts,
-                )
-            });
+            let completed =
+                ctx.complete_graph_signature(&output.observed_self_roots, &merged_facts);
             match completed {
                 Ok((facts, self_root_canonicals)) => {
                     let carrier = crate::fact_signature_helpers::ReadSetSignature::new(facts);
@@ -3960,10 +3965,10 @@ pub fn resolve_decl_key(
 /// Existing callers passing `&VerterHost` upcast implicitly.
 #[must_use]
 pub(crate) fn node_data_for(
-    ctx: &dyn ResolverContext,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
 ) -> Option<Arc<SemanticNodeData>> {
-    ctx.project_type_store().semantic_graph().node_data(node)
+    graph.node_data(node)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -4101,7 +4106,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Hop 2: the slot value's first-parameter type holds the bindings.
         // CALL kind only — a construct-signature slot value is not a
         // callable slot shape and holds no bindings.
-        let param0_ty = match node_data_for(self.ctx, slot_node).as_deref() {
+        let param0_ty = match node_data_for(self.graph(), slot_node).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params,
@@ -4274,23 +4279,20 @@ pub enum BuiltinUtilityResolution {
 /// - [`NodeScopeId::File { canonical_id, .. }`] → scope canonical + scope payload
 /// - [`NodeScopeId::Global`] / exempt / missing → no scope context
 ///
-/// The adapter holds only a host reference; scope is resolved fresh per
-/// call so the adapter stays `Send + Sync` and cheap to construct.
+/// The adapter borrows the existing facade's selected engine binding and
+/// request ports. Scope is resolved fresh per call, with no host reference or
+/// independent query driver.
 pub struct SessionDispatchHost<'a> {
+    resources: &'a EngineBinding,
     ctx: &'a dyn ResolverContext,
 }
 
 impl<'a> SessionDispatchHost<'a> {
-    /// Construct an adapter bound to `ctx`. The adapter does not retain a
-    /// base node or a scope payload — it re-resolves per-base scope on
-    /// every call via [`Self::base_scope`].
-    ///
-    /// Locked-in signature: takes a sealed, request-bound
-    /// `&dyn ResolverContext`. Direct-host construction exists only in the
-    /// compile-fenced test configuration.
-    #[must_use]
-    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
-        Self { ctx }
+    fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_>) -> Self {
+        Self {
+            resources: &dispatch.binding,
+            ctx: dispatch.ctx,
+        }
     }
 
     /// Public accessor for `base`'s recorded origin scope. Returns
@@ -4301,9 +4303,8 @@ impl<'a> SessionDispatchHost<'a> {
     /// a scope payload directly.
     #[must_use]
     pub fn base_scope(&self, base: SemanticNodeId) -> NodeScopeId {
-        self.ctx
-            .project_type_store()
-            .semantic_graph()
+        self.resources
+            .graph
             .node_scope(base)
             .unwrap_or(NodeScopeId::Global)
     }
@@ -4400,10 +4401,7 @@ impl<'a> SessionDispatchHost<'a> {
         let identity = BuiltinUtility::from_name(name);
         if identity.is_some()
             || matches!(
-                self.ctx
-                    .project_type_store()
-                    .intrinsic_registry()
-                    .lookup(name),
+                self.resources.intrinsics.lookup(name),
                 crate::intrinsic_registry::IntrinsicLookup::Found(_)
             )
         {
@@ -4600,3 +4598,5 @@ mod unique_symbol_widening_tests;
 mod unread_marker_relation_tests;
 #[cfg(test)]
 mod wide_union_relation_tests;
+
+pub(crate) mod memo;

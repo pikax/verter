@@ -185,7 +185,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     }
 
     fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        node_data_for(self.dispatch.ctx, node)
+        node_data_for(self.dispatch.graph(), node)
     }
 
     /// Normalize a node to its concrete structural body at a GENUINE node-domain
@@ -672,19 +672,18 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         if slot_param_root_is_symbolic_only(self.dispatch, first_param) {
             return None;
         }
-        ctx.host_for_fact_tracer_install()
-            .project_shallow_surface_from_base(
-                ctx,
-                self.dispatch,
-                first_param,
-                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                ProjectionReductionContext::published(ProjectionMode::Shallow),
-                None,
-            )
-            // An INCOMPLETE projection records its typed reason before the
-            // no-surface answer; a failed resolution never reads as "the
-            // param has no object surface".
-            .recorded()
+        crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+            ctx,
+            self.dispatch,
+            first_param,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
+        )
+        // An INCOMPLETE projection records its typed reason before the
+        // no-surface answer; a failed resolution never reads as "the
+        // param has no object surface".
+        .recorded()
     }
 
     /// All positional params of the realized callable — leading `this` skipped,
@@ -1079,7 +1078,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
 
 impl SignatureNodeView<'_, '_> {
     fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        node_data_for(self.dispatch.ctx, node)
+        node_data_for(self.dispatch.graph(), node)
     }
 
     /// The signature's first-parameter node, if any.

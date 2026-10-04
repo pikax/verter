@@ -63,7 +63,7 @@ impl ProjectSemanticDispatch<'_> {
     pub(super) fn module_object_of_root(
         &self,
         value_root: &ValueRootKey,
-        shallow: &crate::resolver_core::ShallowFileState,
+        shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
         use crate::resolver_core::shallow_file_state::LexicalValueBinding;
@@ -113,7 +113,7 @@ impl ProjectSemanticDispatch<'_> {
             }
             Some(_) => None,
             None => {
-                let headers = shallow.decl_bodies().header_index();
+                let headers = &shallow.headers;
                 let name = value_root.name.as_ref();
                 let scope = if headers
                     .namespace_blocks
@@ -249,7 +249,7 @@ impl ProjectSemanticDispatch<'_> {
                 (Arc::clone(&block.canonical), indexed.whole_hash),
             );
             let shallow = &indexed.shallow_state;
-            let headers = shallow.decl_bodies().header_index();
+            let headers = &shallow.headers;
             for name in headers.namespace_value_members(Some(&block.scope), block.owner, None) {
                 let name: Arc<str> = Arc::from(name);
                 // `export default function f` exports `f` as `default` only.
@@ -299,7 +299,6 @@ impl ProjectSemanticDispatch<'_> {
         if name.contains('.') {
             return None;
         }
-        let host = self.ctx.host_for_fact_tracer_install();
         let population = self.global_contributors_in(
             demand_canonical,
             name,
@@ -315,8 +314,13 @@ impl ProjectSemanticDispatch<'_> {
             })
             .collect();
         declarations.sort_by(|left, right| {
-            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+            self.ctx
+                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(
+                    &self
+                        .ctx
+                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
+                )
                 .then_with(|| {
                     left.artifact_key
                         .canonical
@@ -339,7 +343,7 @@ impl ProjectSemanticDispatch<'_> {
                 continue;
             };
             push_root(&mut roots, (Arc::from(canonical), indexed.whole_hash));
-            let headers = indexed.shallow_state.decl_bodies().header_index();
+            let headers = &indexed.shallow_state.headers;
             instantiated |= headers.namespace_is_instantiated(None, entry.owner, name);
             for member in headers.namespace_value_members(None, entry.owner, Some(name)) {
                 if seen.insert(member.clone()) {
@@ -385,7 +389,7 @@ impl ProjectSemanticDispatch<'_> {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
         let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         let names = headers.namespace_value_members(scope, owner, Some(name));
         // A namespace that declares no value (only types) is no value; one
         // whose values it does not export is an object without members.
@@ -449,7 +453,7 @@ impl ProjectSemanticDispatch<'_> {
             )
             .map(|surface| surface.positive_members().to_vec())
             .unwrap_or_default();
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         let merged: Vec<(Arc<str>, ValueRootKey)> = headers
             .namespace_value_members(scope, assigned.scope.owner, Some(assigned.name.as_ref()))
             .into_iter()

@@ -1122,7 +1122,7 @@ pub(crate) struct StoreViewSnapshot {
 /// on the `FileWholeHash` rail). Snapshot value backing the strict
 /// `FileSourceEnv` validation branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceEnvIdentity {
+pub struct SourceEnvIdentity {
     pub(crate) parse_env_hash: crate::locator_identity::ParseEnvHash,
     pub(crate) parse_key: verter_language::ParseKey,
     pub(crate) file_language_id: verter_language::FileLanguage,
@@ -2842,11 +2842,21 @@ pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState)
 }
 
 fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
-    let syntactic = syntactic_route_interface_hash(state);
+    hash_route_surface_from_syntactic(state.whole_hash, syntactic_route_interface_hash(state))
+}
+pub(crate) fn hash_route_surface_inputs(
+    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+) -> Hash16 {
+    hash_route_surface_from_syntactic(
+        state.whole_hash,
+        syntactic_route_interface_hash_uncached(state),
+    )
+}
+fn hash_route_surface_from_syntactic(whole_hash: Hash16, syntactic: Hash16) -> Hash16 {
     hash16_from_sorted(|hasher| {
         b"verter:legacy-route-surface:v2".hash(hasher);
         syntactic.hash(hasher);
-        state.whole_hash.hash(hasher);
+        whole_hash.hash(hasher);
     })
 }
 
@@ -2863,7 +2873,7 @@ pub(crate) fn syntactic_route_interface_hash(
 }
 
 fn syntactic_route_interface_hash_uncached(
-    state: &crate::resolver_core::ShallowFileState,
+    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
 ) -> Hash16 {
     hash16_from_sorted(|hasher| {
         b"verter:syntactic-route-interface:v2".hash(hasher);
@@ -5115,3 +5125,58 @@ mod store_view_resolution_root_tests;
 #[cfg(test)]
 #[path = "resolve_env_asymmetry_tests.rs"]
 mod resolve_env_asymmetry_tests;
+
+/// A read-only project clock selected from its lifetime owner.
+#[derive(Clone)]
+pub(crate) struct ProjectGenerationRead(std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl ProjectGenerationRead {
+    pub(crate) fn new(clock: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self(clock)
+    }
+    fn current(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Fixed live-clock sampling authority. The workspace slot remains live so a
+/// workspace replacement has the same visibility as the host's original read.
+/// No workspace, store, mutation, or callback capability can escape this record.
+#[derive(Clone)]
+pub struct AggregateClockReader {
+    workspace:
+        std::sync::Arc<parking_lot::RwLock<std::sync::Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    project: ProjectGenerationRead,
+    imports: crate::resolver_core::bracketed_generation::BracketedGenerationRead,
+    routes: crate::resolver_core::bracketed_generation::BracketedGenerationRead,
+}
+impl AggregateClockReader {
+    pub(crate) fn live(&self) -> verter_workspace::LiveAggregateCounters {
+        // Keep the original two workspace selections and read order. A workspace
+        // can be replaced between them; each read observes the live slot.
+        let content = { std::sync::Arc::clone(&self.workspace.read()) }.content_generation();
+        let source_env = { std::sync::Arc::clone(&self.workspace.read()) }.source_env_generation();
+        verter_workspace::LiveAggregateCounters {
+            content,
+            source_env,
+            workspace_shape: self.project.current(),
+            semantic_imports: self.imports.stable(),
+            route_surface: self.routes.stable(),
+        }
+    }
+}
+impl crate::VerterHost {
+    pub(crate) fn aggregate_clock_reader(&self) -> AggregateClockReader {
+        AggregateClockReader {
+            workspace: std::sync::Arc::clone(&self.workspace),
+            project: self.project_type_store().project_generation_reader(),
+            imports: self
+                .project_type_store()
+                .resolved_import_facts()
+                .generation_reader(),
+            routes: self
+                .project_type_store()
+                .indexed()
+                .route_generation_reader(),
+        }
+    }
+}

@@ -399,8 +399,7 @@ impl ProjectSemanticDispatch<'_> {
             .indexed;
         let block = *indexed
             .shallow_state
-            .decl_bodies()
-            .header_index()
+            .headers
             .namespace_private_value_blocks
             .get(&verter_type_expr::facts::DeclBindingKey::new(
                 user.0.owner,
@@ -473,7 +472,7 @@ impl ProjectSemanticDispatch<'_> {
             .ctx
             .ensure_indexed_ready_serve(decl.canonical_id.as_ref())?
             .indexed;
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         let header = headers
             .enum_headers
             .get(&verter_type_expr::facts::DeclBindingKey::new(
@@ -498,8 +497,7 @@ impl ProjectSemanticDispatch<'_> {
             .indexed;
         indexed
             .shallow_state
-            .decl_bodies()
-            .header_index()
+            .headers
             .value_header_in(identity.owner, &identity.symbol_name)
             .map(|header| header.span.start)
     }
@@ -832,7 +830,7 @@ impl ProjectSemanticDispatch<'_> {
 /// literal — the types a fresh value carries and a widening position
 /// widens.
 pub(super) fn is_literal_type(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &impl crate::semantic_query::NodeRead,
     node: SemanticNodeId,
 ) -> bool {
     matches!(

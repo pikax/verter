@@ -1161,7 +1161,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ));
                         crate::request_context::observe_component_meta_read_suppress(&read);
                         crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                            self.ctx,
+                            self,
                             &read.dep_signature,
                         );
                         completeness = completeness
@@ -1228,7 +1228,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }));
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                        self.ctx,
+                        self,
                         &read.dep_signature,
                     );
                     completeness = completeness
@@ -1279,7 +1279,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ));
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                        self.ctx,
+                        self,
                         &read.dep_signature,
                     );
                     completeness = completeness

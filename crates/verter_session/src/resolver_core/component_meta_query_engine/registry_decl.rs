@@ -232,12 +232,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
     /// object because every method they reach (project_type_store,
     /// prepared_decl_bundle, dispatch, etc.) is on the trait surface.
-    pub(crate) fn ctx(&self) -> &dyn crate::resolver_core::ResolverContext {
-        self.ctx
-    }
-
-    pub(super) fn semantic_dispatch(&self) -> ProjectSemanticDispatch<'_> {
-        ProjectSemanticDispatch::new(self.ctx)
+    pub(crate) fn semantic_dispatch(&self) -> &'a ProjectSemanticDispatch<'a> {
+        self.dispatch
     }
 
     /// Resolve the decl-anchor node for `(scope, symbol)` — the
@@ -260,18 +256,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
         .unwrap_or_else(|| {
-            let interner = self.ctx.project_type_store().identity_interner();
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
-                interner.intern(scope_canonical_id),
-                scope_owner,
-                interner.intern(symbol_name),
-            )
+            self.dispatch
+                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
         });
         let dispatch = self.semantic_dispatch();
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
@@ -297,18 +290,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
         .unwrap_or_else(|| {
-            let interner = self.ctx.project_type_store().identity_interner();
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
-                interner.intern(scope_canonical_id),
-                scope_owner,
-                interner.intern(symbol_name),
-            )
+            self.dispatch
+                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
         });
         let dispatch = self.semantic_dispatch();
         let anchor =
@@ -374,7 +364,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
     ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, scope_owner, symbol_name)?;
-        if let Some(surface) = surface_view_from_semantic_node(self.ctx, root) {
+        if let Some(surface) = surface_view_from_semantic_node(self.dispatch, root) {
             return Some((surface, root));
         }
         // The post-`Published(Expanded)` instantiated root did not yield a
@@ -396,7 +386,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // filter rejects.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, scope_owner, symbol_name)?;
         let (surface, composed_surface_node) =
-            compound_root_surface_view_via_dispatch(self.ctx, anchor)?;
+            compound_root_surface_view_via_dispatch(self.dispatch, anchor)?;
         Some((surface, composed_surface_node))
     }
 
@@ -439,18 +429,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
         .unwrap_or_else(|| {
-            let interner = self.ctx.project_type_store().identity_interner();
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
-                interner.intern(scope_canonical_id),
-                scope_owner,
-                interner.intern(symbol_name),
-            )
+            self.dispatch
+                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
         });
         // SHAPE classification runs on the raised DeclBody carrier (the
         // lowered body root) — the decl-anchor node is an identity
@@ -474,7 +461,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =
-                node_data_for(self.ctx, node).as_deref()
+                node_data_for(self.dispatch.graph(), node).as_deref()
             {
                 node = *inner;
             }
@@ -482,7 +469,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         // Lone-`extends` heritage shape only: heritage `DeclRef` arms plus
         // exactly ONE own-member `Object` arm.
-        let arms = match node_data_for(self.ctx, peel_alias(body_root)).as_deref() {
+        let arms = match node_data_for(self.dispatch.graph(), peel_alias(body_root)).as_deref() {
             Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
             _ => return None,
         };
@@ -493,7 +480,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )> = Vec::new();
         let mut own_object_arms = 0usize;
         for arm in arms.iter() {
-            match node_data_for(self.ctx, peel_alias(*arm)).as_deref() {
+            match node_data_for(self.dispatch.graph(), peel_alias(*arm)).as_deref() {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
                     std::sync::Arc::clone(&identity.canonical_id),
                     identity.owner,
@@ -508,7 +495,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         // The one-level MERGED view through the shared empty-path Shallow
         // surface walker (arm roots only; member values stay shallow nodes).
-        let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
+        let (view, _surface_node) =
+            compound_root_surface_view_via_dispatch(self.dispatch, body_root)?;
         let closed = view.closed();
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
@@ -613,7 +601,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // `.filter(dispatch_route_expr_is_materialized)`); the
                         // gated mint is `route_admission::admit_materialized`,
                         // which admits the node WITHOUT materialising it.
-                        node_raised_shape_facts_with_dispatch(&dispatch, node)
+                        node_raised_shape_facts_with_dispatch(dispatch, node)
                             .and_then(|witness| route_admission::admit_materialized(&witness))
                     }
                     _ => None,
@@ -693,7 +681,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // mint is `route_admission::admit_materialized`, which admits the
                 // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
-                node_raised_shape_facts_with_dispatch(&dispatch, node)
+                node_raised_shape_facts_with_dispatch(dispatch, node)
                     .and_then(|witness| route_admission::admit_materialized(&witness))
             }
             _ => None,

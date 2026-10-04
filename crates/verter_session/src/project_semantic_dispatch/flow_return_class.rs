@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use super::{
-    signature_answer_is_frame_shadowed, FlowBinderEnv, FlowEvaluator, FlowProductSubject,
-    Positional,
+    signature_answer_is_frame_shadowed, FlowBinderEnv, FlowDemandDriver, FlowEvaluator,
+    FlowProductSubject, Positional,
 };
 use crate::flow_slice_content::{SliceClass, SliceClassMemberValue, SliceExpr, SliceObjectKey};
 use crate::semantic_query::{
@@ -166,7 +166,7 @@ pub(super) struct MemberSide {
     pub(super) computed: ComputedIndexKinds,
 }
 
-impl<'d, 'b> FlowEvaluator<'d, 'b> {
+impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Evaluate a class EXPRESSION to its value: the class's constructor
     /// type, composed by TypeScript's class rules (measured on 7.0.2).
     ///
@@ -1223,14 +1223,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     })
                     .collect();
-                let mut evidence = super::super::canonical_algebra::CanonicalEvidence::default();
-                let members = super::super::walk::presence_intersection_members(
-                    graph,
-                    &per_arm,
-                    &mut evidence,
-                );
-                self.dispatch.deposit_canonical_evidence(evidence);
-                members
+                self.dispatch.presence_intersection_for_flow(&per_arm)
             }
             (None, Some(SemanticNodeData::Union(_))) => Vec::new(),
             (None, _) => return None,

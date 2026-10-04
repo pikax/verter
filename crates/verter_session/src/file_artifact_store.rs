@@ -497,18 +497,18 @@ impl AugmenterEntry {
 /// captured off the `self.artifacts` DashMap so the augmenter match
 /// (and any resolver it invokes) runs after every shard guard is
 /// released. See [`FileArtifactStore::collect_base_augmenter_candidates`].
-struct AugmenterCandidate {
+pub(crate) struct AugmenterCandidate {
     /// Exact content-addressed key of the candidate augmenter artifact.
-    artifact_key: FileArtifactKey,
+    pub(crate) artifact_key: FileArtifactKey,
     /// The candidate's canonical id (also reachable via `artifact_key`,
     /// kept alongside to avoid re-borrowing through the key on the hot
     /// match loop).
-    canonical: Arc<str>,
+    pub(crate) canonical: Arc<str>,
     /// `parse_stable_hash` folded into the augmenter-set fingerprint.
-    parse_stable_hash: Hash16,
+    pub(crate) parse_stable_hash: Hash16,
     /// The candidate's augmentation facts. Cloned `Arc` — a cheap
     /// refcount bump, not a deep copy.
-    augmentations: Arc<Vec<ModuleAugmentationFact>>,
+    pub(crate) augmentations: Arc<Vec<ModuleAugmentationFact>>,
 }
 
 /// The set of augmenter files that contribute to a given
@@ -3375,6 +3375,12 @@ impl FileArtifactStore {
     /// The domain's current stable semantic generation, or `None` while
     /// an augmentation-world mutation is in flight.
     #[must_use]
+    pub(crate) fn route_generation_reader(
+        &self,
+    ) -> crate::resolver_core::bracketed_generation::BracketedGenerationRead {
+        self.route_surface_generation.reader()
+    }
+
     pub(crate) fn stable_route_surface_generation(&self) -> Option<u64> {
         self.route_surface_generation.stable()
     }
@@ -3460,7 +3466,7 @@ impl FileArtifactStore {
     /// artifact carries a different discriminator and is excluded — overlay
     /// augmenters never cross sessions or poison the base index. Only
     /// artifacts carrying at least one augmentation fact are collected.
-    fn collect_augmenter_candidates(
+    pub(crate) fn collect_augmenter_candidates(
         &self,
         overlay_discriminator: Option<Hash16>,
     ) -> Vec<AugmenterCandidate> {
@@ -3514,105 +3520,18 @@ impl FileArtifactStore {
     /// a canonical when the queried target is `ResolvedRelativeCanonical`.
     /// `None` means the augmenter's specifier did not resolve to the
     /// queried canonical and the augmenter is skipped.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_augmentation_index_populated<R>(
         &self,
         key: &AugmentationTargetKey,
-        resolve_relative_canonical: R,
-        overlay_discriminator: Option<Hash16>,
+        resolve: R,
+        discriminator: Option<Hash16>,
     ) -> Arc<AugmenterSet>
     where
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
-        if let Some(existing) = self.augmentation_index.get(key) {
-            return Arc::clone(&existing.value().set);
-        }
-
-        // Cold scan — collect (canonical, parse_stable_hash) for
-        // every artifact whose augmentations include at least one
-        // matching `ModuleAugmentationFact` for the queried target.
-        // Dedup by canonical so a file with multiple matching facts
-        // contributes only once.
-        //
-        // The scan filters to base ([`FileArtifactKey::is_base`])
-        // artifacts: the augmentation index is keyed by a base
-        // resolve-domain identity (`project_identity`,
-        // `resolve_env_hash`, `lib_env_hash`). A session-overlay artifact
-        // An overlay-scoped key carries session-divergent
-        // augmentations and must not poison that base index.
-        // Snapshot first, then match off the guard: the resolver invoked
-        // by `augmenter_matches_target` for a relative target re-enters
-        // the store and inserts into `self.artifacts`, which cannot run
-        // while a `self.artifacts.iter()` shard guard is held (see
-        // `collect_augmenter_candidates`).
-        let candidates = self.collect_augmenter_candidates(overlay_discriminator);
-        let mut matched: Vec<AugmenterEntry> = Vec::new();
-        let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-        for candidate in &candidates {
-            for fact in candidate.augmentations.iter() {
-                if augmenter_matches_target(
-                    fact,
-                    key,
-                    candidate.canonical.as_ref(),
-                    &resolve_relative_canonical,
-                ) {
-                    if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
-                        // Capture the EXACT artifact key — the stitch
-                        // consumer re-fetches `.augmentations` via
-                        // `get_artifacts(&key)` so it reads precisely
-                        // the version fingerprinted here.
-                        matched.push(AugmenterEntry {
-                            artifact_key: candidate.artifact_key.clone(),
-                            parse_stable_hash: candidate.parse_stable_hash,
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Sort by (canonical, parse_stable_hash) for determinism.
-        matched.sort_by(|a, b| {
-            a.canonical()
-                .as_ref()
-                .cmp(b.canonical().as_ref())
-                .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
-        });
-
-        let augmenter_count = matched.len() as u32;
-        let fingerprint = compute_augmenter_set_fingerprint(&matched);
-        let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
-        let set = Arc::new(AugmenterSet {
-            entries,
-            fingerprint,
-        });
-
-        // Insert. Capture prev fingerprint for audit event.
-        let prev = self.publish_augmenter_set(key.clone(), Arc::clone(&set));
-        let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
-        // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
-        // `HostStoreView`, and `artifact_generation` is folded into the
-        // store-view reuse oracle. Bump it ONLY when this cold populate
-        // actually changes the snapshotted fingerprint (R4 parity with
-        // `populate_augmenter_set`): when two threads cold-scan the same
-        // target concurrently, the
-        // second `insert` replaces the first with an IDENTICAL fingerprint,
-        // a no-op for the base snapshot that must not churn the token (which
-        // would spuriously invalidate the manager-cached base view and split
-        // singleflight lanes under batch load). Any real fingerprint change
-        // (including absent → present) still bumps (no under-bump).
-        if prev_fingerprint != Some(fingerprint) {
-            self.bump_artifact_generation();
-        }
-
-        // Emit `ModuleAugmentationIndexShape` typed audit event.
-        emit_module_augmentation_index_shape_event(
-            key,
-            prev_fingerprint,
-            fingerprint,
-            augmenter_count,
-        );
-
-        set
+        crate::host_manage::source_augmentation::AugmentationRequestDriver::new(self)
+            .ensure_populated(key, resolve, discriminator)
     }
 
     /// Invalidate every `augmentation_index` entry that the augmenter
@@ -3848,35 +3767,13 @@ impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
 /// Duplicated here to keep the matcher free-standing of fact_emission.
 pub(crate) const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 
-/// Does `fact` (emitted by `augmenter_canonical`) contribute to the
-/// queried `target_key`?
-///
-/// Classification semantics by target-kind archetype:
-///
-/// - `ExternalSpecifier(s)` → match `fact.specifier == s` AND the
-///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
-/// - `ResolvedRelativeCanonical(canon)` → match relative specifiers
-///   (the full TS `pathIsRelative` class via
-///   [`verter_semantic::resolver_core::is_relative_specifier`]) whose
-///   `resolve_relative_canonical` resolves equal to `canon`.
-/// - `WildcardAmbient(pattern)` → match `fact.specifier == pattern`
-///   AND the specifier contains a wildcard `*`.
-/// - `GlobalAugmentation` → match `fact.specifier == "$global"`.
-///
-/// Relative classification MUST be the shared resolver predicate, not
-/// a `./`/`../` prefix check: a `declare module '..'` fact is the
-/// parent-directory index module, and treating it as a bare external
-/// named `..` would match location-independently against any `'..'`
-/// import target regardless of the directories involved.
-pub(crate) fn augmenter_matches_target<R>(
+/// Classify an owned augmentation fact against a target. Relative resolution is
+/// supplied by the request owner; this predicate performs no source work.
+pub(crate) fn augmenter_matches_target(
     fact: &ModuleAugmentationFact,
     target_key: &AugmentationTargetKey,
-    augmenter_canonical: &str,
-    resolve_relative_canonical: R,
-) -> bool
-where
-    R: Fn(&str, &str) -> Option<Arc<str>>,
-{
+    resolved_relative_canonical: Option<&str>,
+) -> bool {
     use verter_semantic::resolver_core::is_relative_specifier;
     let specifier: &str = fact.specifier.as_ref();
     match &target_key.target {
@@ -3891,8 +3788,8 @@ where
             if !is_relative_specifier(specifier) {
                 return false;
             }
-            match resolve_relative_canonical(augmenter_canonical, specifier) {
-                Some(resolved) => resolved.as_ref() == target_canon.as_ref(),
+            match resolved_relative_canonical {
+                Some(resolved) => resolved == target_canon.as_ref(),
                 None => false,
             }
         }

@@ -144,8 +144,9 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> SemanticQueryKey {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(identity.canonical_id.as_ref());
+        let env = self
+            .ctx
+            .host_view_env_hashes_for(identity.canonical_id.as_ref());
         SemanticQueryKey::ClassifyMaterializationCycleGate(MaterializationCycleGateKey {
             root: self.type_slot_for(
                 Arc::clone(&identity.canonical_id),
@@ -244,7 +245,7 @@ impl ProjectSemanticDispatch<'_> {
                 roots.push((Arc::clone(&identity.canonical_id), identity.whole_hash));
             };
 
-        let graph = self.ctx.project_type_store().semantic_graph();
+        let graph = self.graph();
         let mut visited: FxHashSet<DeclIdentity> = FxHashSet::default();
         let mut queue: VecDeque<(DeclIdentity, bool)> = VecDeque::new();
         visited.insert(root_identity.clone());

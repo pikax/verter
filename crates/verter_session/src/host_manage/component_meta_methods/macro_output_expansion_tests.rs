@@ -323,7 +323,12 @@ const model = defineModel<ModelValue>()
     // Closed-demand entrance: ctx (`&host`) + owner canonical + macro index +
     // the authored fallback source — no node crosses in. The sink resolves the
     // carrier head internally.
-    let outcome = expand_define_model_output(&host, "/Model.vue", macro_index, &model_fallback);
+    let outcome = expand_define_model_output(
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
+        "/Model.vue",
+        macro_index,
+        &model_fallback,
+    );
     let DefineModelOutputExpansion::Materialized {
         produced_node_id,
         normalized,
@@ -342,8 +347,11 @@ const model = defineModel<ModelValue>()
     // structurally, then pin that the published source demand-materialises
     // BYTE-EQUAL to the demand of that same identity through the one engine
     // (the parity the former Expanded-time shell-raise oracle pinned).
-    let produced_data = crate::project_semantic_dispatch::node_data_for(&host, produced_node_id)
-        .expect("the produced carrier-head node is present in the graph");
+    let produced_data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        produced_node_id,
+    )
+    .expect("the produced carrier-head node is present in the graph");
     let crate::semantic_query::SemanticNodeData::DeclRef { identity } = produced_data.as_ref()
     else {
         panic!(
@@ -423,8 +431,12 @@ const x = 1
     // still returns `None`, never grows the table).
     let _ = host.get_raw_analysis_snapshot("/Empty.vue");
 
-    let outcome =
-        expand_define_model_output(&host, "/Empty.vue", 9999, &distinct_fallback_source());
+    let outcome = expand_define_model_output(
+        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
+        "/Empty.vue",
+        9999,
+        &distinct_fallback_source(),
+    );
     assert!(
         matches!(outcome, DefineModelOutputExpansion::CarrierMiss),
         "an absent macro index makes the carrier hot-ref producer miss → CarrierMiss"

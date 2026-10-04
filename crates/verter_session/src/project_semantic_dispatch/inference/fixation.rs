@@ -83,6 +83,23 @@ fn decided(step: RelationStep) -> Option<bool> {
 }
 
 impl ProjectSemanticDispatch<'_> {
+    pub(in crate::project_semantic_dispatch) fn fix_inference_inputs(
+        &self,
+        inputs: Vec<super::super::dispatch_txn::FixationInput>,
+        type_params: &[crate::semantic_query::TypeParamDecl],
+        accepts: impl FnMut(
+            &super::InferenceTxn<'_, Self>,
+            SemanticNodeId,
+            SemanticNodeId,
+        ) -> Result<Option<bool>, crate::semantic_query::ResolveCallFailure>,
+    ) -> Result<
+        (Vec<crate::semantic_query::InferBinding>, Vec<usize>),
+        crate::semantic_query::ResolveCallFailure,
+    > {
+        super::InferenceTxn::new(self).fix_inference_inputs(inputs, type_params, accepts)
+    }
+}
+impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
     /// Each type parameter's fixed binding from its session `inputs`, in
     /// declaration order, and the positions no candidate inferred. `accepts`
     /// decides whether one type is assignable to another; `None` from it
@@ -291,9 +308,9 @@ impl ProjectSemanticDispatch<'_> {
         };
         let mut kept = first;
         for &candidate in rest {
-            self.dispatch_txn.borrow_mut().begin_binding_disabled();
+            let binding_guard = self.binding.disable();
             let step = self.execute_relate_pair_kind(candidate, kept, RelationKind::Subtype);
-            self.dispatch_txn.borrow_mut().end_binding_disabled();
+            drop(binding_guard);
             match decided(step) {
                 Some(true) => kept = candidate,
                 Some(false) => {}
@@ -338,9 +355,10 @@ impl ProjectSemanticDispatch<'_> {
         let graph = self.graph();
         let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            if !ordered.iter().any(|kept| {
-                crate::semantic_query::stable_key::provably_equal(graph, *kept, *candidate)
-            }) {
+            if !ordered
+                .iter()
+                .any(|kept| self.nodes_provably_equal(*kept, *candidate))
+            {
                 ordered.push(*candidate);
             }
         }

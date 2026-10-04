@@ -170,6 +170,9 @@ fn run_policy_with_overflow_check(
     });
     assert_no_stack_overflow(move || {
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            let fixture_dispatch_0 =
+                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             apply_component_meta_resolution_policy(
                 &mut meta,
                 &registry,
@@ -178,6 +181,7 @@ fn run_policy_with_overflow_check(
                 "/owner.vue",
                 None,
                 ctx,
+                &fixture_dispatch_0,
             );
         });
         meta

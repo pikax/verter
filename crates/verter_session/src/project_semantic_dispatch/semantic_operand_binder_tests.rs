@@ -462,7 +462,7 @@ fn both_locator_navigators_select_the_same_authored_position() {
                 !matches!(data.as_ref(), SemanticNodeData::Opaque(_)),
                 "{label}: a selection must not degrade to an opaque node, got {data:?}"
             );
-            let rendered = crate::typeinfo::raise::render_node_display_with_ctx(&host, node)
+            let rendered = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, node)
                 .unwrap_or_else(|| panic!("{label}: selection must render"))
                 .text;
             (std::mem::discriminant(data.as_ref()), rendered)
@@ -682,7 +682,7 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
         // recomputed answer must equal a fresh host's — a refusal past a
         // completed child may never poison the shared entry it produced.
         let replay = force(&dispatch, &operand, ProjectionMode::Expanded);
-        let replay = crate::typeinfo::raise::render_node_display_with_ctx(&host, replay)
+        let replay = crate::typeinfo::raise::render_node_display_with_ctx(&dispatch, replay)
             .expect("replayed force must render");
         let fresh_host = make_host();
         upsert(&fresh_host, SOURCE_V1);
@@ -692,7 +692,7 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
             &mint(&fresh_dispatch, member_value("Owned", 0)),
             ProjectionMode::Expanded,
         );
-        let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&fresh_host, fresh)
+        let fresh = crate::typeinfo::raise::render_node_display_with_ctx(&fresh_dispatch, fresh)
             .expect("fresh force must render");
         assert_eq!(replay.text, fresh.text, "{leg}: recomputed answer diverged");
         assert_eq!(replay.degraded, fresh.degraded);

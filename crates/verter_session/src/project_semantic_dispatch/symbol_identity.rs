@@ -636,7 +636,7 @@ impl ProjectSemanticDispatch<'_> {
         read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
     ) -> Result<SemanticNodeId, PropCallableRoleUnresolvedReason> {
         crate::request_context::observe_component_meta_read_suppress(&read);
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         match read.value {
             QueryResult::Recursive(_) => Err(PropCallableRoleUnresolvedReason::Cycle),
             QueryResult::Error(error) => Err(query_error_reason(&error)),

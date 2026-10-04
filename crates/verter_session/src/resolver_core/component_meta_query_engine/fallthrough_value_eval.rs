@@ -17,13 +17,13 @@ use verter_semantic::analysis::types::AnalyzedImport;
 use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression, LiteralValue, TypeExpr};
 
 use super::ComponentMetaQueryEngine;
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use crate::project_semantic_dispatch::node_data_for;
 use crate::resolver_core::fallthrough::{
     collect_dynamic_root_candidates_from_type, component_import_candidate_for_binding,
     intersect_known_spread_keys, normalize_public_spread_key, structural_substitute_typeof_refs,
     DynamicRootCandidate, FallthroughPropOverrideSet, KnownSpreadKeys,
 };
-use crate::resolver_core::ResolverContext;
+
 use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
 /// Shared per-call prologue for the two fallthrough node-DAG walkers
@@ -116,6 +116,7 @@ impl ComponentMetaQueryEngine<'_> {
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<SemanticNodeId> {
+        let dispatch = self.dispatch;
         // A call's callee, receiver and arguments, and a member read's
         // object, evaluate from an explicit stack of the records waiting on
         // them, in that order, a record ending at a child with no value: a
@@ -176,11 +177,7 @@ impl ComponentMetaQueryEngine<'_> {
                         waiting.pop();
                         let object = value;
                         value = object.and_then(|object| {
-                            ProjectSemanticDispatch::new(self.ctx).indexed_member_value(
-                                scope_canonical_id,
-                                object,
-                                name,
-                            )
+                            dispatch.indexed_member_value(scope_canonical_id, object, name)
                         });
                         if callee {
                             if let (Some(object), Some(Pending::Call(call))) =
@@ -273,7 +270,7 @@ impl ComponentMetaQueryEngine<'_> {
             }
         }
 
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
 
         // (2) Runtime-value env substitution. A changed shape is already a
         // concrete value type; lower it to a node directly (Navigate).
@@ -292,6 +289,7 @@ impl ComponentMetaQueryEngine<'_> {
         // (3) Node Class-A projection (registry route fast-path + terminal).
         if let Some(admitted) = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
             self.ctx,
+            dispatch,
             Some(self),
             scope_canonical_id,
             scope_owner,
@@ -332,7 +330,7 @@ impl ComponentMetaQueryEngine<'_> {
             env,
             overrides,
         )?;
-        known_spread_keys_from_node(self.ctx, node)
+        known_spread_keys_from_node(self.dispatch, node)
     }
 
     /// Node-domain dynamic-root-candidate reader for an `is=` value expression.
@@ -368,7 +366,9 @@ impl ComponentMetaQueryEngine<'_> {
             overrides,
         ) {
             candidates.extend(collect_dynamic_root_candidates_from_node(
-                self.ctx, node, imports,
+                self.dispatch,
+                node,
+                imports,
             ));
         }
         candidates.sort_by(|left, right| left.ordering(right));
@@ -439,7 +439,8 @@ impl ComponentMetaQueryEngine<'_> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         expr: &TypeExpr,
     ) -> Option<SemanticNodeId> {
-        ProjectSemanticDispatch::new(self.ctx).lower_type_expr_in_owner_scope_with_mode(
+        let dispatch = self.dispatch;
+        dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
             scope_owner,
             expr,
@@ -458,7 +459,7 @@ impl ComponentMetaQueryEngine<'_> {
         receiver: Option<SemanticNodeId>,
         args: Vec<crate::semantic_query::CallArgKey>,
     ) -> Option<SemanticNodeId> {
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
             explicit_type_args.push(dispatch.lower_type_expr_in_owner_scope_with_mode(
@@ -501,11 +502,11 @@ impl ComponentMetaQueryEngine<'_> {
 /// attr + listener key sets. `None` for any node that exposes no static key
 /// surface (the caller records an unknown spread).
 pub(crate) fn known_spread_keys_from_node(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<KnownSpreadKeys> {
     known_spread_keys_from_node_inner(
-        ctx,
+        dispatch,
         node,
         &mut FxHashSet::default(),
         &mut FxHashMap::default(),
@@ -513,7 +514,7 @@ pub(crate) fn known_spread_keys_from_node(
 }
 
 fn known_spread_keys_from_node_inner(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
     memo: &mut FxHashMap<SemanticNodeId, Option<KnownSpreadKeys>>,
@@ -523,13 +524,13 @@ fn known_spread_keys_from_node_inner(
         NodeWalkStep::Halt => return None,
         NodeWalkStep::Visit => {}
     }
-    let result = match node_data_for(ctx, node) {
+    let result = match node_data_for(dispatch.graph(), node) {
         None => None,
         Some(data) => match data.as_ref() {
             // The `Alias` identity hop is the node equivalent of the
             // `TypeExpr::Parenthesized` wrap.
             SemanticNodeData::Alias(inner) => {
-                known_spread_keys_from_node_inner(ctx, *inner, active, memo)
+                known_spread_keys_from_node_inner(dispatch, *inner, active, memo)
             }
             SemanticNodeData::Object(surface) => Some(known_spread_keys_from_surface(surface)),
             SemanticNodeData::Intersection(arms) => {
@@ -539,7 +540,8 @@ fn known_spread_keys_from_node_inner(
                 };
                 let mut saw_any = false;
                 for part in arms.iter() {
-                    let Some(summary) = known_spread_keys_from_node_inner(ctx, *part, active, memo)
+                    let Some(summary) =
+                        known_spread_keys_from_node_inner(dispatch, *part, active, memo)
                     else {
                         result.exact = false;
                         continue;
@@ -556,7 +558,8 @@ fn known_spread_keys_from_node_inner(
                 match iter.next() {
                     None => None,
                     Some(first_node) => {
-                        match known_spread_keys_from_node_inner(ctx, *first_node, active, memo) {
+                        match known_spread_keys_from_node_inner(dispatch, *first_node, active, memo)
+                        {
                             None => None,
                             Some(first) => {
                                 let mut result = first.clone();
@@ -564,7 +567,7 @@ fn known_spread_keys_from_node_inner(
                                 let mut early_inexact = false;
                                 for branch in iter {
                                     let Some(summary) = known_spread_keys_from_node_inner(
-                                        ctx, *branch, active, memo,
+                                        dispatch, *branch, active, memo,
                                     ) else {
                                         result.exact = false;
                                         early_inexact = true;
@@ -669,12 +672,12 @@ fn insert_dynamic_root_candidate_charged(
 /// (the SAME ordering the syntactic-combine site re-applies), so observable
 /// output order is unchanged — only the exponential duplication is removed.
 pub(crate) fn collect_dynamic_root_candidates_from_node(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
     let set = collect_dynamic_root_candidates_from_node_inner(
-        ctx,
+        dispatch,
         node,
         imports,
         &mut FxHashSet::default(),
@@ -686,7 +689,7 @@ pub(crate) fn collect_dynamic_root_candidates_from_node(
 }
 
 fn collect_dynamic_root_candidates_from_node_inner(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
     active: &mut FxHashSet<SemanticNodeId>,
@@ -697,7 +700,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
         NodeWalkStep::Halt => return DynamicRootCandidateSet::default(),
         NodeWalkStep::Visit => {}
     }
-    let out = match node_data_for(ctx, node) {
+    let out = match node_data_for(dispatch.graph(), node) {
         None => DynamicRootCandidateSet::default(),
         Some(data) => match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(tag)) => {
@@ -712,7 +715,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
                 let mut set = DynamicRootCandidateSet::default();
                 'merge: for arm in arms.iter() {
                     let arm_set = collect_dynamic_root_candidates_from_node_inner(
-                        ctx, *arm, imports, active, memo,
+                        dispatch, *arm, imports, active, memo,
                     );
                     for candidate in arm_set {
                         // A budget trip HALTS the merge: stop unioning further
@@ -725,9 +728,9 @@ fn collect_dynamic_root_candidates_from_node_inner(
                 }
                 set
             }
-            SemanticNodeData::Alias(inner) => {
-                collect_dynamic_root_candidates_from_node_inner(ctx, *inner, imports, active, memo)
-            }
+            SemanticNodeData::Alias(inner) => collect_dynamic_root_candidates_from_node_inner(
+                dispatch, *inner, imports, active, memo,
+            ),
             // A single-segment `typeof <name>` carrier maps to a component
             // import binding — the node equivalent of the `TypeOf(value_ref)`
             // arm (`value_ref.path.len() == 1`). The carrier head splits the

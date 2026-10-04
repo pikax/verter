@@ -114,7 +114,9 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     let (rctx, _guard) = install_budget(100_000);
 
     let before_ks = rctx.projection_budget.projection_ops_executed_count();
-    let spread = known_spread_keys_from_node(ctx, ks_top);
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let spread = known_spread_keys_from_node(&fixture_dispatch_0, ks_top);
     let after_ks = rctx.projection_budget.projection_ops_executed_count();
     let ks_delta = after_ks - before_ks;
 
@@ -135,7 +137,7 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     );
 
     let before_dr = rctx.projection_budget.projection_ops_executed_count();
-    let candidates = collect_dynamic_root_candidates_from_node(ctx, dr_top, &[]);
+    let candidates = collect_dynamic_root_candidates_from_node(&fixture_dispatch_0, dr_top, &[]);
     let after_dr = rctx.projection_budget.projection_ops_executed_count();
     let dr_delta = after_dr - before_dr;
 
@@ -179,7 +181,9 @@ fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
     let top = build_diamond(&graph, leaf, n);
 
     let (_rctx, _guard) = install_budget(100_000);
-    let candidates = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let candidates = collect_dynamic_root_candidates_from_node(&fixture_dispatch_1, top, &[]);
 
     assert_eq!(
         candidates.len(),
@@ -285,12 +289,16 @@ defineProps<{ root: Tree }>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        let fixture_dispatch_2 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
             &resolved,
             false,
             ctx,
+            &fixture_dispatch_2,
         )
     })
     .analysis;
@@ -352,7 +360,10 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
         // budget per distinct node and trips on the 5th, deep mid-walk.
         let (_rctx, _budget_guard) = install_budget(4);
         let _scope = ColdComputeCompletenessScope::enter();
-        let spread = known_spread_keys_from_node(ctx, top);
+
+        let fixture_dispatch_3 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let spread = known_spread_keys_from_node(&fixture_dispatch_3, top);
         assert!(
             spread.is_none(),
             "an over-cap known_spread walk halts to the `None` halt value"
@@ -372,7 +383,9 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
         let top = build_diamond(&graph, leaf, n);
         let (_rctx, _budget_guard) = install_budget(4);
         let _scope = ColdComputeCompletenessScope::enter();
-        let candidates = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+        let fixture_dispatch_3 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let candidates = collect_dynamic_root_candidates_from_node(&fixture_dispatch_3, top, &[]);
         assert!(
             candidates.is_empty(),
             "an over-cap dynamic-root walk halts to the empty halt value"
@@ -433,7 +446,10 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let total = {
         let (rctx, _guard) = install_budget(1_000_000);
         let before = rctx.projection_budget.projection_ops_executed_count();
-        let full = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+
+        let fixture_dispatch_4 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let full = collect_dynamic_root_candidates_from_node(&fixture_dispatch_4, top, &[]);
         let after = rctx.projection_budget.projection_ops_executed_count();
         assert_eq!(
             full.len(),
@@ -450,7 +466,8 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let cap = total - n / 2;
     let (_rctx, _guard) = install_budget(cap);
     let _scope = ColdComputeCompletenessScope::enter();
-    let bounded = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let bounded = collect_dynamic_root_candidates_from_node(&fixture_dispatch_4, top, &[]);
 
     assert!(
         bounded.len() < n,

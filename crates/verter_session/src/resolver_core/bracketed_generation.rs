@@ -54,13 +54,26 @@ pub(crate) struct BracketedGeneration {
     /// ODD while a mutation is in flight, EVEN and readable otherwise.
     /// A membership-changing mutation leaves it two higher; a no-change
     /// mutation restores it.
-    seq: AtomicU64,
+    seq: std::sync::Arc<AtomicU64>,
     /// Serialises writers so the odd/even discipline holds. Held only
     /// across the mutation body.
     writer: Mutex<()>,
 }
 
+/// Read-only authority over the existing clock; it cannot bracket or mutate.
+#[derive(Clone)]
+pub(crate) struct BracketedGenerationRead(std::sync::Arc<AtomicU64>);
+impl BracketedGenerationRead {
+    pub(crate) fn stable(&self) -> Option<u64> {
+        let seq = self.0.load(Ordering::Acquire);
+        seq.is_multiple_of(2).then_some(seq)
+    }
+}
+
 impl BracketedGeneration {
+    pub(crate) fn reader(&self) -> BracketedGenerationRead {
+        BracketedGenerationRead(std::sync::Arc::clone(&self.seq))
+    }
     /// The current stable generation, or `None` while a mutation is in
     /// flight.
     ///

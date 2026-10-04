@@ -502,13 +502,10 @@ impl ProjectSemanticDispatch<'_> {
         if let AuthoredBodyLocator::MacroPayload(payload) = locator {
             match payload.payload {
                 MacroPayloadPosition::TypeArgument => {
-                    if let Some(product) =
-                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                            self.ctx,
-                            payload.anchor.canonical_id.as_ref(),
-                            payload.macro_index as usize,
-                        )
-                    {
+                    if let Some(product) = self.macro_type_arg_hot_ref(
+                        payload.anchor.canonical_id.as_ref(),
+                        payload.macro_index as usize,
+                    ) {
                         // Terminal-demand mode split (mirroring the per-FIELD
                         // arm below): `Expanded` / `Identity` complete the
                         // carrier-head resolution through the one dispatch.
@@ -629,11 +626,7 @@ impl ProjectSemanticDispatch<'_> {
                 _ => return None,
             }
         };
-        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            canonical,
-            payload.macro_index as usize,
-        )?;
+        let product = self.macro_type_arg_hot_ref(canonical, payload.macro_index as usize)?;
         let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier(member_name),
         ))
@@ -643,7 +636,7 @@ impl ProjectSemanticDispatch<'_> {
             path,
             context,
         });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         match read.value {
             QueryResult::Value(node) | QueryResult::Recursive(node) => Some(HotTypeRef::new(node)),
             QueryResult::Error(_) => None,
@@ -671,18 +664,17 @@ impl ProjectSemanticDispatch<'_> {
                 .get(payload.macro_index as usize)?
                 .kind
         };
-        self.ctx
-            .host_for_fact_tracer_install()
-            .resolve_vue_macro_surface_with_ctx(
-                self.ctx,
-                &crate::typeinfo::types::VueMacroSurfaceRequest {
-                    owner_canonical: Arc::from(canonical),
-                    macro_index: payload.macro_index as usize,
-                    macro_kind,
-                    root_identity: [0u8; 16],
-                    level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-                },
-            )
+        crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface_with_ctx(
+            self.ctx,
+            self,
+            &crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: Arc::from(canonical),
+                macro_index: payload.macro_index as usize,
+                macro_kind,
+                root_identity: [0u8; 16],
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            },
+        )
     }
 
     /// Raise a projected MEMBER-PATH fact ([`ProjectedTypeFact::MemberPath`])
@@ -758,7 +750,7 @@ impl ProjectSemanticDispatch<'_> {
             path: segments,
             context: ctx.context,
         });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         match read.value {
             // FAIL-CLOSED: a projection can "succeed" onto an interned
             // failure carrier (the walker's `Opaque(Miss)` for an undeclared
@@ -799,7 +791,7 @@ impl ProjectSemanticDispatch<'_> {
     /// failures. This is the node-domain reader that lets a raise boundary
     /// answer with the carrier's OWN disposition instead of a blanket `None`.
     fn opaque_failure_carrier_error(&self, node: SemanticNodeId) -> Option<QueryError> {
-        let data = super::node_data_for(self.ctx, node)?;
+        let data = super::node_data_for(self.graph(), node)?;
         let SemanticNodeData::Opaque(err) = data.as_ref() else {
             return None;
         };
@@ -872,7 +864,7 @@ impl ProjectSemanticDispatch<'_> {
             let Some(realized_root) = view.realized_callable_root(context).recorded() else {
                 return SourceRaiseOutcome::Absent;
             };
-            let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {
+            let combine = match super::node_data_for(self.graph(), realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => {
                     crate::meta_resolve::callable_view::ArmCombineNode::Union
                 }
@@ -1014,7 +1006,7 @@ impl ProjectSemanticDispatch<'_> {
             if !visited.insert(current) {
                 continue;
             }
-            let data = super::node_data_for(self.ctx, current)?;
+            let data = super::node_data_for(self.graph(), current)?;
             match data.as_ref() {
                 // Stable residual reference carriers are COMPLETE semantic
                 // results. Root normalization already distinguished an
@@ -1185,16 +1177,14 @@ impl ProjectSemanticDispatch<'_> {
         // `result_is_partial()`-only gate below cannot reject it; the scope's
         // CACHEABILITY verdict (which also folds a fact-signature overflow) is the
         // rail the `ShapeCacheDb` admission funnel consults.
-        let cache = self.ctx.project_type_store().shape_cache_db();
-        let value = cache.with_owner_scope(self.ctx, |scope| {
+        let value = self.with_shape_scope(|scope| {
                 let id = crate::semantic_query::SyntheticBindingId::from_carrier_key(key);
                 let cache_key =
             crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole_with_context(
                 id, context,
             );
                 if let Some(cached) = scope.peek(&cache_key) {
-                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                        self.ctx,
+                    crate::meta_resolve::emit_dispatch_dep_signature_facts(self,
                         cached.dep_signature(),
                     );
                     // A warm entry serves its reduced node. An entry without a node
@@ -1230,10 +1220,9 @@ impl ProjectSemanticDispatch<'_> {
                     return None;
                 }
                 // Cold reduce from the seed under the caller's terminal context —
-                // the one dispatch reducer, no second walker.
+                // the one self reducer, no second walker.
                 let reduced = self.raise_and_reduce_with_context(seed, context);
-                crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                    self.ctx,
+                crate::meta_resolve::emit_dispatch_dep_signature_facts(self,
                     reduced.dep_signature(),
                 );
                 let node = reduced.node_id()?;
@@ -1293,11 +1282,7 @@ impl ProjectSemanticDispatch<'_> {
         context: ProjectionReductionContext,
     ) -> Option<HotTypeRef> {
         let macro_index: usize = demand.owner.surface_anchor.parse().ok()?;
-        let base = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            demand.owner.canonical.as_ref(),
-            macro_index,
-        )?;
+        let base = self.macro_type_arg_hot_ref(demand.owner.canonical.as_ref(), macro_index)?;
         match demand.route {
             // The hot-mirror route IS the base handle: the demand names the
             // macro payload itself.
@@ -1305,7 +1290,7 @@ impl ProjectSemanticDispatch<'_> {
                 Some(base.hot)
             }
             // A member-role path projects off the base through the one
-            // dispatch — both routes converge on the same `ProjectPath`
+            // self — both routes converge on the same `ProjectPath`
             // projection when a path is present.
             SessionDemandRoute::MacroHotMirror | SessionDemandRoute::ProjectPath => {
                 let path: Arc<[PathSegment]> = demand
@@ -1325,10 +1310,7 @@ impl ProjectSemanticDispatch<'_> {
                     path,
                     context,
                 });
-                crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                    self.ctx,
-                    &read.dep_signature,
-                );
+                crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
                 match read.value {
                     QueryResult::Value(node) | QueryResult::Recursive(node) => {
                         Some(HotTypeRef::new(node))
@@ -1628,3 +1610,19 @@ fn demand_semantic_source_carrier(
 #[cfg(test)]
 #[path = "semantic_source_tests.rs"]
 mod semantic_source_tests;
+
+impl ProjectSemanticDispatch<'_> {
+    pub(crate) fn macro_type_arg_hot_ref(
+        &self,
+        owner_canonical: &str,
+        macro_index: usize,
+    ) -> Option<crate::structural_carrier_producer::MacroHotProduct> {
+        crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            self.ctx,
+            self.graph(),
+            &self.binding.macro_mirrors,
+            owner_canonical,
+            macro_index,
+        )
+    }
+}

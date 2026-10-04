@@ -414,11 +414,12 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// admission can compare against the cursor's surface kind.
 pub(crate) fn read_surface_member_candidates(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
     // An INCOMPLETE member read records its typed reason and enumerates only
     // the usable subset — never a silently truncated candidate set.
-    let members = super::read_positive_surface_members(ctx, surface.node)
+    let members = super::read_positive_surface_members(ctx, dispatch, surface.node)
         .recorded()
         .unwrap_or_default();
     members

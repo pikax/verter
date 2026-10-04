@@ -1,5 +1,31 @@
 ## Semantic Dispatch (current authority)
 
+The request boundary is the sealed, method-free `ResolverContext` marker over
+six services. Its implementations select the captured request view privately;
+engine consumers receive owned observations and typed demands, never a host,
+store, configuration object, AST borrow, or another resolver.
+
+| Port | Request services |
+| --- | --- |
+| `IndexedInputs` | Pure indexed, shallow and prepared input records; content and environment identity; analysis snapshots |
+| `OwnedLowering` | Demanded declaration bodies, dependencies and preparation; concrete leased source demands; owned contributor and augmentation answers |
+| `RouteLookup` | Import/export routes, imported roots, ambient lookup and structural workspace classification |
+| `FactValidation` | Owned validity results, compatibility tokens, live generation and supersession observations, and selected tracer-clock authority |
+| `Cancellation` | A concrete checkpoint that retains the established live scheduler-owner selection |
+| `ExecutionSubmission` | An opaque attachment of selected resources, consumed by the existing query facade |
+
+`ProjectSemanticDispatch` owns query execution, output capabilities and result
+leases. Nested requests reuse that same facade. `ArenaOps` exposes fixed arena
+operations without a graph getter. The actual flow evaluator, relation worklist
+and inference transaction use static `FlowCx`, `RelationCx` and `InferenceTxn`
+views with finite services and one generic demand driver. `MemoRead` and
+`MemoPublish` perform request-bound validation and publication; durable result,
+shape, candidate and source databases contain storage and cannot resolve or
+compute types. Private source drivers in `host_manage` preserve the existing
+route, owner-import and augmentation execution protocols. Source workers return
+owned products through their selected lease and never call the query engine.
+
+
 **Architectural decision:** `ProjectSemanticDispatch` +
 `SemanticGraphStore` are the canonical lazy semantic layer and the sole
 authority for every reusable type-resolution operation. The

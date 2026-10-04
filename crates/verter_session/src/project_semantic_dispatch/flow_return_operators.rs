@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::super::dispatch_txn::RelationStep;
-use super::{FlowEvaluator, FlowProductSubject, Positional};
+use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
 use crate::flow_slice_content::{
     SliceArithmetic, SliceExpr, SliceGuard, SliceLogical, SliceNarrowRoot, SliceNarrowSubject,
 };
@@ -50,7 +50,7 @@ impl OperandKind {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`SliceExpr::Arithmetic`]: every operand evaluates in order, then the
     /// operator's result follows the checker's rule over their types. A
     /// relation the shared authority cannot decide leaves the typed
@@ -578,7 +578,7 @@ impl FlowEvaluator<'_, '_> {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`SliceExpr::NonNull`]: `getNonNullableType` of the operand's value
     /// — its `null` / `undefined` / `void` members removed under
     /// `strictNullChecks`, the value itself with it off. A member whose
@@ -726,7 +726,7 @@ struct LogicalFacts {
     nullish: bool,
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`SliceExpr::Logical`]: the left operand evaluates; the right one
     /// evaluates on the edge the operator selects, under the left's
     /// narrowing on that edge; the other edge carries the opposite reading;
@@ -1230,7 +1230,7 @@ impl FlowEvaluator<'_, '_> {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`SliceExpr::Not`]: `true` when every member of the operand is
     /// definitely falsy, `false` when every member is definitely truthy,
     /// `boolean` otherwise (`checkPrefixUnaryExpression` over the
@@ -1391,7 +1391,7 @@ impl FlowEvaluator<'_, '_> {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`SliceExpr::ConstTemplate`]: the template literal type of the holes'
     /// types (`getTemplateLiteralType`), each hole evaluated in order —
     /// `` `a${n}` as const `` over `n: number` is `` `a${number}` `` and over

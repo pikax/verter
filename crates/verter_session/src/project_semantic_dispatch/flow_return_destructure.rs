@@ -5,14 +5,12 @@
 
 use std::sync::Arc;
 
-use super::{widen_values_within, FlowEvaluator, FlowProductSubject, Positional};
+use super::{widen_values_within, FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
 use crate::flow_slice_content::{
     SliceArrayElement, SliceBindingKind, SliceExpr, SlicePattern, SlicePatternElement,
     SlicePatternKey,
 };
-use crate::semantic_query::{
-    LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-};
+use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
 use verter_semantic::analysis::flow::SkeletonBindingId;
 
 /// One element's value: the node, and the FRESH literal values in it.
@@ -30,7 +28,7 @@ impl ElementValue {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// [`crate::flow_slice_content::SliceStatement::Destructure`]: the
     /// parent value is the declarator's annotation when it has one (the
     /// initializer still runs), else its initializer's value — an array
@@ -673,7 +671,7 @@ impl FlowEvaluator<'_, '_> {
     }
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// The type a `for…of` over `source` iterates when `source` is not an
     /// array, a tuple or a string — the checker's
     /// `getIterationTypesOfIterable` slow path through the ITERATOR
@@ -787,7 +785,7 @@ impl FlowEvaluator<'_, '_> {
         base: SemanticNodeId,
         key: crate::semantic_query::PropertyKey,
     ) -> Option<SemanticNodeId> {
-        let node = match self.dispatch.execute_type_node(
+        let node = match self.dispatch.demand_type_node(
             crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path: Arc::from(

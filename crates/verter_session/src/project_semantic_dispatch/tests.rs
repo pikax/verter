@@ -1215,14 +1215,11 @@ fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
         .expect("defineProps must be type-based");
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let macro_members = || {
-        let root = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            &host,
-            canonical,
-            macro_index,
-        )
-        .expect("macro type argument must lower")
-        .hot
-        .node();
+        let root = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+            .macro_type_arg_hot_ref(canonical, macro_index)
+            .expect("macro type argument must lower")
+            .hot
+            .node();
         let surface = match graph.node_data(root).as_deref() {
             Some(SemanticNodeData::Object(surface)) => surface.clone(),
             other => panic!("defineProps object must lower structurally, got {other:?}"),
@@ -5367,7 +5364,8 @@ fn dispatch_host_adapter_routes_per_base_scope() {
     // Global-origin helper intermediate.
     let global_anchor = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    let adapter = SessionDispatchHost::new(&host);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let adapter = SessionDispatchHost::from_facade(&dispatch);
 
     // Per-base routing: each base's scope comes back from the sidecar.
     assert_eq!(adapter.base_scope(anchor_a), scope_a);
@@ -5457,7 +5455,8 @@ fn dispatch_host_preserves_prepared_outcomes_and_final_hop_identity() {
             },
         )
     };
-    let adapter = SessionDispatchHost::new(&host);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let adapter = SessionDispatchHost::from_facade(&dispatch);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
 
     let complete = adapter.resolve_prepared_type_decl(
@@ -5571,7 +5570,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
     }
 
     // Round-trip through the adapter confirms routing for this base.
-    let adapter = SessionDispatchHost::new(&host);
+    let adapter = SessionDispatchHost::from_facade(&dispatch);
     match adapter.base_scope(node) {
         NodeScopeId::File { canonical_id, .. } => {
             assert_eq!(canonical_id.as_ref(), "/w/types.ts");

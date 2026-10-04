@@ -1028,33 +1028,24 @@ fn request_view_is_absent_from_crate_sources() {
     }
 }
 
-/// Arch-guard: the `ResolverContext` trait MUST expose a
-/// `resolver_store_view()` method that returns a
-/// `HostStoreView<'_>`. This is the explicit-view threading entry
-/// point — the only sanctioned way for resolver-tier code to reach
-/// a store view (R17, R18). Without this accessor the surface
-/// would have no view at all and callers would be tempted to
-/// reintroduce the thread-local globals this rule forbids.
+/// Arch-guard: the `ResolverContext` trait stays dyn-compatible and stays
+/// FREE of an ambient store accessor.
 ///
-/// Extends `request_view_is_absent_from_crate_sources` — that test
-/// asserts the FORBIDDEN thread-local shape is absent; this test
-/// asserts the REPLACEMENT explicit-view shape is present (paired
-/// positive / negative arch-guard).
+/// `ResolverContext` is a sealed super-trait over the request-bound ports, so
+/// it exposes no host, store or config: resolver-tier code reaches a view only
+/// through the request-bound adapter's own request view, and the trait carries
+/// no ambient accessor to reintroduce.
+///
+/// What this guard enforces is the compile-time half: the trait is used as
+/// `&dyn ResolverContext`, so its object safety must not regress. The
+/// `assert_obj_safe!(ResolverContext)` static check at the bottom of
+/// `resolver_context.rs` already fails the build; it is cross-checked here so
+/// the guard set surfaces the failure in one place. The FORBIDDEN
+/// thread-local shape is asserted absent by
+/// `request_view_is_absent_from_crate_sources`.
 #[test]
 fn resolver_context_threads_session_view_via_view_accessor() {
     let src = include_str!("resolver_core/resolver_context.rs");
-
-    // The trait must declare `resolver_store_view()` so resolver-tier
-    // callers can construct a store view explicitly — no thread-local
-    // view globals. Match the signature tokens so a future
-    // contributor cannot weaken this to a non-explicit shape.
-    assert!(
-        src.contains("fn resolver_store_view(&self) -> HostStoreView"),
-        "ResolverContext trait must declare \
-         `resolver_store_view(&self) -> HostStoreView` — the explicit \
-         view-threading entry point (R17, R18). Missing declaration in \
-         `crates/verter_session/src/resolver_core/resolver_context.rs`."
-    );
 
     // The trait must NOT regress to a generic / non-dyn-compat
     // shape. The `assert_obj_safe!(ResolverContext)` static check at
@@ -1065,6 +1056,94 @@ fn resolver_context_threads_session_view_via_view_accessor() {
         src.contains("static_assertions::assert_obj_safe!(ResolverContext)"),
         "`assert_obj_safe!(ResolverContext)` static check must remain \
          in `resolver_context.rs` (dyn-compatibility guard)."
+    );
+}
+
+/// Arch-guard: the base-store post-parse read on the `IndexedInputs` port has
+/// exactly ONE reader, the consumer-boundary span slicer.
+///
+/// `IndexedInputs::base_indexed_ready_serve` reads the base-store pin rather
+/// than the calling request's overlay-priority view. That is the correct read
+/// for slicing published member JSDoc (the text is frozen against the
+/// base-store artifact, so it is not re-pointed at an overlay candidate), but
+/// a resolver-tier semantic read must never take it — a semantic artifact
+/// resolved overlay-priority would be paired with base-pinned spans.
+///
+/// The port's own doc names the single reader, and this guard is what makes
+/// that claim enforced: a second call site anywhere in the crate fails here.
+#[test]
+fn the_base_store_serve_has_exactly_one_reader() {
+    // The needle is split so this guard's own source does not match itself.
+    const METHOD: &str = concat!(".base_indexed", "_ready_serve", "(");
+    const ALLOWED: &str = "typeinfo/framework_surface/vue_exec/mod.rs";
+
+    fn crate_src() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect_rs(&crate_src(), &mut files);
+    assert!(
+        files.len() > 100,
+        "crate source walk found only {} files under `{}`; the scan cannot \
+         be trusted to see a second call site",
+        files.len(),
+        crate_src().display()
+    );
+
+    let mut sites: Vec<String> = Vec::new();
+    for path in &files {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(crate_src())
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (idx, line) in src.lines().enumerate() {
+            // Skip line comments and doc-comment prose: only active code can
+            // call the port method.
+            let stripped = line.trim_start();
+            if stripped.starts_with("//") || stripped.starts_with("*") {
+                continue;
+            }
+            if line.contains(METHOD) {
+                sites.push(format!("{rel}:{}: {}", idx + 1, stripped));
+            }
+        }
+    }
+
+    assert_eq!(
+        sites.len(),
+        1,
+        "`base_indexed_ready_serve` must have exactly one reader \
+         (`{ALLOWED}`), because it reads the base-store pin rather than the \
+         calling request's overlay-priority view. Found {}:\n  {}",
+        sites.len(),
+        sites.join("\n  ")
+    );
+    assert!(
+        sites[0].starts_with(ALLOWED),
+        "the one `base_indexed_ready_serve` reader must stay the \
+         consumer-boundary span slicer (`{ALLOWED}`), found: {}",
+        sites[0]
     );
 }
 

@@ -737,7 +737,7 @@ fn collect_from_indexed(
     }
 
     if module_kind == FileModuleKind::Script || is_automatic_lib {
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         for (binding, header) in headers.type_headers.iter() {
             let (origin, kind) = match header.kind {
                 verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
@@ -787,7 +787,7 @@ fn collect_from_indexed(
     }
 
     if module_kind == FileModuleKind::Script && !is_automatic_lib {
-        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let headers = &indexed.shallow_state.headers;
         for (binding, header) in headers.value_headers.iter() {
             // A namespace member its namespace does not export is no global.
             if !headers.namespace_member_is_exported(binding.owner, binding.name.as_ref()) {
@@ -825,14 +825,14 @@ fn collect_from_indexed(
 /// uses to opt a `.d.ts` out of the global script scope. Dynamic `import()`
 /// and nested `export` inside a namespace are not file-level module syntax.
 #[must_use]
-pub fn classify_module_kind(indexed: &IndexedReady) -> FileModuleKind {
-    classify_shallow_module_kind(indexed.shallow_state.as_ref())
+pub(crate) fn classify_module_kind(indexed: &impl IndexedModuleFacts) -> FileModuleKind {
+    classify_shallow_module_kind(indexed.shallow_inputs())
 }
 
 /// [`classify_module_kind`] over the retained shallow inventory alone.
 #[must_use]
 pub(crate) fn classify_shallow_module_kind(
-    shallow: &crate::resolver_core::ShallowFileState,
+    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
 ) -> FileModuleKind {
     if !shallow.exports.is_empty()
         || !shallow.wildcard_reexports.is_empty()
@@ -1436,5 +1436,25 @@ pub fn population_fact_decl_name<'a>(
         AugmentationTargetKindTag::ExternalSpecifier => wildcard_pattern,
         AugmentationTargetKindTag::ResolvedRelativeCanonical => wildcard_pattern,
         AugmentationTargetKindTag::WildcardAmbient => external_specifier,
+    }
+}
+
+pub(crate) trait IndexedModuleFacts {
+    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord;
+}
+impl IndexedModuleFacts for IndexedReady {
+    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+        &self.shallow_state
+    }
+}
+impl IndexedModuleFacts for crate::resolver_core::request_inputs::IndexedInputRecord {
+    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+        &self.shallow_state
+    }
+}
+
+impl<T: IndexedModuleFacts> IndexedModuleFacts for Arc<T> {
+    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+        self.as_ref().shallow_inputs()
     }
 }

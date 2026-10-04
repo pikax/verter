@@ -514,6 +514,9 @@ pub use test_worker_pools::{
 ///
 /// Internal state is protected by `RwLock` for thread-safe concurrent access.
 pub struct VerterHost {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) source_input_leases: resolver_core::request_inputs::InputArtifactLeases,
+
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
     pub(crate) carrier_publication: carrier_publication_store::CarrierPublicationHostHandles,
@@ -792,7 +795,7 @@ pub struct VerterHost {
     pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Per-host relation-engine knobs: the overflow / budget test-injection
     /// triggers — see [`crate::host_construction::RelationHostKnobs`].
-    pub(crate) relation_knobs: host_construction::RelationHostKnobs,
+    pub(crate) relation_knobs: Arc<host_construction::RelationHostKnobs>,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`crate::project_semantic_dispatch`]'s
     /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in
@@ -813,18 +816,18 @@ pub struct VerterHost {
     /// [`crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection`].
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) flow_fault_injection:
-        project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs,
+        Arc<project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs>,
     /// Test-only force-injection knobs, grouped so the root struct stays thin;
     /// `#[cfg(test)]`-gated. See [`crate::host_test_force::TestForceKnobs`].
     #[cfg(test)]
-    pub(crate) test_force: crate::host_test_force::TestForceKnobs,
+    pub(crate) test_force: Arc<crate::host_test_force::TestForceKnobs>,
     /// Per-host count of macro-hot-mirror COLD builds (`build_macro_hot_ref`
     /// entries). The per-slot singleflight guarantee is that concurrent first
     /// demands of ONE macro collapse onto ONE cold build; a test asserts this
     /// counter is `1` after a barrier-synchronised concurrent demand burst.
     /// `#[cfg(test)]`-gated: no production reader.
     #[cfg(test)]
-    pub(crate) macro_hot_lowering_count: std::sync::atomic::AtomicUsize,
+    pub(crate) macro_hot_lowering_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute
@@ -843,7 +846,7 @@ pub struct VerterHost {
     /// [`crate::fact_signature_helpers::read_signature_overflow_at_install`].
     /// Per-host so an overflow forced on one host's tracer never bumps
     /// the counter a different host's delta assertion reads.
-    pub(crate) signature_overflow_at_install: std::sync::atomic::AtomicU64,
+    pub(crate) signature_overflow_at_install: Arc<std::sync::atomic::AtomicU64>,
     /// Exclusive ownership token for a shared test worker substrate. Declared
     /// last so it is released only after every production host field (including
     /// the scheduler/driver) has been dropped.

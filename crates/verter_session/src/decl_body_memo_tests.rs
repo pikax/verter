@@ -2620,3 +2620,100 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
         IndexedValueExpression::Call(_)
     ));
 }
+
+#[test]
+fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
+    let (memo, provenance) = memo_for("function f(value:string){return target(value);} function target(value:string){return value;}");
+    let before = parses(&provenance);
+    let demand = memo.indexed_expression_demand();
+    assert_eq!(
+        parses(&provenance),
+        before,
+        "selecting a demand lowers nothing"
+    );
+    let index = demand.function_program_index();
+    assert!(
+        Arc::ptr_eq(&index, &memo.function_program_index()),
+        "one source index backs both demands"
+    );
+    let entry = index.matches_named("f").next().expect("indexed f").entry();
+    let parse_count = parses(&provenance);
+    assert!(demand
+        .indexed_call_expression_over_frame_at(entry.call_sites[0].span, Arc::from([]))
+        .is_some());
+    assert_eq!(
+        parses(&provenance),
+        parse_count,
+        "expression demand reuses the same retained parse"
+    );
+}
+
+#[test]
+fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
+    let (memo, provenance) =
+        memo_for("function f(){return target();} function target(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    let index = demand.function_program_index();
+    let entry = index.matches_named("f").next().expect("indexed f").entry();
+    let parses_before = parses(&provenance);
+    memo.release_retained_snapshot_for_test();
+    assert!(demand
+        .indexed_call_expression_over_frame_at(entry.call_sites[0].span, Arc::from([]))
+        .is_none());
+    assert_eq!(
+        parses(&provenance),
+        parses_before,
+        "a broken pin cannot reparse"
+    );
+}
+
+#[test]
+fn indexed_expression_endpoint_seeded_source_keeps_absence() {
+    let memo = seeded_memo_for("function f(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    assert_eq!(demand.function_program_index().len(), 0);
+    assert!(demand
+        .indexed_call_expression_over_frame_at(verter_span::Span::new(0, 1), Arc::from([]))
+        .is_none());
+}
+
+#[test]
+fn indexed_expression_endpoint_macro_and_capture_keep_seeded_absence() {
+    let memo = seeded_memo_for("function f(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    assert!(matches!(
+        demand.transient_macro_type_argument(verter_span::Span::new(0, 1)),
+        DemandOutcome::Ready(None)
+    ));
+    assert!(demand.flow_capture_authorities(&[]).is_none());
+}
+
+#[test]
+fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
+    let source = "defineProps<{ value: string }>()";
+    let (memo, provenance) = memo_for(source);
+    let demand = memo.indexed_expression_demand();
+    let before = parses(&provenance);
+    let span = verter_span::Span::new(0, source.len() as u32);
+    let DemandOutcome::Ready(Some(argument)) = demand.transient_macro_type_argument(span) else {
+        panic!("live retained macro argument");
+    };
+    assert!(matches!(argument.as_ref(), TypeExpr::Object(_)));
+    let after = parses(&provenance);
+    assert_eq!(after, before + 1, "one lazy retained parse");
+    assert!(matches!(
+        demand.transient_macro_type_argument(span),
+        DemandOutcome::Ready(Some(_))
+    ));
+    assert_eq!(parses(&provenance), after, "same demand shares the parse");
+    memo.release_retained_snapshot_for_test();
+    assert!(matches!(
+        demand.transient_macro_type_argument(span),
+        DemandOutcome::LeaseMiss
+    ));
+    assert_eq!(
+        parses(&provenance),
+        after,
+        "broken lease cannot parse again"
+    );
+}

@@ -83,7 +83,6 @@
 
 use std::sync::Arc;
 
-use super::ProjectSemanticDispatch;
 use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
     ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
@@ -342,7 +341,7 @@ impl CalleeClause {
     /// that claims and what it deliberately does not.
     fn instantiate(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         node: SemanticNodeId,
         origin: ReturnOrigin,
     ) -> SemanticNodeId {
@@ -386,7 +385,7 @@ impl CalleeClause {
     /// perform.
     fn instantiate_default(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         default: SemanticNodeId,
     ) -> SemanticNodeId {
         dispatch.instantiate_clause_params_at_call(
@@ -451,7 +450,7 @@ impl UtilityClause {
     /// spelling is claimed there.
     pub(super) fn instantiate(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
         dispatch.instantiate_clause_at_base_constraints(
@@ -535,12 +534,12 @@ impl CallValue {
     /// the shallow function-program fact answers for the direct rail,
     /// asked of the resolved shape instead of the authored one.
     pub(super) fn of_signature_node(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         function_node: SemanticNodeId,
         site: SliceCallSite,
         origin: ReturnOrigin,
     ) -> SignatureCall {
-        let graph = dispatch.graph();
+        let graph = dispatch.arena();
         let Some(data) = graph.node_data(function_node) else {
             return SignatureCall::NotCallable;
         };
@@ -603,7 +602,7 @@ impl CallValue {
     /// whose callee answers with a bare return node and never composes a
     /// signature, so its clause is supplied separately.
     pub(super) fn of_served_return(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         clause: &CalleeClause,
         return_node: SemanticNodeId,
         origin: ReturnOrigin,
@@ -619,7 +618,7 @@ impl CallValue {
     /// the caller's terms and no clause transfer remains — stated by
     /// name through the non-generic clause, never omitted.
     pub(super) fn of_resolved_call(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         return_node: SemanticNodeId,
     ) -> Self {
         Self::of_served_return(
@@ -634,10 +633,10 @@ impl CallValue {
     /// an unbound or `any`-typed binding, and the modeled `any` of a
     /// degraded callee. `any` declares no binders, so there is nothing
     /// to instantiate and nothing to leak.
-    pub(super) fn modeled_any(dispatch: &ProjectSemanticDispatch<'_>) -> Self {
+    pub(super) fn modeled_any(dispatch: &impl super::flow_return::FlowDemandDriver) -> Self {
         Self(
             dispatch
-                .graph()
+                .arena()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
         )
     }
@@ -651,7 +650,7 @@ impl CallValue {
     /// the whole result degrades to `ReturnOnly`. The CALLER records the
     /// positional degradation — this constructor only mints the node, so
     /// it cannot be used to launder a marker in without one.
-    pub(super) fn unmodeled_position(dispatch: &ProjectSemanticDispatch<'_>) -> Self {
+    pub(super) fn unmodeled_position(dispatch: &impl super::flow_return::FlowDemandDriver) -> Self {
         Self(unmodeled_position_marker(dispatch))
     }
 
@@ -684,10 +683,10 @@ impl CallValue {
 /// arms re-enter the canonical intersection, so a single survivor collapses
 /// to itself and nothing else about the composite is re-decided.
 fn reduce_instantiated_return(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &impl super::flow_return::FlowDemandDriver,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.arena();
     let Some(SemanticNodeData::Intersection(members)) = graph.node_data(node).as_deref().cloned()
     else {
         return node;
@@ -711,9 +710,12 @@ fn reduce_instantiated_return(
 /// Whether `node` is the empty object type `{}` — an object surface whose
 /// CLOSED key domain lists no member, call signature, construct signature
 /// or index signature.
-fn is_empty_object_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_empty_object_node(
+    dispatch: &impl super::flow_return::FlowDemandDriver,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
-        dispatch.graph().node_data(node).as_deref(),
+        dispatch.arena().node_data(node).as_deref(),
         Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
     )
 }
@@ -726,8 +728,11 @@ fn is_empty_object_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 /// `never` all answer `false`, and every structured form answers `false`
 /// because this predicate is only ever asked to justify dropping a `{}`
 /// arm, where a wrong `true` would delete a real constraint.
-fn is_definitely_non_nullish(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
-    match dispatch.graph().node_data(node).as_deref() {
+fn is_definitely_non_nullish(
+    dispatch: &impl super::flow_return::FlowDemandDriver,
+    node: SemanticNodeId,
+) -> bool {
+    match dispatch.arena().node_data(node).as_deref() {
         Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_)) => true,
         Some(SemanticNodeData::Primitive(kind)) => match kind {
             PrimitiveKind::String
@@ -766,8 +771,10 @@ fn is_definitely_non_nullish(dispatch: &ProjectSemanticDispatch<'_>, node: Seman
 /// whole enclosing surface. The two conditions are genuinely different —
 /// `Miss` is "no result yet", this is "there is a value here and this
 /// substrate cannot name it" — so they are different carriers.
-pub(super) fn unmodeled_position_marker(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId {
-    dispatch.graph().intern_node(SemanticNodeData::Opaque(
+pub(super) fn unmodeled_position_marker(
+    dispatch: &impl super::flow_return::FlowDemandDriver,
+) -> SemanticNodeId {
+    dispatch.arena().intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::UnmodeledPosition,
     ))
 }
@@ -848,7 +855,7 @@ impl HeldCallee {
     /// into a node, so the equation cannot join a raw callee return.
     pub(super) fn discharged(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &impl super::flow_return::FlowDemandDriver,
         return_node: SemanticNodeId,
     ) -> CallValue {
         match self {

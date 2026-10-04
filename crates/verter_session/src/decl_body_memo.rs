@@ -192,7 +192,7 @@ enum DemandLower {
 /// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken: the demand
 ///   ran NOTHING and committed NOTHING (`ReturnOnly`). A caller must route
 ///   this to a no-warm signal, never treat it as a genuine miss.
-pub(crate) enum DemandOutcome<D> {
+pub enum DemandOutcome<D> {
     Ready(Option<Arc<D>>),
     LeaseMiss,
 }
@@ -342,6 +342,375 @@ struct LoweredStatementBatch {
     lowered_count: usize,
 }
 
+/// A finite source-demand lease shared with the artifact's body memo.
+/// No host, graph, declaration cache, or arbitrary worker callback escapes.
+struct SnapshotDemandLease {
+    key: SnapshotKey,
+    eval_source: Arc<str>,
+    source_type: oxc_span::SourceType,
+    service: Option<Arc<DeclLoweringService>>,
+    lease: OnceLock<SnapshotLease>,
+    provenance: Arc<MetaProvenance>,
+}
+impl SnapshotDemandLease {
+    fn ensure_lease(&self) {
+        let Some(service) = self.service.as_ref() else {
+            return;
+        };
+        self.lease.get_or_init(|| {
+            let outcome = service.acquire_lease(&self.key, &self.eval_source, self.source_type);
+            if outcome.parsed_now {
+                self.provenance
+                    .eval_program_parses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            outcome.lease
+        });
+    }
+}
+
+/// The existing once-per-source structural index authority, selected without
+/// retaining the declaration memo or its preparation services.
+struct FunctionIndexDemand {
+    snapshot: Arc<SnapshotDemandLease>,
+    owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+    class_fields: Arc<verter_semantic::analysis::class_field_value::ClassFieldValues>,
+    function_program_index:
+        OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
+}
+impl FunctionIndexDemand {
+    pub fn function_program_index(
+        &self,
+    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+        if let Some(cached) = self.function_program_index.get() {
+            return cached.clone();
+        }
+        let Some(service) = self.snapshot.service.as_ref() else {
+            // Seeded memos carry no parse to walk; the empty index is the
+            // CORRECT value (a genuine miss, not a lease-pin break).
+            return self
+                .function_program_index
+                .get_or_init(Default::default)
+                .clone();
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
+        let canonical = Arc::clone(&self.snapshot.key.canonical);
+        let parse_env_hash = self.snapshot.key.parse_env_hash;
+        let class_fields = Arc::clone(&self.class_fields);
+        let Some(index) = service.run_leased(&self.snapshot.key, move |program| {
+            // A walk-stack lease refused the program's index reads as a missed
+            // snapshot below: an uncached empty index, never memoized.
+            program.and_then(|p| {
+                p.function_program_index(
+                    owner_table.as_ref(),
+                    Arc::clone(&canonical),
+                    &parse_env_hash,
+                    &class_fields,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
+            // the empty index — a retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        let Some(index) = index else {
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        self.function_program_index.get_or_init(|| index).clone()
+    }
+}
+
+/// Owned, statically dispatched expression demands for one exact observed
+/// source. Selecting this capability performs no parsing or lowering.
+#[derive(Clone)]
+pub struct IndexedExpressionDemand {
+    snapshot: Arc<SnapshotDemandLease>,
+    index: Arc<FunctionIndexDemand>,
+    carrier_module: bool,
+    #[cfg(test)]
+    capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
+}
+impl IndexedExpressionDemand {
+    pub(crate) fn function_program_index(
+        &self,
+    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+        self.index.function_program_index()
+    }
+    pub fn indexed_program_expression_ir(
+        &self,
+        record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        let service = self.snapshot.service.as_ref()?;
+        self.snapshot.ensure_lease();
+        let record = record.clone();
+        let node = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|parsed| {
+                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
+                    parsed.borrow_dependent(),
+                    parsed.source_str(),
+                    &record,
+                )
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    pub(crate) fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
+        };
+        let service = self.snapshot.service.as_ref()?;
+        self.snapshot.ensure_lease();
+        let _index = self.function_program_index();
+        let node = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|parsed| {
+                let source = parsed.source_str();
+                parsed
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        IndexedCallSite::Construct(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
+                    })
+                    .flatten()
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    pub(crate) fn function_type_param_clause(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
+        let service = self.snapshot.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let _index = self.function_program_index();
+        let entry = entry.clone();
+        let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|p| {
+                p.with_indexed_function(&entry, |resolved, _entry| {
+                    crate::flow_slice_content::build_function_type_param_clause(
+                        resolved,
+                        p.source_str(),
+                    )
+                })
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        clause
+    }
+
+    pub(crate) fn flow_slice_content(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        selection: crate::flow_slice_content::FlowSliceSelection,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        policy: crate::semantic_query::FlowReturnPolicy,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
+    }
+
+    pub(crate) fn flow_slice_content_with_context(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        selection: Option<crate::flow_slice_content::FlowSliceSelection>,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+        policy: crate::semantic_query::FlowReturnPolicy,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        if bound.key().function != entry.key
+            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+            || context
+                .as_ref()
+                .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
+        {
+            return None;
+        }
+        let skeleton = Arc::clone(&bound.bundle().skeleton);
+        let bindings = Arc::clone(&bound.bundle().bindings);
+        let service = self.snapshot.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let entry = entry.clone();
+        let index = self.function_program_index();
+        // A carrier's script block (`.vue` / `.svelte`) compiles to a
+        // module by construction; a plain script file proves module scope
+        // only through its own top-level syntax.
+        let carrier_module = self.carrier_module;
+        let snapshot = self.snapshot.key.clone();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
+        #[cfg(test)]
+        let lowering_work = Arc::clone(&self.lowering_work);
+        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            #[cfg(test)]
+            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
+            program.and_then(|p| {
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    crate::flow_slice_content::build_flow_slice_content(
+                        crate::flow_slice_content::FlowSliceSource {
+                            program: p.borrow_dependent(),
+                            walks: p.walk_stack(),
+                            resolved,
+                        },
+                        p.source_str(),
+                        &index,
+                        entry,
+                        selection.as_ref(),
+                        &skeleton,
+                        Arc::clone(&bindings),
+                        carrier_module,
+                        &snapshot,
+                        context.as_deref(),
+                        policy,
+                    )
+                })
+                .flatten()
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        node.map(Arc::new)
+    }
+
+    pub(crate) fn flow_capture_authorities(
+        &self,
+        locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
+        let service = self.snapshot.service.as_ref()?;
+        let index = self.function_program_index();
+        let snapshot = self.snapshot.key.clone();
+        let locators = locators.to_vec();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
+        self.snapshot.ensure_lease();
+        service.run_leased(&self.snapshot.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            let program = program?;
+            Some(
+                locators
+                    .iter()
+                    .map(|locator| {
+                        if !locator.matches_snapshot(&snapshot) {
+                            return None;
+                        }
+                        let entry = index.get(&locator.declaration.defining_function)?;
+                        crate::flow_slice_content::build_flow_capture_authority(
+                            program.borrow_dependent(),
+                            program.source_str(),
+                            entry.entry(),
+                            locator,
+                        )
+                    })
+                    .collect(),
+            )
+        })?
+    }
+
+    pub(crate) fn transient_macro_type_argument(
+        &self,
+        macro_span: verter_span::Span,
+    ) -> DemandOutcome<TypeExpr> {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.snapshot.ensure_lease();
+        let outcome = service.run_leased(&self.snapshot.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(
+                verter_semantic::analysis::lower_macro_type_argument_at_span(
+                    program, source, macro_span,
+                ),
+            )
+        });
+        match outcome {
+            // Service-level lease miss OR a program-absent re-borrow: both are
+            // the transient broken-pin class — fail closed to ReturnOnly.
+            None | Some(None) => {
+                tracing::error!(
+                    canonical = %self.snapshot.key.canonical,
+                    "decl-body lease pin broken: transient macro type-argument re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            // A genuine typed absence: no macro-shaped call at the span / no
+            // authored type argument.
+            Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(expr))) => DemandOutcome::Ready(Some(Arc::new(expr))),
+        }
+    }
+}
+
 /// See module docs.
 pub struct DeclBodyMemo {
     #[cfg(test)]
@@ -351,9 +720,9 @@ pub struct DeclBodyMemo {
     #[cfg(test)]
     pub(crate) lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
     key: SnapshotKey,
+    #[cfg(test)]
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
-    source_type: oxc_span::SourceType,
     owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
     /// Scope-aware component mode captured from the SAME retained eval program
     /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
@@ -368,7 +737,7 @@ pub struct DeclBodyMemo {
     /// lazily on the first service-backed body demand; dropped with the
     /// memo, releasing the retained parse. A seeded memo (no service)
     /// never holds a lease.
-    lease: OnceLock<SnapshotLease>,
+    snapshot: Arc<SnapshotDemandLease>,
     header_index: Arc<DeclHeaderIndex>,
     provenance: Arc<MetaProvenance>,
     /// The ONE shared shallow cross-decl lens, built ONCE per state by
@@ -394,8 +763,7 @@ pub struct DeclBodyMemo {
     /// direct local call targets, and whole-function stable hashes.
     /// Arena-free, no lowered types; built once through the retained
     /// snapshot on first Flow demand.
-    function_program_index:
-        OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
+    function_index: Arc<FunctionIndexDemand>,
     raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
 
@@ -435,19 +803,33 @@ impl DeclBodyMemo {
         if let Some(lease) = lease {
             let _ = lease_cell.set(lease);
         }
+        let snapshot = Arc::new(SnapshotDemandLease {
+            key: key.clone(),
+            eval_source: Arc::clone(&eval_source),
+            source_type,
+            service: Some(Arc::clone(&service)),
+            lease: lease_cell,
+            provenance: Arc::clone(&provenance),
+        });
+        let function_index = Arc::new(FunctionIndexDemand {
+            snapshot: Arc::clone(&snapshot),
+            owner_table: Arc::clone(&owner_table),
+            class_fields: Arc::clone(&header_index.class_field_values),
+            function_program_index: OnceLock::new(),
+        });
         Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
             #[cfg(test)]
             lowering_work: Arc::default(),
             key,
+            #[cfg(test)]
             eval_source,
             framework_parse,
-            source_type,
             owner_table,
             svelte_component_runes_mode,
             service: Some(service),
-            lease: lease_cell,
+            snapshot,
             header_index,
             provenance,
             lens: OnceLock::new(),
@@ -457,7 +839,7 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
-            function_program_index: OnceLock::new(),
+            function_index,
             raw_surfaces: DashMap::default(),
         }
     }
@@ -473,21 +855,36 @@ impl DeclBodyMemo {
         env: &EvalEnv,
         header_index: Arc<DeclHeaderIndex>,
     ) -> Self {
+        let provenance = Arc::new(MetaProvenance::default());
+        let snapshot = Arc::new(SnapshotDemandLease {
+            key: key.clone(),
+            eval_source: Arc::from(""),
+            source_type: oxc_span::SourceType::ts(),
+            service: None,
+            lease: OnceLock::new(),
+            provenance: Arc::clone(&provenance),
+        });
+        let function_index = Arc::new(FunctionIndexDemand {
+            snapshot: Arc::clone(&snapshot),
+            owner_table: Arc::new(verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0)),
+            class_fields: Arc::clone(&header_index.class_field_values),
+            function_program_index: OnceLock::new(),
+        });
         let memo = Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
             #[cfg(test)]
             lowering_work: Arc::default(),
             key,
+            #[cfg(test)]
             eval_source: Arc::from(""),
             framework_parse: None,
-            source_type: oxc_span::SourceType::ts(),
             owner_table: Arc::new(verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0)),
             svelte_component_runes_mode: false,
             service: None,
-            lease: OnceLock::new(),
+            snapshot,
             header_index,
-            provenance: Arc::new(MetaProvenance::default()),
+            provenance,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
             type_entries: DashMap::default(),
@@ -495,7 +892,7 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
-            function_program_index: OnceLock::new(),
+            function_index,
             raw_surfaces: DashMap::default(),
         };
 
@@ -621,6 +1018,10 @@ impl DeclBodyMemo {
 
     /// The canonical id this memo's snapshot lowers (anchors route-fact
     /// recipe locators).
+    pub(crate) fn snapshot_identity(&self) -> crate::decl_lowering::SnapshotKey {
+        self.key.clone()
+    }
+
     pub(crate) fn canonical_id(&self) -> Arc<str> {
         Arc::clone(&self.key.canonical)
     }
@@ -674,18 +1075,19 @@ impl DeclBodyMemo {
     /// broken pin is a lowering MISS, never a transient re-parse.
     /// A seeded memo (no service) never acquires a lease.
     fn ensure_lease(&self) {
-        let Some(service) = self.service.as_ref() else {
-            return;
-        };
-        self.lease.get_or_init(|| {
-            let outcome = service.acquire_lease(&self.key, &self.eval_source, self.source_type);
-            if outcome.parsed_now {
-                self.provenance
-                    .eval_program_parses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            outcome.lease
-        });
+        self.snapshot.ensure_lease();
+    }
+
+    pub(crate) fn indexed_expression_demand(&self) -> IndexedExpressionDemand {
+        IndexedExpressionDemand {
+            snapshot: Arc::clone(&self.snapshot),
+            index: Arc::clone(&self.function_index),
+            carrier_module: self.framework_parse.is_some(),
+            #[cfg(test)]
+            capture_lookup_work: Arc::clone(&self.capture_lookup_work),
+            #[cfg(test)]
+            lowering_work: Arc::clone(&self.lowering_work),
+        }
     }
 
     pub(crate) fn type_decl_in(
@@ -1147,54 +1549,7 @@ impl DeclBodyMemo {
     pub fn function_program_index(
         &self,
     ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
-        if let Some(cached) = self.function_program_index.get() {
-            return cached.clone();
-        }
-        let Some(service) = self.service.as_ref() else {
-            // Seeded memos carry no parse to walk; the empty index is the
-            // CORRECT value (a genuine miss, not a lease-pin break).
-            return self
-                .function_program_index
-                .get_or_init(Default::default)
-                .clone();
-        };
-        // Pin the retained snapshot for this memo's lifetime; the
-        // LEASE-ONLY run below reuses it.
-        self.ensure_lease();
-        let owner_table = Arc::clone(&self.owner_table);
-        let canonical = Arc::clone(&self.key.canonical);
-        let parse_env_hash = self.key.parse_env_hash;
-        let class_fields = Arc::clone(&self.header_index.class_field_values);
-        let Some(index) = service.run_leased(&self.key, move |program| {
-            // A walk-stack lease refused the program's index reads as a missed
-            // snapshot below: an uncached empty index, never memoized.
-            program.and_then(|p| {
-                p.function_program_index(
-                    owner_table.as_ref(),
-                    Arc::clone(&canonical),
-                    &parse_env_hash,
-                    &class_fields,
-                )
-            })
-        }) else {
-            // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
-            // the empty index — a retry under a live lease recovers.
-            tracing::error!(
-                canonical = %self.key.canonical,
-                "decl-body lease pin broken: function_program_index's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
-            );
-            return Arc::new(Default::default());
-        };
-        let Some(index) = index else {
-            tracing::error!(
-                canonical = %self.key.canonical,
-                "decl-body lease pin broken: function_program_index's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
-            );
-            return Arc::new(Default::default());
-        };
-        self.function_program_index.get_or_init(|| index).clone()
+        self.function_index.function_program_index()
     }
 
     /// The OWNED slice content of one demanded flow evaluation: the
@@ -1239,6 +1594,7 @@ impl DeclBodyMemo {
     /// optional parameter under its `strictNullChecks` algebra and an
     /// object literal member's `this` under its `noImplicitThis` (the rest
     /// of the content is policy-free syntax).
+    #[cfg(test)]
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
@@ -1246,9 +1602,11 @@ impl DeclBodyMemo {
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         policy: crate::semantic_query::FlowReturnPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
+        self.indexed_expression_demand()
+            .flow_slice_content(entry, selection, bound, policy)
     }
 
+    #[cfg(test)]
     pub(crate) fn flow_slice_content_with_context(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
@@ -1257,106 +1615,19 @@ impl DeclBodyMemo {
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
         policy: crate::semantic_query::FlowReturnPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
-        if bound.key().function != entry.key
-            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
-            || context
-                .as_ref()
-                .is_some_and(|context| !context.matches_snapshot(&self.key))
-        {
-            return None;
-        }
-        let skeleton = Arc::clone(&bound.bundle().skeleton);
-        let bindings = Arc::clone(&bound.bundle().bindings);
-        let service = self.service.as_ref()?;
-        // Pin the retained snapshot for this memo's lifetime; the
-        // LEASE-ONLY run below reuses it.
-        self.ensure_lease();
-        let entry = entry.clone();
-        let index = self.function_program_index();
-        // A carrier's script block (`.vue` / `.svelte`) compiles to a
-        // module by construction; a plain script file proves module scope
-        // only through its own top-level syntax.
-        let carrier_module = self.framework_parse.is_some();
-        let snapshot = self.key.clone();
-        #[cfg(test)]
-        let work = Arc::clone(&self.capture_lookup_work);
-        #[cfg(test)]
-        let lowering_work = Arc::clone(&self.lowering_work);
-        let Some(node) = service.run_leased(&self.key, move |program| {
-            #[cfg(test)]
-            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
-            #[cfg(test)]
-            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
-            program.and_then(|p| {
-                p.with_indexed_function(&entry, |resolved, entry| {
-                    crate::flow_slice_content::build_flow_slice_content(
-                        crate::flow_slice_content::FlowSliceSource {
-                            program: p.borrow_dependent(),
-                            walks: p.walk_stack(),
-                            resolved,
-                        },
-                        p.source_str(),
-                        &index,
-                        entry,
-                        selection.as_ref(),
-                        &skeleton,
-                        Arc::clone(&bindings),
-                        carrier_module,
-                        &snapshot,
-                        context.as_deref(),
-                        policy,
-                    )
-                })
-                .flatten()
-            })
-        }) else {
-            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
-            // retry under a live lease recovers.
-            tracing::error!(
-                canonical = %self.key.canonical,
-                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
-            );
-            return None;
-        };
-        node.map(Arc::new)
+        self.indexed_expression_demand()
+            .flow_slice_content_with_context(entry, selection, bound, context, policy)
     }
 
     /// Lower selected missing annotations in one retained-source lease. Slots
     /// preserve authored absence separately from a source/locator mismatch.
+    #[cfg(test)]
     pub(crate) fn flow_capture_authorities(
         &self,
         locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
     ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
-        let service = self.service.as_ref()?;
-        let index = self.function_program_index();
-        let snapshot = self.key.clone();
-        let locators = locators.to_vec();
-        #[cfg(test)]
-        let work = Arc::clone(&self.capture_lookup_work);
-        self.ensure_lease();
-        service.run_leased(&self.key, move |program| {
-            #[cfg(test)]
-            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
-            let program = program?;
-            Some(
-                locators
-                    .iter()
-                    .map(|locator| {
-                        if !locator.matches_snapshot(&snapshot) {
-                            return None;
-                        }
-                        let entry = index.get(&locator.declaration.defining_function)?;
-                        crate::flow_slice_content::build_flow_capture_authority(
-                            program.borrow_dependent(),
-                            program.source_str(),
-                            entry.entry(),
-                            locator,
-                        )
-                    })
-                    .collect(),
-            )
-        })?
+        self.indexed_expression_demand()
+            .flow_capture_authorities(locators)
     }
 
     #[cfg(test)]
@@ -1377,38 +1648,6 @@ impl DeclBodyMemo {
     /// the caller's own family memo prevents same-demand recomputation.
     /// Returns `None` on a locator miss (a typed miss, never a panic) or
     /// on a seeded memo / broken lease pin.
-    pub(crate) fn function_type_param_clause(
-        &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
-    ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
-        let service = self.service.as_ref()?;
-        // Pin the retained snapshot for this memo's lifetime; the
-        // LEASE-ONLY run below reuses it.
-        self.ensure_lease();
-        let _index = self.function_program_index();
-        let entry = entry.clone();
-        let Some(clause) = service.run_leased(&self.key, move |program| {
-            program.and_then(|p| {
-                p.with_indexed_function(&entry, |resolved, _entry| {
-                    crate::flow_slice_content::build_function_type_param_clause(
-                        resolved,
-                        p.source_str(),
-                    )
-                })
-            })
-        }) else {
-            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
-            // retry under a live lease recovers.
-            tracing::error!(
-                canonical = %self.key.canonical,
-                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
-            );
-            return None;
-        };
-        clause
-    }
-
     /// The arena-free [`FunctionBodySkeleton`] of one indexed function —
     /// the demand-sliced flow substrate's structural input, built through
     /// the same lease-only retained-snapshot run every other body product
@@ -1496,19 +1735,8 @@ impl DeclBodyMemo {
         &self,
         record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
-        let service = self.service.as_ref()?;
-        self.ensure_lease();
-        let record = record.clone();
-        let node = service.run_leased(&self.key, move |program| {
-            program.and_then(|parsed| {
-                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
-                    parsed.borrow_dependent(),
-                    parsed.source_str(),
-                    &record,
-                )
-            })
-        })??;
-        Some(Arc::new(node))
+        self.indexed_expression_demand()
+            .indexed_program_expression_ir(record)
     }
 
     /// Transient typed IR for one authored call, `new` expression or tagged
@@ -1517,6 +1745,7 @@ impl DeclBodyMemo {
     /// flow-selected call is inside a served function by construction); no
     /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
     /// it calls or constructs.
+    #[cfg(test)]
     pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
@@ -1528,58 +1757,14 @@ impl DeclBodyMemo {
     /// and evaluates the arguments `frame_lowered` names by ordinal itself:
     /// a direct call among them keeps no record of its own
     /// (`lower_indexed_call_expression_with_read_roots`).
+    #[cfg(test)]
     pub(crate) fn indexed_call_expression_over_frame_at(
         &self,
         span: verter_span::Span,
         frame_lowered: Arc<[bool]>,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
-        use verter_semantic::analysis::function_program::IndexedCallSite;
-        use verter_semantic::analysis::type_eval_build::{
-            lower_indexed_call_expression_with_read_roots,
-            lower_indexed_new_expression_with_read_roots,
-            lower_indexed_tagged_template_expression_with_read_roots,
-        };
-        let service = self.service.as_ref()?;
-        self.ensure_lease();
-        let _index = self.function_program_index();
-        let node = service.run_leased(&self.key, move |program| {
-            program.and_then(|parsed| {
-                let source = parsed.source_str();
-                parsed
-                    .with_indexed_call_site(span, |site| match site {
-                        IndexedCallSite::Call(call) => {
-                            observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_call_expression_with_read_roots(
-                                    call,
-                                    source,
-                                    observe,
-                                    &frame_lowered,
-                                )
-                            })
-                        }
-                        IndexedCallSite::Construct(call) => {
-                            observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_new_expression_with_read_roots(
-                                    call,
-                                    source,
-                                    observe,
-                                    &frame_lowered,
-                                )
-                            })
-                        }
-                        // The template strings are the first argument.
-                        IndexedCallSite::TaggedTemplate(tagged) => {
-                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
-                                lower_indexed_tagged_template_expression_with_read_roots(
-                                    tagged, source, observe,
-                                )
-                            })
-                        }
-                    })
-                    .flatten()
-            })
-        })??;
-        Some(Arc::new(node))
+        self.indexed_expression_demand()
+            .indexed_call_expression_over_frame_at(span, frame_lowered)
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -2218,7 +2403,7 @@ impl DeclBodyMemo {
 /// GROUP-level `ValueSignature` ordinal the producer-minted locators carry).
 /// Fact-production intermediates — returned owned, never stored.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TransientValueParts {
+pub struct TransientValueParts {
     pub(crate) type_annotation: Option<TypeExpr>,
     pub(crate) object_shape: Option<ObjectExpr>,
     pub(crate) signatures: Vec<LoweredSignatureParts>,
@@ -2241,7 +2426,7 @@ pub(crate) struct TransientValueParts {
 /// order — the SAME union the demanded lowering folded. Fact-production
 /// intermediates — returned owned, never stored.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TransientTypeParts {
+pub struct TransientTypeParts {
     pub(crate) bodies: Vec<TypeExpr>,
     pub(crate) type_parameters: Vec<TypeParam>,
 }
@@ -2657,40 +2842,13 @@ impl DeclBodyMemo {
     /// no macro-shaped call at that span / no authored type argument (a
     /// genuine typed absence); a broken lease pin is the DISTINCT
     /// `LeaseMiss` (transient ReturnOnly).
+    #[cfg(test)]
     pub(crate) fn transient_macro_type_argument(
         &self,
         macro_span: verter_span::Span,
     ) -> DemandOutcome<TypeExpr> {
-        let Some(service) = self.service.as_ref() else {
-            return DemandOutcome::Ready(None);
-        };
-        self.ensure_lease();
-        let outcome = service.run_leased(&self.key, move |program| {
-            let program = program?;
-            let source = program.source_str();
-            let program = program.borrow_dependent();
-            Some(
-                verter_semantic::analysis::lower_macro_type_argument_at_span(
-                    program, source, macro_span,
-                ),
-            )
-        });
-        match outcome {
-            // Service-level lease miss OR a program-absent re-borrow: both are
-            // the transient broken-pin class — fail closed to ReturnOnly.
-            None | Some(None) => {
-                tracing::error!(
-                    canonical = %self.key.canonical,
-                    "decl-body lease pin broken: transient macro type-argument re-borrow \
-                     missed the retained snapshot; failing closed to ReturnOnly"
-                );
-                DemandOutcome::LeaseMiss
-            }
-            // A genuine typed absence: no macro-shaped call at the span / no
-            // authored type argument.
-            Some(Some(None)) => DemandOutcome::Ready(None),
-            Some(Some(Some(expr))) => DemandOutcome::Ready(Some(Arc::new(expr))),
-        }
+        self.indexed_expression_demand()
+            .transient_macro_type_argument(macro_span)
     }
 
     /// Recover one member's authored declaration-site spans from this memo's

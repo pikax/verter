@@ -6,6 +6,7 @@
 //! node result DIRECTLY against the shared resolver
 //! (`realize_callable_member`) — both node-domain.
 
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use verter_type_expr::{MemberVisibility, PrimitiveName, TypeExpr};
@@ -15,7 +16,7 @@ use crate::meta_resolve::dispatch_helpers::realize_callable_member;
 use crate::project_semantic_dispatch::{
     node_data_for, ProjectSemanticDispatch, StructuralFactDemandOutcome,
 };
-use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
+use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, InstantiateKey, LiteralValue, PartialReasonSet,
@@ -1255,7 +1256,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         "the unplanted ordinary owner must not recover instance-owned `Props`"
     );
 
-    let dispatch = ctx.dispatch();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
@@ -1264,7 +1265,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner macro locator materializes, got {other:?}"),
     };
-    let macro_data = node_data_for(dispatch.ctx, macro_base);
+    let macro_data = node_data_for(dispatch.graph(), macro_base);
     let Some(SemanticNodeData::DeclRef { identity }) = macro_data.as_deref() else {
         panic!("the `Props` macro payload lowers to DeclRef, got {macro_data:?}");
     };
@@ -1300,7 +1301,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner DeclRef resolves, got {other:?}"),
     };
-    let resolved_data = node_data_for(dispatch.ctx, resolved);
+    let resolved_data = node_data_for(dispatch.graph(), resolved);
     let Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
         owner: resolved_owner,
         name: resolved_name,
@@ -1330,7 +1331,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner declaration instantiates, got {other:?}"),
     };
-    let instantiated_data = node_data_for(dispatch.ctx, instantiated);
+    let instantiated_data = node_data_for(dispatch.graph(), instantiated);
     let Some(SemanticNodeData::Object(instantiated_surface)) = instantiated_data.as_deref() else {
         panic!("Instantiate returns the `Props` Object, got {instantiated_data:?}");
     };
@@ -1349,7 +1350,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
             QueryResult::Value(node) => node,
             other => panic!("the exact-owner prepared body locator materializes, got {other:?}"),
         };
-    let data = node_data_for(dispatch.ctx, body);
+    let data = node_data_for(dispatch.graph(), body);
     let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
         panic!("the exact-owner `Props` body is an Object, got {data:?}");
     };
@@ -1597,10 +1598,13 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_0, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
 
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -1618,7 +1622,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         let arm = arm.unwrap_or_else(|| panic!("`{name}` realizes to a single callable arm"));
         assert!(
             matches!(
-                node_data_for(dispatch.ctx, arm).as_deref(),
+                node_data_for(dispatch.graph(), arm).as_deref(),
                 Some(SemanticNodeData::Signature { .. })
             ),
             "`{name}`'s callable arm is a Function node"
@@ -1646,7 +1650,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         arm, nullish,
         "the view returns the stripped callable ARM, not the raw member value"
     );
-    let arm_data = node_data_for(dispatch.ctx, arm).expect("arm node data");
+    let arm_data = node_data_for(dispatch.graph(), arm).expect("arm node data");
     let SemanticNodeData::Signature {
         kind: _, params, ..
     } = arm_data.as_ref()
@@ -1723,10 +1727,13 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_1, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -1749,14 +1756,14 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
     };
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, first_param_raw("onsave")).as_deref(),
+            node_data_for(dispatch.graph(), first_param_raw("onsave")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `onsave` raw first-param node is a `DeclRef` carrier (the `Event` alias) before resolution"
     );
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, first_param_raw("ongen")).as_deref(),
+            node_data_for(dispatch.graph(), first_param_raw("ongen")).as_deref(),
             Some(SemanticNodeData::InstantiationRef { .. })
         ),
         "the `ongen` raw first-param node is an `InstantiationRef` carrier before resolution"
@@ -1822,10 +1829,13 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_2, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -1848,14 +1858,14 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
     };
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, rest_param_raw("onrest")).as_deref(),
+            node_data_for(dispatch.graph(), rest_param_raw("onrest")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `onrest` raw rest-param node is a `DeclRef` carrier (the `Args` alias) before resolution"
     );
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, rest_param_raw("ongentuple")).as_deref(),
+            node_data_for(dispatch.graph(), rest_param_raw("ongentuple")).as_deref(),
             Some(SemanticNodeData::InstantiationRef { .. })
         ),
         "the `ongentuple` raw rest-param node is an `InstantiationRef` carrier before resolution"
@@ -1927,10 +1937,13 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_3, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -1946,7 +1959,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     // union.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, member("onmaybe")).as_deref(),
+            node_data_for(dispatch.graph(), member("onmaybe")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `onmaybe` member raw node is a `DeclRef` carrier before resolution"
@@ -1958,7 +1971,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         .expect("a `DeclRef`-wrapped `Fn | undefined` resolves to a single callable arm");
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, arm).as_deref(),
+            node_data_for(dispatch.graph(), arm).as_deref(),
             Some(SemanticNodeData::Signature { .. })
         ),
         "the resolved callable arm is a `Function` node"
@@ -1971,7 +1984,8 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         .normalize_node_for_structural_fact_demand(member("onmaybe"), navigate())
         .into_complete_node()
         .expect("a fully-resolvable member demand is Complete");
-    let norm_data = node_data_for(dispatch.ctx, normalized).expect("normalized member node data");
+    let norm_data =
+        node_data_for(dispatch.graph(), normalized).expect("normalized member node data");
     let SemanticNodeData::Union(union_arms) = norm_data.as_ref() else {
         panic!("the normalized `MaybeFn` body is a nullish Union, got {norm_data:?}");
     };
@@ -1981,7 +1995,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     );
     assert!(
         union_arms.iter().any(|a| matches!(
-            node_data_for(dispatch.ctx, *a).as_deref(),
+            node_data_for(dispatch.graph(), *a).as_deref(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
         )),
         "the other union constituent is the stripped `undefined` arm"
@@ -2029,10 +2043,13 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_4, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2143,10 +2160,13 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_5, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let onprops = surface
         .members
         .iter()
@@ -2163,7 +2183,7 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
         .expect("the signature has a first param");
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, first).as_deref(),
+            node_data_for(dispatch.graph(), first).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the first-param root stays a `DeclRef` carrier (not resolved to an Object)"
@@ -2263,10 +2283,17 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface = navigate_param_to_object_surface(
+        &ctx,
+        &fixture_dispatch_6,
+        "/workspace/Carriers.svelte",
+        props_type,
+    )
+    .resolved_for_tests()
+    .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2279,14 +2306,14 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
     // Precondition: the raw nodes are genuinely carriers.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, member("chain")).as_deref(),
+            node_data_for(dispatch.graph(), member("chain")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `chain` member raw node is a `DeclRef` carrier"
     );
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, member("geninst")).as_deref(),
+            node_data_for(dispatch.graph(), member("geninst")).as_deref(),
             Some(SemanticNodeData::InstantiationRef { .. })
         ),
         "the `geninst` member raw node is an `InstantiationRef` carrier"
@@ -2299,11 +2326,11 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
             .unwrap_or_else(|| panic!("`{name}` resolves COMPLETE through its carrier chain"));
         assert!(
             matches!(
-                node_data_for(dispatch.ctx, resolved).as_deref(),
+                node_data_for(dispatch.graph(), resolved).as_deref(),
                 Some(SemanticNodeData::Literal(LiteralValue::String(s))) if s == "leaf"
             ),
             "`{name}` resolves through its carrier chain to the terminal `'leaf'` literal, got {:?}",
-            node_data_for(dispatch.ctx, resolved).as_deref()
+            node_data_for(dispatch.graph(), resolved).as_deref()
         );
     }
 }
@@ -2323,10 +2350,17 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface = navigate_param_to_object_surface(
+        &ctx,
+        &fixture_dispatch_7,
+        "/workspace/Carriers.svelte",
+        props_type,
+    )
+    .resolved_for_tests()
+    .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2344,14 +2378,14 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
     // are both alias `DeclRef`s.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, member("mutual")).as_deref(),
+            node_data_for(dispatch.graph(), member("mutual")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `mutual` member raw node is a `DeclRef` carrier (the `MutA` alias) before resolution"
     );
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, member("deepchain")).as_deref(),
+            node_data_for(dispatch.graph(), member("deepchain")).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `deepchain` member raw node is a `DeclRef` carrier (the `T0` alias) before resolution"
@@ -2368,7 +2402,7 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         ),
         StructuralFactDemandOutcome::Complete(node) => panic!(
             "a mutual-recursion cycle must be Partial, not Complete({:?})",
-            node_data_for(dispatch.ctx, node).as_deref()
+            node_data_for(dispatch.graph(), node).as_deref()
         ),
     }
 
@@ -2379,11 +2413,11 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         .expect("a deep finite alias chain resolves Complete");
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, deep).as_deref(),
+            node_data_for(dispatch.graph(), deep).as_deref(),
             Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == "leaf"
         ),
         "the deep finite alias chain must reach its terminal leaf, got {:?}",
-        node_data_for(dispatch.ctx, deep).as_deref()
+        node_data_for(dispatch.graph(), deep).as_deref()
     );
 }
 
@@ -2414,11 +2448,11 @@ fn normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete() {
     };
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, resolved).as_deref(),
+            node_data_for(dispatch.graph(), resolved).as_deref(),
             Some(SemanticNodeData::DeclRef { .. }) | Some(SemanticNodeData::Opaque(_))
         ),
         "an unresolvable `DeclRef` fails closed to a carrier / opaque (never a fabricated type), got {:?}",
-        node_data_for(dispatch.ctx, resolved).as_deref()
+        node_data_for(dispatch.graph(), resolved).as_deref()
     );
 }
 
@@ -2478,10 +2512,13 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_8, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let toowide = surface
         .members
         .iter()
@@ -2494,12 +2531,12 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
     // reading a pre-reduced shape.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, toowide).as_deref(),
+            node_data_for(dispatch.graph(), toowide).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `toowide` member raw node is a `DeclRef` carrier (the `TooWide` alias) before \
          resolution, got {:?}",
-        node_data_for(dispatch.ctx, toowide).as_deref()
+        node_data_for(dispatch.graph(), toowide).as_deref()
     );
 
     dispatch.set_connected_limits_for_tests(256, 24);
@@ -2514,7 +2551,7 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
         StructuralFactDemandOutcome::Complete(node) => panic!(
             "a refused template-literal product behind a DeclRef must be Partial (never a \
              confident classification of the advanced-but-unenumerated shell), got Complete({:?})",
-            node_data_for(dispatch.ctx, node).as_deref()
+            node_data_for(dispatch.graph(), node).as_deref()
         ),
     }
 }
@@ -2538,10 +2575,17 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface = navigate_param_to_object_surface(
+        &ctx,
+        &fixture_dispatch_9,
+        "/workspace/Carriers.svelte",
+        props_type,
+    )
+    .resolved_for_tests()
+    .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mut_ref = surface
         .members
         .iter()
@@ -2551,7 +2595,7 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
     // Precondition: the rest param type is the mutual-cycle `DeclRef` carrier.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, mut_ref).as_deref(),
+            node_data_for(dispatch.graph(), mut_ref).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the rest param type `MutA` is a `DeclRef` carrier before resolution"
@@ -2591,10 +2635,17 @@ fn demand_validated_structural_node_partial_yields_none() {
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface = navigate_param_to_object_surface(
+        &ctx,
+        &fixture_dispatch_10,
+        "/workspace/Carriers.svelte",
+        props_type,
+    )
+    .resolved_for_tests()
+    .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mut_ref = surface
         .members
         .iter()
@@ -2651,10 +2702,13 @@ fn event_names_direct_self_reference_terminates_complete() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_11 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_11, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let onself = surface
         .members
         .iter()
@@ -2720,10 +2774,13 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_12, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2934,16 +2991,16 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
         .normalize_node_for_structural_fact_demand(unresolvable, navigate())
         .into_complete_node()
         .expect("a nonexistent `DeclRef` is a stable honest miss (Complete), never Partial");
-    let arm_is_unresolvable_residual = match node_data_for(dispatch.ctx, normalized_arm).as_deref()
-    {
-        Some(SemanticNodeData::DeclRef { .. }) => true,
-        Some(SemanticNodeData::Opaque(err)) => !matches!(err, QueryError::RecursiveRef { .. }),
-        _ => false,
-    };
+    let arm_is_unresolvable_residual =
+        match node_data_for(dispatch.graph(), normalized_arm).as_deref() {
+            Some(SemanticNodeData::DeclRef { .. }) => true,
+            Some(SemanticNodeData::Opaque(err)) => !matches!(err, QueryError::RecursiveRef { .. }),
+            _ => false,
+        };
     assert!(
         arm_is_unresolvable_residual,
         "precondition: the unresolvable `DeclRef` arm carrier-stops to an UNRESOLVABLE residual (DeclRef / non-RecursiveRef Opaque miss), not a literal and not the RecursiveRef carve-out, got {:?}",
-        node_data_for(dispatch.ctx, normalized_arm).as_deref()
+        node_data_for(dispatch.graph(), normalized_arm).as_deref()
     );
 
     let names_union = union(&graph, vec![present, unresolvable]);
@@ -3106,10 +3163,13 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         shallow.has_type_symbol_in(props_locator.anchor.owner, "Props"),
         "the exact instance owner indexes the local `Props` declaration"
     );
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_13 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_13, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let row = surface
         .members
         .iter()
@@ -3132,11 +3192,11 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         .expect("the peel reaches the `Snippet` `InstantiationRef` carrier (Complete)");
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, peeled).as_deref(),
+            node_data_for(dispatch.graph(), peeled).as_deref(),
             Some(SemanticNodeData::InstantiationRef { .. })
         ),
         "the peel STOPS at the `Snippet<Params>` `InstantiationRef` (does not instantiate it), got {:?}",
-        node_data_for(dispatch.ctx, peeled).as_deref()
+        node_data_for(dispatch.graph(), peeled).as_deref()
     );
     let normalized = dispatch
         .normalize_node_for_structural_fact_demand(row, navigate())
@@ -3144,12 +3204,12 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         .expect("the demand primitive instantiates the `Snippet` carrier (Complete)");
     assert!(
         !matches!(
-            node_data_for(dispatch.ctx, normalized).as_deref(),
+            node_data_for(dispatch.graph(), normalized).as_deref(),
             Some(SemanticNodeData::InstantiationRef { .. })
         ),
         "the ordinary demand primitive INSTANTIATES the `Snippet<Params>` carrier (consuming its \
          args), got {:?}",
-        node_data_for(dispatch.ctx, normalized).as_deref()
+        node_data_for(dispatch.graph(), normalized).as_deref()
     );
     assert_ne!(
         peeled, normalized,
@@ -3212,10 +3272,17 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         shallow.has_type_symbol_in(props_locator.anchor.owner, "Props"),
         "the exact instance owner indexes the local `Props` declaration"
     );
-    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_14 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface = navigate_param_to_object_surface(
+        &ctx,
+        &fixture_dispatch_14,
+        "/workspace/Carriers.svelte",
+        props_type,
+    )
+    .resolved_for_tests()
+    .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mutual = surface
         .members
         .iter()
@@ -3242,7 +3309,7 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         StructuralFactDemandOutcome::Complete(node) => panic!(
             "a mutual-recursion `DeclRef` cycle must be Partial(SAME_PATH_RECURSION), not \
              Complete({:?})",
-            node_data_for(dispatch.ctx, node).as_deref()
+            node_data_for(dispatch.graph(), node).as_deref()
         ),
     }
 }
@@ -3365,10 +3432,13 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_15 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_15, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let toowide = surface
         .members
         .iter()
@@ -3460,7 +3530,7 @@ fn validated_snippet_params_union_combines_by_index() {
     // `string & number` is PROVABLY disjoint — the canonical intersection
     // reduces the combined binding to `never` (checker-confirmed), never a
     // single-arm override.
-    match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
+    match node_data_for(dispatch.graph(), params[0].ty).as_deref() {
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {}
         other => panic!("the disjoint combined binding reduces to `never`, got {other:?}"),
     }
@@ -3532,10 +3602,13 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
-        .resolved_for_tests()
-        .expect("props surface");
-    let dispatch = ctx.dispatch();
+
+    let fixture_dispatch_16 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let surface =
+        navigate_param_to_object_surface(&ctx, &fixture_dispatch_16, component, props_type)
+            .resolved_for_tests()
+            .expect("props surface");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let x = surface
         .members
         .iter()
@@ -3545,7 +3618,7 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
     // PRECONDITION: the `Args` arg is a `DeclRef` carrier (NOT a literal tuple).
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, x).as_deref(),
+            node_data_for(dispatch.graph(), x).as_deref(),
             Some(SemanticNodeData::DeclRef { .. })
         ),
         "the `Args` type argument is a `DeclRef` carrier before resolution"
@@ -3595,7 +3668,7 @@ fn validated_snippet_params_union_of_tuples_is_present_bindingless() {
     // exhaustive classifier — not a lucky reduction — drives the outcome.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, params).as_deref(),
+            node_data_for(dispatch.graph(), params).as_deref(),
             Some(SemanticNodeData::Union(_))
         ),
         "the `Params` arg is a `Union` of tuples before the reader runs"
@@ -3623,7 +3696,7 @@ fn validated_snippet_params_intersection_of_tuples_is_present_bindingless() {
     let params = intersection(&graph, vec![ta, tb]);
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, params).as_deref(),
+            node_data_for(dispatch.graph(), params).as_deref(),
             Some(SemanticNodeData::Intersection(_))
         ),
         "the `Params` arg is an `Intersection` of tuples before the reader runs"
@@ -3656,7 +3729,7 @@ fn validated_snippet_params_conditional_is_present_bindingless() {
     // undecidable, so normalize does NOT reduce it to a branch.
     assert!(
         matches!(
-            node_data_for(dispatch.ctx, cond).as_deref(),
+            node_data_for(dispatch.graph(), cond).as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "the `Params` arg is an (open) `Conditional` before the reader runs"
@@ -3746,3 +3819,5 @@ fn event_names_builtin_nominal_first_param_is_a_complete_non_contributor() {
         "a `Date` first param is a decided non-contributor, never an incomplete enumeration"
     );
 }
+
+use crate::resolver_core::request_ports::OwnedLowering as _;

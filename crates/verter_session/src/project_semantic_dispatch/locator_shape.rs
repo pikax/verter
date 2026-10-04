@@ -1662,11 +1662,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name_type.as_ref(),
             digests,
         );
-        let mapper_ordinal = self
-            .ctx
-            .project_type_store()
-            .mapper_binder_registry()
-            .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
+        let mapper_ordinal = self.binding.mapper_binders.as_ref().ordinal_for(
+            &mapper_decl.canonical_id,
+            &mapper_display_name,
+            fingerprint,
+        );
         graph.intern_node_with_scope(
             SemanticNodeData::TypeParam {
                 decl: mapper_decl,
@@ -2562,6 +2562,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 NodeScopeId::File { canonical_id, .. } => {
                     let ri = resolve_bare_name_in_scope(
                         self.ctx,
+                        self,
                         canonical_id.as_ref(),
                         scope
                             .top_level_owner()
@@ -2648,7 +2649,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .with_symbol_space(semantic_space_for_locator_space(anchor.space));
         let env = self
             .ctx
-            .host_for_fact_tracer_install()
             .host_view_env_hashes_for(anchor.canonical_id.as_ref());
         let key = match LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -2663,7 +2663,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Err(_) => return QueryResult::Error(QueryError::Miss),
         };
         let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         read.value
     }
 }

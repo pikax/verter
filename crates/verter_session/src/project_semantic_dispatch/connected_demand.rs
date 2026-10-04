@@ -176,19 +176,23 @@ impl Drop for InstantiationBudgetForTests {
 /// dispatch.
 #[derive(Clone, Copy)]
 pub(crate) struct DemandCancellation<'a> {
-    ctx: &'a dyn ResolverContext,
+    checkpoint: crate::resolver_core::request_ports::CancellationCheckpoint,
+    _request: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> DemandCancellation<'a> {
     /// Narrow the request's resolver context down to its cancellation signal.
     pub(super) fn from_context(ctx: &'a dyn ResolverContext) -> Self {
-        Self { ctx }
+        Self {
+            checkpoint: ctx.cancellation_checkpoint(),
+            _request: std::marker::PhantomData,
+        }
     }
 
     /// Cheap cancellation checkpoint, consulted at every charge boundary.
     #[cfg_attr(feature = "test-support", track_caller)]
     fn is_cancelled(&self) -> bool {
-        self.ctx.is_cancelled()
+        self.checkpoint.is_cancelled()
     }
 }
 

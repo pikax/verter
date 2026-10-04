@@ -180,7 +180,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         forced: &ForcedSemanticOperand,
     ) -> Result<SemanticOperand, SemanticOperandMintError> {
         if forced.store_identity() != self.graph().operand_store_identity()
-            || forced.generation() != self.ctx.project_type_store().current_project_generation()
+            || forced.generation() != self.ctx.current_project_generation()
         {
             return Err(SemanticOperandMintError::ForeignNode);
         }
@@ -235,7 +235,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        let generation = self.ctx.project_type_store().current_project_generation();
+        let generation = self.ctx.current_project_generation();
         let store_identity = self.graph().operand_store_identity();
         let (substitution, substitution_evidence) =
             self.seal_substitution(&substitution, store_identity, generation)?;
@@ -427,11 +427,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 AugmentationScopeKind::Module(specifier.as_ref().to_string())
             }
         };
-        match bundle.prepare_augmentation_type_decl_in(
-            &scope_kind,
-            anchor.owner,
-            anchor.symbol.as_ref(),
-        ) {
+        match self
+            .ctx
+            .prepare_augmentation_type(&bundle, &scope_kind, anchor.owner, anchor.symbol.as_ref())
+            .into_result()
+        {
             Ok(Some(prepared)) => Ok(HeaderArity::Exact(prepared.type_parameters.len())),
             Ok(None) | Err(_) => Err(SemanticOperandMintError::MissingAuthoredDeclaration),
         }
@@ -499,15 +499,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     fn read_operand_env(&self, canonical: &str) -> OperandSplitEnv {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical);
+        let env = self.ctx.host_view_env_hashes_for(canonical);
         OperandSplitEnv::new(
             ParseEnvHash::from_env_hash(env.parse_env_hash),
             ResolveEnvHash::from_env_hash(env.resolve_env_hash),
             TypeEnvHash::from_env_hash(env.type_env_hash),
             LibEnvHash::from_env_hash(env.lib_env_hash),
             ProjectIdentityDim::from_project_identity(
-                host.host_view_project_identity_for(canonical).fold_u32(),
+                self.ctx
+                    .host_view_project_identity_for(canonical)
+                    .fold_u32(),
             ),
             SemanticOperandAuthority::mint_for_forcing_boundary(),
         )
@@ -524,16 +525,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// for the whole window, which is what makes pointer equality a sound
     /// identity test (a dropped root's allocation could otherwise be reused
     /// by the replacement).
-    fn operand_env_epoch(
-        &self,
-    ) -> (
-        Option<Arc<verter_workspace::published_state::PublishedRoot>>,
-        u64,
-    ) {
-        let workspace = self.ctx.host_for_fact_tracer_install().workspace();
-        (workspace.published_root(), workspace.content_generation())
-    }
-
     /// Seal all five environment dimensions as ONE atomic observation.
     ///
     /// The composite read is bracketed by the publication epoch above and
@@ -545,25 +536,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn stable_operand_env(&self, canonical: &str) -> Option<OperandSplitEnv> {
         // bounded-loop: at most three paired snapshots before typed instability.
         for _ in 0..3 {
-            let (before_root, before_generation) = self.operand_env_epoch();
+            let before_epoch = self.ctx.operand_env_epoch();
             let first = self.read_operand_env(canonical);
             // Test-only repeating seam: a real workspace republication landing
             // between the two halves of the composite read, with every read
             // VALUE unchanged. Production has no hook here.
             #[cfg(test)]
-            self.ctx
-                .host_for_fact_tracer_install()
-                .test_force
+            self.binding
+                .observers
+                .forcing
                 .semantic_operand_env_window_seam
                 .fire_repeating();
             let second = self.read_operand_env(canonical);
-            let (after_root, after_generation) = self.operand_env_epoch();
-            let same_root = match (&before_root, &after_root) {
-                (None, None) => true,
-                (Some(before), Some(after)) => Arc::ptr_eq(before, after),
-                _ => false,
-            };
-            if first == second && same_root && before_generation == after_generation {
+            let after_epoch = self.ctx.operand_env_epoch();
+            if first == second && before_epoch.matches(&after_epoch) {
                 return Some(first);
             }
         }
@@ -625,7 +611,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     fn reject_if_cancelled(&self) -> Result<(), QueryError> {
-        if !self.ctx.is_cancelled() {
+        if !self.cancellation.is_cancelled() {
             return Ok(());
         }
         crate::request_context::mark_request_result_cancelled();
@@ -652,7 +638,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         evidence.read_set().bubble(self.ctx);
         for signature in evidence.dep_signatures().iter() {
-            crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, signature);
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, signature);
         }
         self.deposit_operand_self_roots(evidence.self_roots());
         Ok(())
@@ -792,7 +778,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         self.record_dispatch_intent_counters(&lower_key);
         let lower = self.execute_read(lower_key);
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &lower.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &lower.dep_signature);
         let mut root = match lower.value {
             QueryResult::Value(node) => node,
             QueryResult::Recursive(node) => {
@@ -808,9 +794,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the force's own result is still being built. Admission tests fire
         // a cancellation or budget drain here. Production has no hook.
         #[cfg(test)]
-        self.ctx
-            .host_for_fact_tracer_install()
-            .test_force
+        self.binding
+            .observers
+            .forcing
             .semantic_operand_post_child_seam
             .fire_once();
 
@@ -878,7 +864,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         self.record_dispatch_intent_counters(&project_key);
         let projected = self.execute_read(project_key);
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &projected.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &projected.dep_signature);
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (projected.value, projected.dep_signature).into();
         if let Some(indexed) = self
@@ -1128,7 +1114,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if index.store_identity() != self.graph().operand_store_identity() {
                 return Err(QueryError::ForeignSemanticOperand);
             }
-            if index.generation() != self.ctx.project_type_store().current_project_generation() {
+            if index.generation() != self.ctx.current_project_generation() {
                 return Err(QueryError::StaleSemanticOperand);
             }
             self.merge_operand_evidence(index.evidence())?;
@@ -1174,7 +1160,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if store_identity != self.graph().operand_store_identity() {
                     return QueryResult::Error(QueryError::ForeignSemanticOperand);
                 }
-                if generation != self.ctx.project_type_store().current_project_generation() {
+                if generation != self.ctx.current_project_generation() {
                     return QueryResult::Error(QueryError::StaleSemanticOperand);
                 }
                 if let Err(error) = self.merge_operand_evidence(evidence) {
@@ -1210,7 +1196,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if store_identity != self.graph().operand_store_identity() {
                         return QueryResult::Error(QueryError::ForeignSemanticOperand);
                     }
-                    if generation != self.ctx.project_type_store().current_project_generation() {
+                    if generation != self.ctx.current_project_generation() {
                         return QueryResult::Error(QueryError::StaleSemanticOperand);
                     }
                 }
@@ -1283,7 +1269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             projection_evidence.iter().cloned(),
         );
         let (read, evidence) = self.execute_read_with_operand_evidence(key);
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
         if evidence
             .as_ref()
             .is_some_and(|evidence| evidence.read_set().overflowed)
@@ -1330,7 +1316,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 QueryResult::Value(ForcedSemanticOperand::minted(
                     self.graph().operand_store_identity(),
-                    self.ctx.project_type_store().current_project_generation(),
+                    self.ctx.current_project_generation(),
                     node,
                     evidence,
                     SemanticOperandAuthority::mint_for_forcing_boundary(),

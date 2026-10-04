@@ -290,8 +290,7 @@ fn c1_local_type_header_wins_over_same_name_value_import_binding() {
     );
     assert!(
         state
-            .decl_bodies()
-            .header_index()
+            .headers
             .type_header("Shared")
             .is_some(),
         "precondition: `Shared` must ALSO have a local type header (else the declaration-id result \

@@ -165,8 +165,12 @@ impl VerterHost {
                 ),
             )
         });
+
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self,
+            &fixture_dispatch_0,
             scope_canonical_id,
             scope_owner,
             scope_payload_arc.as_deref(),

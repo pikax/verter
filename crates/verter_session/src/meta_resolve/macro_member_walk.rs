@@ -46,7 +46,7 @@ pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
 /// composite shapes do not produce a root name (the predicate
 /// downstream falls back to `false` for those cases).
 pub(crate) fn collect_define_props_root_names(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
@@ -63,14 +63,11 @@ pub(crate) fn collect_define_props_root_names(
         // The type argument's root reference name is read off its structural
         // mirror node (the ONE sanctioned type-arg producer; parens are
         // structurally transparent there) — never a stored body.
-        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            ctx,
-            owner_canonical,
-            macro_index,
-        ) else {
+        let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
             continue;
         };
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, product.hot.node())
+        let Some(data) =
+            crate::project_semantic_dispatch::node_data_for(dispatch.graph(), product.hot.node())
         else {
             continue;
         };
@@ -105,7 +102,7 @@ pub(crate) fn collect_define_props_root_names(
 /// - `Primitive(_)` / `Object(_)` / fully-expanded fields whose
 ///   raw type was None → does NOT fire (no work to skip).
 pub(crate) fn slot_binding_targets_define_props_root(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
@@ -121,7 +118,6 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // bare annotation the user wrote), otherwise the post-expansion resolved
     // source. Both raise through the shared dispatch bridge — the root
     // extraction below runs in NODE DOMAIN off the raised carrier.
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let transit_ctx =
         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
@@ -155,13 +151,16 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // carrier's value-side provenance): the seed IS the lowered binding value
     // (`Props['avatar']`), exactly the node the root extraction below walks.
     let subject =
-        match crate::project_semantic_dispatch::node_data_for(ctx, raised.node()).as_deref() {
+        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), raised.node())
+            .as_deref()
+        {
             Some(SemanticNodeData::SyntheticBinding { value_node, .. }) => {
                 crate::semantic_query::SemanticNodeId(*value_node)
             }
             _ => raised.node(),
         };
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, subject) else {
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
+    else {
         return false;
     };
 
@@ -180,7 +179,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // projection rooted at a single reference. Parens are structurally
     // transparent in the graph.
     let root_name = |node: crate::semantic_query::SemanticNodeId| -> Option<String> {
-        let data = crate::project_semantic_dispatch::node_data_for(ctx, node)?;
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
         // A builtin object-filter utility application (`Pick<Props, …>` /
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
@@ -191,7 +190,8 @@ pub(crate) fn slot_binding_targets_define_props_root(
                 )
                 .is_some();
             if is_utility && !args.is_empty() {
-                let source = crate::project_semantic_dispatch::node_data_for(ctx, args[0])?;
+                let source =
+                    crate::project_semantic_dispatch::node_data_for(dispatch.graph(), args[0])?;
                 let (source_name, _) = source.bare_ref_head()?;
                 return Some(source_name.as_ref().to_string());
             }
@@ -202,7 +202,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     let indexed_access_root = |node: crate::semantic_query::SemanticNodeId| -> Option<String> {
         let mut current = node;
         loop {
-            let data = crate::project_semantic_dispatch::node_data_for(ctx, current)?;
+            let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
             match data.as_ref() {
                 SemanticNodeData::IndexedAccess { object, index } => {
                     if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {

@@ -218,7 +218,7 @@ impl ConditionalBranches for LoweredBranches<'_> {
         dispatch: &ProjectSemanticDispatch,
     ) -> Option<(SemanticNodeId, SemanticNodeId)> {
         let true_branch = (self.lower_branch)(true);
-        if dispatch.ctx.is_cancelled() {
+        if dispatch.cancellation.is_cancelled() {
             return None;
         }
         Some((true_branch, (self.lower_branch)(false)))
@@ -337,7 +337,7 @@ impl ProjectSemanticDispatch<'_> {
         distributive: bool,
         branches: &mut dyn ConditionalBranches,
     ) -> super::walk::QueryBuildOutput {
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
         let operands = self.conditional_operands(check, extends);
@@ -364,7 +364,7 @@ impl ProjectSemanticDispatch<'_> {
         if let Some(output) = self.absorb_named_error_operand(check, extends) {
             return output;
         }
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
         match selection {
@@ -627,7 +627,7 @@ impl ProjectSemanticDispatch<'_> {
         ]));
         let mut per_member = Vec::with_capacity(members.len());
         for &member in members.iter() {
-            if self.ctx.is_cancelled() {
+            if self.cancellation.is_cancelled() {
                 return Some(self.cancelled_build_output());
             }
             let member_output = reduce_member(member);
@@ -667,7 +667,7 @@ impl ProjectSemanticDispatch<'_> {
         selection: ConditionalBranchSelection,
         infer: Option<super::relation::RelationInferBindings>,
     ) -> super::walk::QueryBuildOutput {
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
         let graph = self.graph();
@@ -693,7 +693,7 @@ impl ProjectSemanticDispatch<'_> {
                 result = self.evaluate_deferred_semantic_node(result);
             }
         }
-        if self.ctx.is_cancelled() {
+        if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
         let branch = match selection {

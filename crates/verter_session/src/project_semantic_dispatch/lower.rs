@@ -7,11 +7,15 @@
 //! published shell identity is stable across entry paths.
 //!
 //! **Authority contract:** this is the *only* EAGER (resolving) TypeExpr
-//! lowering path in the workspace. The §6.5 invariant test
-//! `type_expr_lowering_has_exactly_two_single_definition_producers` asserts
-//! exactly one `fn shallow_lower_type_expr_with_context` exists in `crates/`
-//! (and no bare-`mode` wrapper beside it — every caller states its
-//! full [`ProjectionReductionContext`] demand explicitly), alongside the one
+//! lowering path in the workspace.
+//! `ProjectSemanticDispatch::shallow_lower_type_expr_with_context` below is
+//! its one definition. The static views reach it through the
+//! `FlowDemandDriver` trait (`flow_return.rs`), whose impls forward to this
+//! method, so deleting or renaming it is a compile error at every impl.
+//! What a spelling counter cannot see is guarded by the §6.5 invariant test
+//! `type_expr_lowering_has_exactly_two_single_definition_producers`: no
+//! bare-`mode` wrapper beside this producer (every caller states its full
+//! [`ProjectionReductionContext`] demand explicitly) and exactly one
 //! query-free structural producer `fn lower_type_expr_structural`.
 
 use std::sync::Arc;
@@ -328,7 +332,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> SemanticNodeId {
         let mut carriers: Vec<SemanticNodeId> = Vec::new();
         crate::resolver_core::component_meta_registry::collect_owner_local_nominal_carriers(
-            self.ctx,
+            self,
             node,
             canonical,
             &mut carriers,
@@ -703,6 +707,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(direct) => direct.clone(),
                 None => resolve_bare_name_in_scope(
                     self.ctx,
+                    self,
                     scope_canonical,
                     scope_owner,
                     scope_payload,
@@ -808,10 +813,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ensure_indexed_ready_serve(canonical_id.as_ref())
                 .filter(|serve| serve.indexed.whole_hash == *whole_hash)
                 .and_then(|serve| {
-                    crate::host_resolve::indexed_script_setup_type_params(&serve.indexed)
-                        .into_iter()
-                        .nth(binding.ordinal as usize)
-                        .filter(|param| param.name == binding.name.as_ref())
+                    crate::host_resolve::sfc_script_setup_type_params(
+                        &serve.indexed.raw_source,
+                        serve.indexed.framework_parse.as_deref(),
+                    )
+                    .into_iter()
+                    .nth(binding.ordinal as usize)
+                    .filter(|param| param.name == binding.name.as_ref())
                 }),
         };
         let Some(param) = transient_param else {
@@ -2225,11 +2233,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     *readonly,
                     name_type.as_ref(),
                 );
-                let mapper_ordinal = self
-                    .ctx
-                    .project_type_store()
-                    .mapper_binder_registry()
-                    .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
+                let mapper_ordinal = self.binding.mapper_binders.as_ref().ordinal_for(
+                    &mapper_decl.canonical_id,
+                    &mapper_display_name,
+                    fingerprint,
+                );
                 // Mapper-binder-ordinal classification. The counter
                 // bumps whenever the SAME `(canonical, display_name)`
                 // triple is observed with a DIFFERENT ordinal in the
@@ -2514,7 +2522,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_type,
                 false_type,
             } => {
-                if self.ctx.is_cancelled() {
+                if self.cancellation.is_cancelled() {
                     return self.opaque(QueryError::Miss);
                 }
                 // Conditional relation targets are structural
@@ -2645,7 +2653,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         if let Some(node) = lowered[index] {
                             return node;
                         }
-                        if self.ctx.is_cancelled() {
+                        if self.cancellation.is_cancelled() {
                             return self.opaque(QueryError::Miss);
                         }
                         let mut true_env;

@@ -471,6 +471,7 @@ impl VerterHost {
         whole_hash: Hash16,
     ) -> Option<ResolvedComponentMetaState> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
                 canonical,
                 mode,
@@ -479,6 +480,8 @@ impl VerterHost {
                 crate::resolver_core::ComponentMetaResolutionPurpose::Full,
                 RegistryMaterialization::Full,
                 ctx,
+                dispatch,
+                None,
             )
         })
     }
@@ -539,6 +542,7 @@ impl VerterHost {
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -547,6 +551,8 @@ impl VerterHost {
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
             ctx,
+            dispatch,
+            Some(view),
         )
     }
 
@@ -573,6 +579,7 @@ impl VerterHost {
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -581,6 +588,8 @@ impl VerterHost {
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
             ctx,
+            dispatch,
+            Some(view),
         )
     }
 
@@ -631,6 +640,7 @@ impl VerterHost {
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -639,6 +649,8 @@ impl VerterHost {
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
             ctx,
+            dispatch,
+            None,
         )
     }
 
@@ -685,6 +697,7 @@ impl VerterHost {
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -693,6 +706,8 @@ impl VerterHost {
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
             ctx,
+            dispatch,
+            None,
         )
     }
 
@@ -824,6 +839,7 @@ impl VerterHost {
         canonical: &str,
         whole_hash: Hash16,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -833,6 +849,8 @@ impl VerterHost {
             crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
             RegistryMaterialization::SkipAppend,
             ctx,
+            dispatch,
+            None,
         )
     }
 
@@ -846,6 +864,8 @@ impl VerterHost {
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        session_view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<ResolvedComponentMetaState> {
         // `ctx` is required, so every production caller supplies the exact
         // request-bound base or session context. The direct-host fixture
@@ -894,7 +914,15 @@ impl VerterHost {
         // Retired `shared_owner_engine` /
         // `SessionSolverHost` pair; the resolver host is now a thin
         // wrapper around `VerterHost`.
-        let resolver_host = HostComponentMetaResolver { host: self, ctx };
+
+        let resolver_host = HostComponentMetaResolver {
+            host: self,
+            ctx,
+            engine: crate::host_manage::jsdoc_resolve::ComponentMetaSemanticServices {
+                dispatch,
+                session_view,
+            },
+        };
         let parts_started = audit_enabled.then(Instant::now);
         let parts = {
             component_meta_trace_custom!(
@@ -949,7 +977,8 @@ impl VerterHost {
                 }
             };
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
-            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut query_engine =
+                crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             let result = slot_binding_graph::resolve_slot_bindings_graph_native(
                 &mut query_engine,
                 canonical,
@@ -967,7 +996,8 @@ impl VerterHost {
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
             // The retired `shared_owner_engine`
             // is gone — dispatch owns all solve-like operations now.
-            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut query_engine =
+                crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             if should_materialize_registry {
                 component_meta_trace_custom!(
                     "append_component_meta_registry_entries",
@@ -1251,6 +1281,7 @@ impl VerterHost {
         tracked_dependencies: &mut BTreeSet<String>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
+        let dispatch = query_engine.dispatch;
         let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
             &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
@@ -1283,10 +1314,9 @@ impl VerterHost {
         // unloaded producing canonical) conservatively stays symbolic — the
         // consumer re-resolves the named root on demand.
         fn imported_registry_alias_should_stay_symbolic(
-            ctx: &dyn crate::resolver_core::ResolverContext,
+            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
             body: &verter_type_expr::facts::PreparedTypeBodyFacts,
         ) -> bool {
-            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let locator =
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
             match dispatch
@@ -1298,9 +1328,10 @@ impl VerterHost {
                 )
                 .at_optional_boundary()
             {
-                Some(hot) => {
-                    crate::meta_resolve::exactness::node_root_should_stay_symbolic(ctx, hot.node())
-                }
+                Some(hot) => crate::meta_resolve::exactness::node_root_should_stay_symbolic(
+                    dispatch,
+                    hot.node(),
+                ),
                 None => true,
             }
         }
@@ -1333,6 +1364,8 @@ impl VerterHost {
         /// seed-scan contract.
         fn collect_imported_component_meta_registry_seed_refs_node(
             ctx: &dyn crate::resolver_core::ResolverContext,
+            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
             node: crate::semantic_query::SemanticNodeId,
             published_names: &rustc_hash::FxHashSet<String>,
             queued_names: &mut RegistryQueuedNames,
@@ -1342,6 +1375,7 @@ impl VerterHost {
         ) {
             fn collect_one_filtered_node(
                 ctx: &dyn crate::resolver_core::ResolverContext,
+                dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
                 node: crate::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
                 queued_names: &mut RegistryQueuedNames,
@@ -1354,6 +1388,7 @@ impl VerterHost {
                 let mut local_names = rustc_hash::FxHashSet::default();
                 collect_component_meta_registry_refs_node(
                     ctx,
+                    dispatch,
                     node,
                     published_names,
                     &mut local_names,
@@ -1380,11 +1415,11 @@ impl VerterHost {
                     );
                 }
             }
-            match crate::project_semantic_dispatch::node_data_for(ctx, node).as_deref() {
+            match crate::project_semantic_dispatch::node_data_for(graph, node).as_deref() {
                 Some(crate::semantic_query::SemanticNodeData::Object(surface)) => {
                     for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
-                            ctx,
+                            ctx,dispatch,
                             member.value,
                             published_names,
                             queued_names,
@@ -1400,7 +1435,7 @@ impl VerterHost {
                         .chain(surface.construct_signatures.iter())
                     {
                         collect_one_filtered_node(
-                            ctx,
+                            ctx,dispatch,
                             *signature,
                             published_names,
                             queued_names,
@@ -1412,7 +1447,7 @@ impl VerterHost {
                     }
                     for signature in surface.index_signatures.iter() {
                         collect_one_filtered_node(
-                            ctx,
+                            ctx,dispatch,
                             signature.key_type,
                             published_names,
                             queued_names,
@@ -1422,7 +1457,7 @@ impl VerterHost {
                             cursor,
                         );
                         collect_one_filtered_node(
-                            ctx,
+                            ctx,dispatch,
                             signature.value_type,
                             published_names,
                             queued_names,
@@ -1435,7 +1470,7 @@ impl VerterHost {
                 }
                 _ => {
                     collect_one_filtered_node(
-                        ctx,
+                        ctx,dispatch,
                         node,
                         published_names,
                         queued_names,
@@ -1514,7 +1549,7 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved.canonical_id.clone();
-            if imported_registry_alias_should_stay_symbolic(query_engine.ctx, &resolved.body) {
+            if imported_registry_alias_should_stay_symbolic(dispatch, &resolved.body) {
                 entry.type_source = verter_type_expr::facts::SourcePosition::Present(
                     shallow_named_ref_source(entry.name.as_str()),
                 );
@@ -1553,6 +1588,7 @@ impl VerterHost {
         let public_field_collect_started = debug_enabled.then(Instant::now);
         collect_component_meta_registry_public_macro_root_refs(
             query_engine.ctx,
+            dispatch,
             owner_canonical,
             snapshot,
             &published_names,
@@ -1569,6 +1605,7 @@ impl VerterHost {
                     RegistryProducerScope::for_field(field, &setup_resolution_scope);
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
+                    dispatch,
                     snapshot,
                     field,
                     &published_names,
@@ -1582,6 +1619,7 @@ impl VerterHost {
                     RegistryProducerScope::for_field(field, &setup_resolution_scope);
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
+                    dispatch,
                     snapshot,
                     field,
                     &published_names,
@@ -1591,7 +1629,7 @@ impl VerterHost {
                 );
             }
             let define_props_roots =
-                collect_define_props_root_names(query_engine.ctx, owner_canonical, snapshot);
+                collect_define_props_root_names(dispatch, owner_canonical, snapshot);
             // Refuse-to-enqueue for synthetic slot-binding carriers.
             // The slot-binding graph publisher's no-parser-branch
             // mints a `TypeExpr::SyntheticSlotBinding(_)` typed-IR
@@ -1619,7 +1657,7 @@ impl VerterHost {
                 // redundant registry work regardless of which source variant
                 // publishes it.
                 if slot_binding_targets_define_props_root(
-                    query_engine.ctx,
+                    dispatch,
                     producer_scope.canonical_id.as_ref(),
                     producer_scope.owner,
                     field,
@@ -1646,6 +1684,7 @@ impl VerterHost {
                 }
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
+                    dispatch,
                     snapshot,
                     field,
                     &published_names,
@@ -1662,9 +1701,7 @@ impl VerterHost {
         // One dispatch for every seed-source raise below: registry locators
         // and shallow sources lower through the ONE shared engine, and the
         // discovery walks run node-domain off the raised carriers.
-        let engine_ctx = query_engine.ctx;
-        let seed_dispatch =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(engine_ctx);
+        let seed_dispatch = query_engine.dispatch;
         let seed_transit_ctx =
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
@@ -1696,6 +1733,7 @@ impl VerterHost {
                 RegistryProducerScope::explicit(declaration_canonical, meta.declaration.owner);
             let entry_import_root = owner_component_meta_registry_import_root(
                 query_engine.ctx,
+                query_engine.dispatch,
                 declaration_scope.canonical_id.as_ref(),
                 declaration_scope.owner,
                 snapshot,
@@ -1776,7 +1814,7 @@ impl VerterHost {
                         .type_source
                         .present()
                         .and_then(|source| {
-                            raise_seed_source(&seed_dispatch, &producer_scope, source)
+                            raise_seed_source(seed_dispatch, &producer_scope, source)
                                 .at_optional_boundary()
                         })
                         .map(|hot| hot.node()),
@@ -1784,6 +1822,8 @@ impl VerterHost {
                 if let Some(node) = seed_node {
                     collect_imported_component_meta_registry_seed_refs_node(
                         query_engine.ctx,
+                        seed_dispatch,
+                        seed_dispatch.graph(),
                         node,
                         &published_names,
                         &mut queued_names,
@@ -1816,7 +1856,7 @@ impl VerterHost {
                     // head (discovery only; dequeue-time resolution applies
                     // the owner-local-vs-imported policy).
                     observe_component_meta_registry_source(
-                        query_engine.ctx,
+                        query_engine.ctx,dispatch,
                         &producer_scope,
                         &observation_source,
                         &published_names,
@@ -1849,11 +1889,10 @@ impl VerterHost {
                 let producer_scope =
                     RegistryProducerScope::explicit(canonical, meta.declaration.owner);
                 if let Some(hot) = entry.type_source.present().and_then(|source| {
-                    raise_seed_source(&seed_dispatch, &producer_scope, source)
-                        .at_optional_boundary()
+                    raise_seed_source(seed_dispatch, &producer_scope, source).at_optional_boundary()
                 }) {
                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
-                        query_engine.ctx,
+                        dispatch,
                         hot.node(),
                         &mut names,
                     );
@@ -1904,6 +1943,7 @@ impl VerterHost {
             );
             let imported_owner_route = owner_component_meta_registry_import_root(
                 query_engine.ctx,
+                query_engine.dispatch,
                 pending_producer_scope.canonical_id.as_ref(),
                 pending_producer_scope.owner,
                 snapshot,
@@ -2038,8 +2078,7 @@ impl VerterHost {
                         crate::host_manage::component_meta_debug(format!(
                             "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_class={:?}",
                             owner_canonical, type_name,
-                            imported_registry_alias_should_stay_symbolic(
-                                query_engine.ctx,
+                            imported_registry_alias_should_stay_symbolic(dispatch,
                                 &resolved.body,
                             ),
                             pending_route_is_whole,
@@ -2047,10 +2086,7 @@ impl VerterHost {
                         ));
                     }
                     if pending_route_is_whole
-                        && imported_registry_alias_should_stay_symbolic(
-                            query_engine.ctx,
-                            &resolved.body,
-                        )
+                        && imported_registry_alias_should_stay_symbolic(dispatch, &resolved.body)
                     {
                         // Imported non-object helpers (mapped/conditional/
                         // indexed-access/typeof aliases) must not be expanded
@@ -2080,6 +2116,7 @@ impl VerterHost {
                                 &mut queued_names,
                                 &mut referenced_names,
                                 query_engine.ctx,
+                                dispatch,
                                 type_name.clone(),
                                 shallow_named_ref_source(type_name.as_str()),
                                 declaration,
@@ -2136,6 +2173,7 @@ impl VerterHost {
                         &mut queued_names,
                         &mut referenced_names,
                         query_engine.ctx,
+                        dispatch,
                         type_name.clone(),
                         type_source,
                         declaration,
@@ -2194,8 +2232,7 @@ impl VerterHost {
                     .raise_authored_locator_to_hot(locator, seed_transit_ctx)
                     .at_optional_boundary()
                     .and_then(|hot| {
-                        crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
-                            engine_ctx,
+                        crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(dispatch,
                             hot.node(),
                         )
                     })
@@ -2301,6 +2338,7 @@ impl VerterHost {
                 &mut queued_names,
                 &mut referenced_names,
                 query_engine.ctx,
+                dispatch,
                 type_name.clone(),
                 published_source,
                 declaration,

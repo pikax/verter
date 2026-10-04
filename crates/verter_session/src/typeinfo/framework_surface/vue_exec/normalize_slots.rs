@@ -42,14 +42,14 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 #[must_use]
 pub(crate) fn slots_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
     let macro_surface = resolved.macro_surface();
     // View-sensitive slot type resolution flows through the active `ctx`.
     // Host-level reads (JSDoc / return-type source slicing, node scope) use the
     // host the `ctx` is installed against.
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
+
     // Node-domain demand identity: `Navigate` carrier-resolves an aliased /
     // generic slot callable before the function-like filter.
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
@@ -90,7 +90,7 @@ pub(crate) fn slots_from_typeinfo_surface(
             // non-`Function` carrier shell under the transit-shallow surface (a
             // generic slot alias lowering to an `InstantiationRef` / alias
             // carrier) — the view realizes it BEFORE the function-like filter.
-            let view = CallableNodeView::new(&dispatch, member.value);
+            let view = CallableNodeView::new(dispatch, member.value);
             // Function-like FILTER + return-combiner selection (node-domain): a
             // member that does not realize to a callable is not a slot (dropped).
             // The realized root's top-level kind selects the return combiner — a
@@ -115,18 +115,18 @@ pub(crate) fn slots_from_typeinfo_surface(
                     return None;
                 }
             };
-            let combine = match node_data_for(dispatch.ctx, realized_root).as_deref() {
+            let combine = match node_data_for(dispatch.graph(), realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
                 _ => ArmCombineNode::Intersection,
             };
             // The across-arms first-param + return NODES (fails closed to drop
             // the slot when any arm is non-callable).
             let parts = view.slot_param_and_return_by_arm(combine, context)?;
-            let scope = macro_surface.member_expr_scope(host, member);
+            let scope = macro_surface.member_expr_scope(dispatch, member);
             // Bindings from the (across-arms-intersected) first-param NODE.
             let bindings = parts
                 .first_param
-                .map(|first_param| binding_fields_from_param_node(ctx, first_param))
+                .map(|first_param| binding_fields_from_param_node(ctx, dispatch, first_param))
                 .unwrap_or_default();
             // Display `return_type`: prefer the EXACT source text sliced from the
             // return-type annotation span (single-arm) — this preserves a name the
@@ -138,17 +138,17 @@ pub(crate) fn slots_from_typeinfo_surface(
             let return_type = parts
                 .return_type_span
                 .map(|span| CanonicalSpan::new(scope.as_str().into(), span))
-                .and_then(|cspan| slice_canonical_span(host, &cspan))
+                .and_then(|cspan| slice_canonical_span(ctx, &cspan))
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
                 .or_else(|| {
                     parts
                         .return_type
-                        .map(|return_node| materialize_slot_return_node(ctx, return_node))
+                        .map(|return_node| materialize_slot_return_node(dispatch, return_node))
                         .as_ref()
                         .and_then(render_type_expr_display)
                 });
-            let (description, tags) = member_jsdoc_from_spans(host, member);
+            let (description, tags) = member_jsdoc_from_spans(ctx, member);
             Some(AnalyzedSlotField {
                 name: member_name,
                 is_required: !member.optional,
@@ -177,11 +177,10 @@ pub(crate) fn slots_from_typeinfo_surface(
 /// vocabulary for the zero-dispatch graph encoder.
 #[must_use]
 pub(crate) fn slot_member_types_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     resolved: &impl ResolvedSurfaceAccess,
     slots: &[AnalyzedSlotField],
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
-    let dispatch = ctx.dispatch();
     let macro_surface = resolved.macro_surface();
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     slots
@@ -191,7 +190,7 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
                 member.visibility.is_public()
                     && member.published_name().as_deref() == Some(slot.name.as_str())
             })?;
-            let view = CallableNodeView::new(&dispatch, member.value);
+            let view = CallableNodeView::new(dispatch, member.value);
             let node = match view.realized_callable_root(context) {
                 crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
                 | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
@@ -204,7 +203,7 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
                     name: slot.name.clone(),
                     is_optional: member.optional,
                     value: crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
-                        &dispatch,
+                        dispatch,
                         node,
                     )
                     .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow),
@@ -285,11 +284,10 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface(
 /// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
 /// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
 fn materialize_slot_return_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
-    let dispatch = ctx.dispatch();
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
     // A node that does not materialize keeps an exact empty `Unknown` value
     // (DISPLAY robustness only — the seam notes a present-but-unraisable
     // failure as an `OutputMaterializationLoss` non-cacheable read); a
@@ -329,10 +327,9 @@ fn materialize_slot_return_node(
 /// mint.
 fn binding_fields_from_param_node(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     first_param: SemanticNodeId,
 ) -> Vec<AnalyzedSlotFieldBinding> {
-    let dispatch = ctx.dispatch();
-    let host = ctx.host_for_fact_tracer_install();
     // Open-generic gate: a symbolic-only param root (an open Conditional / mapped
     // / indexed / free `TypeParam`) must NOT be materialised into a committed
     // object surface — the SAME gate `navigate_param_to_object_surface` /
@@ -343,7 +340,7 @@ fn binding_fields_from_param_node(
     // authored-reference mirror passes through — the projection resolves it.
     if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
         ctx,
-        crate::project_semantic_dispatch::node_data_for(ctx, first_param).as_deref(),
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), first_param).as_deref(),
     ) {
         crate::request_context::fold_result_completeness(
             crate::semantic_query::ResultCompleteness::partial(reasons.get()),
@@ -351,7 +348,7 @@ fn binding_fields_from_param_node(
         return Vec::new();
     }
     if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
-        &dispatch,
+        dispatch,
         first_param,
     ) {
         return Vec::new();
@@ -364,9 +361,9 @@ fn binding_fields_from_param_node(
     // bindings AND marks the result partial, so zero bindings is never
     // byte-identical to a genuinely binding-less slot. A genuinely
     // non-object first param stays the complete no-bindings answer.
-    let surface = match host.project_shallow_surface_from_base(
+    let surface = match crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
         ctx,
-        &dispatch,
+        dispatch,
         first_param,
         Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -390,7 +387,7 @@ fn binding_fields_from_param_node(
     // indexed access `NamedRoot['member']`. The Pick source-root is read
     // NODE-DOMAIN from the first-param node (a thin structural `InstantiationRef`
     // read under the Vue Pick DTO policy — never a `"Pick<"` text sniff).
-    let pick_root = pick_source_root_node(&dispatch, first_param);
+    let pick_root = pick_source_root_node(dispatch, first_param);
     surface
         .members
         .iter()
@@ -399,7 +396,7 @@ fn binding_fields_from_param_node(
         .filter_map(|member| {
             member
                 .string_name()
-                .map(|name| slot_binding_field(ctx, member, name, pick_root))
+                .map(|name| slot_binding_field(dispatch, member, name, pick_root))
         })
         .collect()
 }
@@ -452,7 +449,7 @@ fn pick_source_root_node(
             ProjectionReductionContext::published(ProjectionMode::Navigate),
         )
         .into_complete_node()?;
-    match node_data_for(dispatch.ctx, peeled).as_deref() {
+    match node_data_for(dispatch.graph(), peeled).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args })
             if base.canonical_id.as_ref() == "__builtin__"
                 && base.decl_name.as_ref() == "Pick"
@@ -466,7 +463,7 @@ fn pick_source_root_node(
             // sink instead — here `None` means CONCRETE materialization, not a
             // preserved carrier.
             let root = args[0];
-            match node_data_for(dispatch.ctx, root).as_deref() {
+            match node_data_for(dispatch.graph(), root).as_deref() {
                 Some(
                     SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
@@ -504,7 +501,7 @@ fn pick_source_root_node(
 /// through the by-name `.and_then` form. The mint cap is constructed
 /// INTERNALLY from `ctx` (the `raise_member_value` pattern).
 fn slot_binding_field(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     member: &TypeInfoSurfaceMember,
     member_name: &str,
     pick_root: Option<SemanticNodeId>,
@@ -512,7 +509,7 @@ fn slot_binding_field(
     let Some(root_node) = pick_root else {
         // Non-Pick member: mint the member's own value ONCE through the
         // registered [`raise_member_value`] sink for DISPLAY ONLY.
-        let raised = raise_member_value(ctx, member);
+        let raised = raise_member_value(dispatch, member);
         // Raise-miss fence: an absent mint is a torn graph read. The shared
         // output seam already notes a present-but-unraisable failure as an
         // `OutputMaterializationLoss` non-cacheable read
@@ -531,8 +528,8 @@ fn slot_binding_field(
     };
     // Mint the Pick source-root ONCE, then build the symbolic
     // `NamedRoot['member']` display access (a pure syntactic build).
-    let dispatch = ctx.dispatch();
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
     let named_root = cap
         .materialize_output_type_expr(root_node)
         .map(|raised| raised.into_type_expr(&cap))
@@ -605,11 +602,13 @@ mod raise_miss_normalization_tests {
     #[test]
     fn slot_binding_raise_miss_fabricates_no_display_and_suppresses_warm_admission() {
         let host = make_host();
+        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+
         let member = raise_miss_member();
 
         let (binding, facts) = host
             .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                slot_binding_field(&*host, &member, "item", None)
+                slot_binding_field(dispatch, &member, "item", None)
             });
 
         assert!(

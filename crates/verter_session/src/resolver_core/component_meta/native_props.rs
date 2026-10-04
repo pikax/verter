@@ -89,11 +89,11 @@ impl NativePropProjectionCache {
 /// demand. Member display rendering is publication-only.
 pub(crate) fn named_native_props_outcome(
     ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     root_canonical: &str,
     root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,
 ) -> ResolvedNativePropsOutcome {
-    let dispatch = ctx.dispatch();
     let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(root_canonical),
@@ -103,31 +103,28 @@ pub(crate) fn named_native_props_outcome(
         },
         name: Arc::from(root_name),
     }));
-    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
     let (base, recursive) = match read.value {
         QueryResult::Value(node) => (node, false),
         QueryResult::Recursive(node) => (node, true),
         QueryResult::Error(_) => return ResolvedNativePropsOutcome::Miss,
     };
 
-    let host = ctx.host_for_fact_tracer_install();
     // An INCOMPLETE projection records its typed reason before degrading to
     // the miss outcome — a failed resolution never reads as a props-less
     // declaration.
-    let Some(surface) = host
-        .project_shallow_surface_graph_only(
-            ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::macro_object_surface(
-                ProjectionMode::Shallow,
-                SurfaceProvenanceContext::MacroTypeArgOwnBody,
-            ),
-            None,
-        )
-        .recorded()
-    else {
+    let Some(surface) = crate::typeinfo::shallow_surface::project_shallow_surface_graph_only(
+        ctx,
+        dispatch,
+        base,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::MacroTypeArgOwnBody,
+        ),
+        None,
+    )
+    .recorded() else {
         return if recursive {
             ResolvedNativePropsOutcome::Recursive
         } else {
@@ -141,7 +138,7 @@ pub(crate) fn named_native_props_outcome(
         .filter_map(|member| {
             ResolvedNativeProp::from_surface_member(
                 member,
-                crate::typeinfo::raise::render_node_display_with_ctx(ctx, member.value)
+                crate::typeinfo::raise::render_node_display_with_ctx(dispatch, member.value)
                     .map(|rendered| rendered.text),
             )
         })

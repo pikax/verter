@@ -122,7 +122,10 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
         )
         .at_optional_boundary()
         .expect("the closed Function fact must raise through the bridge");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     assert!(
         matches!(
             data.as_deref(),

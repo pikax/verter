@@ -1,7 +1,7 @@
 //! The effects signature of a statement call the content half could not
 //! settle alone ([`crate::flow_slice_content::SliceStatement::CallEffect`]).
 
-use super::{FlowCallEvidence, FlowEvaluator, Positional};
+use super::{FlowCallEvidence, FlowDemandDriver, FlowEvaluator, Positional};
 use crate::flow_slice_content::{
     SliceCallArguments, SliceCallSite, SliceEffectCallee, SliceNarrowSubject,
 };
@@ -21,7 +21,7 @@ enum SignatureEffect {
     Unread,
 }
 
-impl FlowEvaluator<'_, '_> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// Settle one statement call's effects signature, the checker's
     /// `getEffectsSignature`: a callee's lone non-generic call signature,
     /// or — when some signature asserts or returns `never` — the signature

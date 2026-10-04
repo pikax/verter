@@ -327,9 +327,8 @@ tracing-test = "0.2.6"
 # `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
 # `VerterHost` fields and assert each cache-shaped field is either
 # allow-listed (with phase-report citation) or lives on `ProjectTypeStore`.
-# Phase 10a — `no_concrete_verter_host_in_seal_scope` static guard parses
-# every file under the resolver-tier seal scope via `syn::Visit`,
-# requiring the `visit` and `parsing` features in addition to the
+# The remaining `syn::Visit`-based guards (e.g. the recursion-budget
+# scanner) require the `visit` and `parsing` features in addition to the
 # original `full`+`extra-traits` set.
 syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
 # Route-mutator guard macro-body scan: walks proc_macro2 TokenTrees of

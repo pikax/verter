@@ -44,7 +44,7 @@ pub(crate) fn reduce_published_field_types(
     // picks the better field shape in NODE DOMAIN (`compare_node_improvement`
     // over the reduced carriers' nodes) and publishes content-free SOURCES —
     // making no decision on any materialised value.
-    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
+    let dispatch = query_engine.dispatch;
     let transit_ctx =
         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             ProjectionMode::Navigate,
@@ -72,7 +72,7 @@ pub(crate) fn reduce_published_field_types(
             };
             finalize_published_prop_source(
                 query_engine,
-                &dispatch,
+                dispatch,
                 transit_ctx,
                 scope_canonical_id,
                 scope_owner,
@@ -171,19 +171,21 @@ fn finalize_published_prop_source(
             .at_optional_boundary()
     });
     if let Some(shallow) = shallow_source {
-        let ctx = query_engine.ctx;
         // The shallow form is an INPUT (untainted); compare in NODE DOMAIN
         // against the reduced carrier's node — never by scoring a
         // materialised `TypeExpr`.
         let prefer_shallow = match (shallow_node.as_ref(), chosen.node_id()) {
             (Some(sn), Some(rn)) => {
-                crate::meta_resolve::compare_node_improvement(ctx, sn.node(), rn)
-                    || crate::meta_resolve::node_root_is_explicit_selector_operator(ctx, sn.node())
+                crate::meta_resolve::compare_node_improvement(dispatch, sn.node(), rn)
+                    || crate::meta_resolve::node_root_is_explicit_selector_operator(
+                        dispatch,
+                        sn.node(),
+                    )
             }
             // No reduced node to compare against: prefer the shallow form
             // only when it is an explicit consumer-demand selector.
             (Some(sn), None) => {
-                crate::meta_resolve::node_root_is_explicit_selector_operator(ctx, sn.node())
+                crate::meta_resolve::node_root_is_explicit_selector_operator(dispatch, sn.node())
             }
             _ => false,
         };
@@ -196,7 +198,7 @@ fn finalize_published_prop_source(
                     ProjectionMode::Navigate,
                 );
                 if let (Some(srn), Some(rn)) = (shallow_reduced.node_id(), chosen.node_id()) {
-                    if crate::meta_resolve::compare_node_improvement(query_engine.ctx, srn, rn) {
+                    if crate::meta_resolve::compare_node_improvement(dispatch, srn, rn) {
                         chosen = shallow_reduced;
                         // Adopt the shallow AUTHORED position as the
                         // published source.
@@ -227,8 +229,7 @@ fn finalize_published_prop_source(
     if !reduced_decided_closed_leaf {
         if let (Some(shallow), Some(sn)) = (shallow_source, shallow_node.as_ref()) {
             let shallow_ref_name =
-                crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_name(
-                    query_engine.ctx,
+                crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_name(dispatch,
                     sn.node(),
                 );
             if let Some(shallow_ref_name) = shallow_ref_name {
@@ -254,6 +255,7 @@ fn finalize_published_prop_source(
                 };
                 let published = authored_package_alias_for_carrier(
                     query_engine.ctx,
+                    dispatch,
                     scope_canonical_id,
                     sn.node(),
                 )

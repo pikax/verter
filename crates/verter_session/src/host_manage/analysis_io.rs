@@ -11,6 +11,8 @@
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
 use crate::instant::Instant;
@@ -159,7 +161,6 @@ impl VerterHost {
                 crate::resolver_core::HostResolverContext::from_cold_seed(self, &base, overlay);
             #[cfg(any(test, feature = "test-support"))]
             {
-                use crate::resolver_core::ResolverContext;
                 record_template_class_lane_binding(TemplateClassLaneBinding {
                     indexed_present: true,
                     request_bound: ctx.is_request_bound(),
@@ -192,7 +193,6 @@ impl VerterHost {
         );
         #[cfg(any(test, feature = "test-support"))]
         {
-            use crate::resolver_core::ResolverContext as _;
             record_template_class_lane_binding(TemplateClassLaneBinding {
                 indexed_present: false,
                 request_bound: ctx.is_request_bound(),
@@ -1548,6 +1548,7 @@ impl VerterHost {
     /// admission while still returning the freshly-computed value; it
     /// never lowers under a fabricated all-zero scope hash.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn observe_materialize_scope(
         &self,
         canonical: &str,
@@ -1557,9 +1558,13 @@ impl VerterHost {
         })
     }
 
-    /// Context-threaded core of [`Self::observe_materialize_scope`].
-    /// Request-bound callers reuse their captured view and fact tracer instead
+    /// Context-threaded core of the base-context observation. Request-bound
+    /// callers reuse their captured view and fact tracer instead
     /// of constructing a second base context inside the observation.
+    ///
+    /// This is the production entry: every port implementation routes here.
+    /// The no-context wrapper above it is the test / test-support convenience
+    /// form and is compiled out of a shipped build.
     pub(crate) fn observe_materialize_scope_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -1579,7 +1584,8 @@ impl VerterHost {
             );
         Some(crate::resolver_core::MaterializeScopeObservation {
             canonical_id: Arc::from(canonical),
-            indexed,
+            observed_whole_hash: indexed.whole_hash,
+            observed_shallow_hash: indexed.shallow_state.whole_hash,
             syntactic_export_set,
         })
     }

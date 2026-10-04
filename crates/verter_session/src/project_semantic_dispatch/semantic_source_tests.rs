@@ -151,7 +151,10 @@ fn authored_decl_body_source_raises_to_the_lower_locator_node() {
     );
 
     // Negative: the raised node is a real object surface, not a miss shell.
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     assert!(
         matches!(data.as_deref(), Some(SemanticNodeData::Object(_))),
         "Base's authored body must raise to an Object surface, got {data:?}"
@@ -195,9 +198,9 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
         .at_optional_boundary()
         .expect("the macro type-argument source must raise through the hot mirror");
 
-    let mirror =
-        crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, SFC_ID, macro_index)
-            .expect("the hot mirror must produce the macro type-arg handle");
+    let mirror = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+        .macro_type_arg_hot_ref(SFC_ID, macro_index)
+        .expect("the hot mirror must produce the macro type-arg handle");
     assert_eq!(
         raised.node(),
         mirror.hot.node(),
@@ -223,7 +226,11 @@ fn closed_leaf_sources_lower_in_scope() {
         .expect("a primitive leaf must raise");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, primitive.node()).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                primitive.node()
+            )
+            .as_deref(),
             Some(SemanticNodeData::Primitive(_))
         ),
         "a primitive leaf must lower to a Primitive node"
@@ -240,7 +247,10 @@ fn closed_leaf_sources_lower_in_scope() {
         )
         .at_optional_boundary()
         .expect("a bare Ref leaf must raise");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, reference.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        reference.node(),
+    );
     assert!(
         matches!(
             data.as_deref(),
@@ -284,7 +294,10 @@ defineProps<{ value?: Shared }>()
 }
 
 fn assert_instance_target(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) {
-    let data = crate::project_semantic_dispatch::node_data_for(host, node);
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        node,
+    );
     let Some(SemanticNodeData::DeclRef { identity }) = data.as_deref() else {
         panic!("owner-exact reference must lower to a declaration identity, got {data:?}");
     };
@@ -377,7 +390,10 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
         .at_optional_boundary()
         .expect("a closed tuple with a leaf-union element must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     let Some(SemanticNodeData::Tuple { elements, readonly }) = data.as_deref() else {
         panic!("the closed tuple must compose a Tuple node, got {data:?}");
     };
@@ -394,7 +410,10 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
     // The leaf-union element interns the ORDERED Union node whose members
     // are the lowered leaves — string THEN number, exactly as produced.
     let union_node = elements[0].value;
-    let union_data = crate::project_semantic_dispatch::node_data_for(&host, union_node);
+    let union_data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        union_node,
+    );
     let Some(SemanticNodeData::Union(members)) = union_data.as_deref() else {
         panic!("the leaf-union element must intern a Union node, got {union_data:?}");
     };
@@ -481,7 +500,10 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
         )
         .at_optional_boundary()
         .expect("a synthesized object shape must raise");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
         panic!("a synthesized object must compose an Object node, got {data:?}");
     };
@@ -498,7 +520,11 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
         .expect("the leaf member must be present");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, flag.value).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                flag.value
+            )
+            .as_deref(),
             Some(SemanticNodeData::Primitive(_))
         ),
         "the leaf member value must lower to a primitive"
@@ -513,7 +539,11 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     assert!(base.optional, "the locator member carries its optionality");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, base.value).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                base.value
+            )
+            .as_deref(),
             Some(SemanticNodeData::Object(_))
         ),
         "the locator member value must lower through the LowerLocator query to Base's body"
@@ -543,7 +573,11 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
         .expect("the session demand must replay to the member node");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, raised.node()).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                raised.node()
+            )
+            .as_deref(),
             Some(SemanticNodeData::Primitive(_))
         ),
         "`msg` must project to its primitive member value through the one dispatch"
@@ -565,7 +599,11 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
     );
     let fabricated_concrete = replayed.is_some_and(|handle| {
         matches!(
-            crate::project_semantic_dispatch::node_data_for(&host, handle.node()).as_deref(),
+            crate::project_semantic_dispatch::node_data_for(
+                host.project_type_store().semantic_graph(),
+                handle.node()
+            )
+            .as_deref(),
             Some(SemanticNodeData::Primitive(_)) | Some(SemanticNodeData::Literal(_))
         )
     });
@@ -614,7 +652,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
         let whole_hash = ctx
             .get_whole_hash(SCOPE)
             .expect("the seed scope must have a live whole hash");
-        ctx.project_type_store()
+        host.project_type_store()
             .semantic_graph()
             .intern_node_with_scope(
                 SemanticNodeData::new_bare_ref(
@@ -652,9 +690,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
             SyntheticBindingId::from_carrier_key(carrier),
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
-        ctx.project_type_store()
+        host.project_type_store()
             .shape_cache_db()
-            .peek(&key, ctx)
+            .fixture(ctx)
+            .peek(&key)
             .is_some()
     }
 
@@ -934,7 +973,10 @@ fn closed_leaf_union_with_duplicate_leaves_raises_to_the_singleton_literal() {
         .at_optional_boundary()
         .expect("a closed leaf union must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     match data.as_deref() {
         Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
             assert_eq!(value, "a", "the surviving literal is the decided leaf");
@@ -983,11 +1025,17 @@ fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
         .at_optional_boundary()
         .expect("a closed tuple with a duplicate-leaf union element must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        raised.node(),
+    );
     let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
         panic!("the closed tuple must compose a Tuple node, got {data:?}");
     };
-    let element_data = crate::project_semantic_dispatch::node_data_for(&host, elements[0].value);
+    let element_data = crate::project_semantic_dispatch::node_data_for(
+        host.project_type_store().semantic_graph(),
+        elements[0].value,
+    );
     match element_data.as_deref() {
         Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
             assert_eq!(value, "a", "the surviving literal is the decided leaf");

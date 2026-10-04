@@ -23,7 +23,6 @@
 //! - View has no overlay for the canonical → fall through to the
 //!   host's own `ensure_indexed_ready_serve` / `ensure_loaded` path.
 
-use crate::resolver_core::resolver_context::ResolverContext;
 use crate::session_view::SessionView;
 use crate::VerterHost;
 
@@ -160,7 +159,10 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
         overlay,
     );
     for canonical in view.overlay_canonicals() {
-        let _ = ResolverContext::ensure_indexed_ready_serve(&session_ctx, canonical.as_str());
+        let _ = crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+            &session_ctx,
+            canonical.as_str(),
+        );
     }
 }
 

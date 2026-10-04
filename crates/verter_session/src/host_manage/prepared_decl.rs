@@ -101,6 +101,15 @@ struct HeldIndexedSource {
     expected_syntactic_route_interface_hash: Hash16,
 }
 
+/// Session-only input lifetimes captured before crossing the request ports.
+/// This carrier is never part of an engine input or port answer.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SourceRequestServices<'a> {
+    pub(crate) session_view: Option<&'a dyn crate::session_view::SessionView>,
+    pub(crate) completion_overlay: Option<&'a crate::resolver_core::CanonicalCompletionOverlay>,
+    pub(crate) base_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
 impl VerterHost {
     /// Eagerly publish fresh current-content parse facts after a carrier edit
     /// that provably left the script routing envelope unchanged.
@@ -203,8 +212,20 @@ impl VerterHost {
         // against a superseded snapshot.
         let view = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
-        self.prepared_decl_bundle_with_context(&ctx, canonical_id)
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            &view,
+            Arc::clone(&overlay),
+        );
+        self.prepared_decl_bundle_with_context(
+            &ctx,
+            SourceRequestServices {
+                session_view: None,
+                completion_overlay: Some(&overlay),
+                base_view: None,
+            },
+            canonical_id,
+        )
     }
 
     /// Attribute a prepared-decl bundle warm-read rejection to one of
@@ -652,6 +673,7 @@ impl VerterHost {
     pub(crate) fn prepared_decl_bundle_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        services: SourceRequestServices<'_>,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         use crate::resolver_core::request_store_view::BundleMemoWorld;
@@ -672,7 +694,7 @@ impl VerterHost {
         // import-route resolution on the normalised analysis canonical.
         // The base path (`prepared_decl_bundle`) normalises internally,
         // so the raw id is forwarded unchanged.
-        if let Some(view) = ctx.active_session_view() {
+        if let Some(view) = services.session_view {
             let identity = self.overlay_artifact_identity(canonical_id);
             // If the active view tombstones the canonical, or carries an
             // overlay whose content hash differs from the base, the
@@ -683,7 +705,7 @@ impl VerterHost {
             // base path when the view carries no overlay for the
             // canonical.
             if view.is_tombstoned(canonical_id) {
-                return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
+                return self.materialize_prepared_decl_bundle_via_ctx(ctx, services, &identity);
             }
             // An explicit overlay for the canonical means the host's
             // shared bundle cache (keyed by canonical alone) holds the
@@ -714,11 +736,13 @@ impl VerterHost {
                 // re-export-chain walk
                 // (`build_prepared_import_canonicalization`). See
                 // `RequestBundleMemo` for the identity contract.
-                let memo = ctx
-                    .request_completion_overlay()
+                let memo = services
+                    .completion_overlay
                     .map(|overlay| overlay.bundle_memo());
                 let world = BundleMemoWorld::Overlay(overlay_hash);
-                let token = ctx.store_view().compat_token();
+                let token =
+                    crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)
+                        .compat_token();
                 if let Some(memo) = memo {
                     if let Some((bundle, reuse)) = memo.get(canonical_id, world, token) {
                         self.provenance
@@ -742,7 +766,9 @@ impl VerterHost {
                 let (bundle, non_cacheable) =
                     crate::fact_signature_helpers::with_cacheability_scope(
                         &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-                        |_probe| self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity),
+                        |_probe| {
+                            self.materialize_prepared_decl_bundle_via_ctx(ctx, services, &identity)
+                        },
                     );
                 let observed = match refusals.observed() {
                     Some(reason) => ObservedRefusal::Typed(reason),
@@ -768,13 +794,14 @@ impl VerterHost {
             }
         }
         // Per-request hoist: route the non-overlay fall-through
-        // through the view-bound helper, threading `ctx.store_view()`
+        // through the view-bound helper, threading `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`
         // (the request-bound borrow) and the request's bundle memo
         // instead of building a fresh owned snapshot via
         // `self.prepared_decl_bundle(canonical_id)`.
         self.prepared_decl_bundle_with_store_view(
-            ctx.store_view(),
-            ctx.request_completion_overlay()
+            &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+            services
+                .completion_overlay
                 .map(|overlay| overlay.bundle_memo()),
             canonical_id,
         )
@@ -814,6 +841,7 @@ impl VerterHost {
     fn materialize_prepared_decl_bundle_via_ctx(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        services: SourceRequestServices<'_>,
         identity: &crate::host_manage::overlay_materialize::OverlayArtifactIdentity,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         // Drive the overlay-aware `ensure_indexed_ready_serve` on the
@@ -823,9 +851,26 @@ impl VerterHost {
         // admission: this per-call bundle is NEVER inserted into the
         // shared `prepared_decl_bundles` cache (R17 below), so the
         // serve status needs no local admission gate.
-        let facts = ctx
-            .ensure_indexed_ready_serve(identity.raw_overlay_owner())?
-            .indexed;
+        let facts = crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
+            self,
+            services.session_view?,
+            identity.raw_overlay_owner(),
+        )?
+        .indexed;
+        // Completion remains epoch-guarded and uses the same captured session
+        // view as the materializer; retention itself never promotes admission.
+        if let (Some(overlay), Some(base), Some(view)) = (
+            services.completion_overlay,
+            services.base_view,
+            services.session_view,
+        ) {
+            overlay.complete_canonical_with_session_view(
+                self,
+                base,
+                view,
+                identity.raw_overlay_owner(),
+            );
+        }
         // The bundle identity is the RAW overlay owner — see the
         // doc-comment above. Every `root_identity.canonical_id` on a
         // decl built from this bundle is therefore the raw owner, so a
@@ -1171,8 +1216,9 @@ impl VerterHost {
         // `complete_canonical_inner`'s
         // `host.current_store_view_epoch() != base.mutation_epoch()`
         // short-circuit — but the resolver-tier `StoreView` trait
-        // cannot take `&VerterHost` (`no_concrete_verter_host_in_seal_scope`
-        // architecture guard). The materialiser publishes
+        // cannot take `&VerterHost` (the six request ports in
+        // `resolver_core::request_ports` return owned records or typed
+        // demands, never a host handle). The materialiser publishes
         // unconditionally; a superseded view will be detected by
         // the outer audited-request retry loop, which discards the
         // overlay before re-running the request.
@@ -1418,9 +1464,18 @@ impl VerterHost {
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            &view,
+            Arc::clone(&overlay),
+        );
         self.prepared_type_decl_in_with_context(
             &ctx,
+            SourceRequestServices {
+                session_view: None,
+                completion_overlay: Some(&overlay),
+                base_view: None,
+            },
             canonical_id,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol_name,
@@ -1459,6 +1514,7 @@ impl VerterHost {
     pub(crate) fn prepared_type_decl_in_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        services: SourceRequestServices<'_>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -1466,7 +1522,8 @@ impl VerterHost {
         Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
-        let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, canonical_id) else {
+        let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
+        else {
             return Ok(None);
         };
         bundle.prepared_type_decls.get_in(owner, symbol_name)
@@ -1488,10 +1545,24 @@ impl VerterHost {
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
-        self.prepared_value_decl_in_with_context(&ctx, canonical_id, owner, symbol_name)
-            .ok()
-            .flatten()
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            &view,
+            Arc::clone(&overlay),
+        );
+        self.prepared_value_decl_in_with_context(
+            &ctx,
+            SourceRequestServices {
+                session_view: None,
+                completion_overlay: Some(&overlay),
+                base_view: None,
+            },
+            canonical_id,
+            owner,
+            symbol_name,
+        )
+        .ok()
+        .flatten()
     }
 
     pub(crate) fn prepared_value_decl_in_with_store_view(
@@ -1515,6 +1586,7 @@ impl VerterHost {
     pub(crate) fn prepared_value_decl_in_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        services: SourceRequestServices<'_>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -1522,7 +1594,8 @@ impl VerterHost {
         Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
-        let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, canonical_id) else {
+        let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
+        else {
             return Ok(None);
         };
         bundle.prepared_value_decls.get_in(owner, symbol_name)
@@ -1673,7 +1746,11 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         self.with_base_resolver_context(|ctx| {
-            self.shallow_file_state_with_context(ctx, canonical_id)
+            self.shallow_file_state_with_context(
+                ctx,
+                SourceRequestServices::default(),
+                canonical_id,
+            )
         })
     }
 
@@ -1722,7 +1799,8 @@ impl VerterHost {
     ///    contract.
     pub(crate) fn shallow_file_state_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        _ctx: &dyn crate::resolver_core::ResolverContext,
+        services: SourceRequestServices<'_>,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         // Step 1 — current-content-pinned `IndexedReady` fast path. A warm
@@ -1733,16 +1811,25 @@ impl VerterHost {
         // `ensure_indexed_ready_serve`'s materialise path never calls
         // `shallow_file_state` / the content-pinned accessor, and its own reuse
         // is edge-gated, so the re-index terminates at a fresh artifact.
-        if let Some(indexed) = ctx.indexed_for_current_content(canonical_id) {
+        let current = match services.session_view {
+            Some(view) if view.overlay_content_hash_for(canonical_id).is_some() => self
+                .materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+                .map(|serve| serve.indexed),
+            Some(view) if view.is_tombstoned(canonical_id) => None,
+            _ => self.current_content_pinned_indexed(canonical_id),
+        };
+        if let Some(indexed) = current {
             if indexed.shallow_state.has_resolvable_surface() {
-                return Some(indexed.shallow_state.clone());
+                return Some(Arc::clone(&indexed.shallow_state));
             }
         }
 
         // Step 2 — route-surface accessor. Overlay branches serve the
         // overlay materialiser's artifact; the base fall-through joins the
         // canonical `IndexedReady` build (`ensure_indexed_ready_serve`).
-        if let Some(state) = self.routed_shallow_state_with_context(ctx, canonical_id) {
+        if let Some(state) =
+            self.routed_shallow_state_with_view(canonical_id, services.session_view)
+        {
             return Some(state);
         }
 
@@ -2403,6 +2490,7 @@ impl VerterHost {
                 declares_interface_app_config,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
                 source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             });
 
             if held_source.is_some_and(|held| {
@@ -2742,7 +2830,9 @@ impl VerterHost {
         let artifacts = self.current_content_pinned_artifacts(canonical_id);
         let indexed = artifacts.as_ref().map(|artifacts| &artifacts.indexed);
         let indexed = indexed.filter(|indexed| {
-            known_shallow.is_none_or(|known| std::ptr::eq(indexed.shallow_state.as_ref(), known))
+            known_shallow.is_none_or(|known| {
+                Arc::ptr_eq(&indexed.shallow_state.input_record(), &known.input_record())
+            })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
             self.syntactic_route_interface_fact_for_indexed(canonical_id, indexed)
@@ -2758,7 +2848,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-        known_shallow: Option<&crate::resolver_core::ShallowFileState>,
+        known_shallow: Option<&crate::resolver_core::shallow_file_state::ShallowInputRecord>,
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
     ) {
@@ -2777,14 +2867,13 @@ impl VerterHost {
 
         let indexed = ctx.indexed_for_current_content(canonical_id);
         let indexed = indexed.as_ref().filter(|indexed| {
-            known_shallow.is_none_or(|known| std::ptr::eq(indexed.shallow_state.as_ref(), known))
+            known_shallow.is_none_or(|known| {
+                indexed.shallow_state.observation_id == known.observation_id
+                    && indexed.shallow_state.source_identity == known.source_identity
+            })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
-            Self::syntactic_route_interface_fact_for_indexed_with_context(
-                ctx,
-                canonical_id,
-                indexed,
-            )
+            self.syntactic_route_interface_fact_for_indexed_with_context(ctx, canonical_id, indexed)
         }) {
             let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
@@ -2794,16 +2883,17 @@ impl VerterHost {
     }
 
     fn syntactic_route_interface_fact_for_indexed_with_context(
+        &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-        indexed: &Arc<crate::project_type_store::IndexedReady>,
+        indexed: &Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
     ) -> Option<crate::resolver_core::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
         let key = ctx.artifact_key_for_current_content(canonical_id)?;
-        let artifacts = ctx.project_type_store().indexed().get_artifacts(&key)?;
-        if !Arc::ptr_eq(&artifacts.indexed, indexed) {
+        let artifacts = self.project_type_store().indexed().get_artifacts(&key)?;
+        if !Arc::ptr_eq(&artifacts.indexed.input_record(), indexed) {
             return None;
         }
         let fact = artifacts
@@ -2820,6 +2910,7 @@ impl VerterHost {
     pub(crate) fn resolve_direct_imported_type_root_fast_path_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
     ) -> Option<(
@@ -2832,7 +2923,7 @@ impl VerterHost {
         // This is deliberately conservative: aliases and default exports need
         // the route inventory to map exported names back to local symbols, and
         // duplicate owners are ambiguous, so all three fall through.
-        let session_masks_dependency = ctx.active_session_view().is_some_and(|view| {
+        let session_masks_dependency = session_view.is_some_and(|view| {
             view.overlay_content_hash_for(dep_canonical).is_some()
                 || view.is_tombstoned(dep_canonical)
         });
@@ -3089,8 +3180,13 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        use crate::resolver_core::resolver_context::ResolverContext;
-        self.owner_import_surface_with_store_view(&ctx, ctx.store_view(), owner_canonical)
+
+        self.owner_import_surface_with_store_view(
+            &ctx,
+            None,
+            &crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
+            owner_canonical,
+        )
     }
 
     /// View-bound variant of [`Self::owner_import_surface`].
@@ -3104,13 +3200,14 @@ impl VerterHost {
     pub(crate) fn owner_import_surface_with_store_view(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
         let shallow = self.shallow_file_state(owner_canonical)?;
         let whole_hash = shallow.whole_hash;
         let surfaces = self.project_type_store.owner_import_surfaces();
-        surfaces.get_or_compute(self, owner_canonical, whole_hash, view, || {
+        crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(surfaces).get_or_compute(self, owner_canonical, whole_hash, view, || {
             component_meta_trace_custom!(
                 "owner_import_surface_build",
                 format!("owner={}", owner_canonical),
@@ -3219,6 +3316,7 @@ impl VerterHost {
                 let (final_identity, route_facts) = self
                     .resolve_imported_type_root_with_facts_with_store_view(
                         ctx,
+                        session_view,
                         view,
                         resolved_canonical_id.as_str(),
                         target.imported_name.as_str(),
@@ -3399,10 +3497,11 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        use crate::resolver_core::resolver_context::ResolverContext;
+
         self.resolve_owner_direct_import_with_store_view(
             &ctx,
-            ctx.store_view(),
+            None,
+            &crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
             owner_canonical,
             local_name,
         )
@@ -3415,11 +3514,13 @@ impl VerterHost {
     pub(crate) fn resolve_owner_direct_import_with_store_view(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        let surface = self.owner_import_surface_with_store_view(ctx, view, owner_canonical)?;
+        let surface =
+            self.owner_import_surface_with_store_view(ctx, session_view, view, owner_canonical)?;
         // `Arc<str>` borrows as `&str`, so the surface lookup uses the
         // caller-supplied slice directly without allocating a fresh Arc.
         let binding = surface.bindings.get(local_name)?;

@@ -172,7 +172,7 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
     if !visited.insert(node) {
         return None;
     }
-    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+    match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
         // Already the Conditional — done.
         Some(SemanticNodeData::Conditional { .. }) => Some(node),
         // Navigate-mode carrier for a named alias. Resolve the alias's
@@ -308,7 +308,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // branches under `Published(Shallow)` and merge their top-level
     // Object members.
     let (true_branch, false_branch) =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, conditional_node)
+        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), conditional_node)
             .as_deref()
         {
             Some(SemanticNodeData::Conditional {
@@ -357,7 +357,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ),
             });
             crate::request_context::observe_component_meta_read_suppress(&branch_read);
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &branch_read.dep_signature);
+            emit_dispatch_dep_signature_facts(dispatch, &branch_read.dep_signature);
             if !branch_read.walker_diagnostics.is_empty() {
                 diag_sink.push(shallow_diagnostics_to_macro_expansion(
                     &branch_read.walker_diagnostics,
@@ -374,7 +374,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 QueryResult::Value(id) => {
                     let open = open
                         || matches!(
-                            crate::project_semantic_dispatch::node_data_for(dispatch.ctx, id)
+                            crate::project_semantic_dispatch::node_data_for(dispatch.graph(), id)
                                 .as_deref(),
                             Some(SemanticNodeData::ObjectSpreadProgram(_))
                         );
@@ -398,7 +398,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // survive un-flattened.
     let read_members =
         |surface: SemanticNodeId| -> Result<Option<Vec<SurfaceMember>>, NonEmptyReasons> {
-            match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, surface).as_deref()
+            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), surface)
+                .as_deref()
             {
                 Some(SemanticNodeData::Object(view)) => {
                     Ok(Some(view.closed().complete_members().to_vec()))
@@ -432,7 +433,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     );
                     let members =
                     crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                        dispatch.ctx.project_type_store().semantic_graph(),
+                        dispatch.graph(),
                         &formula,
                         &mut canonical_evidence,
                     );
@@ -469,11 +470,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
             let merged = merge_emit_branch_members(&t, &f);
             let view = crate::semantic_query::SurfaceView::from_members(merged, None);
             SurfaceResolution::resolved(
-                dispatch
-                    .ctx
-                    .project_type_store()
-                    .semantic_graph()
-                    .intern_node(SemanticNodeData::Object(view)),
+                dispatch.graph().intern_node(SemanticNodeData::Object(view)),
             )
         }
         // One branch has an enumerable member surface, the other RESOLVED

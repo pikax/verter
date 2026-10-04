@@ -2482,8 +2482,13 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     let mut saw_true = false;
     let mut saw_false = false;
     for (candidate, current, label) in pairs {
-        let node_verdict =
-            crate::meta_resolve::compare_node_improvement(&host, *candidate, *current);
+        let fixture_dispatch_0 =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let node_verdict = crate::meta_resolve::compare_node_improvement(
+            &fixture_dispatch_0,
+            *candidate,
+            *current,
+        );
         let cand_raise = raise_oracle(&host, *candidate).expect("candidate raises");
         let cur_raise = raise_oracle(&host, *current).expect("current raises");
         let expr_verdict =

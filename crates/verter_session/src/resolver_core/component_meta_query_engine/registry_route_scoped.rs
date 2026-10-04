@@ -123,18 +123,15 @@ impl ComponentMetaQueryEngine<'_> {
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
         .unwrap_or_else(|| {
-            let interner = self.ctx.project_type_store().identity_interner();
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
-                interner.intern(scope_canonical_id),
-                scope_owner,
-                interner.intern(symbol_name),
-            )
+            self.dispatch
+                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
         });
         let body_locator = self.named_decl_body(
             own_root.canonical_id.as_ref(),
@@ -155,7 +152,8 @@ impl ComponentMetaQueryEngine<'_> {
         };
         // The one-level view through the shared empty-path Shallow surface
         // walker (member values stay shallow nodes).
-        let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
+        let (view, _surface_node) =
+            compound_root_surface_view_via_dispatch(self.dispatch, body_root)?;
         let closed = view.closed();
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
@@ -237,7 +235,7 @@ impl ComponentMetaQueryEngine<'_> {
 
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =
-                node_data_for(self.ctx, node).as_deref()
+                node_data_for(self.dispatch.graph(), node).as_deref()
             {
                 node = *inner;
             }
@@ -261,13 +259,13 @@ impl ComponentMetaQueryEngine<'_> {
                 }
                 let Some(root) =
                     crate::resolver_core::component_meta_registry::prepared_body_root_node(
-                        self.ctx,
+                        self.dispatch,
                         prepared.as_ref(),
                     )
                 else {
                     continue;
                 };
-                match node_data_for(self.ctx, peel_alias(root)).as_deref() {
+                match node_data_for(self.dispatch.graph(), peel_alias(root)).as_deref() {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         next.push((
                             identity.canonical_id.as_ref().to_string(),
@@ -285,7 +283,9 @@ impl ComponentMetaQueryEngine<'_> {
                             // substitution) — recurse into the source arg.
                             if let Some(SemanticNodeData::DeclRef { identity }) = args
                                 .first()
-                                .and_then(|arg| node_data_for(self.ctx, peel_alias(*arg)))
+                                .and_then(|arg| {
+                                    node_data_for(self.dispatch.graph(), peel_alias(*arg))
+                                })
                                 .as_deref()
                             {
                                 next.push((
@@ -307,7 +307,7 @@ impl ComponentMetaQueryEngine<'_> {
                     Some(SemanticNodeData::Intersection(arms)) => {
                         for arm in arms.iter() {
                             if let Some(SemanticNodeData::DeclRef { identity }) =
-                                node_data_for(self.ctx, peel_alias(*arm)).as_deref()
+                                node_data_for(self.dispatch.graph(), peel_alias(*arm)).as_deref()
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),

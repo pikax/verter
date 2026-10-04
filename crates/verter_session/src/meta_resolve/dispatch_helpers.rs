@@ -128,7 +128,7 @@ fn realize_callable_member_at(
     // root shell resolved only on demand would be replayed as its resolved
     // carrier and no longer match the recorded occurrence. A shell behind a
     // local alias publishes the alias node instead and normalizes below.
-    if let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) {
+    if let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) {
         if let SemanticNodeData::ImportType(_) = data.as_ref() {
             return match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
                 dispatch.ctx,
@@ -149,7 +149,7 @@ fn realize_callable_member_at(
             );
         }
     };
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, normalized)
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), normalized)
     else {
         return SurfaceResolution::incomplete(NonEmptyReasons::of(
             PartialReason::MissingSemanticNodeData,
@@ -229,13 +229,7 @@ fn realize_callable_member_at(
                     ),
                 )
             };
-            SurfaceResolution::resolved(
-                dispatch
-                    .ctx
-                    .project_type_store()
-                    .semantic_graph()
-                    .intern_node(rebuilt),
-            )
+            SurfaceResolution::resolved(dispatch.graph().intern_node(rebuilt))
         }
 
         // A builtin runtime NOMINAL's application carrier (`Date`,
@@ -354,13 +348,14 @@ fn route_outer_utility_is_shadowed(
 /// `Mapped` / `TypeOf` / `Conditional` shells).
 pub(crate) fn project_expr_class_a_via_dispatch(
     ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
     // Resolve via the node-domain Class-A sibling (registry route fast-path +
     // terminal), materialising ONCE at the surface sink — the engine-less
     // counterpart of `project_expr_class_a_node_via_dispatch_threaded`.
-    crate::resolver_core::project_class_a_published(ctx, scope_canonical_id, expr)
+    crate::resolver_core::project_class_a_published(ctx, dispatch, scope_canonical_id, expr)
 }
 
 /// Node-domain Class-A projection: returns the admitted route/surface NODE
@@ -378,6 +373,7 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// off the projected node WITHOUT re-lowering a materialised leaf.
 pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
+    dispatch: &'ctx crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx>,
     mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
@@ -411,7 +407,7 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
         let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
         let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
             Some(e) => e,
-            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
+            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx, dispatch)),
         };
         if let Some(projected) = project_route_surface_node_via_host_threaded(
             engine_ref,
@@ -431,7 +427,12 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
             return Some(solved);
         }
     }
-    crate::resolver_core::project_class_a_terminal_node(ctx, scope_canonical_id, scope_owner, expr)
+    crate::resolver_core::project_class_a_terminal_node(
+        dispatch,
+        scope_canonical_id,
+        scope_owner,
+        expr,
+    )
 }
 
 /// decompose an IndexedAccess chain over literal-string
@@ -500,7 +501,7 @@ pub(crate) fn decompose_indexed_access_chain(
 /// WITHOUT lowering the base a second time (it IS the same handle). A
 /// non-indexed carrier decomposes to `(node, [])`.
 pub(crate) fn decompose_indexed_access_chain_node(
-    ctx: &dyn ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
 ) -> (
     crate::semantic_query::SemanticNodeId,
@@ -511,7 +512,9 @@ pub(crate) fn decompose_indexed_access_chain_node(
     // Collect outer→inner, then reverse so the path reads base→terminal.
     let mut rev_path: Vec<PathSegment> = Vec::new();
     let mut current = node;
-    while let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) {
+    while let Some(data) =
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)
+    {
         match data.as_ref() {
             SemanticNodeData::IndexedAccess { object, index } => match index {
                 IndexKey::String(s) => {
@@ -577,7 +580,7 @@ pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
         return None;
     }
     crate::resolver_core::lower_and_project_to_expanded_node(
-        engine.ctx(),
+        engine.dispatch,
         scope_canonical_id,
         scope_owner,
         expr,
@@ -715,7 +718,7 @@ fn resolved_instantiation_head(
     // Bounded: alias chains are short; the cap only guards pathological
     // graph shapes.
     for _ in 0..16 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::InstantiationRef { base, args } => {

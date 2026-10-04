@@ -76,8 +76,25 @@ const SEP: u8 = 0u8;
 /// Invariant under cosmetic edits; changes under decl-shape edits.
 #[must_use]
 pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
+    compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
+}
+/// The same hash, computed from a request-input record rather than the
+/// canonical artifact. The request-input carrier is the port-shaped
+/// projection of the artifact, so the two must agree; the only caller is
+/// the fact-validation proof surface, which is compiled only under `test` /
+/// `test-support`. A shipped (no test-support) build — the wasm32 lane among
+/// them — therefore has no reader.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn compute_parse_stable_hash_inputs(
+    indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,
+) -> Hash16 {
+    compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
+}
+fn compute_parse_stable_hash_parts(
+    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+) -> Hash16 {
     verter_audit::attribute!(ParseStableHash);
-    let shallow = &indexed.shallow_state;
 
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     buf.extend_from_slice(SALT);
@@ -85,7 +102,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: type symbols (HEADER inventory — no body lowering) ──
     write_section(&mut buf, b"types");
-    let headers = shallow.decl_bodies().header_index();
+    let headers = &shallow.headers;
     let mut type_keys: Vec<_> = headers.type_headers.keys().collect();
     type_keys.sort_unstable();
     for key in type_keys {
@@ -237,7 +254,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     // the region KIND and source dialect, but not byte spans: offsets move
     // under cosmetic carrier edits and are not semantic shape.
     write_section(&mut buf, b"carrier_script_regions");
-    if let Some(parse) = indexed.framework_parse.as_deref() {
+    if let Some(parse) = framework_parse {
         for region in parse.script_regions() {
             write_script_region_kind(&mut buf, region.kind);
             write_script_source_type(&mut buf, region.source_type);

@@ -201,7 +201,7 @@ private byte quota beside the aggregate ceiling this contract forbids, and
 would let N stores admit against N ceilings. `SemanticGraphStore` and
 `ComponentMetaResultDb` therefore charge the one account through EVERY
 reachable constructor, including `new()` / `Default`; `reserve_memo_candidate`,
-`reserve_scc_batch` and `ComponentMetaResultDb::insert_owned` have no
+`reserve_scc_batch` and `ComponentMetaResultDb::publish_core` have no
 uncharged arm. A test that needs deterministic pressure binds a private
 account explicitly (`with_account`, `with_account_for_test`,
 `ProjectTypeStore::with_retention_account`).
@@ -462,8 +462,13 @@ never in the key. The rail per layer:
   (`BoundedCandidateMap<…, Hash16, …>`) + `ReadSetSignature.facts` +
   `validated_at_generation`; the owner `FileWholeHash` stays in the value facts.
 
-`ComponentMetaResultDb` and its resolved-meta sidecar take those facts from the
-finalized request fact tracer. Dispatch paths without their own cache boundary
+The selected engine `MemoPublish` for `ComponentMetaResultDb` and its resolved-meta
+sidecar takes those facts from the finalized request fact tracer. Storage accepts
+owned entries; `MemoRead` owns generation/fact validation and accounting through
+the request-bound `FactValidation` port. Candidate stores clone ordered `Arc`
+snapshots under their existing guards; the engine tests them only after those
+guards drop. Shape lifecycle validation deliberately keeps the original entry
+guards while testing node liveness, then removes collected keys in order. Dispatch paths without their own cache boundary
 fan dependency signatures into that tracer; they must not maintain a parallel
 TLS accumulator or reconstruct a curated signature after the compute. A
 non-cacheable or overflowing tracer still returns the best computed value to the
@@ -515,7 +520,7 @@ derived-`Hash` query-identity key (the retired content-free `DeclKey`
 query-key struct must NOT be reintroduced). The cold-build path
 (`build_instantiate`, `build_resolve_macro_payload`) re-sources the live file
 content version from
-`ResolverContext::ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash` at
+`IndexedInputs::ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash` at
 value-compute time and rolls it into the published `MemoEntry`'s
 `ReadSetSignature.facts` + `self_root_canonicals` rails. The slot is U2-DERIVED
 at query-key construction via `ProjectSemanticDispatch::type_slot_for` (reads
@@ -720,8 +725,10 @@ accessor that scans `artifacts` is forbidden by the
 The only intentional content-agnostic escapes are `get_any` /
 `get_artifacts_any`, each guarded at every call site.
 
-**R18.** `SessionView` is passed explicitly through `ResolverContext`.
-Thread-local "current view" globals remain forbidden.
+**R18.** The private request adapter captures `SessionView` and its completion
+overlay at entry. Engine consumers use the six request-bound ports and owned
+observations; `ResolverContext` returns no view or overlay borrow. Thread-local
+"current view" globals remain forbidden.
 
 **R19.** Fact validation is the **cache-correctness oracle**.
 `StoreViewCompatToken` is the **concurrency oracle**: singleflight lane
@@ -1258,9 +1265,11 @@ stale / admit-refused paths or when an observer is explicitly sampling.
 Warm-hit validation must stay under 50µs p99 and must not allocate (asserted
 via test-allocator counter).
 
-**R25.** The fact read tracer (`FactReadSet` in `ResolverContext`) is active on
-cold-compute and write-admission paths only. Warm hits validate stored
-signatures directly without instantiating a tracer.
+**R25.** The driver-scoped fact read tracer uses the selected `FactValidation`
+clock authority and is active on cold-compute and write-admission paths only.
+Its concrete reader preserves live clock sampling without per-frame port
+dispatch. Warm hits validate stored signatures directly without instantiating a
+tracer.
 
 ### Cache substrate
 
@@ -1275,7 +1284,7 @@ on any cache layer violates R21 (the five env-hash dimensions must remain split
 Fields:
 
 - `compat_token: StoreViewCompatToken` — singleflight lane identity (epoch +
-  optional session); read through `ctx.store_view().compat_token()`.
+  optional session); read through `FactValidation::compat_token(ctx)`.
 - `project_identity, parse_env_hash, resolve_env_hash, type_env_hash,
   lib_env_hash: Hash16` — the five env-hash dimensions.
 - `source_map_policy_hash, public_api_mode_hash: Hash16` — typed policy

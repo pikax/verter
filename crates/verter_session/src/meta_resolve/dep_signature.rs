@@ -20,7 +20,7 @@
 /// fact representation and is deliberately omitted. The enclosing
 /// request-level tracer finalises and owns the reusable cache signature.
 pub(crate) fn emit_dispatch_dep_signature_facts(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -30,7 +30,7 @@ pub(crate) fn emit_dispatch_dep_signature_facts(
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
-    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
+    if let Some(prov) = dispatch.graph().provenance() {
         prov.dispatch_dep_signature_fact_tracer_emissions
             .fetch_add(1, Relaxed);
     }

@@ -708,12 +708,12 @@
         "crateInternal": [
           "build_toolchain_fingerprint",
           "cache_runtime",
+          "decl_body_memo",
           "flow_completion_inventory",
           "flow_return_audit",
           "flow_slice_content",
           "graph_walk",
           "project_semantic_dispatch",
-          "project_type_store",
           "request_context",
           "resolver_core",
           "semantic_query",
@@ -879,12 +879,10 @@
           "loop5_instrumentation",
           "meta_resolve",
           "project_semantic_dispatch",
-          "project_type_store",
           "request_context",
           "resolver_core",
           "semantic_query",
-          "semantic_query_memo",
-          "session_view"
+          "semantic_query_memo"
         ],
         "mustNotImport": [
           "verter_compiler",
