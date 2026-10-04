@@ -1006,6 +1006,15 @@ impl VerterLanguageServer {
             return;
         };
         let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        // TEST SEAM: fires HERE — after the open generation is resolved and
+        // BEFORE the lease is taken — so a test can observe POSITIVELY that a
+        // caller reached this wrapper. The lane-less `publish_carrier_to_
+        // external_ts` has no such point, which is what makes "the arm parked
+        // at the fence" and "the arm reached the publish's compile" mutually
+        // exclusive observations instead of a timing window.
+        #[cfg(test)]
+        self.maybe_pause_open_carrier_publish_before_lease(&canonical_id)
+            .await;
         let _repair_guard = repair_lease.lock().await;
         if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
             // Same revived-lane guard as `ensure_current_file_synced`.
