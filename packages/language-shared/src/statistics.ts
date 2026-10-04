@@ -43,10 +43,4 @@ export type StatisticsSnapshot = {
 export type StatisticsRequestParams = {
   includeEvents?: boolean;
   scope?: "session" | "global" | "all";
-  /**
-   * The open document whose diagnostics status the caller is waiting on. The
-   * server records it as demand for that document, so its owed work is served
-   * ahead of unrelated work.
-   */
-  uri?: string;
 };

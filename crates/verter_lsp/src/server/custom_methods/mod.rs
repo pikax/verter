@@ -422,6 +422,12 @@ impl VerterLanguageServer {
     /// Handle `$/verter/getAnalysis` request.
     ///
     /// Returns the full analysis snapshot as JSON for a Vue document URI.
+    ///
+    /// A caller asking for this document by name is waiting on it: the
+    /// request is recorded as demand for the document first (see
+    /// [`Self::demand_document`]), so the status it is polled alongside is
+    /// served ahead of unrelated owed work. The analysis response itself is
+    /// unchanged.
     pub async fn get_analysis(
         &self,
         params: GetAnalysisParams,
@@ -434,30 +440,19 @@ impl VerterLanguageServer {
             Err(_) => return Ok(None),
         };
 
+        self.demand_document(&parsed_uri).await;
+
         Ok(self.documents.get_analysis_json(&parsed_uri))
     }
 
     /// Handle `$/verter/getStatistics` request.
     ///
     /// Returns basic statistics about the LSP session.
-    ///
-    /// A request naming a `uri` is a caller waiting on that document's
-    /// diagnostics status: it is recorded as demand for the document first
-    /// (see [`Self::demand_document`]), so the status it polls for is served
-    /// ahead of unrelated owed work.
     pub async fn get_statistics(
         &self,
-        params: Option<StatisticsRequestParams>,
+        _params: Option<StatisticsRequestParams>,
     ) -> Result<StatisticsSnapshot> {
         tracing::debug!("$/verter/getStatistics");
-
-        if let Some(uri) = params
-            .as_ref()
-            .and_then(|params| params.uri.as_deref())
-            .and_then(|uri| uri.parse::<Uri>().ok())
-        {
-            self.demand_document(&uri).await;
-        }
 
         let mut by_type = serde_json::Map::new();
         let mut by_file = serde_json::Map::new();

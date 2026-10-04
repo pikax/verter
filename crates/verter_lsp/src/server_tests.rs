@@ -30585,9 +30585,9 @@ async fn promoting_a_rootless_receipt_releases_the_publication_a_scan_held() {
 
 /// A restart replays every document the client still holds as an open, and
 /// nothing in a replayed open singles out the one a caller is about to assert
-/// on. Its diagnostics-status request names it, and that request alone must
-/// move it ahead of every newer replayed open: no fresh open and no other
-/// editor request against it is involved.
+/// on. Its status poll names it through the existing per-document analysis
+/// request, and that request alone must move it ahead of every newer replayed
+/// open: no fresh open and no other editor request against it is involved.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() {
     let fixture = watched_dependency_fixture(true).await;
@@ -30669,13 +30669,20 @@ async fn a_status_request_naming_a_document_serves_it_ahead_of_replayed_opens() 
         pulled(&fixture.provider.calls())
     );
 
-    // The caller polls the asserted document's status, naming it.
+    // The caller polls the asserted document's status the way the E2E-only
+    // command does: an existing per-document request names it — the demand —
+    // and only after it answers is the unchanged statistics snapshot read.
+    server
+        .get_analysis(crate::server::protocol_types::GetAnalysisParams {
+            uri: docs[0].1.to_string(),
+        })
+        .await
+        .expect("the per-document request must answer");
     let status = server
         .get_statistics(Some(
             crate::server::protocol_types::StatisticsRequestParams {
                 include_events: false,
                 scope: None,
-                uri: Some(docs[0].1.to_string()),
             },
         ))
         .await
@@ -30790,18 +30797,25 @@ impl ScanPublicationFixture {
     }
 
     /// Wait for `ready` while polling `uri`'s diagnostics status by name, the
-    /// way a restarted client waiting on that document does. The poll cadence
-    /// is the client's; the coordinator's own receipts decide the wait.
+    /// way a restarted client waiting on that document does: the existing
+    /// per-document analysis request names it, then the unchanged statistics
+    /// snapshot is read. The poll cadence is the client's; the coordinator's
+    /// own receipts decide the wait.
     async fn await_while_polling(&self, uri: &Uri, ready: impl FnMut() -> bool, what: &str) {
         let poll = async {
             loop {
+                let _ = self
+                    .server()
+                    .get_analysis(crate::server::protocol_types::GetAnalysisParams {
+                        uri: uri.to_string(),
+                    })
+                    .await;
                 let _ = self
                     .server()
                     .get_statistics(Some(
                         crate::server::protocol_types::StatisticsRequestParams {
                             include_events: false,
                             scope: None,
-                            uri: Some(uri.to_string()),
                         },
                     ))
                     .await;
@@ -30918,10 +30932,14 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
 }
 
 /// With the production workspace scan parked on an unrelated item, a replayed
-/// open document whose own sync and dependencies settle is certified — a
-/// current merged-diagnostics receipt — while level 2 of the readiness ladder
-/// is still unannounced, and level 2 follows only once the parked item lets
-/// the scan finish.
+/// open document whose dependency content was already delivered is still not
+/// certified until its DependencyReady receipt is minted: the coordinator's
+/// tick decides the publication during the parked scan and fail-closes on the
+/// missing receipt — the hold the counter observes — even though the engine
+/// already holds the dependency. Once the receipt is minted the target is
+/// certified with a current merged-diagnostics receipt while level 2 of the
+/// readiness ladder is still unannounced, and level 2 follows only once the
+/// parked item lets the scan finish.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagnostics() {
     let fixture = scan_publication_fixture(true).await;
@@ -30929,13 +30947,35 @@ async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagno
     let (scan_parked, release_scan) = crate::sync_coordinator::test_hooks::block_after_ide_compile(
         &fixture.id("far/Unrelated.vue"),
     );
+    // Hold the target's import-publication pass — the one route that mints
+    // its DependencyReady receipt. The open's eager warmup still delivers the
+    // child into the engine (its content is current); only the receipt lags,
+    // so a publication decided while this guard is held can only be held back
+    // by the receipt gate, never excused by the delivery.
+    let publication = server.import_sync.lock_for(&fixture.id("src/Target.vue"));
+    let publication_parked = publication.lock().await;
     let target = fixture.open("src/Target.vue").await;
+    let holds_before = server.sync_coordinator.dependency_holds();
 
     server.spawn_background_init(None, "parked scan").await;
     tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
         .await
         .expect("the workspace scan must reach the unrelated item");
     fixture.await_ready_announced().await;
+    fixture
+        .await_while_polling(
+            &target,
+            || server.sync_coordinator.dependency_holds() > holds_before,
+            "the parked scan must decide the target's publication and hold it on the missing receipt",
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&target),
+        "a publication held for want of its receipt must not be certified"
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+
+    drop(publication_parked);
     fixture
         .await_while_polling(
             &target,

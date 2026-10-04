@@ -117,9 +117,11 @@ async function closeAllEditors(): Promise<void> {
  * entry. The entry is opened FIRST, straight after the restart. A document VS
  * Code still holds is not re-opened — its replayed open is all the server has,
  * and nothing about that open singles it out — so the priority comes from the
- * diagnostics-status poll instead: it names the entry, and the server records
- * that request as demand for it (its owed work served first, its dependency
- * publication enqueued, the scanner promoting it and its imports).
+ * diagnostics-status poll instead: `verter._getDiagnosticStatus` first awaits
+ * an existing per-document request for the entry (`getAnalysis {uri}`), which
+ * the server records as demand for it (its owed work served first, its
+ * dependency publication enqueued, the scanner promoting it and its imports),
+ * and only then reads the unchanged statistics.
  *
  * A suite that asserts workspace-wide state (closed-file references, project
  * rename, workspace symbols) passes `workspaceWide` with the reason: the server
