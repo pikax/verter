@@ -799,7 +799,12 @@ The provider-free `verter_lsp` library nextest lane runs the regression proofs:
 - `server::server_tests::a_scanner_started_closed_is_refused_when_the_document_opens_after_its_lane_probe`
   checks the delivery fence after a successful open.
 - `server::server_tests::the_open_carrier_republish_waits_for_the_document_lane`
-  checks completion recovery's publication ordering.
+  drives the production completion recovery path and proves it reaches the
+  fenced wrapper. The oracle is which of two test-owned fence points the arm
+  parks at — the wrapper's pre-lease point (only the lane-taking entry has one)
+  or the shared publish's post-compile seam (a lane-bypassing arm lands here
+  without ever taking the lane) — so lane exclusion is an observed ordering
+  event, not a deadline, and a slow-but-correct arm still passes.
 - `server::server_tests::an_api_leg_yielding_to_an_interactive_request_is_a_lane_yield_not_a_retry`
   checks the coordinator's API contention disposition.
 - `server::server_tests::did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed`

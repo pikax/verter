@@ -38044,63 +38044,124 @@ async fn a_tsserver_revision_already_published_is_not_published_again() {
 /// records and versions its surfaces. It must take the document's lane, so it
 /// cannot supersede a lane holder's recorded surface mid-transaction.
 ///
-/// The compile seam is the discriminator, and the reason the proof cannot be a
-/// bare "the future is still pending": an unfenced republish is a long async
-/// future, so it is pending at the first poll whether or not it respects the
-/// lane. The seam is the FIRST point it reaches after the lane, so a republish
-/// that walks past a held lane arrives there at once, while a fenced one cannot
-/// get there at all. The bound below is generous for an in-memory provider and
-/// only has to outlast the mock's own bookkeeping.
+/// **The regression boundary is the WIRING, so the proof drives the wiring.**
+/// The defect this fences was the recovery closure in `server/nav_features.rs`
+/// choosing the lane-less `publish_carrier_to_external_ts` over the lane-taking
+/// `publish_open_carrier_to_external_ts`, so the test drives the PRODUCTION
+/// completion path: a completion request whose provider query fails, which is
+/// what makes the shared bounded recovery run its resync arm, with the
+/// document's lane held by this test.
+///
+/// **The oracle is an observed ordering event, not a deadline.** Two fence
+/// points are armed, and the recovery arm can only ever park at ONE of them:
+///
+/// * `at_fence` — inside `publish_open_carrier_to_external_ts`, after the open
+///   generation resolves and before the lease is taken. Only the lane-taking
+///   wrapper has this point, so reaching it is positive proof the call site
+///   chose the fenced entry.
+/// * `at_compile` — inside the shared `publish_carrier_to_external_ts`, after
+///   its own compile. A lane-bypassing arm never enters the wrapper and so
+///   lands here directly, without ever taking the lane.
+///
+/// The fenced arm therefore parks at `at_fence` and blocks on the held lease
+/// before any compile; the unfenced arm parks at `at_compile`. Waiting for
+/// whichever arrives first and asserting which one it was is scheduling
+/// independent: a lane-bypassing arm that is merely SLOW still fails, and a
+/// correct arm that is slow still passes. The remaining timeouts only bound
+/// genuine hangs on positively-observed events.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_open_carrier_republish_waits_for_the_document_lane() {
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
     let server = service.inner();
     let canonical_id = "/workspace/src/RepublishOnLane.vue";
     install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
-    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
-    let (arrived, release) = server.pause_next_publish_carrier_after_compile(canonical_id);
+    // A member-access position, so completion consults the type provider
+    // instead of answering from the template's own render-proxy scope.
+    let source = "<script setup lang=\"ts\">\nconst state = { count: 0 }\n</script>\n\
+                  <template><div>{{ state.count }}</div></template>\n";
+    let uri = open_test_vue(server, canonical_id, source);
+    // Settle the document's own IDE repair first: the completion request's
+    // inline repair shares this document's lane, so a still-owed repair would
+    // queue behind the test's holder instead of reaching the recovery arm.
+    server.ensure_current_file_synced(&uri).await;
+    let line_index = server
+        .documents
+        .get(&uri)
+        .expect("open document")
+        .line_index
+        .clone();
+    let position = line_index
+        .offset_to_position(source.find("state.count").expect("member access") as u32 + 6)
+        .expect("member-access source position");
+
+    // Both recovery attempts fail, so the resync arm is the only thing this
+    // request can do after its first `Err`.
+    provider.fail_next_completions(4);
+    let (at_fence, pass_fence) = server.pause_next_open_carrier_publish_before_lease(canonical_id);
+    let (at_compile, pass_compile) = server.pause_next_publish_carrier_after_compile(canonical_id);
+    let published_before = server
+        .membership_ledger()
+        .expect("tsserver has a ledger")
+        .record_snapshot(&crate::external_ts::CanonicalSource::from(canonical_id));
     let held = match server.documents.try_delivery_lane(canonical_id) {
         crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
         other => panic!("the open document's lane is free, got {other:?}"),
     };
-    let republish = server.publish_open_carrier_to_external_ts(&uri);
-    tokio::pin!(republish);
-    assert!(
-        futures_util::poll!(republish.as_mut()).is_pending(),
-        "the republish waits for the lane holder"
+
+    let request =
+        super::nav_features::handle_completion(server, completion_params(&uri, position, None));
+    tokio::pin!(request);
+    // Every wait below is a `select!` that ALSO polls the request: a parked
+    // arm only progresses while the request future is being driven.
+    let parked = tokio::select! {
+        biased;
+        _ = at_fence.notified() => "the fenced wrapper's pre-lease fence point",
+        _ = at_compile.notified() => "the shared publish's post-compile seam",
+        finished = &mut request => panic!(
+            "the completion request returned before the recovery arm reached either fence \
+             point (recovery ran the lane-less publish and finished: {finished:?})"
+        ),
+    };
+    assert_eq!(
+        parked, "the fenced wrapper's pre-lease fence point",
+        "the completion recovery reached {parked} while the document's lane was held: the \
+         recovery arm wrote an open document's surface without taking the lane"
     );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), arrived.notified())
-            .await
-            .is_err(),
-        "the republish reached its compile while the lane was held: it wrote an open \
-         document's surface without taking the lane"
-    );
-    assert!(
+    assert_eq!(
         server
             .membership_ledger()
             .expect("tsserver has a ledger")
-            .record_snapshot(&crate::external_ts::CanonicalSource::from(canonical_id))
-            .is_none(),
-        "nothing was published while the lane was held"
+            .record_snapshot(&crate::external_ts::CanonicalSource::from(canonical_id)),
+        published_before,
+        "an arm parked at the fence has published nothing, so it cannot have superseded the \
+         lane holder's recorded surface"
     );
-    // Releasing the holder lets the queued republish reach the seam it could not
-    // reach before, and then publish on its turn.
-    let seam = tokio::spawn({
-        let arrived = Arc::clone(&arrived);
-        async move { arrived.notified().await }
-    });
+
+    // Handing the fence over and releasing the holder lets the queued arm take
+    // the lane, reach the compile seam it could not reach before, and publish
+    // on its turn.
     drop(held);
-    release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(10), republish)
-        .await
-        .expect("the republish runs once the lane is released");
-    tokio::time::timeout(std::time::Duration::from_secs(10), seam)
-        .await
-        .expect("the republish reached its compile once the lane was free")
-        .expect("the seam waiter task");
+    pass_fence.notify_one();
+    tokio::time::timeout(SETTLE, async {
+        let mut released_seam = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = at_compile.notified(), if !released_seam => {
+                    released_seam = true;
+                    pass_compile.notify_one();
+                }
+                result = &mut request => return result,
+            }
+        }
+    })
+    .await
+    .expect("the released arm reaches the publish's compile seam and the request finishes")
+    .expect("the completion request succeeds");
     assert!(
         server
             .membership_ledger()
