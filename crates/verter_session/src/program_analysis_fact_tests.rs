@@ -67,6 +67,7 @@ fn live_alpha_hash(
         .shallow_state
         .decl_bodies()
         .function_program_index()
+        .value
         .value_function(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "alpha",
@@ -161,7 +162,11 @@ fn flow_body_fact_identity_discriminates_overload_ordinals() {
     let indexed = host
         .ensure_indexed_ready("/ws/flow.ts")
         .expect("indexed ready");
-    let index = indexed.shallow_state.decl_bodies().function_program_index();
+    let index = indexed
+        .shallow_state
+        .decl_bodies()
+        .function_program_index()
+        .value;
     let entry = index
         .value_function(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),

@@ -189,6 +189,7 @@ pub mod fact_emission;
 pub mod flow_return_audit;
 pub mod framework;
 pub mod global_contributors;
+pub(crate) mod host_source_demand;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
 pub(crate) mod rune_ambient;

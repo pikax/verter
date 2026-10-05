@@ -2355,7 +2355,7 @@ const FLOW_FIXTURE: &str = "export function alpha(n: number) {\n\
 #[test]
 fn function_program_index_builds_once_and_covers_every_function_position() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
-    let first = memo.function_program_index();
+    let first = memo.function_program_index().value;
     assert_eq!(first.len(), 3, "three function positions are served");
     for name in ["alpha", "beta", "Gamma"] {
         assert!(
@@ -2382,7 +2382,7 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
 
     // One structural artifact for the file: a second demand — even a
     // demand targeting another function's facts — never rebuilds.
-    let second = memo.function_program_index();
+    let second = memo.function_program_index().value;
     assert!(
         Arc::ptr_eq(&first, &second),
         "the index builds once per file artifact"
@@ -2410,7 +2410,7 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
 #[test]
 fn function_program_index_hash_folds_parse_env_identity() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let alpha_of = |index: &verter_session_query::function_program::FunctionProgramIndex| {
         index
             .value_function(
@@ -2453,6 +2453,7 @@ fn function_program_index_hash_tracks_body_content_across_files() {
     let (memo_b, _) = memo_for_canonical("/ws/flow-b.ts", FLOW_FIXTURE);
     let hash_of = |memo: &Arc<DeclBodyMemo>| {
         memo.function_program_index()
+            .value
             .value_function(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "alpha",
@@ -2486,7 +2487,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
         .collect();
     let source = format!("function root() {{ {siblings} return () => 99; }}");
     let (memo, provenance) = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let children: Vec<_> = index
         .matches_named("root")
         .filter(|matched| matched.entry().lexical_parent().is_some())
@@ -2499,7 +2500,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
         .unwrap();
     let parse_count = parses(&provenance);
     for child in &children {
-        assert!(memo.function_flow_structure(child).unwrap().is_some());
+        assert!(memo.function_flow_structure(child).value.unwrap().is_some());
         for call in child.call_sites().iter() {
             assert!(memo.indexed_call_expression_at(call.span).is_some());
         }
@@ -2517,7 +2518,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
 #[test]
 fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     let (memo, _) = memo_for("function f(x) { let value = x; return value; }");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     // Each altered record is resealed into an index of its own: a served
     // entry cannot be edited in place.
@@ -2536,7 +2537,7 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     for stale in [&stale_span, &stale_body, &stale_hash] {
         let stale = stale.get(entry.key()).unwrap().entry();
         assert!(
-            memo.function_flow_structure(stale).unwrap().is_none(),
+            memo.function_flow_structure(stale).value.unwrap().is_none(),
             "stale address-bearing metadata must not reach the retained AST"
         );
     }
@@ -2546,6 +2547,7 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     });
     let prepared = memo
         .function_flow_structure(modified_inventory.get(entry.key()).unwrap().entry())
+        .value
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2570,7 +2572,7 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
     };
     let source = "function f(value, rest, receiver) { receiver.method((value), ...rest, value as string, 1); }";
     let (memo, provenance) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
@@ -2608,7 +2610,7 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
     };
     let source="function f(receiver:{method():string}){((receiver as {method():string}) satisfies {method():string}).method();(receiver as {method():string}).method();}";
     let (memo, _) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     assert_eq!(entry.call_sites().len(), 2);
     let transparent = memo
@@ -2641,7 +2643,7 @@ fn retained_call_type_query_keeps_its_distinct_source_origin() {
 
     let source = "function f(x,other){return id(x,other as typeof x,other as string);}";
     let (memo, provenance) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
@@ -2669,7 +2671,7 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
     use verter_type_expr::IndexedValueExpression;
     let source = "function f<T>(v: T): T { return v; }\nfunction g() { return f(f(1), f(2)); }";
     let (memo, _) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("g").next().unwrap().entry();
     let outer = entry
         .call_sites()
@@ -2705,15 +2707,16 @@ fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
         before,
         "selecting a demand lowers nothing"
     );
-    let index = demand.function_program_index();
+    let index = demand.function_program_index().value;
     assert!(
-        Arc::ptr_eq(&index, &memo.function_program_index()),
+        Arc::ptr_eq(&index, &memo.function_program_index().value),
         "one source index backs both demands"
     );
     let entry = index.matches_named("f").next().expect("indexed f").entry();
     let parse_count = parses(&provenance);
     assert!(demand
         .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
+        .value
         .is_some());
     assert_eq!(
         parses(&provenance),
@@ -2727,12 +2730,13 @@ fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
     let (memo, provenance) =
         memo_for("function f(){return target();} function target(){return 1;}");
     let demand = memo.indexed_expression_demand();
-    let index = demand.function_program_index();
+    let index = demand.function_program_index().value;
     let entry = index.matches_named("f").next().expect("indexed f").entry();
     let parses_before = parses(&provenance);
     memo.release_retained_snapshot_for_test();
     assert!(demand
         .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
+        .value
         .is_none());
     assert_eq!(
         parses(&provenance),
@@ -2745,9 +2749,10 @@ fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
 fn indexed_expression_endpoint_seeded_source_keeps_absence() {
     let memo = seeded_memo_for("function f(){return 1;}");
     let demand = memo.indexed_expression_demand();
-    assert_eq!(demand.function_program_index().len(), 0);
+    assert_eq!(demand.function_program_index().value.len(), 0);
     assert!(demand
         .indexed_call_expression_over_frame_at(verter_span::Span::new(0, 1), Arc::from([]))
+        .value
         .is_none());
 }
 
@@ -2759,7 +2764,7 @@ fn indexed_expression_endpoint_macro_and_capture_keep_seeded_absence() {
         demand.transient_macro_type_argument(verter_span::Span::new(0, 1)),
         DemandOutcome::Ready(None)
     ));
-    assert!(demand.flow_capture_authorities(&[]).is_none());
+    assert!(demand.flow_capture_authorities(&[]).value.is_none());
 }
 
 #[test]

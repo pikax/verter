@@ -69,7 +69,7 @@ mod tests {
                 source,
             );
         let memo = state.decl_bodies();
-        let index = memo.function_program_index();
+        let index = memo.function_program_index().value;
         let entry = index
             .matches_named("products")
             .find(|candidate| candidate.entry().lexical_parent().is_some() == nested)

@@ -57,7 +57,7 @@ fn prepare_structure(
     };
     let indexed = serve.indexed;
     let memo = indexed.shallow_state.decl_bodies();
-    let index = memo.function_program_index();
+    let index = crate::host_source_demand::consume_walked_read(memo.function_program_index());
     let Some(matched) = index.get(&key.function) else {
         return Ok(None);
     };
@@ -76,7 +76,9 @@ fn prepare_structure(
     if source.admits(key, entry).is_err() {
         return Ok(None);
     }
-    let Some(prepared) = memo.function_flow_structure(entry)? else {
+    let Some(prepared) =
+        crate::host_source_demand::consume_walked_read(memo.function_flow_structure(entry))?
+    else {
         return Ok(None);
     };
     Ok(KeyedFunctionStructure::bind(key.clone(), prepared, entry, source).ok())
@@ -361,7 +363,7 @@ impl<
             + super::request_ports::RouteLookup,
     > super::request_ports::ExpressionSourceSelection for T
 {
-    type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
+    type ExpressionDemand = crate::host_source_demand::HostExpressionDemand;
 
     fn indexed_flow_source(
         &self,
@@ -372,9 +374,11 @@ impl<
     )> {
         let serve =
             super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
-        let demand = self
-            .source(&serve.indexed.shallow_state)
-            .map(|source| source.decl_bodies().indexed_expression_demand());
+        let demand = self.source(&serve.indexed.shallow_state).map(|source| {
+            crate::host_source_demand::HostExpressionDemand::new(
+                source.decl_bodies().indexed_expression_demand(),
+            )
+        });
         Some((serve, demand))
     }
 
@@ -388,7 +392,12 @@ impl<
         let serve =
             super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
         let source = self.source(&serve.indexed.shallow_state)?;
-        Some((serve, source.decl_bodies().indexed_expression_demand()))
+        Some((
+            serve,
+            crate::host_source_demand::HostExpressionDemand::new(
+                source.decl_bodies().indexed_expression_demand(),
+            ),
+        ))
     }
 }
 
@@ -785,7 +794,9 @@ impl<
             missing_source();
             return None;
         };
-        Some(source.decl_bodies().function_program_index())
+        Some(crate::host_source_demand::consume_walked_read(
+            source.decl_bodies().function_program_index(),
+        ))
     }
 
     fn transient_type_parts(

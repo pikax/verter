@@ -5,8 +5,13 @@
 //! borrowed AST never outlives its arena. `ParsedEvalProgram::parse` is
 //! the scheduler-bound parse entry for the borrowed lowering input (see
 //! the `no_direct_oxc_parser_calls_outside_scheduler_path` architecture
-//! guard); consumers reach the cell through the crate-root re-export
-//! (`crate::parsed_eval_program::ParsedEvalProgram`).
+//! guard).
+//!
+//! A walk of the retained program runs under a walk-stack lease; a refused
+//! lease is returned BY VALUE ([`WalkStackRefused`], carried upward in a
+//! [`WalkedRead`]) so the request-side consumer of the read — never this
+//! module, which may run on a lowering worker — marks the result it feeds
+//! partial.
 
 use std::{cell::OnceCell, rc::Rc, sync::Arc};
 use verter_semantic::analysis::function_program::{
@@ -15,6 +20,80 @@ use verter_semantic::analysis::function_program::{
 use verter_session_query::function_program::{FunctionProgramEntry, FunctionProgramIndex};
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
+
+/// A walk-stack lease for walks of a retained program was refused: the
+/// walks did not run, and nothing they would have produced exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkStackRefused;
+
+/// A read over a retained program together with whether a walk it depends
+/// on was refused its walk-stack lease. The value of a refused read is the
+/// fail-closed answer the source serves without caching it; the consumer
+/// that folds the read into a request result marks that result partial.
+/// A composition keeps the refusal of every read it consulted.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedRead<T> {
+    pub value: T,
+    pub refusal: Option<WalkStackRefused>,
+}
+
+impl<T> WalkedRead<T> {
+    /// A read whose walks all ran.
+    #[inline]
+    pub(crate) fn clean(value: T) -> Self {
+        Self {
+            value,
+            refusal: None,
+        }
+    }
+
+    /// A read whose walk was refused; `value` is its fail-closed answer.
+    #[inline]
+    pub(crate) fn refused(value: T) -> Self {
+        Self {
+            value,
+            refusal: Some(WalkStackRefused),
+        }
+    }
+
+    /// Transform the value, keeping the evidence.
+    #[inline]
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> WalkedRead<U> {
+        WalkedRead {
+            value: f(self.value),
+            refusal: self.refusal,
+        }
+    }
+
+    /// Take the value, folding this read's evidence into `refusal`.
+    #[inline]
+    pub(crate) fn absorb_into(self, refusal: &mut Option<WalkStackRefused>) -> T {
+        *refusal = refusal.or(self.refusal);
+        self.value
+    }
+
+    /// Keep the evidence of a read consulted before this one.
+    #[inline]
+    pub(crate) fn with_prior_refusal(mut self, prior: Option<WalkStackRefused>) -> Self {
+        self.refusal = prior.or(self.refusal);
+        self
+    }
+}
+
+impl<T> WalkedRead<Option<T>> {
+    /// The answer of a lease-only run over a retained program: no program
+    /// (or no answer) is a clean absence; a refused walk is a refused
+    /// absence.
+    #[inline]
+    pub(crate) fn from_program_walk(answer: Option<Result<Option<T>, WalkStackRefused>>) -> Self {
+        match answer {
+            None => Self::clean(None),
+            Some(Ok(value)) => Self::clean(value),
+            Some(Err(WalkStackRefused)) => Self::refused(None),
+        }
+    }
+}
 
 struct ParsedEvalProgramOwner {
     allocator: oxc_allocator::Allocator,
@@ -125,39 +204,35 @@ impl ParsedEvalProgram {
     /// this retained parse owner. Neither the arena nor its node table leaves it.
     ///
     /// The index's walks of the program run under a walk-stack lease for it,
-    /// the one fallible step: a refused lease is `None`, recorded for the
-    /// operation around it, and leaves nothing indexed, so a later demand
-    /// whose lease is granted indexes the program.
+    /// the one fallible step: a refused lease is [`WalkStackRefused`], returned
+    /// for the operation around it, and leaves nothing indexed, so a later
+    /// demand whose lease is granted indexes the program.
     pub(crate) fn function_program_index(
         &self,
         owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
         parse_env_hash: &verter_session_query::analysis::types::Hash16,
         class_fields: &verter_session_query::declarations::class_fields::ClassFieldValues,
-    ) -> Option<Arc<FunctionProgramIndex>> {
+    ) -> Result<Arc<FunctionProgramIndex>, WalkStackRefused> {
         if let Some(cell) = self.functions.get() {
-            return Some(Arc::clone(&cell.borrow_dependent().index));
+            return Ok(Arc::clone(&cell.borrow_dependent().index));
         }
         self.leased(|| self.index_functions(owners, canonical, parse_env_hash, class_fields))
     }
 
     /// Run `walks`, walks of this program, under a walk-stack lease for it,
     /// sized from the program's one shared scan: the lease is the walks'
-    /// one fallible step. A refused lease is `None`, recorded for the
-    /// operation around it, and the result that would have read the walks
-    /// is partial, so no cache retains what was computed without them.
-    fn leased<R>(&self, walks: impl FnOnce() -> R) -> Option<R> {
+    /// one fallible step. A refused lease is [`WalkStackRefused`], returned by
+    /// value: the result that would have read the walks is partial, so no
+    /// cache retains what was computed without them, and the request-side
+    /// consumer of the read marks it so.
+    fn leased<R>(&self, walks: impl FnOnce() -> R) -> Result<R, WalkStackRefused> {
         let program = self.borrow_dependent();
         let nesting = *self.nesting.get_or_init(|| {
             verter_parser::oxc_parse::syntax_nesting(program.source_text, program.source_type)
         });
-        match verter_parser::oxc_parse::with_walk_stack_lease(nesting, walks) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                crate::request_context::mark_request_result_partial();
-                None
-            }
-        }
+        verter_parser::oxc_parse::with_walk_stack_lease(nesting, walks)
+            .map_err(|_| WalkStackRefused)
     }
 
     fn index_functions(
@@ -203,19 +278,29 @@ impl ParsedEvalProgram {
         &self,
         entry: &FunctionProgramEntry,
         lower: impl for<'a> FnOnce(ResolvedFunctionNode<'a>, &'a FunctionProgramEntry) -> R,
-    ) -> Option<R> {
-        let cell = self.functions.get()?;
+    ) -> Result<Option<R>, WalkStackRefused> {
+        let Some(cell) = self.functions.get() else {
+            return Ok(None);
+        };
         let retained = cell.borrow_dependent();
-        let indexed = retained.index.get(entry.key())?.entry();
+        let Some(indexed) = retained
+            .index
+            .get(entry.key())
+            .map(|matched| matched.entry())
+        else {
+            return Ok(None);
+        };
         if indexed.locator() != entry.locator()
             || indexed.span() != entry.span()
             || indexed.body_span() != entry.body_span()
             || indexed.flow_body_exact_hash() != entry.flow_body_exact_hash()
         {
-            return None;
+            return Ok(None);
         }
-        let node = retained.nodes.get(entry.key())?;
-        self.leased(|| lower(node, indexed))
+        let Some(node) = retained.nodes.get(entry.key()) else {
+            return Ok(None);
+        };
+        self.leased(|| lower(node, indexed)).map(Some)
     }
 
     /// Lower the indexed call, `new` or tagged template addressed by `span`.
@@ -225,10 +310,14 @@ impl ParsedEvalProgram {
         lower: impl for<'a> FnOnce(
             verter_semantic::analysis::function_program::IndexedCallSite<'a>,
         ) -> R,
-    ) -> Option<R> {
-        let cell = self.functions.get()?;
-        let site = cell.borrow_dependent().nodes.call_site(span)?;
-        self.leased(|| lower(site))
+    ) -> Result<Option<R>, WalkStackRefused> {
+        let Some(cell) = self.functions.get() else {
+            return Ok(None);
+        };
+        let Some(site) = cell.borrow_dependent().nodes.call_site(span) else {
+            return Ok(None);
+        };
+        self.leased(|| lower(site)).map(Some)
     }
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`

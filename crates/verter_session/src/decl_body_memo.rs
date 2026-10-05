@@ -26,7 +26,6 @@
 //! performed — path-independent population of only what the compute
 //! produced).
 use verter_session_query::source::demand::DemandOutcome;
-use verter_session_query::source::demand::ExpressionSourceDemand;
 use verter_session_query::source::demand::SourceRead;
 use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
@@ -76,6 +75,7 @@ use verter_type_expr::span_origins::DeclContributorAnchor;
 use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
 use crate::decl_lowering::{DeclLoweringCounters, DeclLoweringService, SnapshotLease};
+use crate::parsed_eval_program::{WalkStackRefused, WalkedRead};
 use crate::source_lens::{RouteLens, ShallowLens};
 use crate::typeof_dependencies::collect_typeof_roots;
 use verter_session_query::source::snapshot::SnapshotKey;
@@ -333,17 +333,18 @@ struct FunctionIndexDemand {
 impl FunctionIndexDemand {
     pub fn function_program_index(
         &self,
-    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         if let Some(cached) = self.function_program_index.get() {
-            return cached.clone();
+            return WalkedRead::clean(cached.clone());
         }
         let Some(service) = self.snapshot.service.as_ref() else {
             // Seeded memos carry no parse to walk; the empty index is the
             // CORRECT value (a genuine miss, not a lease-pin break).
-            return self
-                .function_program_index
-                .get_or_init(Default::default)
-                .clone();
+            return WalkedRead::clean(
+                self.function_program_index
+                    .get_or_init(Default::default)
+                    .clone(),
+            );
         };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
@@ -353,9 +354,7 @@ impl FunctionIndexDemand {
         let parse_env_hash = self.snapshot.key.parse_env_hash;
         let class_fields = Arc::clone(&self.class_fields);
         let Some(index) = service.run_leased(&self.snapshot.key, move |program| {
-            // A walk-stack lease refused the program's index reads as a missed
-            // snapshot below: an uncached empty index, never memoized.
-            program.and_then(|p| {
+            program.map(|p| {
                 p.function_program_index(
                     owner_table.as_ref(),
                     Arc::clone(&canonical),
@@ -371,17 +370,27 @@ impl FunctionIndexDemand {
                 "decl-body lease pin broken: function_program_index's lease-only run missed \
                  the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
             );
-            return Arc::new(Default::default());
+            return WalkedRead::clean(Arc::new(Default::default()));
         };
-        let Some(index) = index else {
-            tracing::error!(
-                canonical = %self.snapshot.key.canonical,
-                "decl-body lease pin broken: function_program_index's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
-            );
-            return Arc::new(Default::default());
+        // A missed snapshot, or a walk-stack lease refused the program's
+        // index walks: an uncached empty index, never memoized. The refusal
+        // travels with it to the consumer that marks its result partial.
+        let index = match index {
+            Some(Ok(index)) => index,
+            missed => {
+                tracing::error!(
+                    canonical = %self.snapshot.key.canonical,
+                    "decl-body lease pin broken: function_program_index's lease-only run missed \
+                     the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+                );
+                let empty = Arc::new(Default::default());
+                return match missed {
+                    Some(Err(WalkStackRefused)) => WalkedRead::refused(empty),
+                    _ => WalkedRead::clean(empty),
+                };
+            }
         };
-        self.function_program_index.get_or_init(|| index).clone()
+        WalkedRead::clean(self.function_program_index.get_or_init(|| index).clone())
     }
 }
 
@@ -1248,7 +1257,7 @@ impl DeclBodyMemo {
     /// functions are not lowered — the index is structural only.
     pub fn function_program_index(
         &self,
-    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         self.function_index.function_program_index()
     }
 
@@ -1283,6 +1292,7 @@ impl DeclBodyMemo {
         };
         let prepared = self
             .function_flow_structure(entry)
+            .value
             .expect("fixture binding authority")
             .expect("fixture retained structure");
         crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
@@ -1304,6 +1314,7 @@ impl DeclBodyMemo {
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
             .flow_slice_content(matched, selection, bound, policy)
+            .value
     }
 
     #[cfg(test)]
@@ -1317,6 +1328,7 @@ impl DeclBodyMemo {
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
             .flow_slice_content_with_context(matched, selection, bound, context, policy)
+            .value
     }
 
     /// Lower selected missing annotations in one retained-source lease. Slots
@@ -1328,6 +1340,7 @@ impl DeclBodyMemo {
     ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
         self.indexed_expression_demand()
             .flow_capture_authorities(locators)
+            .value
     }
 
     #[cfg(test)]
@@ -1362,11 +1375,13 @@ impl DeclBodyMemo {
     pub fn function_body_skeleton(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> Option<verter_session_query::flow::skeleton::FunctionBodySkeleton> {
-        self.function_flow_structure(entry)
-            .ok()
-            .flatten()
-            .map(|prepared| prepared.into_parts().0)
+    ) -> WalkedRead<Option<verter_session_query::flow::skeleton::FunctionBodySkeleton>> {
+        self.function_flow_structure(entry).map(|structure| {
+            structure
+                .ok()
+                .flatten()
+                .map(|prepared| prepared.into_parts().0)
+        })
     }
 
     /// Build the current frame with the index's retained closure-access facts,
@@ -1374,21 +1389,24 @@ impl DeclBodyMemo {
     pub fn function_flow_structure(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> Result<
-        Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
-        verter_session_query::flow::binding::FlowBindingMapError,
+    ) -> WalkedRead<
+        Result<
+            Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
+            verter_session_query::flow::binding::FlowBindingMapError,
+        >,
     > {
         let Some(service) = self.service.as_ref() else {
-            return Ok(None);
+            return WalkedRead::clean(Ok(None));
         };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
-        let index = self.function_program_index();
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
         let nested_bodies = crate::flow_slice_content::nested_function_bodies(&index, entry);
         let entry = entry.clone();
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
-            program.and_then(|p| {
+            program.map(|p| {
                 use verter_semantic::analysis::flow::{
                     build_indexed_function_body_skeleton_in, FunctionBodySource,
                 };
@@ -1414,7 +1432,7 @@ impl DeclBodyMemo {
                         entry,
                     ))
                 })
-                .flatten()
+                .map(Option::flatten)
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1424,9 +1442,14 @@ impl DeclBodyMemo {
                 "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return Ok(None);
+            return WalkedRead {
+                value: Ok(None),
+                refusal,
+            };
         };
-        skeleton.transpose()
+        WalkedRead::from_program_walk(skeleton)
+            .with_prior_refusal(refusal)
+            .map(Option::transpose)
     }
 
     /// Transient typed IR for one indexed declaration expression. The retained
@@ -1465,6 +1488,7 @@ impl DeclBodyMemo {
     ) -> Option<Arc<IndexedFlowCallExpression>> {
         self.indexed_expression_demand()
             .indexed_call_expression_over_frame_at(span, frame_lowered)
+            .value
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -3300,14 +3324,18 @@ pub(crate) fn fold_flow_body_env_identity(
     })
 }
 
-impl ExpressionSourceDemand for IndexedExpressionDemand {
-    fn function_program_index(
+/// The source side of the expression-source capability. A read whose
+/// program walk was refused a walk-stack lease carries that refusal by value
+/// ([`WalkedRead`]); the request-side capability that serves these reads to
+/// the engine applies it.
+impl IndexedExpressionDemand {
+    pub(crate) fn function_program_index(
         &self,
-    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         self.index.function_program_index()
     }
 
-    fn indexed_program_expression_ir(
+    pub(crate) fn indexed_program_expression_ir(
         &self,
         record: &verter_session_query::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
@@ -3326,22 +3354,25 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
         Some(Arc::new(node))
     }
 
-    fn indexed_call_expression_over_frame_at(
+    pub(crate) fn indexed_call_expression_over_frame_at(
         &self,
         span: verter_span::Span,
         frame_lowered: Arc<[bool]>,
-    ) -> Option<Arc<IndexedFlowCallExpression>> {
+    ) -> WalkedRead<Option<Arc<IndexedFlowCallExpression>>> {
         use verter_semantic::analysis::function_program::IndexedCallSite;
         use verter_semantic::analysis::type_eval_build::{
             lower_indexed_call_expression_with_read_roots,
             lower_indexed_new_expression_with_read_roots,
             lower_indexed_tagged_template_expression_with_read_roots,
         };
-        let service = self.snapshot.service.as_ref()?;
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
         self.snapshot.ensure_lease();
-        let _index = self.function_program_index();
-        let node = service.run_leased(&self.snapshot.key, move |program| {
-            program.and_then(|parsed| {
+        let mut refusal = None;
+        let _index = self.function_program_index().absorb_into(&mut refusal);
+        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
+            program.map(|parsed| {
                 let source = parsed.source_str();
                 parsed
                     .with_indexed_call_site(span, |site| match site {
@@ -3374,28 +3405,41 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
                             })
                         }
                     })
-                    .flatten()
+                    .map(Option::flatten)
             })
-        })??;
-        Some(Arc::new(node))
+        }) else {
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        };
+        WalkedRead::from_program_walk(node)
+            .with_prior_refusal(refusal)
+            .map(|node| node.map(Arc::new))
     }
 
-    fn function_type_param_clause(
+    pub(crate) fn function_type_param_clause(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
-    ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
-        let service = self.snapshot.service.as_ref()?;
+    ) -> WalkedRead<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.snapshot.ensure_lease();
         // A witness another index answered names no position THIS source
         // serves: the same typed miss as an unknown entry.
-        if !matched.is_served_by(&self.function_program_index()) {
-            return None;
+        let mut refusal = None;
+        if !matched.is_served_by(&self.function_program_index().absorb_into(&mut refusal)) {
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
         }
         let entry = matched.entry().clone();
         let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
-            program.and_then(|p| {
+            program.map(|p| {
                 p.with_indexed_function(&entry, |resolved, _entry| {
                     crate::flow_slice_content::build_function_type_param_clause(
                         resolved,
@@ -3411,49 +3455,58 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
                 "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return None;
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
         };
-        clause
+        WalkedRead::from_program_walk(clause).with_prior_refusal(refusal)
     }
 
-    fn flow_slice_content(
+    pub(crate) fn flow_slice_content(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
-    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+    ) -> WalkedRead<Option<Arc<verter_session_query::flow::slice::SliceContent>>> {
         self.flow_slice_content_with_context(matched, Some(selection), bound, None, policy)
     }
 
-    fn flow_slice_content_with_context(
+    pub(crate) fn flow_slice_content_with_context(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
-    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+    ) -> WalkedRead<Option<Arc<verter_session_query::flow::slice::SliceContent>>> {
         let entry = matched.entry();
         if bound.key().function != *entry.key()
-            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash()?
+            || Some(bound.key().flow_body_exact_hash) != entry.flow_body_exact_hash()
             || context
                 .as_ref()
                 .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
         {
-            return None;
+            return WalkedRead::clean(None);
         }
         let skeleton = Arc::clone(bound.bundle().skeleton());
         let bindings = Arc::clone(bound.bundle().bindings());
-        let service = self.snapshot.service.as_ref()?;
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.snapshot.ensure_lease();
-        let index = self.function_program_index();
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
         // A witness another index answered names no position THIS source
         // serves: the same typed miss as an unknown entry.
         if !matched.is_served_by(&index) {
-            return None;
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
         }
         let entry = entry.clone();
         // A carrier's script block (`.vue` / `.svelte`) compiles to a
@@ -3470,7 +3523,7 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
             let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
             #[cfg(test)]
             let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
-            program.and_then(|p| {
+            program.map(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
                     crate::flow_slice_content::build_flow_slice_content(
                         crate::flow_slice_content::FlowSliceSource {
@@ -3490,7 +3543,7 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
                         policy,
                     )
                 })
-                .flatten()
+                .map(Option::flatten)
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -3500,47 +3553,63 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
                 "decl-body lease pin broken: flow_slice_content's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return None;
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
         };
-        node.map(Arc::new)
+        WalkedRead::from_program_walk(node)
+            .with_prior_refusal(refusal)
+            .map(|node| node.map(Arc::new))
     }
 
-    fn flow_capture_authorities(
+    pub(crate) fn flow_capture_authorities(
         &self,
         locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
-    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
-        let service = self.snapshot.service.as_ref()?;
-        let index = self.function_program_index();
+    ) -> WalkedRead<
+        Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>>,
+    > {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
         let snapshot = self.snapshot.key.clone();
         let locators = locators.to_vec();
         #[cfg(test)]
         let work = Arc::clone(&self.capture_lookup_work);
         self.snapshot.ensure_lease();
-        service.run_leased(&self.snapshot.key, move |program| {
-            #[cfg(test)]
-            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
-            let program = program?;
-            Some(
-                locators
-                    .iter()
-                    .map(|locator| {
-                        if !locator.matches_snapshot(&snapshot) {
-                            return None;
-                        }
-                        let entry = index.get(&locator.declaration().defining_function)?;
-                        crate::flow_slice_content::build_flow_capture_authority(
-                            program.borrow_dependent(),
-                            program.source_str(),
-                            entry.entry(),
-                            locator,
-                        )
-                    })
-                    .collect(),
-            )
-        })?
+        let authorities = service
+            .run_leased(&self.snapshot.key, move |program| {
+                #[cfg(test)]
+                let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
+                let program = program?;
+                Some(
+                    locators
+                        .iter()
+                        .map(|locator| {
+                            if !locator.matches_snapshot(&snapshot) {
+                                return None;
+                            }
+                            let entry = index.get(&locator.declaration().defining_function)?;
+                            crate::flow_slice_content::build_flow_capture_authority(
+                                program.borrow_dependent(),
+                                program.source_str(),
+                                entry.entry(),
+                                locator,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .flatten();
+        WalkedRead {
+            value: authorities,
+            refusal,
+        }
     }
 
-    fn transient_macro_type_argument(
+    pub(crate) fn transient_macro_type_argument(
         &self,
         macro_span: verter_span::Span,
     ) -> DemandOutcome<TypeExpr> {

@@ -32,7 +32,7 @@ use verter_session_query::analysis::types::Hash16;
 pub enum HostCapabilities {}
 
 impl ResolverCapabilities for HostCapabilities {
-    type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
+    type ExpressionDemand = crate::host_source_demand::HostExpressionDemand;
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
     type HostAttachment = crate::session_attachment::SessionAttachment;
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;

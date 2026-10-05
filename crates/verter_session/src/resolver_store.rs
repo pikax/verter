@@ -3412,7 +3412,9 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                 let Some(indexed) = resolved.flow_body_indexed.as_ref() else {
                     return false;
                 };
-                let index = indexed.shallow_state.decl_bodies().function_program_index();
+                let index = crate::host_source_demand::consume_walked_read(
+                    indexed.shallow_state.decl_bodies().function_program_index(),
+                );
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".

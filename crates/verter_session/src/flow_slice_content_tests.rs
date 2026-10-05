@@ -93,7 +93,7 @@ fn selection_for(
 
 fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceContent> {
     let memo = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, name);
     let (selection, skeleton) = selection_for(&memo, entry, path);
     memo.flow_slice_content(
@@ -158,7 +158,7 @@ fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
     let SliceExpr::NestedFunctionValue { function, .. } = nested else {
         unreachable!()
     };
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     assert!(
         index
             .get(function)
@@ -196,7 +196,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
             _ => None,
         })
         .expect("nested descriptor");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let capture = &index
         .get(function)
         .expect("indexed child")
@@ -214,7 +214,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
     let changed = memo_for(&source.replace("'one'", "'two'"));
     assert!(changed.flow_capture_authority(&locator).is_none(),
         "unchanged function bytes cannot attach a lexical gate from a different outer source snapshot");
-    let changed_index = changed.function_program_index();
+    let changed_index = changed.function_program_index().value;
     let changed_entry = changed_index.get(function).expect("same indexed child");
     let (_, changed_bound) = selection_for(&changed, changed_entry, &[]);
     assert!(
@@ -254,7 +254,7 @@ fn selected_capture_locators_skip_known_unannotated_local_declarations() {
             _ => None,
         })
         .expect("selected closure");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let captures = &index
         .get(function)
         .expect("indexed child")
@@ -295,7 +295,7 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
             .join(",");
         let source = format!("function f(x:number){{{aliases}return {{{members}}};}}");
         let memo = memo_for(&source);
-        let index = memo.function_program_index();
+        let index = memo.function_program_index().value;
         let entry = entry_of(&index, "f");
         let (selection, bound) = selection_for(&memo, entry, &[]);
         memo.capture_lookup_work.store(0, Ordering::Relaxed);
@@ -336,7 +336,7 @@ fn and_chain_guard_classifications(operands: usize) -> usize {
         "function lc(a0: string | undefined, a1: number | null, a2: boolean, a3: \"x\" | \"\", a4: 0 | 1) {{ return {chain}; }}"
     );
     let memo = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "lc");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     memo.lowering_work
@@ -387,7 +387,7 @@ fn nested_call_lowerings(depth: usize) -> usize {
         ")".repeat(depth)
     );
     let memo = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "pc");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     memo.lowering_work.expressions.store(0, Ordering::Relaxed);
@@ -449,7 +449,7 @@ fn nested_array_lowerings(depth: usize) -> usize {
         "]".repeat(depth)
     );
     let memo = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "pa");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     memo.lowering_work.expressions.store(0, Ordering::Relaxed);
@@ -491,7 +491,7 @@ fn nested_class_scans(depth: usize) -> usize {
         "; } }".repeat(depth)
     );
     let memo = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "pc");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     memo.lowering_work
@@ -549,7 +549,7 @@ fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans(
             _ => None,
         })
         .expect("selected closure");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let child = index.get(function).unwrap().entry();
     memo.capture_lookup_work.store(0, Ordering::Relaxed);
     let locators = {
@@ -1643,7 +1643,7 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
     else {
         panic!("nested descriptor");
     };
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.get(function).expect("indexed child");
     let (selection, skeleton) = selection_for(memo, entry, &[]);
     memo.flow_slice_content_with_context(
@@ -3539,7 +3539,7 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
          \x20 static has(x: C | number) { if (#f in x) { return x } return 0 }\n\
          }\n",
     );
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = member_entry_of(&index, "C", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let brand = memo
@@ -4474,7 +4474,7 @@ fn symbolic_and_unrepresentable_calls() {
          \x20 run() { return this.helper(); }\n\
          }\n",
     );
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
@@ -4869,7 +4869,7 @@ fn member_demand_elides_sibling_member_values() {
 #[test]
 fn locator_miss_is_typed_none() {
     let memo = memo_for("function id(a: number) { return a; }\n");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "id");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
 
@@ -4919,6 +4919,7 @@ fn locator_miss_is_typed_none() {
     for stale in [&missing_contributor, &bad_descent] {
         assert!(
             memo.function_flow_structure(stale.get(entry.key()).unwrap().entry())
+                .value
                 .unwrap()
                 .is_none(),
             "a stale locator never reaches the retained AST"
@@ -4933,13 +4934,12 @@ fn locator_miss_is_typed_none() {
 /// it — and its witness is refused as a typed miss.
 #[test]
 fn source_refuses_a_witness_from_another_index_for_the_same_position() {
-    use verter_session_query::source::demand::ExpressionSourceDemand;
     let source = "function pick<T extends string>(x: T) { return x; }\n";
     let memo = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let own = entry_of(&index, "pick");
     let other = memo_for(source);
-    let other_index = other.function_program_index();
+    let other_index = other.function_program_index().value;
     let foreign = entry_of(&other_index, "pick");
     assert_eq!(
         own.entry(),
@@ -4954,11 +4954,11 @@ fn source_refuses_a_witness_from_another_index_for_the_same_position() {
 
     let demand = memo.indexed_expression_demand();
     assert!(
-        demand.function_type_param_clause(own).is_some(),
+        demand.function_type_param_clause(own).value.is_some(),
         "the source's own witness is served"
     );
     assert!(
-        demand.function_type_param_clause(foreign).is_none(),
+        demand.function_type_param_clause(foreign).value.is_none(),
         "a foreign witness is a typed miss"
     );
 
@@ -6064,7 +6064,7 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
         let writes = "unrelated=0;".repeat(count);
         let source = format!("function f(){{let x=0;let unrelated=0;{writes}x=1;return x;}}");
         let memo = memo_for(&source);
-        let index = memo.function_program_index();
+        let index = memo.function_program_index().value;
         let entry = entry_of(&index, "f");
         let (mut selection, bound) = selection_for(&memo, entry, &[]);
         let work = Arc::new(AtomicUsize::new(0));
@@ -6117,7 +6117,7 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
 fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     let source = "function f(){let x=0;x=1;return x;}";
     let memo = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "f");
     let bound = memo.flow_bound_graph_for_tests(entry.entry());
     let skeleton = &bound.bundle().skeleton();
@@ -6248,7 +6248,7 @@ fn local_function_lookup_visits(uses: usize, unrelated: usize) -> usize {
         vec!["g"; uses].join(", ")
     );
     let memo = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = entry_of(&index, "f");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     memo.lowering_work
