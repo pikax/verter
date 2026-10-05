@@ -454,20 +454,33 @@ fn shown(messages: &[Request]) -> Vec<String> {
 
 /// A control producer that cannot await joins the line in order and is
 /// accounted with its exact bytes, even past the admitted budget, until the
-/// writer has written it.
+/// writer has written it — and however many it offers behind a client that is
+/// not reading, the transport retains at most one budget of them beyond the
+/// admitted set, shedding the oldest waiting ones.
+///
+/// Discriminating: an unbounded detached line retains all 1,000 messages.
 #[tokio::test(flavor = "current_thread")]
-async fn detached_control_messages_are_ordered_and_accounted_until_written() {
+async fn detached_control_messages_are_ordered_accounted_and_bounded() {
+    const OFFERED: usize = 1_000;
+    let budget = ClassBudget {
+        messages: 2,
+        bytes: usize::MAX,
+    };
     let outbound = Outbound::new(OutboundBudget {
-        control: ClassBudget {
-            messages: 2,
-            bytes: usize::MAX,
-        },
+        control: budget,
         ..OutboundBudget::DEFAULT
     });
     outbound.mark_initialized();
-    let sent: Vec<ShowMessageParams> = (0..5).map(warning).collect();
-    for message in &sent {
+    let sent: Vec<ShowMessageParams> = (0..OFFERED).map(warning).collect();
+    let awaited = warning(OFFERED);
+    let mut awaiting = Box::pin(outbound.send_notification::<ShowMessage>(awaited.clone()));
+    for (i, message) in sent.iter().enumerate() {
         outbound.notify_detached::<ShowMessage>(message.clone());
+        if i == 1 {
+            // An awaiting producer joins the line between the detached ones; its
+            // message is never shed.
+            assert!(futures_util::poll!(&mut awaiting).is_pending());
+        }
     }
     let control = outbound.load().control;
     assert_eq!(
@@ -482,21 +495,81 @@ async fn detached_control_messages_are_ordered_and_accounted_until_written() {
         control.waiting,
         Load {
             messages: 3,
-            bytes: sent[2..].iter().map(control_size).sum()
+            bytes: control_size(&awaited)
+                + sent[OFFERED - 2..].iter().map(control_size).sum::<usize>()
         },
-        "the rest wait, every byte counted"
+        "the awaiting producer's message and the newest detached ones wait, every \
+         byte counted"
+    );
+    assert_eq!(
+        control.shed,
+        Load {
+            messages: OFFERED - 4,
+            bytes: sent[2..OFFERED - 2].iter().map(control_size).sum()
+        },
+        "the oldest waiting detached messages are shed, and counted"
     );
 
     let mut wire = outbound.wire();
-    let expected: Vec<String> = sent.into_iter().map(|m| m.message).collect();
+    let expected: Vec<String> = [&sent[..2], &[awaited], &sent[OFFERED - 2..]]
+        .concat()
+        .into_iter()
+        .map(|m| m.message)
+        .collect();
     assert_eq!(
         shown(&written_now(&mut wire)),
         expected,
-        "control messages keep their order"
+        "the messages kept keep their order"
     );
+    bounded(awaiting).await;
     assert_eq!(outbound.load().control.retained(), Load::default());
     assert_eq!(outbound.high_water().control.admitted.messages, 2);
-    assert_eq!(outbound.high_water().control.retained.messages, 5);
+    assert_eq!(
+        outbound.high_water().control.retained.messages,
+        2 * budget.messages + 1,
+        "the transport never retained more than the admitted set, the one awaiting \
+         producer's message and one budget of detached messages"
+    );
+}
+
+/// Detached waiters cannot exceed their byte ceiling, even when count slots
+/// remain; an oversized informational message is shed rather than retained.
+#[tokio::test(flavor = "current_thread")]
+async fn detached_control_waiters_obey_the_byte_ceiling() {
+    let budget = ClassBudget {
+        messages: 10,
+        bytes: 256,
+    };
+    let outbound = Outbound::new(OutboundBudget {
+        control: budget,
+        ..OutboundBudget::DEFAULT
+    });
+    outbound.mark_initialized();
+    let wide = ShowMessageParams {
+        typ: MessageType::WARNING,
+        message: "x".repeat(200),
+    };
+    // The first oversized frame may be admitted alone and written whole.
+    outbound.notify_detached::<ShowMessage>(wide.clone());
+    outbound.notify_detached::<ShowMessage>(warning(1));
+    outbound.notify_detached::<ShowMessage>(warning(2));
+    outbound.notify_detached::<ShowMessage>(warning(3));
+    outbound.notify_detached::<ShowMessage>(wide.clone());
+    let load = outbound.load().control;
+    assert!(
+        load.waiting.bytes <= budget.bytes,
+        "detached bytes stay bounded: {load:?}"
+    );
+    assert!(
+        load.shed.messages > 0,
+        "the overflow was accounted: {load:?}"
+    );
+    let mut wire = outbound.wire();
+    assert_eq!(
+        shown(&written_now(&mut wire)),
+        vec![wide.message, "warning-2".into(), "warning-3".into()]
+    );
+    assert_eq!(outbound.load().control.retained(), Load::default());
 }
 
 /// A producer that awaits its send waits for room, holding its place in the
@@ -551,9 +624,14 @@ async fn a_server_request_is_answered_through_the_transport() {
     let refused = outbound
         .send_request::<WorkspaceConfiguration>(ConfigurationParams { items: Vec::new() })
         .await;
-    assert!(
-        refused.is_err(),
-        "a request before initialization is refused, as by any LSP client connection"
+    assert_eq!(
+        refused
+            .expect_err("a request before initialization is refused")
+            .code,
+        tower_lsp_server::jsonrpc::ErrorCode::ServerError(
+            tower_lsp_server::ls_types::error_codes::SERVER_NOT_INITIALIZED
+        ),
+        "refused as not initialized, as by any LSP client connection"
     );
 
     let mut wire = outbound.wire();

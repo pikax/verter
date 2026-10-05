@@ -7,8 +7,9 @@
 //! draining stdout. The case binds the transport contract:
 //!
 //! * while the client is stalled every class stays within its own budget —
-//!   control, response and replaceable bytes are accounted separately, and the
-//!   control producers left waiting are accounted too — and once the client
+//!   control, response and replaceable bytes are accounted separately, the
+//!   control producers left waiting are accounted too, and detached control
+//!   notifications beyond their ceiling shed the oldest — and once the client
 //!   reads again every document ends on its newest complete diagnostics, never
 //!   a superseded set after a newer one;
 //! * `$/cancelRequest`, `shutdown` and the control backlog are written ahead of
@@ -24,7 +25,9 @@ use std::time::Duration;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt as _;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream,
+};
 use tokio::sync::Notify;
 use tower_lsp_server::jsonrpc::{ErrorCode, Result};
 use tower_lsp_server::ls_types::notification::{LogMessage, ShowMessage};
@@ -50,6 +53,7 @@ struct Probe {
     outbound: Outbound,
     large_ran: Arc<Notify>,
     cancelled: Arc<Notify>,
+    started: Arc<Notify>,
 }
 
 impl LanguageServer for Probe {
@@ -75,6 +79,7 @@ impl Drop for DropSignal {
 impl Probe {
     async fn run_until_cancelled(&self, _: Value) -> Result<Value> {
         let _signal = DropSignal(Arc::clone(&self.cancelled));
+        self.started.notify_one();
         std::future::pending().await
     }
 
@@ -92,12 +97,12 @@ impl Probe {
     }
 }
 
-struct Editor {
-    reader: BufReader<tokio::io::ReadHalf<DuplexStream>>,
-    writer: tokio::io::WriteHalf<DuplexStream>,
+struct Editor<R = tokio::io::ReadHalf<DuplexStream>, W = tokio::io::WriteHalf<DuplexStream>> {
+    reader: BufReader<R>,
+    writer: W,
 }
 
-impl Editor {
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Editor<R, W> {
     async fn send(&mut self, message: Value) {
         let body = serde_json::to_vec(&message).unwrap();
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
@@ -168,15 +173,18 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
     let lane = outbound.diagnostics_lane();
     let large_ran = Arc::new(Notify::new());
     let cancelled = Arc::new(Notify::new());
+    let started = Arc::new(Notify::new());
 
     let (service, _socket) = {
         let outbound = outbound.clone();
         let large_ran = Arc::clone(&large_ran);
         let cancelled = Arc::clone(&cancelled);
+        let started = Arc::clone(&started);
         LspService::build(move |_| Probe {
             outbound,
             large_ran,
             cancelled,
+            started,
         })
         .custom_method("test/runUntilCancelled", Probe::run_until_cancelled)
         .custom_method("test/large", Probe::large)
@@ -264,6 +272,15 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
             message: message.clone(),
         });
     }
+    // More than the admitted set plus the detached ceiling: the oldest waiting
+    // warnings are shed, the newest kept.
+    let shed = outbound.load().control.shed.messages;
+    assert!(
+        shed > 0,
+        "the detached line stops at its ceiling: {:?}",
+        outbound.load()
+    );
+    let kept = WARNINGS - shed;
 
     // Requests issued behind the backlog: a large result for a client that never
     // asked for partial results, one that asks the client a question, one that is
@@ -281,6 +298,9 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
     editor
         .send(json!({"jsonrpc": "2.0", "id": 2, "method": "test/runUntilCancelled", "params": {}}))
         .await;
+    tokio::time::timeout(Duration::from_secs(30), started.notified())
+        .await
+        .expect("the request starts before it is cancelled");
     editor
         .send(json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 2}}))
         .await;
@@ -318,12 +338,13 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         .len()
     };
     assert!(
-        stalled.control.retained().messages > WARNINGS,
-        "every offered control message is still the transport's, and counted: {stalled:?}"
+        stalled.control.retained().messages <= 2 * budget.control.messages + 1,
+        "control retains at most its admitted set, one budget of detached messages \
+         and the one awaiting producer's request: {stalled:?}"
     );
     assert!(
         stalled.control.waiting.bytes
-            >= warnings[budget.control.messages + 1..]
+            >= warnings[WARNINGS - budget.control.messages..]
                 .iter()
                 .map(|m| warning_bytes(m))
                 .sum::<usize>(),
@@ -358,7 +379,7 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         newest.len() == DOCUMENTS && newest.values().all(|(edit, _)| *edit == EDITS)
     };
     tokio::time::timeout(Duration::from_secs(60), async {
-        while responses.len() < 4 || shown.len() < WARNINGS || !complete(&newest) {
+        while responses.len() < 4 || shown.len() < kept || !complete(&newest) {
             let message = editor.recv().await;
             if message.get("method") == Some(&json!("workspace/configuration")) {
                 // A server→client request: answer it.
@@ -390,7 +411,7 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
             assert_eq!(message["method"], "textDocument/publishDiagnostics");
             let control_done = responses.contains_key(&2)
                 && responses.contains_key(&3)
-                && shown.len() == WARNINGS;
+                && shown.len() == kept;
             if !control_done {
                 diagnostics_before_control += 1;
             }
@@ -445,7 +466,17 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         stalling_frames, 1,
         "the stalling frame reaches the client once"
     );
-    assert_eq!(shown, warnings, "control messages keep their order");
+    let admitted_warnings = kept - budget.control.messages;
+    assert_eq!(
+        shown,
+        [
+            &warnings[..admitted_warnings],
+            &warnings[WARNINGS - budget.control.messages..]
+        ]
+        .concat(),
+        "control messages keep their order, and only the oldest waiting detached ones \
+         are shed"
+    );
 
     // The storm's backlog cannot precede the control traffic: only the few
     // frames the writer takes before the shutdown response exists can.
@@ -499,8 +530,8 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         "the admitted control set exceeded its budget: {high_water:?}"
     );
     assert!(
-        high_water.control.retained.messages >= WARNINGS,
-        "every control message was accounted while it waited: {high_water:?}"
+        high_water.control.retained.messages <= 2 * budget.control.messages + 1,
+        "control retained more than its envelope: {high_water:?}"
     );
     assert!(
         high_water.response.admitted.messages <= budget.response.messages,
@@ -559,4 +590,266 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         Delivery::Closed,
         "an exited transport takes no further publication"
     );
+}
+
+/// A server whose one request runs until it is cancelled or dropped, observably.
+struct Busy {
+    started: Arc<Notify>,
+    released: Arc<Notify>,
+    shutdown_seen: Arc<Notify>,
+}
+
+impl LanguageServer for Busy {
+    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        Ok(InitializeResult::default())
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        self.shutdown_seen.notify_one();
+        Ok(())
+    }
+}
+
+const SMALL_RESULT_BYTES: usize = 2048;
+
+impl Busy {
+    async fn hold(&self, _: Value) -> Result<Value> {
+        let _signal = DropSignal(Arc::clone(&self.released));
+        self.started.notify_one();
+        std::future::pending().await
+    }
+
+    async fn small(&self, _: Value) -> Result<String> {
+        Ok("s".repeat(SMALL_RESULT_BYTES))
+    }
+}
+
+struct BusyServer {
+    outbound: Outbound,
+    started: Arc<Notify>,
+    released: Arc<Notify>,
+    shutdown_seen: Arc<Notify>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for BusyServer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+/// Serve [`Busy`] with `budget`, its input and output on separate pipes so the
+/// editor can stop reading, or go away, without closing the server's input.
+fn serve_busy(budget: OutboundBudget) -> (BusyServer, Editor<DuplexStream, DuplexStream>) {
+    let outbound = Outbound::new(budget);
+    let started = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let shutdown_seen = Arc::new(Notify::new());
+    let (service, _socket) = {
+        let started = Arc::clone(&started);
+        let released = Arc::clone(&released);
+        let shutdown_seen = Arc::clone(&shutdown_seen);
+        LspService::build(move |_| Busy {
+            started,
+            released,
+            shutdown_seen,
+        })
+        .custom_method("test/hold", Busy::hold)
+        .custom_method("test/small", Busy::small)
+        .finish()
+    };
+    let (editor_out, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, editor_in) = tokio::io::duplex(PIPE_BYTES);
+    let server = tokio::spawn(verter_lsp::outbound::serve(
+        server_in,
+        server_out,
+        service,
+        outbound.clone(),
+    ));
+    (
+        BusyServer {
+            outbound,
+            started,
+            released,
+            shutdown_seen,
+            server,
+        },
+        Editor {
+            reader: BufReader::new(editor_in),
+            writer: editor_out,
+        },
+    )
+}
+
+async fn initialize<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(editor: &mut Editor<R, W>) {
+    editor
+        .send(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}))
+        .await;
+    assert_eq!(editor.recv().await["id"], 1);
+    editor
+        .send(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+        .await;
+}
+
+/// A frame larger than the pipe: the writer cannot finish writing it while the
+/// editor does not read, so it stalls on it.
+fn stall_writer(outbound: &Outbound) {
+    outbound.notify_detached::<LogMessage>(LogMessageParams {
+        typ: MessageType::LOG,
+        message: "f".repeat(4 * PIPE_BYTES),
+    });
+}
+
+/// With the response budget full behind a stalled client, the handlers still
+/// running keep being polled: `$/cancelRequest` releases a running request and
+/// `shutdown` runs. The responses produced meanwhile wait, accounted with their
+/// bytes, and reach the client whole once it reads again.
+///
+/// Discriminating: a dispatcher that waits for response admission before
+/// polling its handlers again never runs the cancellation, so the held request
+/// is never released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_and_shutdown_run_while_responses_wait_for_a_stalled_client() {
+    let (mut busy, mut editor) = serve_busy(OutboundBudget {
+        response: ClassBudget {
+            messages: 1,
+            bytes: 1024 * 1024,
+        },
+        ..OutboundBudget::DEFAULT
+    });
+    initialize(&mut editor).await;
+    stall_writer(&busy.outbound);
+
+    editor
+        .send(json!({"jsonrpc": "2.0", "id": 2, "method": "test/hold", "params": {}}))
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), busy.started.notified())
+        .await
+        .expect("the held request starts");
+    let response_ids = 3..3 + verter_lsp::LSP_MAX_CONCURRENCY as u64;
+    let shutdown_id = response_ids.end;
+    for id in response_ids.clone() {
+        editor
+            .send(json!({"jsonrpc": "2.0", "id": id, "method": "test/small", "params": {}}))
+            .await;
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while busy.outbound.load().response.retained().messages < verter_lsp::LSP_MAX_CONCURRENCY {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all ordinary handler slots are occupied behind the stalled client");
+    let full = busy.outbound.load().response;
+    assert_eq!(full.admitted.messages, 1, "the budget admits one: {full:?}");
+    assert_eq!(
+        full.waiting.messages,
+        verter_lsp::LSP_MAX_CONCURRENCY - 1,
+        "every other response waits, accounted: {full:?}"
+    );
+    assert!(
+        full.admitted.bytes > SMALL_RESULT_BYTES && full.waiting.bytes > SMALL_RESULT_BYTES,
+        "each held response is accounted with its serialized bytes: {full:?}"
+    );
+
+    editor
+        .send(json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 2}}))
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), busy.released.notified())
+        .await
+        .expect("cancellation releases the running request while responses wait");
+    editor
+        .send(json!({"jsonrpc": "2.0", "id": shutdown_id, "method": "shutdown"}))
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), busy.shutdown_seen.notified())
+        .await
+        .expect("shutdown runs while responses wait");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while busy.outbound.load().response.retained().messages
+            < verter_lsp::LSP_MAX_CONCURRENCY + 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the cancelled and shutdown responses are held too");
+    let held = busy.outbound.load().response;
+    assert_eq!(held.admitted.messages, 1, "still one admitted: {held:?}");
+    assert!(
+        busy.outbound.high_water().response.admitted.messages <= 1,
+        "the admitted responses never exceeded their budget"
+    );
+
+    let mut responses: HashMap<u64, Value> = HashMap::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while responses.len() < verter_lsp::LSP_MAX_CONCURRENCY + 2 {
+            let message = editor.recv().await;
+            if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                responses.insert(id, message);
+            }
+        }
+    })
+    .await
+    .expect("the resumed client receives every held response");
+    for id in response_ids {
+        assert_eq!(
+            responses[&id]["result"].as_str().map(str::len),
+            Some(SMALL_RESULT_BYTES),
+            "a held response arrives whole"
+        );
+    }
+    assert_eq!(
+        responses[&2]["error"]["code"],
+        ErrorCode::RequestCancelled.code()
+    );
+    assert_eq!(responses[&shutdown_id]["result"], Value::Null);
+    assert_eq!(busy.outbound.load().response.retained(), Load::default());
+
+    editor
+        .send(json!({"jsonrpc": "2.0", "method": "exit"}))
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), &mut busy.server)
+        .await
+        .expect("the server exits")
+        .unwrap();
+}
+
+/// A failed write ends the session: the server stops reading and drops every
+/// running request with what it holds, even though its input stays open.
+///
+/// Discriminating: a transport that ends only its writer keeps reading the
+/// open input and keeps the held request alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_write_releases_running_requests_and_ends_the_session() {
+    let (mut busy, editor) = serve_busy(OutboundBudget::DEFAULT);
+    let Editor { reader, mut writer } = editor;
+    let mut editor = Editor {
+        reader,
+        writer: &mut writer,
+    };
+    initialize(&mut editor).await;
+    editor
+        .send(json!({"jsonrpc": "2.0", "id": 2, "method": "test/hold", "params": {}}))
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), busy.started.notified())
+        .await
+        .expect("the held request starts");
+
+    // The editor goes away without closing the server's input; the next write
+    // fails.
+    drop(editor.reader);
+    busy.outbound
+        .notify_detached::<LogMessage>(LogMessageParams {
+            typ: MessageType::LOG,
+            message: "unread".into(),
+        });
+
+    tokio::time::timeout(Duration::from_secs(30), busy.released.notified())
+        .await
+        .expect("the failed write releases the running request");
+    tokio::time::timeout(Duration::from_secs(30), &mut busy.server)
+        .await
+        .expect("the session ends although its input is still open")
+        .unwrap();
+    drop(writer);
 }

@@ -11,8 +11,9 @@
 //!   writes a pending response first.
 //! * CONTROL — every other server→client message except diagnostics: requests
 //!   (whose replies [`serve`] routes back to the waiting producer) and ordered
-//!   notifications such as progress, messages and lifecycle signals. Never
-//!   coalesced, reordered or dropped once offered. Written ahead of diagnostics.
+//!   notifications such as progress, messages and lifecycle signals. Awaiting
+//!   producers are never coalesced, reordered or dropped. Detached informational
+//!   notifications have a separate waiting ceiling. Written ahead of diagnostics.
 //! * REPLACEABLE — `textDocument/publishDiagnostics`, which replaces a
 //!   document's whole diagnostic set. It flows only through the
 //!   [`ReplaceableLane`], never as split append-like chunks.
@@ -26,12 +27,21 @@
 //!   budget never truncates a complete result;
 //! * a control producer that offers a message while the admitted set is full
 //!   WAITS in one first-come line, and that line is accounted too: a producer
-//!   that awaits its send holds its place until admitted; a producer that
+//!   that awaits its send holds its place until admitted, so those waiting
+//!   messages number at most one per suspended producer; a producer that
 //!   cannot await ([`Outbound::notify_detached`]) leaves its message in the line
-//!   without blocking. Messages are admitted strictly in the order they were
-//!   offered;
-//! * responses do not queue beyond their budget: while the admitted responses
-//!   are full, no further handler result is taken from the running handlers;
+//!   without blocking, and at most `B.control` of those detached messages
+//!   wait — a newer one sheds the oldest beyond that; an oversized detached
+//!   notification that cannot be admitted immediately is shed instead. Messages are admitted
+//!   strictly in the order they were offered;
+//! * a response produced while the admitted responses are full WAITS,
+//!   accounted, and keeps its handler's concurrency slot until admitted, so
+//!   ordinary running handlers and waiting responses together never exceed
+//!   [`crate::LSP_MAX_CONCURRENCY`]. Two reserved lifecycle slots handle
+//!   cancellation notifications, the first shutdown request and exit independently
+//!   of response admission. The shutdown reply has one extra accounted waiting
+//!   slot; duplicate shutdown requests use ordinary slots. Waiting never stops
+//!   running handlers being polled;
 //! * the replaceable class keeps at most one payload per document admitted or
 //!   waiting: a newer publication retires the older payload at once, and an
 //!   older one never overtakes a newer one;
@@ -145,6 +155,10 @@ pub struct ClassLoad {
     pub admitted: Load,
     /// Messages offered while the admitted set was full.
     pub waiting: Load,
+    /// Messages discarded instead of retained since the transport was built:
+    /// detached control notifications shed beyond their ceiling. Not part of
+    /// what the class retains.
+    pub shed: Load,
 }
 
 impl ClassLoad {
@@ -303,7 +317,11 @@ impl Outbound {
     /// Account the completed write of `outgoing`.
     fn complete(&self, outgoing: Outgoing) {
         match outgoing {
-            Outgoing::Response(_) => self.hub.responses.complete(),
+            Outgoing::Response(_) => {
+                if self.hub.responses.complete(&self.hub.budget.response) {
+                    self.mark_initialized();
+                }
+            }
             Outgoing::Control(_) => self.hub.control.complete(&self.hub.budget.control),
             Outgoing::Replaceable(taken) => self.hub.diagnostics.complete(taken),
         }

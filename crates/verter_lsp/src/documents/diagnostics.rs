@@ -8,26 +8,18 @@ use crate::provider_surface_store::ProviderSurfaceSnapshot;
 #[derive(Clone)]
 pub(crate) struct ReadinessBasis {
     pub snapshot: DocumentSnapshotIdentity,
+    environment: ObservedEnvironment,
+}
+
+/// The compiler generation and workspace root a basis observed.
+#[derive(Clone)]
+struct ObservedEnvironment {
     generation: Option<u64>,
     // Weak identity prevents address reuse without retaining a retired root's payload.
     workspace: Option<std::sync::Weak<verter_workspace::PublishedRoot>>,
 }
 
-impl ReadinessBasis {
-    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Option<Self> {
-        let snapshot = documents.snapshot_identity(uri)?;
-        let host = documents.host();
-        Some(Self {
-            snapshot,
-            generation: host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
-            workspace: host
-                .workspace_read()
-                .published_root()
-                .as_ref()
-                .map(Arc::downgrade),
-        })
-    }
-
+impl ObservedEnvironment {
     fn workspace_matches(
         &self,
         current: Option<&std::sync::Weak<verter_workspace::PublishedRoot>>,
@@ -39,11 +31,34 @@ impl ReadinessBasis {
         }
     }
 
-    fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
-        let host = documents.host();
+    /// Whether both are still the host's.
+    fn matches(&self, host: &verter_session::VerterHost, canonical_id: &str) -> bool {
         let workspace = host.workspace_read().published_root();
-        host.get_diagnostics_generation(&uri_to_canonical_id(uri)) == self.generation
+        host.get_diagnostics_generation(canonical_id) == self.generation
             && self.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+    }
+}
+
+impl ReadinessBasis {
+    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Option<Self> {
+        let snapshot = documents.snapshot_identity(uri)?;
+        let host = documents.host();
+        Some(Self {
+            snapshot,
+            environment: ObservedEnvironment {
+                generation: host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
+                workspace: host
+                    .workspace_read()
+                    .published_root()
+                    .as_ref()
+                    .map(Arc::downgrade),
+            },
+        })
+    }
+
+    fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        self.environment
+            .matches(&documents.host(), &uri_to_canonical_id(uri))
     }
 
     fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
@@ -85,7 +100,9 @@ impl ForegroundSettlement {
         };
         let workspace = documents.host().workspace_read().published_root();
         documents.snapshot_identity_is_current(uri, &basis.snapshot)
-            && basis.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+            && basis
+                .environment
+                .workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
     }
 
     pub(crate) fn settle<T>(
@@ -431,8 +448,9 @@ impl DocumentRegistry {
     /// A close or supersession instead CANCELS the suspended delivery, which
     /// withdraws the payload from the lane, so it never reaches the client — the
     /// same stale-publication guarantee, without the stranding. The transport
-    /// writer re-checks this epoch, under the same lock as the fence, at the
-    /// moment it takes the payload, so a publication cancelled before the take
+    /// writer re-checks this epoch, under the same lock as the fence, and the
+    /// basis's compiler generation and workspace root at the moment it takes
+    /// the payload, so a publication cancelled before the take
     /// is never written even if this task has not yet observed the cancellation.
     /// Only the one payload already being written may finish.
     pub(crate) async fn publish_diagnostics(
@@ -452,7 +470,7 @@ impl DocumentRegistry {
         let Some(cancelled) = claimed else {
             tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0,
                 current_epoch = ?self.diagnostics_state.lock().epochs.get(uri.as_str()),
-                generation = ?publication.basis.generation,
+                generation = ?publication.basis.environment.generation,
                 current_generation = ?self.host().get_diagnostics_generation(&uri_to_canonical_id(uri)),
                 "diagnostics publication superseded");
             self.refresh_superseded_diagnostics(uri, publication);
@@ -465,11 +483,20 @@ impl DocumentRegistry {
             diagnostics,
             Some(publication.basis.snapshot.version),
         );
+        // The take re-checks the whole basis: the epoch fences the source (every
+        // edit and close takes it), and the compiler generation and workspace
+        // root can each advance without touching the epoch.
         let still_current = {
             let state = Arc::clone(&self.diagnostics_state);
+            let host = self.host.clone();
+            let canonical_id = uri_to_canonical_id(uri);
             let uri = uri.to_string();
             let epoch = publication.epoch;
-            move || state.lock().epochs.get(&uri) == Some(&epoch)
+            let environment = publication.basis.environment.clone();
+            move || {
+                state.lock().epochs.get(&uri) == Some(&epoch)
+                    && environment.matches(&host.host(), &canonical_id)
+            }
         };
         let sent = tokio::select! {
             // Cancellation wins a tie: a close that has already taken the URI must
@@ -492,6 +519,9 @@ impl DocumentRegistry {
                 epoch = publication.epoch.0,
                 "diagnostics send cancelled before it reached the client"
             );
+            // A payload the writer retired because its compiler generation or
+            // workspace moved on still owns the document: owe its replacement.
+            self.refresh_superseded_diagnostics(uri, publication);
             self.refresh_outdated_receipts();
             return;
         }
@@ -499,9 +529,9 @@ impl DocumentRegistry {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) == Some(&publication.epoch) {
             if complete {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.generation, "diagnostics complete");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.environment.generation, "diagnostics complete");
             } else {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.generation, "diagnostics incomplete; publication owed");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.environment.generation, "diagnostics incomplete; publication owed");
             }
             // An incomplete publication is recorded as OWED rather than dropped:
             // the generation advance that settles its carrier must find it.
@@ -826,6 +856,123 @@ mod tests {
             );
             stale_send.await;
             assert!(!documents.diagnostics_ready(&edited));
+        }
+    }
+
+    /// The writer retires a queued publication when the compiler generation or
+    /// workspace root changes without an editor edit, then owes a replacement.
+    /// An epoch-only take fence writes `obsolete` behind the stalled frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_transport_retires_publications_from_an_outdated_environment() {
+        use serde_json::json;
+        use tower_lsp_server::ls_types::notification::LogMessage;
+        use tower_lsp_server::ls_types::{LogMessageParams, MessageType};
+
+        struct ServerTask(tokio::task::JoinHandle<()>);
+        impl Drop for ServerTask {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        for change_workspace in [false, true] {
+            let outbound = crate::outbound::Outbound::default();
+            let documents = registry_on(&outbound);
+            let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver(
+                "/workspace",
+                Some("/workspace/tsconfig.json"),
+            )
+            .read()
+            .clone()
+            .unwrap();
+            documents.host().set_workspace(vfs.clone());
+            let (service, _socket) = tower_lsp_server::LspService::new(|_| HandshakeOnly);
+            let (editor_end, server_end) = tokio::io::duplex(2048);
+            let (server_in, server_out) = tokio::io::split(server_end);
+            let mut server = ServerTask(tokio::spawn(crate::outbound::serve(
+                server_in,
+                server_out,
+                service,
+                outbound.clone(),
+            )));
+            let (editor_in, mut editor_out) = tokio::io::split(editor_end);
+            let mut reader = tokio::io::BufReader::new(editor_in);
+            send_frame(
+                &mut editor_out,
+                json!({"jsonrpc":"2.0", "id":1,
+                "method":"initialize", "params":{"capabilities":{}}}),
+            )
+            .await;
+            assert_eq!(recv_frame(&mut reader).await["id"], 1);
+            outbound.notify_detached::<LogMessage>(LogMessageParams {
+                typ: MessageType::LOG,
+                message: "x".repeat(8192),
+            });
+            let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+            let sentinel: Uri = "file:///workspace/Sentinel.vue".parse().unwrap();
+            open(&documents, &edited);
+            open(&documents, &sentinel);
+            let mut refreshes = documents.subscribe_diagnostics_refresh();
+            let obsolete = documents.begin_diagnostics_publication(&edited).unwrap();
+            let obsolete_send = documents.publish_diagnostics(
+                &edited,
+                &obsolete,
+                diagnostic("obsolete"),
+                true,
+                None,
+            );
+            tokio::pin!(obsolete_send);
+            assert!(futures_util::poll!(&mut obsolete_send).is_pending());
+            if change_workspace {
+                let root = documents.host().workspace_read().published_root().unwrap();
+                vfs.publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(
+                    root.snapshot.clone(),
+                ));
+                assert_eq!(
+                    documents
+                        .host()
+                        .get_diagnostics_generation(&uri_to_canonical_id(&edited)),
+                    obsolete.basis.environment.generation,
+                    "only the workspace basis changed"
+                );
+            } else {
+                documents
+                    .host()
+                    .bump_diagnostics_generation(&uri_to_canonical_id(&edited));
+            }
+            assert!(!documents.diagnostic_publication_is_current(&edited, &obsolete));
+            let marker = documents.begin_diagnostics_publication(&sentinel).unwrap();
+            let marker_send = documents.publish_diagnostics(
+                &sentinel,
+                &marker,
+                diagnostic("sentinel"),
+                true,
+                None,
+            );
+            tokio::pin!(marker_send);
+            assert!(futures_util::poll!(&mut marker_send).is_pending());
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                assert_eq!(recv_frame(&mut reader).await["method"], "window/logMessage");
+                let next = recv_frame(&mut reader).await;
+                assert_eq!(
+                    next["params"]["uri"],
+                    sentinel.as_str(),
+                    "the obsolete publication never reaches the resumed editor"
+                );
+                obsolete_send.await;
+                marker_send.await;
+            })
+            .await
+            .expect("the resumed writer reaches the sentinel");
+            assert!(!documents.diagnostics_ready(&edited));
+            assert_eq!(
+                refreshes.try_recv().expect("a replacement is owed").uri,
+                edited
+            );
+            send_frame(&mut editor_out, json!({"jsonrpc":"2.0", "method":"exit"})).await;
+            tokio::time::timeout(std::time::Duration::from_secs(30), &mut server.0)
+                .await
+                .expect("the session exits")
+                .unwrap();
         }
     }
 
