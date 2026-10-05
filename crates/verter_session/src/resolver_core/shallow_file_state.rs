@@ -381,7 +381,7 @@ impl ShallowFileState {
             false,
             Arc::new(crate::decl_lowering::DeclLoweringService::new()),
             header_index,
-            Arc::clone(&provenance),
+            Arc::clone(&provenance.decl_lowering),
             None,
         ));
         (

@@ -582,6 +582,31 @@ impl std::fmt::Debug for DeclLoweringService {
     }
 }
 
+/// The declaration-lowering work counters: the deterministic, wall-clock-free
+/// observability rail for parse-once / lower-on-demand. Owned by the lowering
+/// side and shared (one `Arc`) by every declaration-body memo a host builds;
+/// the host's provenance facade aggregates it. Relaxed increments, reset only
+/// by the facade.
+#[derive(Debug, Default)]
+pub struct DeclLoweringCounters {
+    /// OXC eval-program parses performed through the single host parse
+    /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
+    pub eval_program_parses: std::sync::atomic::AtomicU64,
+    /// `EvalEnv` builds initiated by the host (the program-taking
+    /// builder plus any call site that forces an internal fallback
+    /// build). Exactly 1 per cold canonical build.
+    pub eval_env_builds: std::sync::atomic::AtomicU64,
+    /// Declaration BODIES lowered to typed IR on behalf of this host —
+    /// one increment per type/value/augmentation declaration contributor
+    /// whose body (annotation, signature set, object shape, heritage,
+    /// member types) was lowered from OXC syntax. The deterministic
+    /// demand-scoping rail: publishing a file's `IndexedReady` lowers
+    /// ZERO bodies; a semantic query lowers exactly the demanded
+    /// declaration closure; a whole-file env demand (fallthrough /
+    /// runtime values) lowers the file's full declaration set once.
+    pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
+}
+
 /// The default decl-lowering pool size — `clamp(available_parallelism / 4,
 /// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
 /// [`crate::types::HostResourcePolicy::default`] and the decl-lowering

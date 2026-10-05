@@ -222,14 +222,20 @@ fn counters_of(host: &VerterHost) -> Counters {
                 p.indexed_ready_scheduler_snapshot_reuse.load(Relaxed),
             ),
             ("shallow_state_builds", p.shallow_state_builds.load(Relaxed)),
-            ("eval_env_builds", p.eval_env_builds.load(Relaxed)),
+            (
+                "eval_env_builds",
+                p.decl_lowering.eval_env_builds.load(Relaxed),
+            ),
             ("sfc_parses", p.sfc_parses.load(Relaxed)),
             ("carrier_parses", p.carrier_parses.load(Relaxed)),
             (
                 "vue_script_snapshot_parses",
                 p.vue_script_snapshot_parses.load(Relaxed),
             ),
-            ("decl_bodies_lowered", p.decl_bodies_lowered.load(Relaxed)),
+            (
+                "decl_bodies_lowered",
+                p.decl_lowering.decl_bodies_lowered.load(Relaxed),
+            ),
             ("dep_resolution_calls", p.dep_resolution_calls.load(Relaxed)),
             (
                 "import_resolution_cache_hit_count",

@@ -187,9 +187,11 @@ pub struct MetaProvenance {
     // build, one `IndexedReady` materialisation. These counters are the
     // deterministic observability rail for that contract (no
     // wall-clock); `reset()` zeroes them like every other counter.
-    /// OXC eval-program parses performed through the single host parse
-    /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
-    pub eval_program_parses: std::sync::atomic::AtomicU64,
+    /// The declaration-lowering work counters (eval-program parses, eval-env
+    /// builds, lowered declaration bodies). Owned by the lowering side and
+    /// shared with every declaration-body memo this host builds; this facade
+    /// only aggregates it.
+    pub decl_lowering: std::sync::Arc<crate::decl_lowering::DeclLoweringCounters>,
     /// Carrier parses performed through the single counted carrier
     /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
@@ -224,19 +226,6 @@ pub struct MetaProvenance {
     /// parse, not an OXC program parse) and `eval_program_parses` (the
     /// eval funnel); counted inside the worker fn so every lane counts.
     pub vue_script_snapshot_parses: std::sync::atomic::AtomicU64,
-    /// `EvalEnv` builds initiated by the host (the program-taking
-    /// builder plus any call site that forces an internal fallback
-    /// build). Exactly 1 per cold canonical build.
-    pub eval_env_builds: std::sync::atomic::AtomicU64,
-    /// Declaration BODIES lowered to typed IR on behalf of this host —
-    /// one increment per type/value/augmentation declaration contributor
-    /// whose body (annotation, signature set, object shape, heritage,
-    /// member types) was lowered from OXC syntax. The deterministic
-    /// demand-scoping rail: publishing a file's `IndexedReady` lowers
-    /// ZERO bodies; a semantic query lowers exactly the demanded
-    /// declaration closure; a whole-file env demand (fallthrough /
-    /// runtime values) lowers the file's full declaration set once.
-    pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
     /// `ShallowFileState::from_route_inventory_with_resolver` builds initiated
     /// by host call sites. Exactly 1 per cold canonical build.
     pub shallow_state_builds: std::sync::atomic::AtomicU64,
@@ -376,13 +365,11 @@ impl Default for MetaProvenance {
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
             compile_cold_runs: std::sync::atomic::AtomicU64::new(0),
-            eval_program_parses: std::sync::atomic::AtomicU64::new(0),
+            decl_lowering: std::sync::Arc::default(),
             carrier_parses: std::sync::atomic::AtomicU64::new(0),
             sfc_parses: std::sync::atomic::AtomicU64::new(0),
             non_sfc_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
             vue_script_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
-            eval_env_builds: std::sync::atomic::AtomicU64::new(0),
-            decl_bodies_lowered: std::sync::atomic::AtomicU64::new(0),
             shallow_state_builds: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_materializes: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
@@ -642,13 +629,13 @@ impl MetaProvenance {
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
             compile_cold_runs: self.compile_cold_runs.load(Relaxed),
-            eval_program_parses: self.eval_program_parses.load(Relaxed),
+            eval_program_parses: self.decl_lowering.eval_program_parses.load(Relaxed),
             carrier_parses: self.carrier_parses.load(Relaxed),
             sfc_parses: self.sfc_parses.load(Relaxed),
             non_sfc_snapshot_parses: self.non_sfc_snapshot_parses.load(Relaxed),
             vue_script_snapshot_parses: self.vue_script_snapshot_parses.load(Relaxed),
-            eval_env_builds: self.eval_env_builds.load(Relaxed),
-            decl_bodies_lowered: self.decl_bodies_lowered.load(Relaxed),
+            eval_env_builds: self.decl_lowering.eval_env_builds.load(Relaxed),
+            decl_bodies_lowered: self.decl_lowering.decl_bodies_lowered.load(Relaxed),
             shallow_state_builds: self.shallow_state_builds.load(Relaxed),
             indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
@@ -742,13 +729,13 @@ impl MetaProvenance {
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
         self.compile_cold_runs.store(0, Relaxed);
-        self.eval_program_parses.store(0, Relaxed);
+        self.decl_lowering.eval_program_parses.store(0, Relaxed);
         self.carrier_parses.store(0, Relaxed);
         self.sfc_parses.store(0, Relaxed);
         self.non_sfc_snapshot_parses.store(0, Relaxed);
         self.vue_script_snapshot_parses.store(0, Relaxed);
-        self.eval_env_builds.store(0, Relaxed);
-        self.decl_bodies_lowered.store(0, Relaxed);
+        self.decl_lowering.eval_env_builds.store(0, Relaxed);
+        self.decl_lowering.decl_bodies_lowered.store(0, Relaxed);
         self.shallow_state_builds.store(0, Relaxed);
         self.indexed_ready_materializes.store(0, Relaxed);
         self.ensure_loaded_calls.store(0, Relaxed);

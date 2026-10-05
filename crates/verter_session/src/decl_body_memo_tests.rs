@@ -107,7 +107,7 @@ fn single(body: &verter_session_query::source::deref::DerefedAuthoredBody) -> &T
     }
 }
 
-fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
+fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<DeclLoweringCounters>) {
     memo_for_canonical(FIXTURE_CANONICAL, source)
 }
 
@@ -115,20 +115,26 @@ fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
 /// out of a full [`ShallowFileState`] construction (which installs the ONE
 /// shared lens pair from the finished state), a live lowering service
 /// retains the parse, and nothing lowers until first demand.
-fn memo_for_canonical(canonical: &str, source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
+fn memo_for_canonical(
+    canonical: &str,
+    source: &str,
+) -> (Arc<DeclBodyMemo>, Arc<DeclLoweringCounters>) {
     let (state, provenance) =
         crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
             canonical, source,
         );
-    (Arc::clone(state.decl_bodies()), provenance)
+    (
+        Arc::clone(state.decl_bodies()),
+        Arc::clone(&provenance.decl_lowering),
+    )
 }
 
-fn bodies(p: &MetaProvenance) -> u64 {
+fn bodies(p: &DeclLoweringCounters) -> u64 {
     p.decl_bodies_lowered
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn parses(p: &MetaProvenance) -> u64 {
+fn parses(p: &DeclLoweringCounters) -> u64 {
     p.eval_program_parses
         .load(std::sync::atomic::Ordering::Relaxed)
 }

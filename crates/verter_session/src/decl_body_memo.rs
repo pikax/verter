@@ -75,8 +75,7 @@ use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
 use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
-use crate::decl_lowering::{DeclLoweringService, SnapshotLease};
-use crate::meta_provenance::MetaProvenance;
+use crate::decl_lowering::{DeclLoweringCounters, DeclLoweringService, SnapshotLease};
 use crate::source_lens::{RouteLens, ShallowLens};
 use crate::typeof_dependencies::collect_typeof_roots;
 use verter_session_query::source::snapshot::SnapshotKey;
@@ -303,7 +302,7 @@ struct SnapshotDemandLease {
     source_type: oxc_span::SourceType,
     service: Option<Arc<DeclLoweringService>>,
     lease: OnceLock<SnapshotLease>,
-    provenance: Arc<MetaProvenance>,
+    counters: Arc<DeclLoweringCounters>,
 }
 impl SnapshotDemandLease {
     fn ensure_lease(&self) {
@@ -313,7 +312,7 @@ impl SnapshotDemandLease {
         self.lease.get_or_init(|| {
             let outcome = service.acquire_lease(&self.key, &self.eval_source, self.source_type);
             if outcome.parsed_now {
-                self.provenance
+                self.counters
                     .eval_program_parses
                     .fetch_add(1, Ordering::Relaxed);
             }
@@ -426,7 +425,7 @@ pub struct DeclBodyMemo {
     /// never holds a lease.
     snapshot: Arc<SnapshotDemandLease>,
     header_index: Arc<DeclHeaderIndex>,
-    provenance: Arc<MetaProvenance>,
+    counters: Arc<DeclLoweringCounters>,
     /// The ONE shared shallow cross-decl lens, built ONCE per state by
     /// [`crate::fact_emission::build_shallow_lens`] and installed at the end of
     /// `ShallowFileState` construction (the lens derives from the FINISHED
@@ -483,7 +482,7 @@ impl DeclBodyMemo {
         svelte_component_runes_mode: bool,
         service: Arc<DeclLoweringService>,
         header_index: Arc<DeclHeaderIndex>,
-        provenance: Arc<MetaProvenance>,
+        counters: Arc<DeclLoweringCounters>,
         lease: Option<SnapshotLease>,
     ) -> Self {
         let lease_cell = OnceLock::new();
@@ -496,7 +495,7 @@ impl DeclBodyMemo {
             source_type,
             service: Some(Arc::clone(&service)),
             lease: lease_cell,
-            provenance: Arc::clone(&provenance),
+            counters: Arc::clone(&counters),
         });
         let function_index = Arc::new(FunctionIndexDemand {
             snapshot: Arc::clone(&snapshot),
@@ -518,7 +517,7 @@ impl DeclBodyMemo {
             service: Some(service),
             snapshot,
             header_index,
-            provenance,
+            counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
             type_entries: DashMap::default(),
@@ -542,14 +541,14 @@ impl DeclBodyMemo {
         env: &EvalEnv,
         header_index: Arc<DeclHeaderIndex>,
     ) -> Self {
-        let provenance = Arc::new(MetaProvenance::default());
+        let counters = Arc::new(DeclLoweringCounters::default());
         let snapshot = Arc::new(SnapshotDemandLease {
             key: key.clone(),
             eval_source: Arc::from(""),
             source_type: oxc_span::SourceType::ts(),
             service: None,
             lease: OnceLock::new(),
-            provenance: Arc::clone(&provenance),
+            counters: Arc::clone(&counters),
         });
         let function_index = Arc::new(FunctionIndexDemand {
             snapshot: Arc::clone(&snapshot),
@@ -579,7 +578,7 @@ impl DeclBodyMemo {
             service: None,
             snapshot,
             header_index,
-            provenance,
+            counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
             type_entries: DashMap::default(),
@@ -1209,10 +1208,10 @@ impl DeclBodyMemo {
             );
             return Arc::new(EvalEnv::default());
         };
-        self.provenance
+        self.counters
             .eval_env_builds
             .fetch_add(1, Ordering::Relaxed);
-        self.provenance
+        self.counters
             .decl_bodies_lowered
             .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
         // `<script setup generic="T">` parameters are NOT bound into this env:
@@ -1925,7 +1924,7 @@ impl DeclBodyMemo {
             return DemandLower::LeaseMiss;
         };
         if let Some(batch) = inner.as_ref() {
-            self.provenance
+            self.counters
                 .decl_bodies_lowered
                 .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
         }

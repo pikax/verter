@@ -768,6 +768,7 @@ impl VerterHost {
         }
         if cold_lease.parsed_now {
             self.provenance
+                .decl_lowering
                 .eval_program_parses
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -935,7 +936,7 @@ impl VerterHost {
             products.svelte_component_runes_mode,
             Arc::clone(&self.decl_lowering),
             Arc::new(products.header_index),
-            Arc::clone(&self.provenance),
+            Arc::clone(&self.provenance.decl_lowering),
             Some(cold_lease.lease),
         ));
         // Materialisation performs ZERO import resolution. The artifact
