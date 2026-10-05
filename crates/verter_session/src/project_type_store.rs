@@ -950,7 +950,7 @@ pub struct ProjectTypeStore {
     owner_import_surfaces: OwnerImportSurfaceDb,
     /// Final component-meta result cache. Keyed by
     /// `(owner_canonical, owner_whole_hash, options_fingerprint)`.
-    /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
+    /// Payload is [`crate::component_meta_cached_result::CachedComponentMetaResult`]
     /// — the native `ComponentMetaAnalysis` plus the sanitized
     /// resolution sidecar template. `get_component_meta` consults
     /// the cache with completion-fence dep-signature validation
@@ -958,7 +958,7 @@ pub struct ProjectTypeStore {
     /// short-circuits `get_component_meta_with_resolution` so
     /// audit-mode warm replays return in near-zero time.
     component_meta_results:
-        Arc<ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>>,
+        Arc<ComponentMetaResultDb<crate::component_meta_cached_result::CachedComponentMetaResult>>,
     /// TypeScript `intrinsic` registry. Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
@@ -1273,7 +1273,6 @@ impl ProjectTypeStore {
             Arc::clone(&self.resolvability_db),
             Arc::clone(&self.owner_collection_db),
             Arc::clone(&self.shape_cache_db),
-            Arc::clone(&self.component_meta_results),
             vue_surfaces,
             svelte_surfaces,
             Arc::clone(&self.identity_interner),
@@ -1423,7 +1422,8 @@ impl ProjectTypeStore {
     /// Final component-meta result cache.
     pub fn component_meta_results(
         &self,
-    ) -> &ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult> {
+    ) -> &ComponentMetaResultDb<crate::component_meta_cached_result::CachedComponentMetaResult>
+    {
         &self.component_meta_results
     }
 
@@ -2323,23 +2323,26 @@ mod tests {
             },
             hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(crate::component_meta_result_db::CachedComponentMetaResult {
-                    analysis: empty_component_meta_analysis(),
-                    resolution_template: crate::component_meta_result_db::ResolutionTemplate {
-                        mode: crate::types::ProjectionMode::Expanded,
+                payload: Arc::new(
+                    crate::component_meta_cached_result::CachedComponentMetaResult {
+                        analysis: empty_component_meta_analysis(),
+                        resolution_template:
+                            crate::component_meta_cached_result::ResolutionTemplate {
+                                mode: crate::types::ProjectionMode::Expanded,
+                                whole_hash: hash,
+                                resolved_macros: Vec::new(),
+                                resolved_type_registry: Vec::new(),
+                                resolved_type_registry_meta: Vec::new(),
+                                evaluated_types: None,
+                                fact_versions: Vec::new(),
+                                surface_identities: None,
+                                origin_graph: None,
+                                completeness: crate::semantic_query::ResultCompleteness::Complete,
+                            },
+                        canonical_id: Arc::from("/w/o.vue"),
                         whole_hash: hash,
-                        resolved_macros: Vec::new(),
-                        resolved_type_registry: Vec::new(),
-                        resolved_type_registry_meta: Vec::new(),
-                        evaluated_types: None,
-                        fact_versions: Vec::new(),
-                        surface_identities: None,
-                        origin_graph: None,
-                        completeness: crate::semantic_query::ResultCompleteness::Complete,
                     },
-                    canonical_id: Arc::from("/w/o.vue"),
-                    whole_hash: hash,
-                }),
+                ),
                 read_set_signature:
                     verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 validated_at_generation: 0,

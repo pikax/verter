@@ -421,7 +421,7 @@ impl ComponentMetaResolutionSeed {
     /// Seed from a warm-cache resolution template (no rehydration — the
     /// template carries every sidecar field the output needs).
     pub(crate) fn from_template(
-        template: &crate::component_meta_result_db::ResolutionTemplate,
+        template: &crate::component_meta_cached_result::ResolutionTemplate,
     ) -> Self {
         Self {
             resolved_type_registry: template.resolved_type_registry.clone(),

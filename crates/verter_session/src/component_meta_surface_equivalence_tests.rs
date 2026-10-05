@@ -504,11 +504,10 @@ defineProps<{
     // corresponding `any(... == "/foo.ts")` assert FAILS.
     // (Empirically the dep-signature for this fixture is
     // `["/component.vue", "/foo.ts", "/types.ts"]`.)
-    let dep_canonicals =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
-            project.host(),
-            "/component.vue",
-        );
+    let dep_canonicals = crate::component_meta_cached_result::dep_signature_for_owner_in_test(
+        project.host(),
+        "/component.vue",
+    );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
         "import-route resolution must record the `Foo` carrier `/foo.ts` in the \
@@ -639,11 +638,10 @@ defineProps<{
     // `string` above already prove `Foo`'s body resolved cross-file; this
     // additionally asserts `/foo.ts` entered the published read-set (a content
     // edit to `/foo.ts` must therefore miss the warm component-meta read).
-    let dep_canonicals =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
-            project.host(),
-            "/component.vue",
-        );
+    let dep_canonicals = crate::component_meta_cached_result::dep_signature_for_owner_in_test(
+        project.host(),
+        "/component.vue",
+    );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
         "cross-file member-type resolution of `Foo['bar']`/`Foo['baz']` must root the published \
@@ -853,11 +851,10 @@ defineProps<{ z: string }>()
     // the cross-file carrier `/types.ts`; without that observable read-set
     // root, a carrier edit could not be validated through the read-set
     // contract and could not invalidate the warm result.
-    let dep_canonicals =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
-            project.host(),
-            "/Owner.vue",
-        );
+    let dep_canonicals = crate::component_meta_cached_result::dep_signature_for_owner_in_test(
+        project.host(),
+        "/Owner.vue",
+    );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
         "the published component-meta read-set MUST root on the cross-file carrier \
@@ -874,11 +871,10 @@ defineProps<{ z: string }>()
         vec!["z"],
         "the unrelated control publishes exactly its local `z` prop"
     );
-    let unrelated_deps =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
-            project.host(),
-            "/UnrelatedLocal.vue",
-        );
+    let unrelated_deps = crate::component_meta_cached_result::dep_signature_for_owner_in_test(
+        project.host(),
+        "/UnrelatedLocal.vue",
+    );
     assert!(
         !unrelated_deps.iter().any(|c| c.as_ref() == "/types.ts"),
         "the unrelated control must NOT depend on the edited carrier `/types.ts` \

@@ -1766,7 +1766,7 @@ defineSlots<Slots>()
     );
     let _ = host.get_component_meta("/src/Comp.vue");
     let dep_canonical_ids: Vec<Arc<str>> =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+        crate::component_meta_cached_result::dep_signature_for_owner_in_test(
             &host,
             "/src/Comp.vue",
         );
@@ -2105,10 +2105,8 @@ defineSlots<Slots>()
     );
 
     // The cache must NOT be warmed when suppression is active.
-    let cached = crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
-        &host,
-        "/src/Comp.vue",
-    );
+    let cached =
+        crate::component_meta_cached_result::has_owner_entry_in_test(&host, "/src/Comp.vue");
     assert!(
         !cached,
         "budget-exceeded synthesis must NOT warm the result cache",

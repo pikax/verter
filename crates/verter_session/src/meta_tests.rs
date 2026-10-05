@@ -4772,7 +4772,7 @@ defineSlots<Slots>()
     // admission. The merged gate keeps it gated via the `resolved.completeness`
     // operand even though the extract scope is Complete.
     assert!(
-        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+        !crate::component_meta_cached_result::has_owner_entry_in_test(
             host, canonical
         ),
         "a synthesis-suppressed (resolve-phase partial) result MUST NOT warm `ComponentMetaResultDb` \
@@ -35196,10 +35196,7 @@ fn output_envelope_completeness_carries_extract_phase_partiality() {
     // PREMISE 2 — the merged gate permanently refuses this result warm
     // admission. That refusal is what makes a `Complete` envelope wrong.
     assert!(
-        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
-            host,
-            "/src/WideParent.vue"
-        ),
+        !crate::component_meta_cached_result::has_owner_entry_in_test(host, "/src/WideParent.vue"),
         "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
     );
 
@@ -35226,7 +35223,7 @@ fn output_envelope_completeness_carries_extract_phase_partiality() {
         "the generous-budget control must still publish Complete"
     );
     assert!(
-        crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+        crate::component_meta_cached_result::has_owner_entry_in_test(
             control_host,
             "/src/WideParent.vue"
         ),
@@ -35252,10 +35249,7 @@ fn resolution_bearing_output_envelope_carries_extract_phase_partiality() {
         .expect("the component resolves")
         .into_parts_with_contract();
     assert!(
-        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
-            host,
-            "/src/WideParent.vue"
-        ),
+        !crate::component_meta_cached_result::has_owner_entry_in_test(host, "/src/WideParent.vue"),
         "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
     );
     assert!(

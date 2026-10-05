@@ -253,7 +253,8 @@ impl VerterHost {
         let canonical = canonical.to_string();
         let (executor_view, executor_fp) = fixed.executor_fixed_view();
         let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
-        let results = dispatch.component_meta_result_publish();
+        let results = dispatch
+            .component_meta_result_publish(self.project_type_store().component_meta_results());
         let maybe_resolved_analysis = results.compute_and_admit(
             canonical.as_str(),
             "with-resolution path",
@@ -684,7 +685,7 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, current_view, overlay);
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         let entry = dispatch
-            .component_meta_result_read()
+            .component_meta_result_read(self.project_type_store().component_meta_results())
             .peek(&key, owner_whole_hash)?;
 
         // Rehydrate the resolution template into a fresh per-request state.

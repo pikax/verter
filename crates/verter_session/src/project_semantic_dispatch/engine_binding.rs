@@ -34,11 +34,6 @@ pub struct EngineBinding {
     pub(super) resolvability: Arc<ResolvabilityDb>,
     pub(super) owner_collections: Arc<OwnerCollectionDb>,
     pub(super) shapes: Arc<ShapeCacheDb>,
-    pub(super) component_meta_results: Arc<
-        crate::component_meta_result_db::ComponentMetaResultDb<
-            crate::component_meta_result_db::CachedComponentMetaResult,
-        >,
-    >,
     pub(super) vue_surfaces: Arc<
         crate::framework::surface_store::FrameworkSurfaceStore<
             crate::typeinfo::framework_surface::VueSurfaceKey,
@@ -74,11 +69,6 @@ impl EngineBinding {
         resolvability: Arc<ResolvabilityDb>,
         owner_collections: Arc<OwnerCollectionDb>,
         shapes: Arc<ShapeCacheDb>,
-        component_meta_results: Arc<
-            crate::component_meta_result_db::ComponentMetaResultDb<
-                crate::component_meta_result_db::CachedComponentMetaResult,
-            >,
-        >,
         vue_surfaces: Arc<
             crate::framework::surface_store::FrameworkSurfaceStore<
                 crate::typeinfo::framework_surface::VueSurfaceKey,
@@ -109,7 +99,6 @@ impl EngineBinding {
             resolvability,
             owner_collections,
             shapes,
-            component_meta_results,
             vue_surfaces,
             svelte_surfaces,
             identities,

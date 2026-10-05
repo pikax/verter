@@ -4240,9 +4240,9 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
 /// content changed) and the stale entry is served.
 #[test]
 fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generation() {
-    use crate::component_meta_result_db::{
-        CachedComponentMetaResult, ComponentMetaResultEntry, ComponentMetaResultKey,
-        ResolutionTemplate,
+    use crate::{
+        component_meta_cached_result::{CachedComponentMetaResult, ResolutionTemplate},
+        component_meta_result_db::{ComponentMetaResultEntry, ComponentMetaResultKey},
     };
 
     let host = VerterHost::new_standalone(HostConfig::default());

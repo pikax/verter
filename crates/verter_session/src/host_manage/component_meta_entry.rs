@@ -119,7 +119,7 @@ pub(super) struct ComponentMetaColdResult {
     /// basis for this build's output publication evidence.
     pub(super) admitted: Option<
         crate::component_meta_result_db::AdmittedComponentMetaResult<
-            crate::component_meta_result_db::CachedComponentMetaResult,
+            crate::component_meta_cached_result::CachedComponentMetaResult,
         >,
     >,
 }
@@ -158,7 +158,7 @@ impl ColdSeedFence {
 /// contract projection.
 pub(crate) struct ComponentMetaOutputPublicationEvidence {
     pub(crate) final_result: crate::component_meta_result_db::AdmittedComponentMetaResult<
-        crate::component_meta_result_db::CachedComponentMetaResult,
+        crate::component_meta_cached_result::CachedComponentMetaResult,
     >,
     pub(crate) output_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
@@ -875,7 +875,8 @@ impl VerterHost {
         // the resolve shares the capture's snapshot rather than re-reading.
         let (executor_view, executor_fp) = fixed.executor_fixed_view();
         let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
-        let results = dispatch.component_meta_result_publish();
+        let results = dispatch
+            .component_meta_result_publish(self.project_type_store().component_meta_results());
         let ((resolved_opt, meta_opt), admitted) = results.compute_and_admit_with_entry(
             canonical,
             "view-aware path",
@@ -1015,7 +1016,7 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         let entry = dispatch
-            .component_meta_result_read()
+            .component_meta_result_read(self.project_type_store().component_meta_results())
             .peek(&key, owner_whole_hash)?;
         Some(entry.payload.analysis.clone())
     }
@@ -1073,7 +1074,7 @@ impl VerterHost {
         crate::component_meta_result_db::ComponentMetaResultKey,
         std::sync::Arc<
             crate::component_meta_result_db::ComponentMetaResultEntry<
-                crate::component_meta_result_db::CachedComponentMetaResult,
+                crate::component_meta_cached_result::CachedComponentMetaResult,
             >,
         >,
     )> {
@@ -1152,7 +1153,7 @@ impl VerterHost {
             );
             let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
             dispatch
-                .component_meta_result_read()
+                .component_meta_result_read(self.project_type_store().component_meta_results())
                 .peek(&key, owner_whole_hash)
         }
         .map(|entry| (key, entry))
@@ -1283,7 +1284,7 @@ impl VerterHost {
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
-        crate::component_meta_result_db::CachedComponentMetaResult,
+        crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
         // Refuse a partial result on ONE merged signal. `final_completeness` is
         // `resolved.completeness.merge(extract_scope_completeness)`: the
@@ -1324,8 +1325,8 @@ impl VerterHost {
         };
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         let resolution_template =
-            crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
-        let cached = crate::component_meta_result_db::CachedComponentMetaResult {
+            crate::component_meta_cached_result::ResolutionTemplate::from_resolved_state(resolved);
+        let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
             analysis: meta,
             resolution_template,
             canonical_id: Arc::from(canonical),
@@ -1364,7 +1365,7 @@ impl VerterHost {
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
-        crate::component_meta_result_db::CachedComponentMetaResult,
+        crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
         // Refuse a partial result on ONE merged signal. `final_completeness` is
         // `resolved.completeness.merge(extract_scope_completeness)`: the
@@ -1410,8 +1411,8 @@ impl VerterHost {
         let whole_hash = shallow.whole_hash;
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         let resolution_template =
-            crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
-        let cached = crate::component_meta_result_db::CachedComponentMetaResult {
+            crate::component_meta_cached_result::ResolutionTemplate::from_resolved_state(resolved);
+        let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
             analysis: meta,
             resolution_template,
             canonical_id: Arc::from(canonical),

@@ -1946,30 +1946,25 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
 }
 
 impl super::ProjectSemanticDispatch<'_> {
-    pub(crate) fn component_meta_result_read(
-        &self,
+    /// Read the final component-meta result cache. The caller passes the
+    /// store its project type store owns; the read validates candidates
+    /// against this dispatch's fact service.
+    pub(crate) fn component_meta_result_read<'s, P: Send + Sync>(
+        &'s self,
+        db: &'s crate::component_meta_result_db::ComponentMetaResultDb<P>,
     ) -> MemoRead<
-        '_,
-        crate::component_meta_result_db::ComponentMetaResultDb<
-            crate::component_meta_result_db::CachedComponentMetaResult,
-        >,
-        &crate::meta_provenance::MetaProvenance,
+        's,
+        crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        &'s crate::meta_provenance::MetaProvenance,
     > {
-        MemoRead::for_result(
-            self.binding.component_meta_results.as_ref(),
-            self.ctx,
-            &self.binding.observers.provenance,
-        )
+        MemoRead::for_result(db, self.ctx, &self.binding.observers.provenance)
     }
-    pub(crate) fn component_meta_result_publish(
-        &self,
-    ) -> MemoPublish<
-        '_,
-        crate::component_meta_result_db::ComponentMetaResultDb<
-            crate::component_meta_result_db::CachedComponentMetaResult,
-        >,
-    > {
-        MemoPublish::new(self.binding.component_meta_results.as_ref(), self.ctx)
+    /// Publish into the final component-meta result cache the caller owns.
+    pub(crate) fn component_meta_result_publish<'s, P: Send + Sync>(
+        &'s self,
+        db: &'s crate::component_meta_result_db::ComponentMetaResultDb<P>,
+    ) -> MemoPublish<'s, crate::component_meta_result_db::ComponentMetaResultDb<P>> {
+        MemoPublish::new(db, self.ctx)
     }
 }
 
