@@ -33,7 +33,7 @@ test("ARH0-ratification: clean products validate and cover every mandatory case 
   assert.ok(clean["debt-register"].emptyDeletionSetRationale.length > 0);
   // Fan-in/fan-out evidence really round-trips through the inventory product.
   const span = clean["codebase-inventory"].crates.find((c) => c.module === "crates/verter_span");
-  assert.equal(span.fanIn, 24);
+  assert.equal(span.fanIn, 25);
   const session = clean["codebase-inventory"].crates.find(
     (c) => c.module === "crates/verter_session",
   );

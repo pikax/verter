@@ -810,6 +810,7 @@
         ],
         "crateInternal": [
           "cache_runtime",
+          "fact_tracing",
           "flow_return_audit",
           "graph_walk",
           "project_semantic_dispatch",
@@ -973,6 +974,7 @@
           "cache_runtime",
           "component_meta_audit",
           "fact_signature_helpers",
+          "fact_tracing",
           "file_artifact_store",
           "graph_walk",
           "intrinsic_registry",
