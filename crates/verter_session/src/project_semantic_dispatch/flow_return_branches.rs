@@ -47,7 +47,10 @@ pub(super) struct DeadPath {
 /// What a branch statement needs next.
 pub(super) enum BranchStep<'r> {
     /// This region evaluated, the statement resuming as `Entered`.
-    Enter(Entered<'r>, &'r crate::flow_slice_content::SliceRegion),
+    Enter(
+        Entered<'r>,
+        &'r verter_session_query::flow::slice::SliceRegion,
+    ),
     /// Nothing: the statement's contributions and whether it completes.
     Done(Result<(Vec<FlowContribution>, bool), FlowReturnFailure>),
 }
@@ -63,8 +66,8 @@ struct ScopeBases {
 
 /// An `if` between its arms.
 pub(super) struct IfEval<'r> {
-    guard: &'r crate::flow_slice_content::SliceGuard,
-    alternate: Option<&'r crate::flow_slice_content::SliceRegion>,
+    guard: &'r verter_session_query::flow::slice::SliceGuard,
+    alternate: Option<&'r verter_session_query::flow::slice::SliceRegion>,
     contributors: Vec<FlowContribution>,
     entry_products: FlowProductStore,
     entry_writes: FlowWriteObservation,
@@ -80,23 +83,23 @@ type ArmEnd = (
     FlowProductStore,
     bool,
     Vec<(
-        crate::flow_slice_content::SliceNarrowSubject,
+        verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     )>,
 );
 
 /// A `switch` between its clauses.
 pub(super) struct SwitchEval<'r> {
-    discriminant: &'r Option<crate::flow_slice_content::SliceNarrowSubject>,
-    cases: &'r [crate::flow_slice_content::SliceSwitchCase],
+    discriminant: &'r Option<verter_session_query::flow::slice::SliceNarrowSubject>,
+    cases: &'r [verter_session_query::flow::slice::SliceSwitchCase],
     has_default: bool,
     entry: FlowLayerState,
     bases: ScopeBases,
-    tests: Vec<crate::flow_slice_content::SliceGuardLiteral>,
+    tests: Vec<verter_session_query::flow::slice::SliceGuardLiteral>,
     /// The clauses whose relation is a guard (`switch (typeof x)`,
     /// `switch (true)`): the default edge and the no-matching-case path
     /// apply every one negated.
-    guards: Vec<&'r crate::flow_slice_content::SliceGuard>,
+    guards: Vec<&'r verter_session_query::flow::slice::SliceGuard>,
     /// The guards of the clauses before the next one.
     guards_before: usize,
     covered: bool,
@@ -186,9 +189,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// sequence's discarded conditional), which nest no statement.
     pub(super) fn eval_if(
         &mut self,
-        guard: &crate::flow_slice_content::SliceGuard,
-        consequent: &crate::flow_slice_content::SliceRegion,
-        alternate: Option<&crate::flow_slice_content::SliceRegion>,
+        guard: &verter_session_query::flow::slice::SliceGuard,
+        consequent: &verter_session_query::flow::slice::SliceRegion,
+        alternate: Option<&verter_session_query::flow::slice::SliceRegion>,
     ) -> Result<(Vec<FlowContribution>, bool), FlowReturnFailure> {
         let mut step = self.begin_if(guard, consequent, alternate);
         loop {
@@ -241,9 +244,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// its per-arm narrows past the `if`.
     pub(super) fn begin_if<'r>(
         &mut self,
-        guard: &'r crate::flow_slice_content::SliceGuard,
-        consequent: &'r crate::flow_slice_content::SliceRegion,
-        alternate: Option<&'r crate::flow_slice_content::SliceRegion>,
+        guard: &'r verter_session_query::flow::slice::SliceGuard,
+        consequent: &'r verter_session_query::flow::slice::SliceRegion,
+        alternate: Option<&'r verter_session_query::flow::slice::SliceRegion>,
     ) -> BranchStep<'r> {
         let eval = IfEval {
             guard,
@@ -352,8 +355,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// as the authored switch body does.
     pub(super) fn begin_switch<'r>(
         &mut self,
-        discriminant: &'r Option<crate::flow_slice_content::SliceNarrowSubject>,
-        cases: &'r [crate::flow_slice_content::SliceSwitchCase],
+        discriminant: &'r Option<verter_session_query::flow::slice::SliceNarrowSubject>,
+        cases: &'r [verter_session_query::flow::slice::SliceSwitchCase],
         has_default: bool,
     ) -> BranchStep<'r> {
         let entry = self.layer_state();
@@ -364,21 +367,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // remainder a SUPERSET of the true default set — the
         // sound direction — and never lets that clause's own
         // values disappear from another clause's edge.
-        let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> = cases
+        let tests: Vec<verter_session_query::flow::slice::SliceGuardLiteral> = cases
             .iter()
             .filter_map(|case| match &case.test {
-                crate::flow_slice_content::SliceSwitchTest::Literal(literal) => {
+                verter_session_query::flow::slice::SliceSwitchTest::Literal(literal) => {
                     Some(literal.clone())
                 }
-                crate::flow_slice_content::SliceSwitchTest::Default
-                | crate::flow_slice_content::SliceSwitchTest::Guard(_)
-                | crate::flow_slice_content::SliceSwitchTest::Unmodeled => None,
+                verter_session_query::flow::slice::SliceSwitchTest::Default
+                | verter_session_query::flow::slice::SliceSwitchTest::Guard(_)
+                | verter_session_query::flow::slice::SliceSwitchTest::Unmodeled => None,
             })
             .collect();
-        let guards: Vec<&crate::flow_slice_content::SliceGuard> = cases
+        let guards: Vec<&verter_session_query::flow::slice::SliceGuard> = cases
             .iter()
             .filter_map(|case| match &case.test {
-                crate::flow_slice_content::SliceSwitchTest::Guard(guard) => Some(&**guard),
+                verter_session_query::flow::slice::SliceSwitchTest::Guard(guard) => Some(&**guard),
                 _ => None,
             })
             .collect();
@@ -397,7 +400,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some((remainder, _)) => remainder.is_empty(),
                     None => {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
+                            verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                         ));
                         false
                     }
@@ -438,9 +441,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // clause's guard negated (`narrowTypeBySwitchOnTrue`;
                 // the `typeof` tests are disjoint, so the negations
                 // change nothing there).
-                crate::flow_slice_content::SliceSwitchTest::Guard(guard) => {
-                    let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> = eval.guards
-                        [..eval.guards_before]
+                verter_session_query::flow::slice::SliceSwitchTest::Guard(guard) => {
+                    let applied: Vec<(&verter_session_query::flow::slice::SliceGuard, bool)> = eval
+                        .guards[..eval.guards_before]
                         .iter()
                         .map(|earlier| (*earlier, false))
                         .chain(std::iter::once((&**guard, true)))
@@ -448,8 +451,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     dispatch = self.guarded_switch_state(&eval.entry, &applied).0;
                     eval.guards_before += 1;
                 }
-                crate::flow_slice_content::SliceSwitchTest::Default if !eval.guards.is_empty() => {
-                    let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
+                verter_session_query::flow::slice::SliceSwitchTest::Default
+                    if !eval.guards.is_empty() =>
+                {
+                    let applied: Vec<(&verter_session_query::flow::slice::SliceGuard, bool)> =
                         eval.guards.iter().map(|guard| (*guard, false)).collect();
                     // Reachable even when the guards leave the
                     // reference `never`: the clause is typed
@@ -469,8 +474,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // not this clause's reaching set, and
                     // baking it in would publish a type the
                     // clause was never proven to see.
-                    crate::flow_slice_content::SliceSwitchTest::Unmodeled
-                    | crate::flow_slice_content::SliceSwitchTest::Guard(_) => {}
+                    verter_session_query::flow::slice::SliceSwitchTest::Unmodeled
+                    | verter_session_query::flow::slice::SliceSwitchTest::Guard(_) => {}
                     // The dispatch edge: the discriminant IS
                     // this test.
                     // A test no discriminant arm matches bakes
@@ -480,22 +485,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // through the `never` subject (measured:
                     // `switch (x) { case "b": return 1 }` over
                     // `x: "a"` still contributes `1`).
-                    crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
-                        match self.narrow_eq_literal(
-                            subject,
-                            test,
-                            false,
-                            LiteralComparison::SwitchCase,
-                        ) {
-                            GuardNarrowing::Narrowed(fact_subject, node) => {
-                                self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
-                            }
-                            GuardNarrowing::Unchanged => {}
+                    verter_session_query::flow::slice::SliceSwitchTest::Literal(test) => match self
+                        .narrow_eq_literal(subject, test, false, LiteralComparison::SwitchCase)
+                    {
+                        GuardNarrowing::Narrowed(fact_subject, node) => {
+                            self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
                         }
-                    }
+                        GuardNarrowing::Unchanged => {}
+                    },
                     // The default clause's dispatch edge: the
                     // discriminant minus every carried test.
-                    crate::flow_slice_content::SliceSwitchTest::Default => {
+                    verter_session_query::flow::slice::SliceSwitchTest::Default => {
                         if let Some((remainder, total)) =
                             self.switch_discriminant_remainder(subject, &eval.tests)
                         {
@@ -520,7 +520,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 // the enclosing reference for
                                 // a nested one.
                                 let parent_subject =
-                                    crate::flow_slice_content::SliceNarrowSubject {
+                                    verter_session_query::flow::slice::SliceNarrowSubject {
                                         root: subject.root.clone(),
                                         path: Arc::from(
                                             subject.path[..subject.path.len().saturating_sub(1)]
@@ -538,7 +538,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // superset, so it degrades rather
                             // than publishing clean.
                             self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
+                                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                             ));
                         }
                     }
@@ -604,7 +604,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // The no-matching-case path sees every guard
                 // negated, and is dead when that leaves the
                 // tested reference nothing (`isExhaustiveSwitchStatement`).
-                let applied: Vec<(&crate::flow_slice_content::SliceGuard, bool)> =
+                let applied: Vec<(&verter_session_query::flow::slice::SliceGuard, bool)> =
                     eval.guards.iter().map(|guard| (*guard, false)).collect();
                 let (state, dead) = self.guarded_switch_state(&eval.entry, &applied);
                 if dead {
@@ -622,7 +622,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .dispatch
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-                let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
                     root: subject.root.clone(),
                     path: Arc::from(
                         subject.path[..subject.path.len().saturating_sub(1)]
@@ -687,7 +687,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     pub(super) fn begin_labeled<'r>(
         &mut self,
         label: &'r Arc<str>,
-        body: &'r crate::flow_slice_content::SliceRegion,
+        body: &'r verter_session_query::flow::slice::SliceRegion,
     ) -> BranchStep<'r> {
         let eval = LabeledEval {
             label,
@@ -763,9 +763,9 @@ enum TryPhase {
 
 /// A `try` statement between its clauses.
 pub(super) struct TryEval<'r> {
-    block: &'r crate::flow_slice_content::SliceRegion,
-    catch: Option<&'r crate::flow_slice_content::SliceCatchClause>,
-    finally: Option<&'r crate::flow_slice_content::SliceRegion>,
+    block: &'r verter_session_query::flow::slice::SliceRegion,
+    catch: Option<&'r verter_session_query::flow::slice::SliceCatchClause>,
+    finally: Option<&'r verter_session_query::flow::slice::SliceRegion>,
     pending_break_contributes_undefined: bool,
     pending_break_following_return_targets: &'r Arc<[Arc<str>]>,
     entry: FlowLayerState,
@@ -795,7 +795,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         start: &FlowLayerState,
         catch_param: Option<(
             SkeletonBindingId,
-            Option<&crate::flow_slice_content::GatedType>,
+            Option<&verter_session_query::flow::slice::GatedType>,
         )>,
         collect_throws: bool,
     ) -> TryClause {
@@ -849,12 +849,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             self.set_declared_local(
                 &subject,
-                crate::flow_slice_content::SliceBindingKind::Let,
+                verter_session_query::flow::slice::SliceBindingKind::Let,
                 Some(declared),
             );
             self.bind_local(
                 &subject,
-                crate::flow_slice_content::SliceBindingKind::Let,
+                verter_session_query::flow::slice::SliceBindingKind::Let,
                 declared,
                 None,
                 false,
@@ -933,9 +933,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// overridden by an abrupt finally.
     pub(super) fn begin_try<'r>(
         &mut self,
-        block: &'r crate::flow_slice_content::SliceRegion,
-        catch: Option<&'r crate::flow_slice_content::SliceCatchClause>,
-        finally: Option<&'r crate::flow_slice_content::SliceRegion>,
+        block: &'r verter_session_query::flow::slice::SliceRegion,
+        catch: Option<&'r verter_session_query::flow::slice::SliceCatchClause>,
+        finally: Option<&'r verter_session_query::flow::slice::SliceRegion>,
         pending_break_contributes_undefined: bool,
         pending_break_following_return_targets: &'r Arc<[Arc<str>]>,
     ) -> BranchStep<'r> {
@@ -1287,12 +1287,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 /// A loop statement between the regions of its evaluation: its init, the
 /// passes of its head analysis and its converged pass.
 pub(super) struct LoopEval<'r> {
-    lowered: &'r crate::flow_slice_content::SliceLoop,
+    lowered: &'r verter_session_query::flow::slice::SliceLoop,
     circular: Vec<SkeletonBindingId>,
     bases: ScopeBases,
     contributors: Vec<FlowContribution>,
     element: Option<(
-        &'r crate::flow_slice_content::SliceLoopElement,
+        &'r verter_session_query::flow::slice::SliceLoopElement,
         SemanticNodeId,
     )>,
     entry: Option<FlowLayerState>,
@@ -1377,7 +1377,7 @@ enum PassPhase {
 
 /// What a pass needs next.
 enum PassStep<'r> {
-    Enter(PassEval, &'r crate::flow_slice_content::SliceRegion),
+    Enter(PassEval, &'r verter_session_query::flow::slice::SliceRegion),
     Done(Result<LoopPass, FlowReturnFailure>),
 }
 
@@ -1385,7 +1385,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Begin evaluating a loop statement: its init region first.
     pub(super) fn begin_loop<'r>(
         &mut self,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
     ) -> BranchStep<'r> {
         let circular: Vec<SkeletonBindingId> = self
             .circular_loop_bindings(lowered)
@@ -1540,7 +1540,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ONE pass of the loop, in which it reads its entry type — a loop
     /// label under analysis answers with the types it has so far — and
     /// every other written reference its value depends on
-    /// ([`crate::flow_slice_content::SliceLoop::writes`]) reads its own head
+    /// ([`verter_session_query::flow::slice::SliceLoop::writes`]) reads its own head
     /// type, analysed with this one under analysis too. A reference the
     /// loop does not write holds its entry state. A reference first typed
     /// while others are under analysis keeps that type wherever else the
@@ -1668,10 +1668,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn enter_loop_pass<'r>(
         &mut self,
         mut eval: Box<LoopEval<'r>>,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
         head: FlowLayerState,
         element: Option<(
-            &'r crate::flow_slice_content::SliceLoopElement,
+            &'r verter_session_query::flow::slice::SliceLoopElement,
             SemanticNodeId,
         )>,
     ) -> BranchStep<'r> {
@@ -1691,14 +1691,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// the `for` update.
     fn begin_loop_pass<'r>(
         &mut self,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
         head: FlowLayerState,
         element: Option<(
-            &'r crate::flow_slice_content::SliceLoopElement,
+            &'r verter_session_query::flow::slice::SliceLoopElement,
             SemanticNodeId,
         )>,
     ) -> PassStep<'r> {
-        use crate::flow_slice_content::SliceLoopTest;
+        use verter_session_query::flow::slice::SliceLoopTest;
         #[cfg(test)]
         LOOP_PASSES.with(|count| count.set(count.get() + 1));
         let pass = PassEval {
@@ -1726,9 +1726,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Bind a pass's element and enter its body.
     fn enter_loop_body<'r>(
         &mut self,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
         element: Option<(
-            &'r crate::flow_slice_content::SliceLoopElement,
+            &'r verter_session_query::flow::slice::SliceLoopElement,
             SemanticNodeId,
         )>,
         mut pass: PassEval,
@@ -1736,7 +1736,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some((element, node)) = element {
             if let Some(element) = element.binding.as_ref() {
                 let subject = FlowProductSubject::Local(element.binding);
-                if element.kind != crate::flow_slice_content::SliceBindingKind::Var {
+                if element.kind != verter_session_query::flow::slice::SliceBindingKind::Var {
                     self.record_scope_shadow(&subject);
                 }
                 self.set_declared_local(&subject, element.kind, Some(node));
@@ -1752,15 +1752,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// A pass with one of its regions evaluated.
     fn pass_region_done<'r>(
         &mut self,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
         element: Option<(
-            &'r crate::flow_slice_content::SliceLoopElement,
+            &'r verter_session_query::flow::slice::SliceLoopElement,
             SemanticNodeId,
         )>,
         mut pass: PassEval,
         (result, falls): (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
     ) -> PassStep<'r> {
-        use crate::flow_slice_content::SliceLoopTest;
+        use verter_session_query::flow::slice::SliceLoopTest;
         match pass.phase {
             PassPhase::TestBefore => {
                 if let Err(failure) = result {
@@ -1855,11 +1855,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// under the negated one.
     fn finish_loop_pass<'r>(
         &mut self,
-        lowered: &'r crate::flow_slice_content::SliceLoop,
+        lowered: &'r verter_session_query::flow::slice::SliceLoop,
         mut pass: PassEval,
         back: Option<FlowLayerState>,
     ) -> PassStep<'r> {
-        use crate::flow_slice_content::SliceLoopTest;
+        use verter_session_query::flow::slice::SliceLoopTest;
         self.restore_narrowings(pass.narrow_mark.clone());
         match (&lowered.test, back) {
             (SliceLoopTest::After { .. }, Some(back)) => {
@@ -1881,7 +1881,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// A loop whose converged pass ran.
     fn finish_loop<'r>(&mut self, mut eval: Box<LoopEval<'r>>, pass: LoopPass) -> BranchStep<'r> {
-        use crate::flow_slice_content::SliceLoopTest;
+        use verter_session_query::flow::slice::SliceLoopTest;
         let head = eval.converged.take().expect("the converged head");
         let entry = eval.entry.take().expect("the loop's entry state");
         let lowered = eval.lowered;

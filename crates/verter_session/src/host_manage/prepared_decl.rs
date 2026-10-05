@@ -2308,7 +2308,7 @@ impl VerterHost {
             // runes mode. ZERO declaration bodies lower here. The
             // file-analysis snapshot is source-bound from `hd.parse`,
             // never rebuilt from the retained program.
-            let snapshot_key = crate::decl_lowering::SnapshotKey {
+            let snapshot_key = verter_session_query::source::snapshot::SnapshotKey {
                 canonical: Arc::from(canonical_id),
                 whole_hash,
                 parse_env_hash: flight_parse_env_hash,

@@ -177,7 +177,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, never],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -189,7 +189,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, any],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -201,7 +201,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, unknown],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -214,7 +214,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, number],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert!(

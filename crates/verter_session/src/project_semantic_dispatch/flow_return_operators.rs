@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use super::super::dispatch_txn::RelationStep;
 use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
-use crate::flow_slice_content::{
-    SliceArithmetic, SliceExpr, SliceGuard, SliceLogical, SliceNarrowRoot, SliceNarrowSubject,
-};
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    FlowReturnDegradation, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+};
+use verter_session_query::flow::policy::FlowGap;
+use verter_session_query::flow::slice::{
+    SliceArithmetic, SliceExpr, SliceGuard, SliceLogical, SliceNarrowRoot, SliceNarrowSubject,
 };
 
 /// The primitive family an `isTypeAssignableToKind` / `maybeTypeOfKind`
@@ -97,7 +98,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         index: &SliceExpr,
         reference: Option<(
             &SliceNarrowSubject,
-            &crate::flow_slice_content::SliceElementKey,
+            &verter_session_query::flow::slice::SliceElementKey,
         )>,
     ) -> Positional<SemanticNodeId> {
         let object = match self.eval_expr(object) {
@@ -141,13 +142,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     }
 
     /// The segment an element-access key spells under its object's
-    /// reference ([`crate::flow_slice_content::SliceElementKey`]): a
+    /// reference ([`verter_session_query::flow::slice::SliceElementKey`]): a
     /// `const` key of one string or numeric literal type names that
     /// member, any other unassigned key its identity segment.
     pub(super) fn element_segment(
         &self,
         index: SemanticNodeId,
-        key: &crate::flow_slice_content::SliceElementKey,
+        key: &verter_session_query::flow::slice::SliceElementKey,
     ) -> Option<Arc<str>> {
         if key.constant {
             let name: Option<Arc<str>> = match self.dispatch.graph().node_data(index).as_deref() {
@@ -176,8 +177,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     pub(super) fn apply_keyed_member_write(
         &mut self,
         target: &SliceNarrowSubject,
-        key: &crate::flow_slice_content::SliceWriteKey,
-        write: &crate::flow_slice_content::SliceMemberWrite,
+        key: &verter_session_query::flow::slice::SliceWriteKey,
+        write: &verter_session_query::flow::slice::SliceMemberWrite,
     ) {
         let index = match self.eval_expr(&key.value) {
             Positional::Value(node) => Some(node),
@@ -185,7 +186,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         };
         let segment = index.and_then(|index| self.element_segment(index, &key.key));
         let Some(segment) = segment else {
-            if let crate::flow_slice_content::SliceMemberWrite::Assign { value, .. } = write {
+            if let verter_session_query::flow::slice::SliceMemberWrite::Assign { value, .. } = write
+            {
                 self.prescan_statement_value_writes(Some(value));
                 let holds_before = self.holds.len();
                 let _ = self.eval_expr(value);
@@ -986,9 +988,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// typed gap.
     pub(super) fn eval_assignment_value(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
         value: &SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         span: verter_session_query::flow::frame_span::FrameSpan,
     ) -> Positional<SemanticNodeId> {
@@ -1366,10 +1368,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     fn collect_fresh_leaves(
         &self,
         expr: &SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         out: &mut Vec<SemanticNodeId>,
     ) {
-        use crate::flow_slice_content::SliceFreshness;
+        use verter_session_query::flow::slice::SliceFreshness;
         match (expr, freshness) {
             (SliceExpr::Type(leaf), SliceFreshness::Fresh) => {
                 if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {

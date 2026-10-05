@@ -59,23 +59,11 @@
 //! of re-parsing; only the threading/storage substrate differs by
 //! platform (native: worker-owned per shard; wasm: single thread-local
 //! shard).
+use verter_session_query::source::snapshot::SnapshotKey;
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_session_query::analysis::types::Hash16;
-
-/// Content-generation identity of one retained parse snapshot: the
-/// canonical file, its whole-content hash, and the R21 parse-env
-/// dimension the parse runs under. Content-addressed by construction —
-/// an edit produces a new key, so a stale snapshot can never answer a
-/// new-content demand.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SnapshotKey {
-    pub canonical: Arc<str>,
-    pub whole_hash: Hash16,
-    pub parse_env_hash: Hash16,
-}
 
 /// One lowering-service call's result: the job's owned value plus
 /// whether the service had to parse (vs. serving the retained snapshot).

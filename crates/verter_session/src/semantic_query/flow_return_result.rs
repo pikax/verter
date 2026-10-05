@@ -37,7 +37,7 @@
 //! [`FlowReturnResult::with_return_type`], re-derives.
 
 use super::{FlowReturnDegradation, SemanticNodeId, SignaturePredicate};
-use crate::flow_completion_inventory::{transports_completion, NormalCompletion};
+use verter_session_query::{flow::completion::NormalCompletion, transports_completion};
 
 /// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
 /// successes. A no-value failure and a usable degraded value are

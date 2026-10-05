@@ -4,6 +4,8 @@
 //! statements backfill, repeated demands re-lower nothing, distinct
 //! demands share ONE retained eval-program parse, and seeding from a
 //! built env matches the lazy fold.
+use verter_session_query::source::deref::DerefedBodyShape;
+use verter_session_query::source::deref::LocatorBodyDerefError;
 
 use std::sync::Arc;
 
@@ -97,7 +99,7 @@ fn aug_type_locator(
 }
 
 /// The single derefed expression, or a panic naming the unexpected shape.
-fn single(body: &locator_deref::DerefedAuthoredBody) -> &TypeExpr {
+fn single(body: &verter_session_query::source::deref::DerefedAuthoredBody) -> &TypeExpr {
     match &body.shape {
         DerefedBodyShape::Single(expr) => expr,
         other => panic!("expected a single derefed body, got {other:?}"),

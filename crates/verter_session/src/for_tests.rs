@@ -1148,10 +1148,10 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
 /// lowered a body, so the value it stands for does not complete normally.
 /// It is minted through the completion-carrier inventory like every other
 /// completion fact — a fixture is a carrier too.
-fn hermetic_completion() -> crate::flow_completion_inventory::NormalCompletion {
-    crate::flow_completion_inventory::NormalCompletion::minted(
+fn hermetic_completion() -> verter_session_query::flow::completion::NormalCompletion {
+    verter_session_query::flow::completion::NormalCompletion::minted(
         false,
-        crate::flow_completion_inventory::CompletionConstruction::HermeticFixture,
+        verter_session_query::flow::completion::CompletionConstruction::HermeticFixture,
     )
 }
 

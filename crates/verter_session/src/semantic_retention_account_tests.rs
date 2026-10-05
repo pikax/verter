@@ -520,7 +520,8 @@ fn the_project_store_charges_its_interned_identities() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
-    use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
+    use crate::decl_lowering::DeclLoweringService;
+    use verter_session_query::source::snapshot::SnapshotKey;
 
     let account = account(usize::MAX, usize::MAX, usize::MAX);
     // ONE worker, so every job is serviced in submission order on a single

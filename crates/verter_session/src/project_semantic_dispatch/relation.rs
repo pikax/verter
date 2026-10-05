@@ -7996,14 +7996,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if whole.is_ok() {
             return None;
         }
-        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
-            self.dispatch_txn
-                .borrow()
-                .relation
-                .strict
-                .unwrap_or(StrictFamilyConfig::TS_STRICT)
-                .strict_null_checks,
-        );
+        let nullability =
+            verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                self.dispatch_txn
+                    .borrow()
+                    .relation
+                    .strict
+                    .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                    .strict_null_checks,
+            );
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
         let refused = super::canonical_algebra::intersection_cross_product_refused(
             graph,
@@ -8053,14 +8054,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 target_recovery.unwrap_or(target),
             ));
         }
-        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
-            self.dispatch_txn
-                .borrow()
-                .relation
-                .strict
-                .unwrap_or(StrictFamilyConfig::TS_STRICT)
-                .strict_null_checks,
-        );
+        let nullability =
+            verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                self.dispatch_txn
+                    .borrow()
+                    .relation
+                    .strict
+                    .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                    .strict_null_checks,
+            );
         let graph = self.graph();
         // A source intersection over a union IS the distributed union of
         // intersections (`getIntersectionType`), even where its written
@@ -10334,7 +10336,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let type_argument = if strict_null_checks {
                         self.intern_normalized_union(
                             &[element.value, undefined],
-                            crate::semantic_query::NullabilityPolicy::Strict,
+                            verter_session_query::flow::policy::NullabilityPolicy::Strict,
                         )
                     } else {
                         element.value

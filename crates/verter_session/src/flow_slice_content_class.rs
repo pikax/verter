@@ -23,10 +23,13 @@ use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 
 use super::{
     expr_is_widening_nullish, infer_declaration_expression_type,
-    leaf_answer_is_fabricated_at_a_call_position, unwrap_parenthesized, DefiningFrameGate,
-    ExprMode, FunctionNode, GatedType, LeafCallScanner, Lowerer, SliceClass, SliceClassHeritage,
-    SliceClassIndexSignature, SliceClassMember, SliceClassMemberValue, SliceClassParam, SliceExpr,
-    SliceObjectKey, SliceTypeParam, TopLevelLiteralPolicy,
+    leaf_answer_is_fabricated_at_a_call_position, unwrap_parenthesized, ExprMode, FunctionNode,
+    LeafCallScanner, Lowerer, TopLevelLiteralPolicy,
+};
+use verter_session_query::flow::slice::{
+    DefiningFrameGate, GatedType, SliceClass, SliceClassHeritage, SliceClassIndexSignature,
+    SliceClassMember, SliceClassMemberValue, SliceClassParam, SliceExpr, SliceObjectKey,
+    SliceTypeParam,
 };
 
 /// The name the checker prints for a class expression nobody names.
@@ -330,7 +333,7 @@ impl<'s> Lowerer<'s> {
                             (_, None) => {
                                 self.selection = selection;
                                 return SliceExpr::Gap(
-                                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                                 );
                             }
                         }
@@ -488,7 +491,7 @@ impl<'s> Lowerer<'s> {
                     (None, None, Some(getter)) if getter.value.body.is_some() => {
                         self.member_this = Some(
                             (!group.is_static)
-                                .then_some(crate::flow_slice_content::SliceThis::Receiver),
+                                .then_some(verter_session_query::flow::slice::SliceThis::Receiver),
                         );
                         match self.lower_nested_function(&FunctionNode::Function(&getter.value)) {
                             SliceExpr::UnmodeledBinding => SliceClassMemberValue::Unmodeled,
@@ -536,7 +539,7 @@ impl<'s> Lowerer<'s> {
                     let value = if method.value.body.is_some() {
                         self.member_this = Some(
                             (!group.is_static)
-                                .then_some(crate::flow_slice_content::SliceThis::Receiver),
+                                .then_some(verter_session_query::flow::slice::SliceThis::Receiver),
                         );
                         match self.lower_nested_function(&FunctionNode::Function(&method.value)) {
                             SliceExpr::UnmodeledBinding => {
@@ -636,7 +639,7 @@ impl<'s> Lowerer<'s> {
         // construction; a static one's is the class, which is not modeled.
         let enclosing_this = std::mem::replace(
             &mut self.this,
-            (!is_static).then_some(crate::flow_slice_content::SliceThis::Receiver),
+            (!is_static).then_some(verter_session_query::flow::slice::SliceThis::Receiver),
         );
         self.class_property_initializers += 1;
         let value = self.lower_expr(
@@ -853,7 +856,9 @@ impl<'s> Lowerer<'s> {
     /// Every frame from the served function inward contributes: a class
     /// member's class clause (`GHolder`), then the frame's own clause
     /// (`outer`, `Holder.make`, `arrow`, `inner`).
-    fn class_outer_clauses(&self) -> Arc<[crate::semantic_query::ClassExpressionClause]> {
+    fn class_outer_clauses(
+        &self,
+    ) -> Arc<[verter_session_query::flow::policy::ClassExpressionClause]> {
         let mut frames: Vec<&DefiningFrameGate> = vec![&self.frame_gate];
         let mut current = self.frame_gate.outer.enclosing.as_deref();
         while let Some(frame) = current {
@@ -875,13 +880,13 @@ impl<'s> Lowerer<'s> {
                 })
                 .unwrap_or_else(|| (Arc::from(ANONYMOUS_FUNCTION), None));
             if !gate.enclosing_type_parameters.is_empty() {
-                clauses.push(crate::semantic_query::ClassExpressionClause {
+                clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container: class.unwrap_or_else(|| Arc::from(ANONYMOUS_CLASS)),
                     parameters: Arc::clone(&gate.enclosing_type_parameters),
                 });
             }
             if !gate.type_parameters.is_empty() {
-                clauses.push(crate::semantic_query::ClassExpressionClause {
+                clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container,
                     parameters: Arc::clone(&gate.type_parameters),
                 });

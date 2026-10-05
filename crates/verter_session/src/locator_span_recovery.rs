@@ -57,7 +57,8 @@ use verter_type_expr::span_origins::{
 };
 use verter_type_expr::{FunctionSpans, IndexSignatureSpans, MemberSpans};
 
-use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
+use crate::decl_lowering::DeclLoweringService;
+use verter_session_query::source::snapshot::SnapshotKey;
 
 /// Why authored span recovery could not produce the authored spans. A default
 /// (all-absent) `MemberSpans` is NEVER returned for any of these — that is

@@ -13,9 +13,10 @@
 
 use super::flow_return_class_tests::{assert_probes, flow_key, with_dispatch};
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    FlowReturnDegradation, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     SemanticQueryValue,
 };
+use verter_session_query::flow::policy::FlowGap;
 use verter_type_expr::facts::FunctionPartIdentity;
 
 const FIXTURE: &str = "\

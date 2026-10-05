@@ -1833,7 +1833,7 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
         .deref_locator_body(&AuthoredBodyLocator::MacroPayload(type_arg));
     assert_eq!(
         deref.expect_err("the TypeArgument position keeps its sole hot producer"),
-        crate::decl_body_memo::LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer,
+        verter_session_query::source::deref::LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer,
         "the anchor-canonical gate (checked first) passes — never CanonicalMismatch"
     );
 
@@ -1878,8 +1878,9 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
         .decl_bodies()
         .deref_locator_body(&props_ref.locator)
         .expect("the absolute-anchored annotation payload derefs clean");
-    let crate::decl_body_memo::DerefedBodyShape::Single(verter_type_expr::TypeExpr::Object(obj)) =
-        &derefed.shape
+    let verter_session_query::source::deref::DerefedBodyShape::Single(
+        verter_type_expr::TypeExpr::Object(obj),
+    ) = &derefed.shape
     else {
         panic!(
             "the annotation payload derefs to its Single object body, got {:?}",

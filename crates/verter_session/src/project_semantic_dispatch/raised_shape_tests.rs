@@ -2819,10 +2819,12 @@ fn publication_score_corpus(
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     offset: 42,
                     name: Arc::from("(Anonymous class)"),
-                    outer_clauses: Arc::from([crate::semantic_query::ClassExpressionClause {
-                        container: Arc::from("Mixin"),
-                        parameters: Arc::from([Arc::from("S")]),
-                    }]),
+                    outer_clauses: Arc::from([
+                        verter_session_query::flow::policy::ClassExpressionClause {
+                            container: Arc::from("Mixin"),
+                            parameters: Arc::from([Arc::from("S")]),
+                        },
+                    ]),
                     own_arity: 0,
                     constructor_visibility: None,
                     prototype: None,

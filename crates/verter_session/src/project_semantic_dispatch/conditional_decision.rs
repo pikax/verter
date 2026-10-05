@@ -648,7 +648,7 @@ impl ProjectSemanticDispatch<'_> {
         }
         let normalized = self.conditional_query_output(SemanticQueryKey::ReduceUnion {
             members: Arc::from(per_member),
-            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
         output.cache_suppress |= normalized.cache_suppress;
         output.result_is_partial |= normalized.result_is_partial;
@@ -1119,9 +1119,9 @@ impl ProjectSemanticDispatch<'_> {
             _ => return node,
         };
         let nullability = if self.relation_strict_config().strict_null_checks {
-            crate::semantic_query::NullabilityPolicy::Strict
+            verter_session_query::flow::policy::NullabilityPolicy::Strict
         } else {
-            crate::semantic_query::NullabilityPolicy::Erased
+            verter_session_query::flow::policy::NullabilityPolicy::Erased
         };
         let constructed = self.intern_normalized_union(&members, nullability);
         let same_members = match self.graph().node_data(constructed).as_deref() {

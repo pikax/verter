@@ -209,7 +209,7 @@ pub enum ShallowDiagnostic {
     /// rails. Never a fabricated value.
     PendingFlowRoot {
         /// The operation-specific gap the pending root surfaces.
-        gap: crate::semantic_query::FlowGap,
+        gap: verter_session_query::flow::policy::FlowGap,
     },
 }
 
@@ -5557,9 +5557,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if factors.iter().all(|arms| arms.len() < 2) {
             return None;
         }
-        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
-            self.dispatch.relation_strict_config().strict_null_checks,
-        );
+        let nullability =
+            verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                self.dispatch.relation_strict_config().strict_null_checks,
+            );
         self.dispatch
             .distribute_intersection(&factors, contributors, nullability, ordered)
             .map(|distributed| distributed.node)
@@ -9409,7 +9410,7 @@ impl UnionMemberAccum {
                     crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
                         graph,
                         values,
-                        crate::semantic_query::NullabilityPolicy::Strict,
+                        verter_session_query::flow::policy::NullabilityPolicy::Strict,
                     );
                 evidence.absorb(composite.evidence);
                 composite.node

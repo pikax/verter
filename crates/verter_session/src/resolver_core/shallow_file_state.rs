@@ -65,7 +65,7 @@ pub struct ShallowFileState {
 pub struct ShallowInputRecord {
     pub whole_hash: Hash16,
     pub canonical_id: Arc<str>,
-    pub(crate) source_identity: crate::decl_lowering::SnapshotKey,
+    pub(crate) source_identity: verter_session_query::source::snapshot::SnapshotKey,
     pub(crate) observation_id: u64,
     pub exports: FxHashMap<String, ExportTarget>,
     pub wildcard_reexports: Vec<WildcardReexport>,
@@ -542,7 +542,7 @@ impl ShallowFileState {
         let header_index =
             Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(&env));
         Arc::new(crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
-            crate::decl_lowering::SnapshotKey {
+            verter_session_query::source::snapshot::SnapshotKey {
                 canonical: Arc::from(""),
                 whole_hash,
                 parse_env_hash: [0u8; 16],
@@ -654,7 +654,7 @@ impl ShallowFileState {
         let whole_hash = whole_hash.unwrap_or_else(|| crate::hash::hash_16(source.as_bytes()));
         let provenance = Arc::new(crate::types::MetaProvenance::default());
         let memo = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
-            crate::decl_lowering::SnapshotKey {
+            verter_session_query::source::snapshot::SnapshotKey {
                 canonical: Arc::from(canonical),
                 whole_hash,
                 parse_env_hash: [0u8; 16],

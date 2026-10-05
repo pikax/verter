@@ -146,7 +146,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn return_equation_nullability(
         &self,
         identity: &ReturnObligationIdentity,
-    ) -> crate::semantic_query::NullabilityPolicy {
+    ) -> verter_session_query::flow::policy::NullabilityPolicy {
         match identity {
             ReturnObligationIdentity::FlowReturn(key) => key.context.policy.nullability,
             ReturnObligationIdentity::ResolveCall(key) => {
@@ -158,7 +158,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn return_equation_leaf_set(
         &self,
         nodes: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Vec<SemanticNodeId> {
         if nodes.is_empty() {
             return Vec::new();

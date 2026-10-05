@@ -7,7 +7,8 @@ use verter_session::for_tests::{
     GraphSemanticAlgebra, LiteralFreshness, LiteralProvenance, LiteralProvenanceResult,
     ReachingTypeProduct, SemanticGraphStore, WideningMembership,
 };
-use verter_session::semantic_query::{FlowGap, LiteralValue, SemanticNodeData, SemanticNodeId};
+use verter_session::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId};
+use verter_session_query::flow::policy::FlowGap;
 
 use super::{alloc_bytes, alloc_count, reset_alloc_counter};
 

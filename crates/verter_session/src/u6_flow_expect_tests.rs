@@ -42,11 +42,12 @@ use super::{degr_of, upsert, Degr};
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowGap, FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
+    FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
     ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SignatureKind,
 };
 use crate::types::HostConfig;
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::flow::policy::FlowGap;
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

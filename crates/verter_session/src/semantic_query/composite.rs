@@ -516,7 +516,7 @@ pub(crate) enum CompositeOriginCategory {
     /// two `strictNullChecks` settings never share the skip. The algebra
     /// is part of the payload's identity, so the same member list minted
     /// under both settings interns as two nodes.
-    Canonical(super::NullabilityPolicy),
+    Canonical(verter_session_query::flow::policy::NullabilityPolicy),
     /// Minted by the canonical algebra from an INCOMPLETE canonicalization
     /// (over-cap arm set, exhausted compare budget, dangling arm,
     /// undecided bounded peek): the value is the deterministic budgeted

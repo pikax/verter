@@ -21,7 +21,7 @@ use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
-use crate::flow_slice_content::{
+use verter_session_query::flow::slice::{
     FlowSliceSelection, ReturnPredicateTest, SliceArithmetic, SliceBindingKind, SliceCall,
     SliceCallSite, SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
     SliceLoopBinding, SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry,
@@ -102,7 +102,9 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
     )
     .expect("slice content must build for an indexed function")
 }
@@ -171,7 +173,7 @@ fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
     );
     let child = nested_content(&memo, nested);
     assert!(child.declared_return.as_ref().expect("declared return").shadowed().iter().any(|name| {
-        matches!(name, crate::flow_slice_content::FrameShadowedName::Value(name) if name.as_ref() == "sibling")
+        matches!(name, verter_session_query::flow::slice::FrameShadowedName::Value(name) if name.as_ref() == "sibling")
     }), "the lexical sibling must prevent a module-scope typeof answer");
 }
 
@@ -227,7 +229,9 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
                 None,
                 &changed_bound,
                 Some(Arc::clone(context)),
-                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+                verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                    &Default::default()
+                )
             )
             .is_none(),
         "signature-only lowering must reject an older linked lexical gate too"
@@ -305,7 +309,9 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
                 entry,
                 selection,
                 &bound,
-                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+                verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                    &Default::default(),
+                ),
             )
             .unwrap();
         assert!(matches!(
@@ -345,9 +351,11 @@ fn and_chain_guard_classifications(operands: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy {
-            nullability: crate::semantic_query::NullabilityPolicy::Strict,
-            ..crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+        verter_session_query::flow::policy::FlowReturnPolicy {
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            ..verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            )
         },
     )
     .expect("slice content must build for an indexed function");
@@ -392,9 +400,11 @@ fn nested_call_lowerings(depth: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy {
-            nullability: crate::semantic_query::NullabilityPolicy::Strict,
-            ..crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+        verter_session_query::flow::policy::FlowReturnPolicy {
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            ..verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            )
         },
     )
     .expect("slice content must build for an indexed function");
@@ -452,7 +462,9 @@ fn nested_array_lowerings(depth: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
     )
     .expect("slice content must build for an indexed function");
     memo.lowering_work.expressions.load(Ordering::Relaxed)
@@ -494,7 +506,9 @@ fn nested_class_scans(depth: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
     )
     .expect("slice content must build for an indexed function");
     memo.lowering_work.scanned_classes.load(Ordering::Relaxed)
@@ -544,7 +558,7 @@ fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans(
     let child = index.get(function).unwrap().entry();
     memo.capture_lookup_work.store(0, Ordering::Relaxed);
     let locators = {
-        let _probe = crate::flow_slice_content::capture_lookup_probe::enter(Arc::clone(
+        let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(Arc::clone(
             &memo.capture_lookup_work,
         ));
         child
@@ -700,7 +714,7 @@ fn optional_chain_after_active_type_predicate_lowers_to_gap() {
             &consequent.statements[0],
             SliceStatement::Return {
                 argument: Some(SliceExpr::Gap(
-                    crate::semantic_query::FlowGap::UnmodeledExpression
+                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression
                 )),
                 ..
             }
@@ -719,7 +733,7 @@ fn optional_chain_with_effectful_call_argument_lowers_to_gap() {
         &node.body.statements[0],
         SliceStatement::Return {
             argument: Some(SliceExpr::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression
             )),
             ..
         }
@@ -736,7 +750,7 @@ fn optional_chain_with_effectful_computed_key_lowers_to_gap() {
         &node.body.statements[0],
         SliceStatement::Return {
             argument: Some(SliceExpr::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression
             )),
             ..
         }
@@ -765,7 +779,7 @@ fn optional_chain_with_nested_syntactic_effect_lowers_to_gap() {
                 returned,
                 Some(SliceStatement::Return {
                     argument: Some(SliceExpr::Gap(
-                        crate::semantic_query::FlowGap::UnmodeledExpression
+                        verter_session_query::flow::policy::FlowGap::UnmodeledExpression
                     )),
                     ..
                 })
@@ -1187,7 +1201,9 @@ fn control_callee_certification_requires_provable_module_local_closure() {
             .filter(|statement| {
                 matches!(
                     statement,
-                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                    SliceStatement::Gap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
                 )
             })
             .count()
@@ -1302,7 +1318,9 @@ fn namespace_owned_call_site_never_resolves_callee_closure_at_top_level() {
             .filter(|statement| {
                 matches!(
                     statement,
-                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                    SliceStatement::Gap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
                 )
             })
             .count()
@@ -1402,7 +1420,7 @@ fn guard_gap_count(node: &SliceContent) -> usize {
         .filter(|statement| {
             matches!(
                 statement,
-                SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing)
             )
         })
         .count()
@@ -1638,7 +1656,9 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
         Some(selection),
         &skeleton,
         Some(Arc::clone(context)),
-        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
     )
     .expect("selected child content")
 }
@@ -1684,7 +1704,7 @@ fn region_guard_gap_count(region: &SliceRegion) -> usize {
         .filter(|statement| {
             matches!(
                 statement,
-                SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing)
             )
         })
         .count()
@@ -3532,7 +3552,9 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             entry,
             selection,
             &skeleton,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            ),
         )
         .expect("the class member slice content must build");
     assert_eq!(
@@ -3955,7 +3977,7 @@ fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
     ] {
         let gaps = capture_gaps(body);
         assert!(
-            gaps.contains(&Some(crate::semantic_query::FlowGap::ClosureCapture)),
+            gaps.contains(&Some(verter_session_query::flow::policy::FlowGap::ClosureCapture)),
             "{spelling}: the guarded capture outside its extended container takes the SAME rail: {gaps:?}"
         );
     }
@@ -4418,7 +4440,7 @@ fn direct_self_call_is_recursion_hold() {
             argument: Some(SliceExpr::Call(
                 SliceCall::DirectSelf,
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
-                crate::flow_slice_content::SliceCallArguments::none(),
+                verter_session_query::flow::slice::SliceCallArguments::none(),
             )),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
@@ -4465,7 +4487,9 @@ fn symbolic_and_unrepresentable_calls() {
             entry,
             selection,
             &skeleton,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            ),
         )
         .expect("the class method slice content must build");
     assert_eq!(
@@ -4474,7 +4498,7 @@ fn symbolic_and_unrepresentable_calls() {
             argument: Some(SliceExpr::Call(
                 SliceCall::Member {
                     receiver: Box::new(SliceExpr::This(
-                        crate::flow_slice_content::SliceThis::Instance {
+                        verter_session_query::flow::slice::SliceThis::Instance {
                             class: Arc::from("Service"),
                             type_parameters: Arc::from([]),
                         }
@@ -4482,7 +4506,7 @@ fn symbolic_and_unrepresentable_calls() {
                     member: Arc::from([Arc::from("helper")]),
                 },
                 SliceCallSite::new(0, false, false, verter_span::Span::new(58, 71)),
-                crate::flow_slice_content::SliceCallArguments::none(),
+                verter_session_query::flow::slice::SliceCallArguments::none(),
             )),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
@@ -4861,7 +4885,9 @@ fn locator_miss_is_typed_none() {
             &missing_contributor,
             selection.clone(),
             &skeleton,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default()
+            )
         )
         .is_none(),
         "an out-of-range contributor is a typed miss"
@@ -4877,7 +4903,9 @@ fn locator_miss_is_typed_none() {
             &bad_descent,
             selection,
             &skeleton,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default())
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default()
+            )
         )
         .is_none(),
         "a mismatched descent is a typed miss"
@@ -5740,7 +5768,7 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
         matches!(
             guard,
             SliceGuard::EqReference {
-                value: crate::flow_slice_content::SliceEqOther::Reference(_),
+                value: verter_session_query::flow::slice::SliceEqOther::Reference(_),
                 negated: false,
                 ..
             }
@@ -5769,7 +5797,7 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     assert!(return_index > 0, "{statements:?}");
     assert_eq!(
         statements[return_index - 1],
-        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing),
         "{statements:?}"
     );
     assert_eq!(guard_gap_count(&unexpressible), 1, "{unexpressible:?}");
@@ -5815,7 +5843,7 @@ fn loop_test_lowers_through_the_guard_classifier_for_both_a_modeled_and_an_unexp
     assert!(
         loop_index > 0
             && statements[loop_index - 1]
-                == SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                == SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing),
         "an UNEXPRESSIBLE narrow over the same downstream-selected slot takes the typed gap \
          ahead of the loop, never iterating as though it narrowed nothing: {statements:?}"
     );
@@ -5858,7 +5886,7 @@ fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_
     );
     assert_eq!(
         statements[if_index - 1],
-        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing),
         "the gap must sit immediately ahead of the If, not merely somewhere in the body: {statements:?}"
     );
     let SliceStatement::If {
@@ -5897,7 +5925,7 @@ fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_
     );
     assert_eq!(
         statements[switch_index - 1],
-        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        SliceStatement::Gap(verter_session_query::flow::policy::FlowGap::GuardNarrowing),
         "the gap must sit immediately ahead of the Switch: {statements:?}"
     );
     let SliceStatement::Switch { cases, .. } = &statements[switch_index] else {
@@ -5979,7 +6007,9 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
                 entry,
                 selection,
                 &bound,
-                crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+                verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                    &Default::default(),
+                ),
             )
             .unwrap();
         let definitions: Vec<_> = content
@@ -6055,7 +6085,9 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
             entry,
             FlowSliceSelection::from_slice_ir(&ir),
             &bound,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            ),
         )
         .unwrap();
     assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
@@ -6069,7 +6101,9 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
             entry,
             FlowSliceSelection::from_slice_ir(&ir),
             &bound,
-            crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            ),
         )
         .unwrap();
     assert!(
@@ -6157,7 +6191,9 @@ fn local_function_lookup_visits(uses: usize, unrelated: usize) -> usize {
         entry,
         selection,
         &skeleton,
-        crate::semantic_query::FlowReturnPolicy::from_compiler_options(&Default::default()),
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
     )
     .expect("slice content must build for an indexed function");
     memo.lowering_work

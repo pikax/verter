@@ -6,12 +6,12 @@
 use std::sync::Arc;
 
 use super::{widen_values_within, FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
-use crate::flow_slice_content::{
+use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
+use verter_session_query::flow::skeleton::SkeletonBindingId;
+use verter_session_query::flow::slice::{
     SliceArrayElement, SliceBindingKind, SliceExpr, SlicePattern, SlicePatternElement,
     SlicePatternKey,
 };
-use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
-use verter_session_query::flow::skeleton::SkeletonBindingId;
 
 /// One element's value: the node, and the FRESH literal values in it.
 struct ElementValue {
@@ -29,7 +29,7 @@ impl ElementValue {
 }
 
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
-    /// [`crate::flow_slice_content::SliceStatement::Destructure`]: the
+    /// [`verter_session_query::flow::slice::SliceStatement::Destructure`]: the
     /// parent value is the declarator's annotation when it has one (the
     /// initializer still runs), else its initializer's value — an array
     /// literal under an array pattern read POSITIONALLY, each element its
@@ -40,10 +40,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         pattern: &SlicePattern,
         kind: SliceBindingKind,
         init: Option<&SliceExpr>,
-        declared: Option<&crate::flow_slice_content::GatedType>,
+        declared: Option<&verter_session_query::flow::slice::GatedType>,
         annotated: bool,
         correlated: bool,
-        source: Option<&crate::flow_slice_content::SliceNarrowSubject>,
+        source: Option<&verter_session_query::flow::slice::SliceNarrowSubject>,
     ) {
         self.prescan_statement_value_writes(init);
         if let Some(declared) = declared {
@@ -135,7 +135,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         self.register_destructured_aliases(pattern, parent, correlated, source);
     }
 
-    /// [`crate::flow_slice_content::SliceStatement::DestructureAssign`]: the
+    /// [`verter_session_query::flow::slice::SliceStatement::DestructureAssign`]: the
     /// right-hand side's value is written through each target in source
     /// order, every element read off it as a declarator's is.
     pub(super) fn eval_destructure_assign(

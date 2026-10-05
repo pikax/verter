@@ -64,9 +64,9 @@
 /// construction / discharge rows every production site must name — is
 /// unconditional, so a shipped build carries the confinement and none of
 /// the bookkeeping.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FlowCompletionFact {
+pub enum FlowCompletionFact {
     /// Whether control reaches past a region or body without returning.
     NormalCompletion,
     /// A `return;` with no argument contributed to the join.
@@ -80,7 +80,7 @@ pub(crate) enum FlowCompletionFact {
     SwitchCaseBreak,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Where in a completion fact's life one inventory row stands.
 ///
 /// The vocabulary is the one the completion debt was scoped against:
@@ -89,7 +89,7 @@ pub(crate) enum FlowCompletionFact {
 /// ASSEMBLED into a result, PUBLISHED on that result, and finally gate
 /// ADMISSION.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FlowCompletionRole {
+pub enum FlowCompletionRole {
     /// The lowering that derives a fact from authored syntax.
     Producer,
     /// A value that holds a fact between production and discharge.
@@ -115,7 +115,7 @@ pub(crate) enum FlowCompletionRole {
 /// construction on the inventory: there is no other way to build the
 /// fact, so a new minting site does not compile until it has a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum CompletionConstruction {
+pub enum CompletionConstruction {
     /// The statement-list lowering's running reachability accumulator —
     /// the producer of every region's normal-completion fact.
     RegionAccumulator,
@@ -159,7 +159,7 @@ pub(crate) enum CompletionConstruction {
 /// [`NormalCompletion::reaches_end`] is the fact's only reader, so a new
 /// decision site does not compile until it has a row here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum CompletionDischarge {
+pub enum CompletionDischarge {
     /// The lowering's read of a child region's fact while composing its
     /// parent's.
     RegionComposition,
@@ -187,9 +187,9 @@ pub(crate) enum CompletionDischarge {
 ///
 /// [`TransportsCompletion`] binds each row to the real type, so a row can
 /// never name a carrier that does not exist.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum CompletionTransport {
+pub enum CompletionTransport {
     /// One lowered statement list.
     SliceRegion,
     /// One lowered function body.
@@ -204,9 +204,9 @@ pub(crate) enum CompletionTransport {
 
 /// THE closed inventory: every carrier of a completion fact, in every
 /// role it plays.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FlowCompletionCarrier {
+pub enum FlowCompletionCarrier {
     /// A minting site.
     Construction(CompletionConstruction),
     /// A reading site.
@@ -215,10 +215,10 @@ pub(crate) enum FlowCompletionCarrier {
     Transport(CompletionTransport),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CompletionConstruction {
     /// Every construction row.
-    pub(crate) const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self] = &[
         Self::RegionAccumulator,
         Self::SynthesizedRegion,
         Self::BodyFromRootRegion,
@@ -231,7 +231,7 @@ impl CompletionConstruction {
 
     /// The fact this site mints. Exhaustive: a new variant must decide
     /// what it produces before it compiles.
-    pub(crate) fn fact(self) -> FlowCompletionFact {
+    pub fn fact(self) -> FlowCompletionFact {
         match self {
             Self::RegionAccumulator
             | Self::SynthesizedRegion
@@ -245,7 +245,7 @@ impl CompletionConstruction {
     }
 
     /// The lifecycle role this site plays.
-    pub(crate) fn role(self) -> FlowCompletionRole {
+    pub fn role(self) -> FlowCompletionRole {
         match self {
             Self::RegionAccumulator => FlowCompletionRole::Producer,
             Self::SynthesizedRegion
@@ -258,10 +258,10 @@ impl CompletionConstruction {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CompletionDischarge {
     /// Every discharge row.
-    pub(crate) const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self] = &[
         Self::RegionComposition,
         Self::BodyComposition,
         Self::EvaluatorRegionWalk,
@@ -272,7 +272,7 @@ impl CompletionDischarge {
     ];
 
     /// The fact this site reads.
-    pub(crate) fn fact(self) -> FlowCompletionFact {
+    pub fn fact(self) -> FlowCompletionFact {
         match self {
             Self::RegionComposition
             | Self::BodyComposition
@@ -285,7 +285,7 @@ impl CompletionDischarge {
     }
 
     /// The lifecycle role this site plays.
-    pub(crate) fn role(self) -> FlowCompletionRole {
+    pub fn role(self) -> FlowCompletionRole {
         match self {
             Self::RegionComposition | Self::BodyComposition | Self::EvaluatorRegionWalk => {
                 FlowCompletionRole::Discharge
@@ -296,10 +296,10 @@ impl CompletionDischarge {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CompletionTransport {
     /// Every transport row.
-    pub(crate) const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self] = &[
         Self::SliceRegion,
         Self::SliceContent,
         Self::SliceSwitchCase,
@@ -308,7 +308,7 @@ impl CompletionTransport {
     ];
 
     /// The facts this carrier stores.
-    pub(crate) fn facts(self) -> &'static [FlowCompletionFact] {
+    pub fn facts(self) -> &'static [FlowCompletionFact] {
         match self {
             Self::SliceRegion => &[FlowCompletionFact::NormalCompletion],
             Self::SliceContent => &[
@@ -328,7 +328,7 @@ impl CompletionTransport {
     }
 
     /// The lifecycle role this carrier plays.
-    pub(crate) fn role(self) -> FlowCompletionRole {
+    pub fn role(self) -> FlowCompletionRole {
         match self {
             Self::SliceRegion
             | Self::SliceContent
@@ -339,10 +339,10 @@ impl CompletionTransport {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl FlowCompletionCarrier {
     /// The whole listed inventory, in a stable order.
-    pub(crate) fn all() -> Vec<Self> {
+    pub fn all() -> Vec<Self> {
         CompletionConstruction::ALL
             .iter()
             .copied()
@@ -363,7 +363,7 @@ impl FlowCompletionCarrier {
     }
 
     /// The lifecycle role of this row.
-    pub(crate) fn role(self) -> FlowCompletionRole {
+    pub fn role(self) -> FlowCompletionRole {
         match self {
             Self::Construction(site) => site.role(),
             Self::Discharge(site) => site.role(),
@@ -372,39 +372,39 @@ impl FlowCompletionCarrier {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// The sealing module: [`TransportsCompletion`] is implementable only
 /// inside this crate's declared carrier set, so a transport row always
 /// names a type this inventory vouched for.
-pub(crate) mod sealed {
+pub mod sealed {
     /// Sealed: only this crate's declared completion carriers implement
     /// it, and it is the supertrait bound on [`super::TransportsCompletion`].
-    pub(crate) trait Sealed {}
+    pub trait Sealed {}
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// A type that stores a completion fact.
 ///
 /// The impl is what makes [`CompletionTransport`] code-first: the row
 /// exists because a real type claims it.
-pub(crate) trait TransportsCompletion: sealed::Sealed {
+pub trait TransportsCompletion: sealed::Sealed {
     /// This carrier's inventory row.
     const TRANSPORT: CompletionTransport;
 }
 
 /// Declare one carrier type's inventory row.
+#[macro_export]
 macro_rules! transports_completion {
     ($ty:ty => $row:ident) => {
-        #[cfg(test)]
-        impl $crate::flow_completion_inventory::sealed::Sealed for $ty {}
-        #[cfg(test)]
-        impl $crate::flow_completion_inventory::TransportsCompletion for $ty {
-            const TRANSPORT: $crate::flow_completion_inventory::CompletionTransport =
-                $crate::flow_completion_inventory::CompletionTransport::$row;
+        #[cfg(any(test, feature = "test-support"))]
+        impl $crate::flow::completion::sealed::Sealed for $ty {}
+        #[cfg(any(test, feature = "test-support"))]
+        impl $crate::flow::completion::TransportsCompletion for $ty {
+            const TRANSPORT: $crate::flow::completion::CompletionTransport =
+                $crate::flow::completion::CompletionTransport::$row;
         }
     };
 }
-pub(crate) use transports_completion;
 
 /// Whether control can reach past a region or body without returning.
 ///
@@ -417,19 +417,19 @@ pub(crate) use transports_completion;
 /// `Deref`: a conversion with no row would be exactly the silent carrier
 /// this module exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct NormalCompletion(bool);
+pub struct NormalCompletion(bool);
 
 impl NormalCompletion {
     /// Mint the fact at one inventory construction site.
     #[must_use]
-    pub(crate) fn minted(reaches_end: bool, at: CompletionConstruction) -> Self {
+    pub fn minted(reaches_end: bool, at: CompletionConstruction) -> Self {
         observe_construction(at);
         Self(reaches_end)
     }
 
     /// Read the fact at one inventory discharge site.
     #[must_use]
-    pub(crate) fn reaches_end(self, at: CompletionDischarge) -> bool {
+    pub fn reaches_end(self, at: CompletionDischarge) -> bool {
         observe_discharge(at);
         self.0
     }
@@ -442,9 +442,9 @@ impl NormalCompletion {
     /// stage on the inventory that production does not have. Built in the
     /// test configuration alone, so production has exactly one way to mint
     /// the fact: [`Self::minted`], with a row.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub(crate) fn minted_for_fixture(reaches_end: bool) -> Self {
+    pub fn minted_for_fixture(reaches_end: bool) -> Self {
         Self(reaches_end)
     }
 
@@ -456,9 +456,9 @@ impl NormalCompletion {
     /// would describe a pipeline stage that does not exist. The reader is
     /// built in the test configuration alone, so production has exactly
     /// one way to read the fact: [`Self::reaches_end`], with a row.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub(crate) fn reaches_end_for_assertion(self) -> bool {
+    pub fn reaches_end_for_assertion(self) -> bool {
         self.0
     }
 }
@@ -471,7 +471,7 @@ impl NormalCompletion {
 /// they are the same KIND of fact — an arm contributed without an
 /// authored value expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct BodyCompletionObservations {
+pub struct BodyCompletionObservations {
     /// A `return;` with no argument was evaluated.
     bare_return: bool,
     /// An inference-only implicit `undefined` edge was retained.
@@ -483,36 +483,36 @@ transports_completion!(BodyCompletionObservations => BodyCompletionObservations)
 impl BodyCompletionObservations {
     /// Nothing observed yet.
     #[must_use]
-    pub(crate) fn none() -> Self {
+    pub fn none() -> Self {
         Self::default()
     }
 
     /// Record an evaluated bare `return;`.
-    pub(crate) fn observe_bare_return(&mut self) {
+    pub fn observe_bare_return(&mut self) {
         self.bare_return = true;
     }
 
     /// Record a retained inference-only implicit `undefined` edge.
-    pub(crate) fn observe_implicit_undefined(&mut self) {
+    pub fn observe_implicit_undefined(&mut self) {
         self.implicit_undefined = true;
     }
 
     /// Whether a bare `return;` contributed.
     #[must_use]
-    pub(crate) fn bare_return(self) -> bool {
+    pub fn bare_return(self) -> bool {
         self.bare_return
     }
 
     /// Whether an implicit `undefined` contributed.
     #[must_use]
-    pub(crate) fn implicit_undefined(self) -> bool {
+    pub fn implicit_undefined(self) -> bool {
         self.implicit_undefined
     }
 
     /// Whether either observation contributes an arm to the join — the
     /// freshness rule's input, which does not care which one fired.
     #[must_use]
-    pub(crate) fn contributes_arm(self) -> bool {
+    pub fn contributes_arm(self) -> bool {
         self.bare_return || self.implicit_undefined
     }
 }
@@ -522,26 +522,26 @@ impl BodyCompletionObservations {
 /// Compiled to nothing outside the crate's own test build, so the
 /// inventory's coverage half costs a shipped evaluation nothing and
 /// changes no behaviour in either build.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 #[inline(always)]
 fn observe_construction(_at: CompletionConstruction) {}
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 #[inline(always)]
 fn observe_discharge(_at: CompletionDischarge) {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn observe_construction(at: CompletionConstruction) {
     coverage::visit(FlowCompletionCarrier::Construction(at));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn observe_discharge(at: CompletionDischarge) {
     coverage::visit(FlowCompletionCarrier::Discharge(at));
 }
 
-#[cfg(test)]
-pub(crate) mod coverage {
+#[cfg(any(test, feature = "test-support"))]
+pub mod coverage {
     use super::FlowCompletionCarrier;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -571,7 +571,7 @@ pub(crate) mod coverage {
     /// discharged on whichever thread evaluates it, so a thread-local
     /// recording would silently miss exactly the producer rows that matter
     /// most.
-    pub(super) fn visit(carrier: FlowCompletionCarrier) {
+    pub fn visit(carrier: FlowCompletionCarrier) {
         if !RECORDING.load(Ordering::Acquire) {
             return;
         }
@@ -593,7 +593,7 @@ pub(crate) mod coverage {
     /// and the "listed but unreached" direction stays a sound lower bound
     /// on what the probes cover. The probe table's own correctness test is
     /// what pins each row to the program that exercises it.
-    pub(crate) fn record<R>(body: impl FnOnce() -> R) -> (R, BTreeSet<FlowCompletionCarrier>) {
+    pub fn record<R>(body: impl FnOnce() -> R) -> (R, BTreeSet<FlowCompletionCarrier>) {
         let _serialized: MutexGuard<'_, ()> = recording_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

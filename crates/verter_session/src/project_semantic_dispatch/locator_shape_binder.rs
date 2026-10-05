@@ -311,7 +311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Err(deref_error) => {
                 if matches!(
                     deref_error,
-                    crate::decl_body_memo::LocatorBodyDerefError::ValueAnnotationAbsent
+                    verter_session_query::source::deref::LocatorBodyDerefError::ValueAnnotationAbsent
                 ) {
                     if let Some(node) = self
                         .lower_locator_value_expression_source(key.locator(), canonical.as_ref())
@@ -331,7 +331,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .into();
                 if matches!(
                     deref_error,
-                    crate::decl_body_memo::LocatorBodyDerefError::LeaseMiss
+                    verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss
                 ) {
                     output.cache_suppress = true;
                 }

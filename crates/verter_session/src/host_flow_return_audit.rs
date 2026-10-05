@@ -47,10 +47,11 @@ use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, FlowReturnFailure, FlowReturnResult, FlowReturnUnsupported,
+    FlowReturnDegradation, FlowReturnFailure, FlowReturnResult, FlowReturnUnsupported,
     ResolveCallFailure, ReturnProjectionDemand,
 };
 use crate::VerterHost;
+use verter_session_query::flow::policy::FlowGap;
 
 /// Typed `Err` arm of the flow-return [`AuditedResult`] carrier —
 /// genuine NO-VALUE outcomes only. A degraded-but-usable result is NOT

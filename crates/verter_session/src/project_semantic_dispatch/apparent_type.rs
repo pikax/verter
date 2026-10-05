@@ -224,7 +224,7 @@ impl ProjectSemanticDispatch<'_> {
         optional: bool,
         declaring_file: Option<&str>,
     ) -> SemanticNodeId {
-        use crate::semantic_query::NullabilityPolicy;
+        use verter_session_query::flow::policy::NullabilityPolicy;
         let strict = declaring_file.is_none_or(|canonical| {
             self.ctx
                 .semantic_compiler_options_for(canonical)

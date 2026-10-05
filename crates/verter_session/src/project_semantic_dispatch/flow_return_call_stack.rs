@@ -27,7 +27,7 @@ use super::super::call_resolve::ResolveCallStep;
 use super::contextual::{FunctionArgumentMark, FunctionArgumentRequest};
 use super::FlowDemandDriver;
 use super::*;
-use crate::flow_slice_content::{
+use verter_session_query::flow::slice::{
     SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceExpr,
 };
 
@@ -111,7 +111,7 @@ pub(super) struct ResolveCallFrame<'e> {
     span: verter_span::Span,
     callee: SemanticNodeId,
     arguments: &'e SliceCallArguments,
-    indexed: Arc<crate::decl_body_memo::IndexedFlowCallExpression>,
+    indexed: Arc<verter_session_query::source::indexed_call::IndexedFlowCallExpression>,
     frame_arguments: Option<Arc<[SliceCallArgument]>>,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,

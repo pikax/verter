@@ -1095,11 +1095,11 @@ fn printed_name_qualifies_exactly_the_instantiated_clauses() {
         offset: 0,
         name: Arc::from("(Anonymous class)"),
         outer_clauses: Arc::from([
-            crate::semantic_query::ClassExpressionClause {
+            verter_session_query::flow::policy::ClassExpressionClause {
                 container: Arc::from("outer3"),
                 parameters: Arc::from([Arc::from("U")]),
             },
-            crate::semantic_query::ClassExpressionClause {
+            verter_session_query::flow::policy::ClassExpressionClause {
                 container: Arc::from("inner"),
                 parameters: Arc::from([Arc::from("T")]),
             },

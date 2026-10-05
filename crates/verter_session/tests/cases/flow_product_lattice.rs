@@ -5,11 +5,11 @@ use verter_identity::identity::InputBasisId;
 use verter_session::for_tests::*;
 use verter_session::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, LiteralValue, NullabilityPolicy, PrimitiveKind,
-    ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
+    FlowReturnKey, LiteralValue, PrimitiveKind, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind};
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
 
@@ -739,7 +739,7 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
             &self,
             _: &[LiteralProvenance<'_>],
             _: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             unreachable!()
         }
     }
@@ -1107,7 +1107,7 @@ fn predecessor_joins_follow_domain_order_and_a_failure_permanently_seals_evidenc
             &self,
             _: &[LiteralProvenance<'_>],
             _: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             unreachable!()
         }
     }
@@ -1281,7 +1281,7 @@ fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_b
             &self,
             inputs: &[LiteralProvenance<'_>],
             result: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             self.inputs.borrow_mut().push(inputs.len());
             self.graph.literal_provenance(inputs, result)
         }

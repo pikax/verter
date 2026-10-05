@@ -18,7 +18,7 @@
 //!   decided what happens to the callee's clause;
 //! - the flow evaluator's call sink is typed [`CallValue`], reached
 //!   through one exhaustive match over the closed
-//!   [`SliceCall`](crate::flow_slice_content::SliceCall) vocabulary, so
+//!   [`SliceCall`](verter_session_query::flow::slice::SliceCall) vocabulary, so
 //!   a new call form must pick a constructor at its own arm. That closes
 //!   the CALL vocabulary; it says nothing about whether a call REACHES
 //!   it, which is the content lowering's obligation and was separately
@@ -79,14 +79,14 @@
 //!   cannot infer: `bare<T>(): T` called with no arguments IS
 //!   `unknown`).
 //!
-//! [`GatedType::root_signature`]: crate::flow_slice_content::GatedType::root_signature
+//! [`GatedType::root_signature`]: verter_session_query::flow::slice::GatedType::root_signature
 
 use std::sync::Arc;
 
-use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
     ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
 };
+use verter_session_query::flow::slice::SliceCallSite;
 use verter_session_query::function_program::{FunctionProgramMatch, FunctionProgramTypeParam};
 
 /// Where the node a clause instantiates into was LOWERED, which decides

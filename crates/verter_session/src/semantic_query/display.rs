@@ -344,7 +344,7 @@ pub fn display(
             display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
             result
                 .can_fall_through
-                .reaches_end(crate::flow_completion_inventory::CompletionDischarge::PublishedResult),
+                .reaches_end(verter_session_query::flow::completion::CompletionDischarge::PublishedResult),
         )),
         SemanticQueryValue::ResolveCall(result) => {
             let return_type = match result.as_ref() {

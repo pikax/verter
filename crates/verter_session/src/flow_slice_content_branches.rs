@@ -8,6 +8,8 @@
 //! as its own frame and the statement resumes with it
 //! ([`Lowerer::resume_entered_lowering`]), entering its next region or
 //! finishing into the region's statements.
+use verter_session_query::flow::slice::SliceCatchClause;
+use verter_session_query::flow::slice::SliceSwitchTest;
 
 use super::*;
 
@@ -247,7 +249,7 @@ impl<'a> Lowerer<'a> {
         // the test evaluates).
         if unprovable_control_call || unprovable_guard {
             acc.out.push(SliceStatement::Gap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         if verter_semantic::analysis::flow::expression_contains_call(test) {
@@ -539,7 +541,7 @@ impl<'a> Lowerer<'a> {
             });
         if unprovable_switch_effect {
             acc.out.push(SliceStatement::Gap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         acc.out.push(SliceStatement::Switch {
@@ -767,7 +769,7 @@ impl<'a> Lowerer<'a> {
             // typed gap ahead of the try: the evaluation returns
             // the value and refuses to warm it.
             acc.out.push(SliceStatement::Gap(
-                crate::semantic_query::FlowGap::AbruptCompletion,
+                verter_session_query::flow::policy::FlowGap::AbruptCompletion,
             ));
         }
         acc.out.push(SliceStatement::Try {

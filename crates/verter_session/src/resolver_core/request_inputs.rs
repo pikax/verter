@@ -24,7 +24,7 @@ impl<T> CachedProjection<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexedInputIdentity {
-    pub(crate) source: crate::decl_lowering::SnapshotKey,
+    pub(crate) source: verter_session_query::source::snapshot::SnapshotKey,
     pub(crate) observation_id: u64,
     pub(crate) file_language: verter_language::FileLanguage,
     pub(crate) parse_key: Option<verter_language::ParseKey>,

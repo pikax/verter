@@ -30,7 +30,6 @@ use verter_type_expr::{
     TupleElement, TypeExpr, TypeParam,
 };
 
-use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
 use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
@@ -40,6 +39,7 @@ use crate::semantic_query::{
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
+use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -1165,7 +1165,7 @@ fn macro_payload_replay_rejects_wrong_owner_for_type_argument_and_field() {
     assert!(
         matches!(
             memo.deref_locator_body(&type_argument),
-            Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
+            Ok(verter_session_query::source::deref::DerefedAuthoredBody {
                 shape: DerefedBodyShape::Single(TypeExpr::Object(_)),
                 ..
             })
@@ -1177,7 +1177,7 @@ fn macro_payload_replay_rejects_wrong_owner_for_type_argument_and_field() {
     assert!(
         matches!(
             memo.deref_locator_body(&field),
-            Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
+            Ok(verter_session_query::source::deref::DerefedAuthoredBody {
                 shape: DerefedBodyShape::Single(TypeExpr::Primitive(_)),
                 ..
             })

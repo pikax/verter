@@ -29,10 +29,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::flow_completion_inventory::{
-    coverage, CompletionConstruction, CompletionDischarge, CompletionTransport,
-    FlowCompletionCarrier, FlowCompletionFact, FlowCompletionRole, TransportsCompletion,
-};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     FlowReturnKey, QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -40,6 +36,10 @@ use crate::semantic_query::{
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::flow::completion::{
+    coverage, CompletionConstruction, CompletionDischarge, CompletionTransport,
+    FlowCompletionCarrier, FlowCompletionFact, FlowCompletionRole, TransportsCompletion,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
 
@@ -413,16 +413,16 @@ fn transport_rows_bind_to_their_carrier_types() {
     for row in CompletionTransport::ALL.iter().copied() {
         match row {
             CompletionTransport::SliceRegion => {
-                bound::<crate::flow_slice_content::SliceRegion>(row);
+                bound::<verter_session_query::flow::slice::SliceRegion>(row);
             }
             CompletionTransport::SliceContent => {
-                bound::<crate::flow_slice_content::SliceContent>(row);
+                bound::<verter_session_query::flow::slice::SliceContent>(row);
             }
             CompletionTransport::SliceSwitchCase => {
-                bound::<crate::flow_slice_content::SliceSwitchCase>(row);
+                bound::<verter_session_query::flow::slice::SliceSwitchCase>(row);
             }
             CompletionTransport::BodyCompletionObservations => {
-                bound::<crate::flow_completion_inventory::BodyCompletionObservations>(row);
+                bound::<verter_session_query::flow::completion::BodyCompletionObservations>(row);
             }
             CompletionTransport::FlowReturnResult => {
                 bound::<crate::semantic_query::FlowReturnResult>(row);

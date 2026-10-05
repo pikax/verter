@@ -602,12 +602,12 @@ impl<
         source: &super::shallow_file_state::ShallowInputRecord,
         locator: &AuthoredBodyLocator,
     ) -> Result<
-        crate::decl_body_memo::locator_deref::DerefedAuthoredBody,
-        crate::decl_body_memo::LocatorBodyDerefError,
+        verter_session_query::source::deref::DerefedAuthoredBody,
+        verter_session_query::source::deref::LocatorBodyDerefError,
     > {
         let Some(source) = self.source(source) else {
             missing_source();
-            return Err(crate::decl_body_memo::LocatorBodyDerefError::LeaseMiss);
+            return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
         };
         source.decl_bodies().deref_locator_body(locator)
     }
@@ -797,10 +797,13 @@ impl<
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
         locator: &verter_type_expr::locators::TypeArgLocator,
-    ) -> Result<verter_type_expr::TypeExpr, crate::decl_body_memo::LocatorBodyDerefError> {
+    ) -> Result<
+        verter_type_expr::TypeExpr,
+        verter_session_query::source::deref::LocatorBodyDerefError,
+    > {
         let Some(source) = self.source(source) else {
             missing_source();
-            return Err(crate::decl_body_memo::LocatorBodyDerefError::LeaseMiss);
+            return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
         };
         source.decl_bodies().deref_type_arg(locator)
     }

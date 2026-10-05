@@ -56,12 +56,13 @@ use std::sync::Arc;
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind,
-    QueryError, SemanticNodeData, SemanticQueryKey,
+    FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind, QueryError,
+    SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::CompileTarget;
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::flow::policy::FlowGap;
 
 // The strengthening layer: recursive expectations, the public cold/warm
 // boundary companion, negative controls, and the crossed capture-write
@@ -160,7 +161,7 @@ pub(crate) enum NodeShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Degr {
     None,
-    FlowGap(crate::semantic_query::FlowGap),
+    FlowGap(verter_session_query::flow::policy::FlowGap),
     UnmodeledPosition,
     UnappliedWriteEffect,
     ConditionalVarDefinition,

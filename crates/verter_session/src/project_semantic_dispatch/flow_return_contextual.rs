@@ -5,8 +5,8 @@
 //! unannotated parameters, and its body return is read under them.
 
 use super::{FlowDemandDriver, FlowEvaluator, Positional};
-use crate::flow_slice_content::SliceExpr;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
+use verter_session_query::flow::slice::SliceExpr;
 
 /// A function-value argument to type under a contextual signature: the
 /// nested function's demand, and what its outcome is read against.

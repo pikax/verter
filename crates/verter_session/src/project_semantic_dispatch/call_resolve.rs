@@ -4096,7 +4096,7 @@ fn optional_parameter_target(
     let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         graph,
         &[param.ty, undefined],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
     evidence.absorb(composite.evidence);
     composite.node

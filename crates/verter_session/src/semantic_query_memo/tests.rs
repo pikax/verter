@@ -10821,11 +10821,11 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ReduceUnion => (
                 SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 },
                 SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
@@ -11224,8 +11224,8 @@ mod prepared_identity_bijection {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-                policy: crate::semantic_query::FlowReturnPolicy {
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                policy: verter_session_query::flow::policy::FlowReturnPolicy {
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                     no_implicit_any: true,
                     use_unknown_in_catch_variables: true,
                     no_implicit_this: true,
@@ -12343,8 +12343,8 @@ mod release_embedded_node_family_tests {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: substitution,
-                policy: crate::semantic_query::FlowReturnPolicy {
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                policy: verter_session_query::flow::policy::FlowReturnPolicy {
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                     no_implicit_any: true,
                     use_unknown_in_catch_variables: true,
                     no_implicit_this: true,

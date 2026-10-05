@@ -181,7 +181,7 @@ fn identity_audit_four_discriminators() {
     let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &members,
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
     match graph.node_data(union.node).as_deref() {
         Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {}
@@ -361,12 +361,12 @@ impl DeepPair {
         let union = intern_ordered_union(
             &self.graph,
             &input(self.a, self.b),
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
         let arm_union = intern_ordered_union(
             &self.graph,
             &input(self.a_arm, self.b_arm),
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
         vec![
             self.labels(&sorted),
@@ -1015,7 +1015,7 @@ fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: Semantic
     let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         graph,
         &[a, b],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
     union_arms(graph, union.node).len()
 }
@@ -1410,7 +1410,7 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
             let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
                 &graph,
                 &members,
-                crate::semantic_query::NullabilityPolicy::Strict,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
             );
             let arms = union_arms(&graph, union.node);
             assert!(
@@ -1675,7 +1675,7 @@ fn nested_union_chain(graph: &SemanticGraphStore, depth: usize) -> Vec<SemanticN
         node = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
             graph,
             &[wrapped, literal],
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
         .node;
         levels.push(node);

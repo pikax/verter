@@ -8,10 +8,11 @@ use super::upsert;
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowGap, FlowInputContext, FlowReturnDegradation, FlowReturnFailure, FlowReturnKey,
-    RelationKind, ReturnProjectionDemand, SemanticQueryKey,
+    FlowInputContext, FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, RelationKind,
+    ReturnProjectionDemand, SemanticQueryKey,
 };
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::flow::policy::FlowGap;
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

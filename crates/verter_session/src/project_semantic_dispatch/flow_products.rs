@@ -12,7 +12,7 @@
 
 use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecutionSelection};
 use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
-use crate::semantic_query::{FlowGap, SemanticNodeId};
+use crate::semantic_query::SemanticNodeId;
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use verter_session_query::flow::binding::{FlowBindingMap, FlowBindingRef};
 use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
 use verter_session_query::flow::flow_ir::ReturnSlicePlan;
+use verter_session_query::flow::policy::FlowGap;
 use verter_session_query::function_program::{FlowBindingIdentity, FunctionProgramKey};
 
 // Compact offsets are private runtime addresses, never persisted identities.
@@ -1093,7 +1094,7 @@ pub(super) struct DispatchFlowAlgebra<'a, D: super::flow_return::FlowDemandDrive
     /// The dispatch whose canonical authority constructs the union.
     pub dispatch: &'a D,
     /// The joining frame's null algebra.
-    pub nullability: crate::semantic_query::NullabilityPolicy,
+    pub nullability: verter_session_query::flow::policy::NullabilityPolicy,
 }
 
 impl<D: super::flow_return::FlowDemandDriver> FlowSemanticAlgebra for DispatchFlowAlgebra<'_, D> {
@@ -1144,7 +1145,7 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
         let composite = super::canonical_algebra::intern_ordered_union(
             self.0,
             members,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
         FlowAlgebraComposite {
             node: composite.node,

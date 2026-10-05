@@ -30,11 +30,13 @@ pub mod analysis;
 pub mod currency_probe;
 pub mod declarations;
 pub mod enum_constant;
+pub mod enum_scalar;
 pub mod facts;
 pub mod flow;
 pub mod function_program;
 pub mod resolution;
 pub mod retention;
+pub mod source;
 pub mod type_solver;
 
 use verter_type_expr::locators::{AuthoredBodyLocator, TypeParamVisibility};

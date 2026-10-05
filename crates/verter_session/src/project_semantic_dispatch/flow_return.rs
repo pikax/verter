@@ -5,7 +5,7 @@
 //! as graph reachability over the once-per-content-version
 //! `FunctionFlowGraph`, hashed, lowered (`FlowSliceIR`), and evaluated
 //! through the slice-gated owned content
-//! ([`crate::flow_slice_content::SliceContent`]) on the shared tagged
+//! ([`verter_session_query::flow::slice::SliceContent`]) on the shared tagged
 //! obligation runtime — return sites, `if` reachability, bare return,
 //! fallthrough, primitive widening, unions, parameters and simple local
 //! reaching definitions, object returns (spread delegated to
@@ -50,15 +50,15 @@ use super::flow_solve::{
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
-use crate::flow_completion_inventory::{
-    BodyCompletionObservations, CompletionConstruction, CompletionDischarge, NormalCompletion,
-};
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
     FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
 use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
+use verter_session_query::flow::completion::{
+    BodyCompletionObservations, CompletionConstruction, CompletionDischarge, NormalCompletion,
+};
 use verter_session_query::flow::{
     binding::{FlowBindingMap, FlowBindingRef as FlowProductSubject},
     skeleton::{FunctionBodySkeleton, SkeletonBindingId},
@@ -678,7 +678,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             project_identity: self.ctx.host_view_project_identity().0,
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy::from_compiler_options(
+            policy: verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
                 &self.ctx.semantic_compiler_options_for(canonical),
             ),
         }
@@ -689,8 +689,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn nullability_for(
         &self,
         canonical: &str,
-    ) -> crate::semantic_query::NullabilityPolicy {
-        crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+    ) -> verter_session_query::flow::policy::NullabilityPolicy {
+        verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
             self.ctx
                 .semantic_compiler_options_for(canonical)
                 .strict_null_checks,
@@ -721,7 +721,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn erase_nullable_members(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         if nullability.is_strict() {
             return node;
@@ -739,7 +739,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn erase_nullable_members_within(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         erased: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
     ) -> SemanticNodeId {
         if let Some(done) = erased.get(&node) {
@@ -1004,7 +1004,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
         if factors.iter().any(Vec::is_empty) {
@@ -1059,7 +1059,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         factors: &[Vec<SemanticNodeId>],
         divided: bool,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
         undecided: &mut bool,
     ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
@@ -2241,7 +2241,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let entry = matched.entry();
         // The lowered clause is demanded at most once, and only for a
         // generic callee.
-        let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
+        let mut lowered: Option<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> =
+            None;
         UtilityClause::read_from_program_entry(matched, |ordinal, param| {
             let clause =
                 lowered.get_or_insert_with(|| source_demand.function_type_param_clause(entry));
@@ -3030,7 +3031,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn close_flow_result_pre_seal(
         &self,
         result: FlowReturnResult,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
         let node = result.return_type();
         let Some(data) = self.graph().node_data(node) else {
@@ -3074,7 +3075,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
         use verter_session_query::flow::skeleton::FunctionBodyKind;
         if kind == FunctionBodyKind::Plain {
@@ -3095,7 +3096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result.return_type(),
                 result.can_fall_through,
                 Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::NominalRelation,
+                    verter_session_query::flow::policy::FlowGap::NominalRelation,
                 )),
                 result.fresh_literal_arms(),
             )
@@ -3135,7 +3136,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn join_yield_contributions(
         &self,
         contributions: &[YieldContribution],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> (Option<SemanticNodeId>, bool) {
         if contributions.is_empty() {
             return (None, false);
@@ -5125,7 +5126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv {
@@ -5185,7 +5186,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut finalized: Vec<(String, SemanticNodeId)> =
             Vec::with_capacity(type_parameters.len());
         for tp in type_parameters.iter() {
-            let mut lower = |gated: &crate::flow_slice_content::GatedType| {
+            let mut lower = |gated: &verter_session_query::flow::slice::GatedType| {
                 let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                 self.shallow_lower_type_expr_with_context(
                     gated.ty(),
@@ -5610,7 +5611,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // unselected binding initializer, sibling member value, or
         // effect-position expression never lowers (no resolution, no
         // budget charge, no fact).
-        let selection = crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered);
+        let selection =
+            verter_session_query::flow::slice::FlowSliceSelection::from_slice_ir(&lowered);
         // The content lowering resolves every identifier against the SAME
         // `FunctionBodySkeleton` the plan above resolved its lexical edges
         // against — one binding authority, one build per content version
@@ -5998,7 +6000,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
                     evaluator.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                            verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                         ),
                     );
                 }
@@ -6296,7 +6298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction {
         let resolved: Vec<SemanticNodeId> = arms
             .iter()
@@ -6440,7 +6442,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
@@ -6487,7 +6489,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         let graph = self.graph();
         let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -6634,7 +6636,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .map(|kind| graph.intern_node(SemanticNodeData::Primitive(kind)));
                 self.intern_normalized_union(
                     &keys,
-                    crate::semantic_query::NullabilityPolicy::Strict,
+                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 )
             }
             Some(SemanticNodeData::IndexedAccess { object, .. })
@@ -6658,7 +6660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 self.intern_normalized_union(
                     &branches,
-                    crate::semantic_query::NullabilityPolicy::Strict,
+                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 )
             }
             _ => view,
@@ -6803,7 +6805,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn unit_typed_properties(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Vec<(crate::semantic_query::PropertyKey, Option<SemanticNodeId>)> {
         let graph = self.graph();
         let node = match graph.node_data(node).as_deref() {
@@ -6944,8 +6946,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         observations: BodyCompletionObservations,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
-        empty_completion: crate::flow_slice_content::EmptyCompletion,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        empty_completion: verter_session_query::flow::slice::EmptyCompletion,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
         // `strictNullChecks` off: a nullable contribution adds nothing to
@@ -7158,8 +7160,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // method as `never`. The producer owns the classification;
                 // this reads its typed answer rather than re-deriving one.
                 let primitive = match empty_completion {
-                    crate::flow_slice_content::EmptyCompletion::Void => PrimitiveKind::Void,
-                    crate::flow_slice_content::EmptyCompletion::Never => PrimitiveKind::Never,
+                    verter_session_query::flow::slice::EmptyCompletion::Void => PrimitiveKind::Void,
+                    verter_session_query::flow::slice::EmptyCompletion::Never => {
+                        PrimitiveKind::Never
+                    }
                 };
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(primitive)));
             } else {
@@ -7203,7 +7207,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 ReunionReduction::Undecided => {
                     degradation.get_or_insert(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::NominalRelation,
+                        verter_session_query::flow::policy::FlowGap::NominalRelation,
                     ));
                 }
             }
@@ -7251,11 +7255,11 @@ struct MemberDemandFilter {
 /// `include_expression_writes`, also collect every EXPRESSION-position
 /// write the tree's value roots carry (return arguments, binding
 /// initializers, statement-write right-hand sides): those apply in
-/// evaluation order through [`crate::flow_slice_content::SliceExpr::Assignment`].
+/// evaluation order through [`verter_session_query::flow::slice::SliceExpr::Assignment`].
 /// A member-projection demand evaluates only the demanded member, so its
 /// sibling-member writes never apply and are NOT subtracted there.
 fn collect_assignment_spans(
-    region: &crate::flow_slice_content::SliceRegion,
+    region: &verter_session_query::flow::slice::SliceRegion,
     out: &mut rustc_hash::FxHashSet<verter_session_query::flow::frame_span::FrameSpan>,
     include_expression_writes: bool,
 ) {
@@ -7266,13 +7270,17 @@ fn collect_assignment_spans(
     while let Some(region) = pending.pop() {
         for statement in region.statements.iter() {
             match statement {
-                crate::flow_slice_content::SliceStatement::Assignment { span, value, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Assignment {
+                    span,
+                    value,
+                    ..
+                } => {
                     out.insert(*span);
                     if include_expression_writes {
                         collect_expression_write_spans(value, out);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
+                verter_session_query::flow::slice::SliceStatement::EvolvingArray(operation) => {
                     // The evaluator applies every operation it lowers: a
                     // `push` or element write adds to the element type, a
                     // reset starts a new evolving array.
@@ -7283,7 +7291,7 @@ fn collect_assignment_spans(
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::If {
+                verter_session_query::flow::slice::SliceStatement::If {
                     consequent,
                     alternate,
                     ..
@@ -7293,15 +7301,15 @@ fn collect_assignment_spans(
                         pending.push(alternate);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Block(block) => {
+                verter_session_query::flow::slice::SliceStatement::Block(block) => {
                     pending.push(block);
                 }
-                crate::flow_slice_content::SliceStatement::Switch { cases, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Switch { cases, .. } => {
                     for case in cases.iter() {
                         pending.push(&case.region);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Try {
+                verter_session_query::flow::slice::SliceStatement::Try {
                     block,
                     catch,
                     finally,
@@ -7315,10 +7323,10 @@ fn collect_assignment_spans(
                         pending.push(finally);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Labeled { body, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Labeled { body, .. } => {
                     pending.push(body);
                 }
-                crate::flow_slice_content::SliceStatement::Loop(lowered) => {
+                verter_session_query::flow::slice::SliceStatement::Loop(lowered) => {
                     pending.push(&lowered.init);
                     pending.push(&lowered.test_effects);
                     pending.push(&lowered.body);
@@ -7335,17 +7343,20 @@ fn collect_assignment_spans(
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::CompoundAssignment { span, .. } => {
+                verter_session_query::flow::slice::SliceStatement::CompoundAssignment {
+                    span,
+                    ..
+                } => {
                     out.insert(*span);
                 }
-                crate::flow_slice_content::SliceStatement::Destructure { init, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Destructure { init, .. } => {
                     if include_expression_writes {
                         if let Some(init) = init {
                             collect_expression_write_spans(init, out);
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::DestructureAssign {
+                verter_session_query::flow::slice::SliceStatement::DestructureAssign {
                     pattern,
                     value,
                     ..
@@ -7355,51 +7366,57 @@ fn collect_assignment_spans(
                         collect_expression_write_spans(value, out);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::MemberWrite { span, write, .. } => {
+                verter_session_query::flow::slice::SliceStatement::MemberWrite {
+                    span,
+                    write,
+                    ..
+                } => {
                     out.insert(*span);
                     if let (
                         true,
-                        crate::flow_slice_content::SliceMemberWrite::Assign { value, .. },
+                        verter_session_query::flow::slice::SliceMemberWrite::Assign {
+                            value, ..
+                        },
                     ) = (include_expression_writes, write)
                     {
                         collect_expression_write_spans(value, out);
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
+                verter_session_query::flow::slice::SliceStatement::Unreachable(unreachable) => {
                     pending.push(unreachable);
                 }
-                crate::flow_slice_content::SliceStatement::Return { argument, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Return { argument, .. } => {
                     if include_expression_writes {
                         if let Some(argument) = argument {
                             collect_expression_write_spans(argument, out);
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Yield { argument, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Yield { argument, .. } => {
                     if include_expression_writes {
                         if let Some(argument) = argument {
                             collect_expression_write_spans(argument, out);
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Binding { init, .. } => {
+                verter_session_query::flow::slice::SliceStatement::Binding { init, .. } => {
                     if include_expression_writes {
                         if let Some(init) = init {
                             collect_expression_write_spans(init, out);
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Gap(_)
-                | crate::flow_slice_content::SliceStatement::Assertion { .. }
-                | crate::flow_slice_content::SliceStatement::CallEffect { .. }
-                | crate::flow_slice_content::SliceStatement::CalleeEffect { .. }
-                | crate::flow_slice_content::SliceStatement::Break { .. }
-                | crate::flow_slice_content::SliceStatement::Continue { .. }
-                | crate::flow_slice_content::SliceStatement::Throw
-                | crate::flow_slice_content::SliceStatement::ThrowPoint
-                | crate::flow_slice_content::SliceStatement::TransparentLoop
-                | crate::flow_slice_content::SliceStatement::DivergentLoop
-                | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
+                verter_session_query::flow::slice::SliceStatement::Gap(_)
+                | verter_session_query::flow::slice::SliceStatement::Assertion { .. }
+                | verter_session_query::flow::slice::SliceStatement::CallEffect { .. }
+                | verter_session_query::flow::slice::SliceStatement::CalleeEffect { .. }
+                | verter_session_query::flow::slice::SliceStatement::Break { .. }
+                | verter_session_query::flow::slice::SliceStatement::Continue { .. }
+                | verter_session_query::flow::slice::SliceStatement::Throw
+                | verter_session_query::flow::slice::SliceStatement::ThrowPoint
+                | verter_session_query::flow::slice::SliceStatement::TransparentLoop
+                | verter_session_query::flow::slice::SliceStatement::DivergentLoop
+                | verter_session_query::flow::slice::SliceStatement::Unsupported(_) => {}
             }
         }
     }
@@ -7412,16 +7429,16 @@ fn collect_assignment_spans(
 /// in (object members and keys, spreads, branch arms, an IIFE's nested
 /// function value, the write's own right-hand side).
 fn collect_expression_write_spans(
-    expr: &crate::flow_slice_content::SliceExpr,
+    expr: &verter_session_query::flow::slice::SliceExpr,
     out: &mut rustc_hash::FxHashSet<verter_session_query::flow::frame_span::FrameSpan>,
 ) {
     for write in expression_effect_tree(expr, |_| true) {
         match write {
-            crate::flow_slice_content::SliceExpr::Assignment { span, .. }
-            | crate::flow_slice_content::SliceExpr::Update { span, .. } => {
+            verter_session_query::flow::slice::SliceExpr::Assignment { span, .. }
+            | verter_session_query::flow::slice::SliceExpr::Update { span, .. } => {
                 out.insert(*span);
             }
-            crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
+            verter_session_query::flow::slice::SliceExpr::EvolvingArray(operation) => {
                 out.insert(operation.span);
             }
             _ => {}
@@ -7432,8 +7449,10 @@ fn collect_expression_write_spans(
 /// Whether a lowered expression reads this frame: a parameter or local, a
 /// leaf naming a frame binding, or a call through a frame binding or a
 /// same-file function this frame reaches with its own arguments.
-fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
-    use crate::flow_slice_content::{SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry};
+fn slice_expr_reads_frame(expr: &verter_session_query::flow::slice::SliceExpr) -> bool {
+    use verter_session_query::flow::slice::{
+        SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry,
+    };
     match expr {
         // The frame's receiver is only the frame's to read.
         SliceExpr::Param { .. }
@@ -7487,26 +7506,28 @@ fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
 /// the pre-scan's work list: the whole-binding writes and the empty-array
 /// resets of an EVOLVING array.
 fn expression_write_tree(
-    expr: &crate::flow_slice_content::SliceExpr,
-) -> Vec<&crate::flow_slice_content::SliceExpr> {
+    expr: &verter_session_query::flow::slice::SliceExpr,
+) -> Vec<&verter_session_query::flow::slice::SliceExpr> {
     expression_effect_tree(expr, |operation| {
         matches!(
             operation.kind,
-            crate::flow_slice_content::SliceEvolvingOperationKind::Reset { .. }
+            verter_session_query::flow::slice::SliceEvolvingOperationKind::Reset { .. }
         )
     })
 }
 
 /// Whether an expression tree changes a binding's reaching value: a
 /// whole-binding write, or any operation on an EVOLVING array.
-fn expression_changes_reaching_values(expr: &crate::flow_slice_content::SliceExpr) -> bool {
+fn expression_changes_reaching_values(expr: &verter_session_query::flow::slice::SliceExpr) -> bool {
     !expression_effect_tree(expr, |_| true).is_empty()
 }
 
 /// Whether a two-armed branch join's arms change a reaching value, which
 /// the join then evaluates as a branching flow
 /// ([`FlowEvaluator::eval_branching_union`]).
-fn union_branches_change_reaching_values(arms: &[crate::flow_slice_content::SliceExpr]) -> bool {
+fn union_branches_change_reaching_values(
+    arms: &[verter_session_query::flow::slice::SliceExpr],
+) -> bool {
     matches!(arms, [consequent, alternate]
         if expression_changes_reaching_values(consequent)
             || expression_changes_reaching_values(alternate))
@@ -7515,10 +7536,10 @@ fn union_branches_change_reaching_values(arms: &[crate::flow_slice_content::Slic
 /// The whole-binding writes of an expression tree and the EVOLVING-array
 /// operations `keep` admits, in tree order.
 fn expression_effect_tree(
-    expr: &crate::flow_slice_content::SliceExpr,
-    keep: fn(&crate::flow_slice_content::SliceEvolvingOperation) -> bool,
-) -> Vec<&crate::flow_slice_content::SliceExpr> {
-    use crate::flow_slice_content::{
+    expr: &verter_session_query::flow::slice::SliceExpr,
+    keep: fn(&verter_session_query::flow::slice::SliceEvolvingOperation) -> bool,
+) -> Vec<&verter_session_query::flow::slice::SliceExpr> {
+    use verter_session_query::flow::slice::{
         SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey,
     };
     // The tree is walked from an explicit stack of the expressions still to
@@ -7653,7 +7674,7 @@ enum FlowIndexedArgumentBinding {
 fn widen_fresh_read_node(
     dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
-    nullability: crate::semantic_query::NullabilityPolicy,
+    nullability: verter_session_query::flow::policy::NullabilityPolicy,
 ) -> SemanticNodeId {
     let graph = dispatch.arena();
     if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
@@ -7677,7 +7698,7 @@ fn widen_values_within(
     dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
     values: &[SemanticNodeId],
-    nullability: crate::semantic_query::NullabilityPolicy,
+    nullability: verter_session_query::flow::policy::NullabilityPolicy,
 ) -> SemanticNodeId {
     if values.contains(&node) {
         return widen_literal_node(dispatch, node);
@@ -7722,7 +7743,7 @@ fn is_unique_symbol_node(
 fn widen_unique_symbols(
     dispatch: &impl FlowDemandDriver,
     node: SemanticNodeId,
-    nullability: crate::semantic_query::NullabilityPolicy,
+    nullability: verter_session_query::flow::policy::NullabilityPolicy,
 ) -> SemanticNodeId {
     let graph = dispatch.arena();
     let symbol = || graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
@@ -7751,7 +7772,7 @@ fn widen_unique_symbols(
     node
 }
 
-/// The bindings a loop ([`crate::flow_slice_content::SliceLoop`]) writes
+/// The bindings a loop ([`verter_session_query::flow::slice::SliceLoop`]) writes
 /// on its way back to its head, in first-write order — the references
 /// whose loop-head types the evaluator computes: every write target and
 /// EVOLVING-array operation of the test, the body and the update, nested
@@ -7759,17 +7780,19 @@ fn widen_unique_symbols(
 /// iteration binds those afresh). A `for` initializer's declarations live
 /// across the iterations.
 fn loop_carried_subjects(
-    lowered: &crate::flow_slice_content::SliceLoop,
+    lowered: &verter_session_query::flow::slice::SliceLoop,
 ) -> Vec<FlowProductSubject> {
-    use crate::flow_slice_content::{SliceExpr, SliceRegion, SliceStatement};
+    use verter_session_query::flow::slice::{SliceExpr, SliceRegion, SliceStatement};
     fn narrow_root_subject(
-        root: &crate::flow_slice_content::SliceNarrowRoot,
+        root: &verter_session_query::flow::slice::SliceNarrowRoot,
     ) -> FlowProductSubject {
         match root {
-            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Param { binding, .. } => {
                 FlowProductSubject::Local(*binding)
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => binding.clone(),
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
+                binding.clone()
+            }
         }
     }
     fn expression(expr: &SliceExpr, written: &mut Vec<FlowProductSubject>) {
@@ -7795,8 +7818,8 @@ fn loop_carried_subjects(
     enum Walk<'r> {
         Region(&'r SliceRegion),
         Pattern(
-            &'r crate::flow_slice_content::SlicePattern,
-            Option<crate::flow_slice_content::SliceBindingKind>,
+            &'r verter_session_query::flow::slice::SlicePattern,
+            Option<verter_session_query::flow::slice::SliceBindingKind>,
         ),
         Expression(&'r SliceExpr),
         Written(FlowProductSubject),
@@ -7807,7 +7830,7 @@ fn loop_carried_subjects(
         written: &mut Vec<FlowProductSubject>,
         declared: &mut Vec<FlowProductSubject>,
     ) {
-        use crate::flow_slice_content::{SliceBindingKind, SlicePattern, SlicePatternKey};
+        use verter_session_query::flow::slice::{SliceBindingKind, SlicePattern, SlicePatternKey};
         let mut stack = vec![first];
         let mut parts: Vec<Walk<'_>> = Vec::new();
         while let Some(item) = stack.pop() {
@@ -7886,7 +7909,7 @@ fn loop_carried_subjects(
                             // root's head carries that path's narrowing joined with the
                             // back edges.
                             SliceStatement::MemberWrite { target, write, .. } => {
-                                if let crate::flow_slice_content::SliceMemberWrite::Assign {
+                                if let verter_session_query::flow::slice::SliceMemberWrite::Assign {
                                     value,
                                     ..
                                 } = write
@@ -8165,9 +8188,9 @@ fn widen_literal_node(dispatch: &impl FlowDemandDriver, node: SemanticNodeId) ->
 /// spellings of `x === "a"` can never disagree about the literal's type.
 /// `None` when the numeric spelling does not parse (`1_000` separators).
 fn guard_literal_type_expr(
-    literal: &crate::flow_slice_content::SliceGuardLiteral,
+    literal: &verter_session_query::flow::slice::SliceGuardLiteral,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::flow_slice_content::SliceGuardLiteral;
+    use verter_session_query::flow::slice::SliceGuardLiteral;
     Some(match literal {
         SliceGuardLiteral::String(value) => {
             verter_type_expr::TypeExpr::string_literal(value.as_ref())
@@ -8205,7 +8228,7 @@ impl FlowBinderEnv {
     /// mint it, and a partial one must not invent a binding.
     fn with_instantiation(
         mut self,
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         normalized_type_args: &[SemanticNodeId],
     ) -> Self {
         for (ordinal, param) in type_parameters.iter().enumerate() {
@@ -8246,7 +8269,7 @@ pub(super) struct FlowBinderEnv {
 /// Whether the file OWNER SCOPE answers `name` in the name meaning it was
 /// referenced in — THE root-identifier gate's owner-side probe, shared by
 /// every consumer of a
-/// [`crate::flow_slice_content::GatedType`]'s shadow list.
+/// [`verter_session_query::flow::slice::GatedType`]'s shadow list.
 ///
 /// Asked through the ONE shared lowering the answer itself would take
 /// (`typeof name` for a value reference, a bare `name` reference for a
@@ -8275,17 +8298,17 @@ pub(super) struct FlowBinderEnv {
 fn owner_scope_answers_frame_name(
     dispatch: &impl FlowDemandDriver,
     binder_env: &FlowBinderEnv,
-    name: &crate::flow_slice_content::FrameShadowedName,
+    name: &verter_session_query::flow::slice::FrameShadowedName,
 ) -> bool {
     let probe = match name {
-        crate::flow_slice_content::FrameShadowedName::Value(name) => {
+        verter_session_query::flow::slice::FrameShadowedName::Value(name) => {
             verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec![name.as_ref().to_string()],
                 type_args: Vec::new(),
             })
         }
-        crate::flow_slice_content::FrameShadowedName::Type(name)
-        | crate::flow_slice_content::FrameShadowedName::Namespace(name) => {
+        verter_session_query::flow::slice::FrameShadowedName::Type(name)
+        | verter_session_query::flow::slice::FrameShadowedName::Namespace(name) => {
             verter_type_expr::TypeExpr::Ref {
                 name: Arc::clone(name),
                 type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -8325,9 +8348,11 @@ fn owner_scope_answers_frame_name(
             match dispatch.arena().node_data(settled).as_deref() {
                 Some(SemanticNodeData::Opaque(_)) => {
                     let head = match name {
-                        crate::flow_slice_content::FrameShadowedName::Value(name)
-                        | crate::flow_slice_content::FrameShadowedName::Type(name)
-                        | crate::flow_slice_content::FrameShadowedName::Namespace(name) => name,
+                        verter_session_query::flow::slice::FrameShadowedName::Value(name)
+                        | verter_session_query::flow::slice::FrameShadowedName::Type(name)
+                        | verter_session_query::flow::slice::FrameShadowedName::Namespace(name) => {
+                            name
+                        }
                     };
                     dispatch.unresolved_head_is_authored_import(&binder_env.scope, head)
                 }
@@ -8340,11 +8365,11 @@ fn owner_scope_answers_frame_name(
 
 /// Whether ANY frame-owned name a signature answer references is
 /// answered by the owner scope — the fail-closed test at every
-/// [`crate::flow_slice_content::GatedType`] consumption point.
+/// [`verter_session_query::flow::slice::GatedType`] consumption point.
 fn signature_answer_is_frame_shadowed(
     dispatch: &impl FlowDemandDriver,
     binder_env: &FlowBinderEnv,
-    gated: &crate::flow_slice_content::GatedType,
+    gated: &verter_session_query::flow::slice::GatedType,
 ) -> bool {
     gated
         .shadowed()
@@ -8386,7 +8411,7 @@ enum LiteralComparison {
 enum GuardNarrowing {
     Unchanged,
     Narrowed(
-        crate::flow_slice_content::SliceNarrowSubject,
+        verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     ),
 }
@@ -8630,7 +8655,7 @@ impl PreparedFlowCaptureInput {
     fn apply_authority(
         &mut self,
         node: SemanticNodeId,
-        source: &crate::flow_slice_content::SliceCaptureAuthoritySource,
+        source: &verter_session_query::flow::slice::SliceCaptureAuthoritySource,
     ) {
         self.declared = Some(node);
         if self.deferred_write.is_none()
@@ -8638,10 +8663,10 @@ impl PreparedFlowCaptureInput {
                 || !self.extended
                     && matches!(
                         source,
-                        crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                            crate::flow_slice_content::SliceBindingKind::Let
-                                | crate::flow_slice_content::SliceBindingKind::Var
-                        ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
+                        verter_session_query::flow::slice::SliceCaptureAuthoritySource::Local(
+                            verter_session_query::flow::slice::SliceBindingKind::Let
+                                | verter_session_query::flow::slice::SliceBindingKind::Var
+                        ) | verter_session_query::flow::slice::SliceCaptureAuthoritySource::Parameter { .. }
                     ))
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
@@ -8673,7 +8698,10 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
         &self,
         inputs: &[super::flow_products::LiteralProvenance<'_>],
         result: SemanticNodeId,
-    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+    ) -> Result<
+        super::flow_products::LiteralProvenanceResult,
+        verter_session_query::flow::policy::FlowGap,
+    > {
         self.observation.borrow_mut().provenance.push(inputs.len());
         self.delegate.literal_provenance(inputs, result)
     }
@@ -8804,7 +8832,7 @@ pub(super) trait FlowDemandDriver {
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite;
     fn attach_function_kind_wrap(
         &self,
@@ -8812,7 +8840,7 @@ pub(super) trait FlowDemandDriver {
         kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult;
     fn attach_inferred_predicate(
         &self,
@@ -8857,13 +8885,13 @@ pub(super) trait FlowDemandDriver {
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection>;
     fn erase_nullable_members(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId;
     fn evaluate_indexed_value(
         &self,
@@ -8887,13 +8915,13 @@ pub(super) trait FlowDemandDriver {
     fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite;
     fn flow_binder_env(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv;
@@ -8926,7 +8954,7 @@ pub(super) trait FlowDemandDriver {
     fn intern_normalized_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId;
     fn intern_normalized_union_or_intersection(
         &self,
@@ -8943,8 +8971,8 @@ pub(super) trait FlowDemandDriver {
         observations: BodyCompletionObservations,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
-        empty_completion: crate::flow_slice_content::EmptyCompletion,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        empty_completion: verter_session_query::flow::slice::EmptyCompletion,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure>;
     fn lower_lib_global(
         &self,
@@ -8986,7 +9014,7 @@ pub(super) trait FlowDemandDriver {
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction;
     fn reduce_template_literal_nodes(
         &self,
@@ -9077,11 +9105,14 @@ pub(super) trait FlowDemandDriver {
         &self,
         inputs: &[super::flow_products::LiteralProvenance<'_>],
         result: SemanticNodeId,
-    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap>;
+    ) -> Result<
+        super::flow_products::LiteralProvenanceResult,
+        verter_session_query::flow::policy::FlowGap,
+    >;
     fn flow_canonical_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite;
 }
 impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
@@ -9153,7 +9184,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability)
     }
@@ -9163,7 +9194,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
         kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
         ProjectSemanticDispatch::attach_function_kind_wrap(
             self,
@@ -9240,7 +9271,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
         ProjectSemanticDispatch::distribute_intersection(
@@ -9254,7 +9285,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn erase_nullable_members(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         ProjectSemanticDispatch::erase_nullable_members(self, node, nullability)
     }
@@ -9298,7 +9329,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability)
     }
@@ -9306,7 +9337,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv {
@@ -9360,7 +9391,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn intern_normalized_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         ProjectSemanticDispatch::intern_normalized_union(self, members, nullability)
     }
@@ -9387,8 +9418,8 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
         observations: BodyCompletionObservations,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
-        empty_completion: crate::flow_slice_content::EmptyCompletion,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        empty_completion: verter_session_query::flow::slice::EmptyCompletion,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         ProjectSemanticDispatch::join_flow_return_contributors(
             self,
@@ -9480,7 +9511,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction {
         ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability)
     }
@@ -9637,13 +9668,16 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
         &self,
         inputs: &[super::flow_products::LiteralProvenance<'_>],
         result: SemanticNodeId,
-    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+    ) -> Result<
+        super::flow_products::LiteralProvenanceResult,
+        verter_session_query::flow::policy::FlowGap,
+    > {
         let (membership, evidence) =
             super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
         let incomplete = evidence.incomplete;
         self.deposit_canonical_evidence(evidence);
         if incomplete {
-            Err(crate::semantic_query::FlowGap::UnmodeledExpression)
+            Err(verter_session_query::flow::policy::FlowGap::UnmodeledExpression)
         } else {
             Ok(membership)
         }
@@ -9651,7 +9685,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn flow_canonical_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         let composite =
             super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
@@ -9759,7 +9793,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         self.driver.subtype_reduced_union(members, nullability)
     }
@@ -9769,7 +9803,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
         self.driver.attach_function_kind_wrap(
             result,
@@ -9846,7 +9880,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
         self.driver
@@ -9855,7 +9889,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn erase_nullable_members(
         &self,
         node: SemanticNodeId,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         self.driver.erase_nullable_members(node, nullability)
     }
@@ -9895,7 +9929,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         self.driver.finalize_evolving_array(elements, nullability)
     }
@@ -9903,7 +9937,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv {
@@ -9952,7 +9986,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn intern_normalized_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         self.driver.intern_normalized_union(members, nullability)
     }
@@ -9980,8 +10014,8 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         observations: BodyCompletionObservations,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
-        empty_completion: crate::flow_slice_content::EmptyCompletion,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        empty_completion: verter_session_query::flow::slice::EmptyCompletion,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         self.driver.join_flow_return_contributors(
             contributors,
@@ -10061,7 +10095,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction {
         self.driver.reduce_arms_to_supertypes(arms, nullability)
     }
@@ -10211,13 +10245,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         inputs: &[super::flow_products::LiteralProvenance<'_>],
         result: SemanticNodeId,
-    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+    ) -> Result<
+        super::flow_products::LiteralProvenanceResult,
+        verter_session_query::flow::policy::FlowGap,
+    > {
         self.driver.flow_literal_provenance(inputs, result)
     }
     fn flow_canonical_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
         self.driver.flow_canonical_union(members, nullability)
     }
@@ -10235,11 +10272,11 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// cancel or a budget trip included.
     call_receivers: rustc_hash::FxHashMap<verter_span::Span, SemanticNodeId>,
     /// The frame-lowered argument values of each call, by the call's span
-    /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
+    /// ([`verter_session_query::flow::slice::SliceContent::call_arguments`]).
     call_arguments: Arc<
         rustc_hash::FxHashMap<
             verter_span::Span,
-            Arc<[crate::flow_slice_content::SliceCallArgument]>,
+            Arc<[verter_session_query::flow::slice::SliceCallArgument]>,
         >,
     >,
     /// The flow slot THIS frame evaluates — the identity a same-slot
@@ -10271,13 +10308,13 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// `undefined` the evaluation would add by itself — an optional member
     /// read, an optional chain, an optional destructured element — is
     /// added only under the strict algebra.
-    nullability: crate::semantic_query::NullabilityPolicy,
+    nullability: verter_session_query::flow::policy::NullabilityPolicy,
     params: &'b [SemanticNodeId],
     /// The frame's formal parameters in the SAME order as `params` —
     /// their names are the closure-capture key: a nested function value
     /// reads a captured enclosing parameter BY NAME (its own `params`
     /// array indexes its own signature).
-    param_names: &'b [crate::flow_slice_content::SliceParam],
+    param_names: &'b [verter_session_query::flow::slice::SliceParam],
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
@@ -10410,7 +10447,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// gap is a fallback diagnosis; a concrete degradation found during the
     /// evaluation takes precedence. Expression gaps remain immediate because
     /// they identify the unmodelled value position itself.
-    pending_statement_gap: Option<crate::semantic_query::FlowGap>,
+    pending_statement_gap: Option<verter_session_query::flow::policy::FlowGap>,
     /// The value site of the destructuring assignment whose targets are
     /// being written — the definition each target's write records.
     pattern_write_definition: Option<verter_session_query::flow::skeleton::SkeletonExprSiteId>,
@@ -10955,7 +10992,7 @@ enum NarrowingLedgerEntry {
     /// subject the fact is filed under, which is what a kill names.
     Established {
         root: FlowProductSubject,
-        subject: crate::flow_slice_content::SliceNarrowSubject,
+        subject: verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
     },
     /// Every fact rooted at `root` was dropped — what a write to the
@@ -10989,12 +11026,12 @@ enum NarrowingLedgerEntry {
 fn standing_narrowings(
     window: &[NarrowingLedgerEntry],
 ) -> Vec<(
-    crate::flow_slice_content::SliceNarrowSubject,
+    verter_session_query::flow::slice::SliceNarrowSubject,
     SemanticNodeId,
 )> {
     let mut standing: Vec<(
         &FlowProductSubject,
-        &crate::flow_slice_content::SliceNarrowSubject,
+        &verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     )> = Vec::with_capacity(window.len());
     for entry in window {
@@ -11029,7 +11066,7 @@ fn standing_narrowings(
 fn fold_standing_narrowings(
     standing: &mut Vec<(
         FlowProductSubject,
-        crate::flow_slice_content::SliceNarrowSubject,
+        verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     )>,
     window: &[NarrowingLedgerEntry],
@@ -11065,7 +11102,7 @@ fn fold_standing_narrowings(
 /// parameter input as definition provenance; no later initializer is claimed.
 fn seed_selected_parameters(
     products: &mut FlowProductStore,
-    parameters: &[crate::flow_slice_content::SliceParam],
+    parameters: &[verter_session_query::flow::slice::SliceParam],
     values: &[SemanticNodeId],
     bindings: &FlowBindingMap,
     bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
@@ -11308,10 +11345,10 @@ enum Waiting<'e> {
     Awaited,
     /// A sequence waiting on its value operand, with the assertion that
     /// applies after it.
-    Sequence(&'e Option<crate::flow_slice_content::SliceAssertion>),
+    Sequence(&'e Option<verter_session_query::flow::slice::SliceAssertion>),
     Arithmetic {
-        operator: crate::flow_slice_content::SliceArithmetic,
-        operands: &'e [crate::flow_slice_content::SliceExpr],
+        operator: verter_session_query::flow::slice::SliceArithmetic,
+        operands: &'e [verter_session_query::flow::slice::SliceExpr],
         types: Vec<SemanticNodeId>,
     },
     /// An object literal waiting on the child it asked for last.
@@ -11320,8 +11357,8 @@ enum Waiting<'e> {
     /// `Union` arm) whose arm `reduction_arms.len()` evaluates
     /// under its guard's overlay, taken off at `mark`.
     Union {
-        arms: &'e [crate::flow_slice_content::SliceExpr],
-        guard: &'e crate::flow_slice_content::SliceGuard,
+        arms: &'e [verter_session_query::flow::slice::SliceExpr],
+        guard: &'e verter_session_query::flow::slice::SliceGuard,
         reduction_arms: Vec<ReductionArm>,
         holds_before: usize,
         mark: NarrowingSnapshot,
@@ -11351,11 +11388,11 @@ enum ResumedCall {
 /// child's value, and the child to evaluate next.
 struct ExprRun<'e> {
     waiting: Vec<Waiting<'e>>,
-    current: &'e crate::flow_slice_content::SliceExpr,
+    current: &'e verter_session_query::flow::slice::SliceExpr,
 }
 
 impl<'e> ExprRun<'e> {
-    fn new(expr: &'e crate::flow_slice_content::SliceExpr) -> Self {
+    fn new(expr: &'e verter_session_query::flow::slice::SliceExpr) -> Self {
         Self {
             waiting: vec![Waiting::Erase],
             current: expr,
@@ -11427,7 +11464,7 @@ impl Drop for EnclosingFrames<'_> {
 /// the contributions and path liveness so far, the next statement, and the
 /// scope bases of the block statement it is suspended at.
 struct RegionEvalFrame<'r> {
-    region: &'r crate::flow_slice_content::SliceRegion,
+    region: &'r verter_session_query::flow::slice::SliceRegion,
     next: usize,
     contributors: Vec<FlowContribution>,
     path_alive: bool,
@@ -11460,9 +11497,9 @@ enum Pending<'r> {
 /// value.
 struct PendingBinding<'r> {
     binding: verter_session_query::flow::skeleton::SkeletonBindingId,
-    kind: crate::flow_slice_content::SliceBindingKind,
-    init: &'r crate::flow_slice_content::SliceExpr,
-    freshness: &'r crate::flow_slice_content::SliceFreshness,
+    kind: verter_session_query::flow::slice::SliceBindingKind,
+    init: &'r verter_session_query::flow::slice::SliceExpr,
+    freshness: &'r verter_session_query::flow::slice::SliceFreshness,
     auto_typed: bool,
     widening_nullish_init: bool,
     run: ExprRun<'r>,
@@ -11472,9 +11509,9 @@ struct PendingBinding<'r> {
 /// function value: what its contribution is built from once the argument
 /// has a value.
 struct PendingReturn<'r> {
-    expr: &'r crate::flow_slice_content::SliceExpr,
-    freshness: &'r crate::flow_slice_content::SliceFreshness,
-    predicate_test: &'r Option<crate::flow_slice_content::ReturnPredicateTest>,
+    expr: &'r verter_session_query::flow::slice::SliceExpr,
+    freshness: &'r verter_session_query::flow::slice::SliceFreshness,
+    predicate_test: &'r Option<verter_session_query::flow::slice::ReturnPredicateTest>,
     bare_literal: bool,
     fresh_literal: bool,
     holds_before: usize,
@@ -11484,7 +11521,7 @@ struct PendingReturn<'r> {
 /// What a region's evaluation needs next: a block's region evaluated, the
 /// value of a nested function value, or nothing — its outcome.
 enum RegionEvalStep<'r> {
-    EnterBlock(&'r crate::flow_slice_content::SliceRegion),
+    EnterBlock(&'r verter_session_query::flow::slice::SliceRegion),
     Nested(NestedDemand),
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
 }
@@ -11513,7 +11550,7 @@ enum RegionProgress {
 /// [`FlowEvaluator::array_eval_step`]: the element join (or tuple) built so
 /// far and the next element.
 struct ArrayEvalFrame<'e> {
-    elements: &'e [crate::flow_slice_content::SliceArrayElement],
+    elements: &'e [verter_session_query::flow::slice::SliceArrayElement],
     const_asserted: bool,
     contextual: Option<SemanticNodeId>,
     tupled: bool,
@@ -11532,7 +11569,7 @@ struct ArrayEvalFrame<'e> {
 /// What an array literal's evaluation needs next.
 enum ArrayEvalStep<'e> {
     /// The value of this element (or spread source).
-    Descend(&'e crate::flow_slice_content::SliceExpr),
+    Descend(&'e verter_session_query::flow::slice::SliceExpr),
     /// Nothing: the literal's value.
     Done(Positional<SemanticNodeId>),
 }
@@ -11541,7 +11578,7 @@ enum ArrayEvalStep<'e> {
 /// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
 /// keeps across its members, the next entry, and the child it waits on.
 struct ObjectEvalFrame<'e> {
-    entries: &'e [crate::flow_slice_content::SliceObjectEntry],
+    entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
     offset: u32,
     assignment_fresh: bool,
     contextual: Option<SemanticNodeId>,
@@ -11558,12 +11595,18 @@ struct ObjectEvalFrame<'e> {
     /// The frame's receiver before the literal's, given back when the
     /// literal completes or fails closed.
     enclosing_receiver: Option<Option<std::rc::Rc<class_expression::ClassReceiver>>>,
-    deferred: Vec<(usize, &'e crate::flow_slice_content::SliceObjectMember)>,
+    deferred: Vec<(
+        usize,
+        &'e verter_session_query::flow::slice::SliceObjectMember,
+    )>,
     /// The next deferred method or accessor to evaluate.
     deferred_next: usize,
     /// The deferred members that read a member not evaluated yet, to
     /// evaluate once more after the rest, and the next of them.
-    again: Vec<(usize, &'e crate::flow_slice_content::SliceObjectMember)>,
+    again: Vec<(
+        usize,
+        &'e verter_session_query::flow::slice::SliceObjectMember,
+    )>,
     again_next: usize,
     next: usize,
     awaiting: ObjectEvalAwait<'e>,
@@ -11580,8 +11623,8 @@ enum ObjectEvalAwait<'e> {
     },
     /// A data member's value.
     Value {
-        member: &'e crate::flow_slice_content::SliceObjectMember,
-        member_value: &'e crate::flow_slice_content::SliceExpr,
+        member: &'e verter_session_query::flow::slice::SliceObjectMember,
+        member_value: &'e verter_session_query::flow::slice::SliceExpr,
         holds_before: usize,
         widens_unique_symbols: bool,
     },
@@ -11594,7 +11637,7 @@ enum ObjectEvalAwait<'e> {
     /// literal (`again` once it read a member not evaluated yet).
     Method {
         position: usize,
-        member: &'e crate::flow_slice_content::SliceObjectMember,
+        member: &'e verter_session_query::flow::slice::SliceObjectMember,
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         holds_before: usize,
         again: bool,
@@ -11604,7 +11647,7 @@ enum ObjectEvalAwait<'e> {
 /// What an [`ObjectEvalFrame`] needs next: a child evaluated, or nothing
 /// — its outcome.
 enum ObjectEvalStep<'e> {
-    Descend(&'e crate::flow_slice_content::SliceExpr),
+    Descend(&'e verter_session_query::flow::slice::SliceExpr),
     /// The child's outcome, already evaluated in place: a method typed by
     /// its contextual signature, which only a literal evaluated under a
     /// contextual type (`FlowEvaluator::eval_object_literal`) asks for.
@@ -11648,8 +11691,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// The flow policy of the function's own project, which a nested
     /// function's content lowers under.
-    fn policy(&self) -> crate::semantic_query::FlowReturnPolicy {
-        crate::semantic_query::FlowReturnPolicy {
+    fn policy(&self) -> verter_session_query::flow::policy::FlowReturnPolicy {
+        verter_session_query::flow::policy::FlowReturnPolicy {
             nullability: self.nullability,
             no_implicit_any: self.no_implicit_any,
             use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
@@ -11760,7 +11803,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ([`Self::eval_in_context`]).
     fn eval_object_literal(
         &mut self,
-        entries: &[crate::flow_slice_content::SliceObjectEntry],
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
         offset: u32,
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
@@ -11776,7 +11819,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// member its own value.
     pub(super) fn eval_object_literal_first_pass(
         &mut self,
-        entries: &[crate::flow_slice_content::SliceObjectEntry],
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
         offset: u32,
     ) -> Positional<SemanticNodeId> {
         let mut frame = self.object_eval_frame(entries, offset, false, None);
@@ -11804,7 +11847,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// through `this`) made the frame's until the literal completes.
     fn object_eval_frame<'e>(
         &mut self,
-        entries: &'e [crate::flow_slice_content::SliceObjectEntry],
+        entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
         offset: u32,
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
@@ -11819,7 +11862,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .all(|entry| {
                 matches!(
                     entry,
-                    crate::flow_slice_content::SliceObjectEntry::Member(_)
+                    verter_session_query::flow::slice::SliceObjectEntry::Member(_)
                 )
             })
             .then(|| {
@@ -11834,11 +11877,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     declared: entries
                         .iter()
                         .filter_map(|entry| match entry {
-                            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
+                            verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
                                 match &member.key {
-                                    crate::flow_slice_content::SliceObjectKey::Static(name) => {
-                                        Some(Arc::clone(name))
-                                    }
+                                    verter_session_query::flow::slice::SliceObjectKey::Static(
+                                        name,
+                                    ) => Some(Arc::clone(name)),
                                     _ => None,
                                 }
                             }
@@ -11972,7 +12015,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         while let Some(entry) = frame.entries.get(frame.next) {
             frame.next += 1;
-            if let crate::flow_slice_content::SliceObjectEntry::Member(member) = entry {
+            if let verter_session_query::flow::slice::SliceObjectEntry::Member(member) = entry {
                 if frame.skips_context_sensitive && member.context_sensitive {
                     let any = self
                         .dispatch
@@ -11991,19 +12034,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     continue;
                 }
             }
-            if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
+            if let (Some(_), verter_session_query::flow::slice::SliceObjectEntry::Member(member)) =
                 (frame.receiver.as_ref(), entry)
             {
                 let deferred = member.method_kind.is_some()
                     && matches!(
                         member.key,
-                        crate::flow_slice_content::SliceObjectKey::Static(_)
+                        verter_session_query::flow::slice::SliceObjectKey::Static(_)
                     );
                 if deferred {
                     // Placeholder at the member's position, filled below.
                     frame.deferred.push((frame.surface_members.len(), member));
                     let key = match &member.key {
-                        crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                        verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
                             crate::semantic_query::AuthoredPropertyKey::string(name.as_ref())
                         }
                         _ => unreachable!("only a static key defers"),
@@ -12031,7 +12074,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
             }
             let member = match entry {
-                crate::flow_slice_content::SliceObjectEntry::Spread { source, readonly } => {
+                verter_session_query::flow::slice::SliceObjectEntry::Spread {
+                    source,
+                    readonly,
+                } => {
                     // A spread SOURCE this frame cannot evaluate is not a
                     // fact about ONE member — it is a fact about the
                     // surface's KEY SET, and an object surface has no way
@@ -12053,7 +12099,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     };
                     return ObjectEvalStep::Descend(source);
                 }
-                crate::flow_slice_content::SliceObjectEntry::Member(member) => member,
+                verter_session_query::flow::slice::SliceObjectEntry::Member(member) => member,
             };
             // Each member value evaluates as a flow expression (parameter
             // / local references substitute); a hold nested in a member
@@ -12067,9 +12113,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 &member.value
             };
             let member_context = match (&member.key, frame.contextual) {
-                (crate::flow_slice_content::SliceObjectKey::Static(name), Some(contextual)) => {
-                    self.contextual_property_type(contextual, name)
-                }
+                (
+                    verter_session_query::flow::slice::SliceObjectKey::Static(name),
+                    Some(contextual),
+                ) => self.contextual_property_type(contextual, name),
                 _ => None,
             };
             // A mutable member with no contextual type widens a `unique
@@ -12136,9 +12183,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // A method is typed by the contextual signature its property's
             // contextual type gives it, as a function-valued property is.
             let member_context = match (&member.key, frame.contextual) {
-                (crate::flow_slice_content::SliceObjectKey::Static(name), Some(contextual)) => {
-                    self.contextual_property_type(contextual, name)
-                }
+                (
+                    verter_session_query::flow::slice::SliceObjectKey::Static(name),
+                    Some(contextual),
+                ) => self.contextual_property_type(contextual, name),
                 _ => None,
             };
             if let Some(node) = member_context
@@ -12158,8 +12206,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn object_eval_member_valued<'e>(
         &mut self,
         frame: &mut ObjectEvalFrame<'e>,
-        member: &'e crate::flow_slice_content::SliceObjectMember,
-        member_value: &'e crate::flow_slice_content::SliceExpr,
+        member: &'e verter_session_query::flow::slice::SliceObjectMember,
+        member_value: &'e verter_session_query::flow::slice::SliceExpr,
         holds_before: usize,
         widens_unique_symbols: bool,
         outcome: Positional<SemanticNodeId>,
@@ -12283,7 +12331,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             _ => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                 ));
                 return None;
             }
@@ -12469,17 +12517,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// | number) {} }.v` is `string | number`).
     fn apply_accessor_annotation_precedence(
         &self,
-        entries: &[crate::flow_slice_content::SliceObjectEntry],
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
         members: &mut [crate::semantic_query::SurfaceMember],
     ) {
         use verter_type_expr::ObjectMethodKind;
         let annotated = |name: &str, kind: ObjectMethodKind| {
             entries.iter().any(|entry| {
-                matches!(entry, crate::flow_slice_content::SliceObjectEntry::Member(member)
+                matches!(entry, verter_session_query::flow::slice::SliceObjectEntry::Member(member)
                     if member.method_kind == Some(kind)
                         && member.accessor_annotated
                         && matches!(&member.key,
-                            crate::flow_slice_content::SliceObjectKey::Static(key) if key.as_ref() == name))
+                            verter_session_query::flow::slice::SliceObjectKey::Static(key) if key.as_ref() == name))
             })
         };
         let graph = self.dispatch.graph();
@@ -12554,22 +12602,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// keeps `1`, `{ n: 1 } satisfies { n: number }` is `{ n: number }`).
     fn eval_in_context(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        fresh_view: Option<&crate::flow_slice_content::SliceExpr>,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        fresh_view: Option<&verter_session_query::flow::slice::SliceExpr>,
         contextual: SemanticNodeId,
     ) -> Positional<SemanticNodeId> {
         match expr {
-            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+            verter_session_query::flow::slice::SliceExpr::Object { entries, offset } => {
                 self.eval_object_literal(entries, *offset, false, Some(contextual))
             }
-            crate::flow_slice_content::SliceExpr::Array {
+            verter_session_query::flow::slice::SliceExpr::Array {
                 elements,
                 const_asserted,
             } => self.eval_array_literal(elements, *const_asserted, Some(contextual)),
             // A function expression is typed by the contextual signature
             // its context gives it (`getContextualSignature`): its
             // unannotated parameters take the context's parameter types.
-            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. } => {
+            verter_session_query::flow::slice::SliceExpr::NestedFunctionValue { .. } => {
                 match self.eval_function_argument_in_context(expr, contextual) {
                     Some(node) => Positional::Value(node),
                     None => self.eval_expr(expr),
@@ -12827,14 +12875,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// the checker widened it where it was declared.
     fn literal_view(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
         match expr {
-            crate::flow_slice_content::SliceExpr::Object { .. }
-            | crate::flow_slice_content::SliceExpr::Array { .. }
-            | crate::flow_slice_content::SliceExpr::Union { .. }
-            | crate::flow_slice_content::SliceExpr::Satisfies { .. } => {
+            verter_session_query::flow::slice::SliceExpr::Object { .. }
+            | verter_session_query::flow::slice::SliceExpr::Array { .. }
+            | verter_session_query::flow::slice::SliceExpr::Union { .. }
+            | verter_session_query::flow::slice::SliceExpr::Satisfies { .. } => {
                 self.unwidened_views.get(&node).copied()
             }
             _ => None,
@@ -12847,18 +12895,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `expr` is an object literal.
     fn reduction_arm(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> ReductionArm {
         ReductionArm {
             node,
             view: self.literal_view(expr, node).unwrap_or(node),
             object_literal: match expr {
-                crate::flow_slice_content::SliceExpr::Object { .. } => true,
-                crate::flow_slice_content::SliceExpr::Satisfies { operand, .. } => {
+                verter_session_query::flow::slice::SliceExpr::Object { .. } => true,
+                verter_session_query::flow::slice::SliceExpr::Satisfies { operand, .. } => {
                     matches!(
                         **operand,
-                        crate::flow_slice_content::SliceExpr::Object { .. }
+                        verter_session_query::flow::slice::SliceExpr::Object { .. }
                     )
                 }
                 _ => false,
@@ -12885,9 +12933,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .reduce_arms_to_supertypes(&unique, self.nullability)
             {
                 ReunionReduction::Reduced(reduced) => unique = reduced,
-                ReunionReduction::Undecided => self.record_degradation(
-                    FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::NominalRelation),
-                ),
+                ReunionReduction::Undecided => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::NominalRelation,
+                    ))
+                }
             }
         }
         let nodes: Vec<SemanticNodeId> = unique.iter().map(|arm| arm.node).collect();
@@ -12922,7 +12972,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// number]` is `[string, number]`).
     fn eval_array_literal(
         &mut self,
-        elements: &[crate::flow_slice_content::SliceArrayElement],
+        elements: &[verter_session_query::flow::slice::SliceArrayElement],
         const_asserted: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
@@ -12942,7 +12992,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// An array literal's evaluation, before its first element.
     fn array_eval_frame<'e>(
         &mut self,
-        elements: &'e [crate::flow_slice_content::SliceArrayElement],
+        elements: &'e [verter_session_query::flow::slice::SliceArrayElement],
         const_asserted: bool,
         contextual: Option<SemanticNodeId>,
     ) -> ArrayEvalFrame<'e> {
@@ -12973,7 +13023,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         frame: &mut ArrayEvalFrame<'e>,
         mut delivered: Option<Positional<SemanticNodeId>>,
     ) -> ArrayEvalStep<'e> {
-        use crate::flow_slice_content::SliceArrayElement;
+        use verter_session_query::flow::slice::SliceArrayElement;
         let graph = self.dispatch.graph();
         let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
         let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
@@ -13235,10 +13285,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// union selection; every other expression uses its ordinary flow value.
     fn eval_assignment_expr(
         &mut self,
-        expression: &crate::flow_slice_content::SliceExpr,
+        expression: &verter_session_query::flow::slice::SliceExpr,
     ) -> Positional<SemanticNodeId> {
         match expression {
-            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+            verter_session_query::flow::slice::SliceExpr::Object { entries, offset } => {
                 self.eval_object_literal(entries, *offset, true, None)
             }
             other => self.eval_expr(other),
@@ -13252,9 +13302,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// value, an EVOLVING target takes the freshness-directed widening).
     fn eval_write_rhs(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-        value: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
+        value: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Positional<SemanticNodeId> {
         let declared = self.target_declared_node(target);
         match declared {
@@ -13270,10 +13320,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // evolves to the assigned type itself (`let x; x = u`
                 // holds `typeof u`).
                 let auto_typed = match &target.root {
-                    crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => self
+                    verter_session_query::flow::slice::SliceNarrowRoot::Local {
+                        binding, ..
+                    } => self
                         .auto_typed_locals
                         .contains(&self.canonical_runtime_subject(binding)),
-                    crate::flow_slice_content::SliceNarrowRoot::Param { .. } => false,
+                    verter_session_query::flow::slice::SliceNarrowRoot::Param { .. } => false,
                 };
                 match self.eval_evolving_rhs(value, freshness) {
                     Positional::Value(node) if !auto_typed => Positional::Value(
@@ -13305,7 +13357,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// degradation for the whole frame).
     fn prescan_statement_value_writes(
         &mut self,
-        root: Option<&crate::flow_slice_content::SliceExpr>,
+        root: Option<&verter_session_query::flow::slice::SliceExpr>,
     ) {
         self.expression_write_nodes.clear();
         self.capture_write_lookahead.clear();
@@ -13330,7 +13382,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let holds_base = self.holds.len();
         let fresh_deposit_base = self.call_fresh_literal_returns.len();
         for write in writes {
-            let crate::flow_slice_content::SliceExpr::Assignment {
+            let verter_session_query::flow::slice::SliceExpr::Assignment {
                 target,
                 value,
                 freshness,
@@ -13352,15 +13404,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     false,
                     *definition,
                     widening_nullish,
-                    matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh),
+                    matches!(
+                        freshness,
+                        verter_session_query::flow::slice::SliceFreshness::Fresh
+                    ),
                 );
                 let subject = match &target.root {
-                    crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
-                        FlowProductSubject::Local(*binding)
-                    }
-                    crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
-                        binding.clone()
-                    }
+                    verter_session_query::flow::slice::SliceNarrowRoot::Param {
+                        binding, ..
+                    } => FlowProductSubject::Local(*binding),
+                    verter_session_query::flow::slice::SliceNarrowRoot::Local {
+                        binding, ..
+                    } => binding.clone(),
                 };
                 let subject = self.canonical_runtime_subject(&subject);
                 match self.capture_write_lookahead.get(&subject) {
@@ -13392,15 +13447,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// missing a key the authored value has.
     fn eval_object_member_key(
         &mut self,
-        key: &crate::flow_slice_content::SliceObjectKey,
+        key: &verter_session_query::flow::slice::SliceObjectKey,
     ) -> class_expression::MemberKey {
         let expression = match key {
-            crate::flow_slice_content::SliceObjectKey::Static(name) => {
+            verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
                 return class_expression::MemberKey::Named(
                     crate::semantic_query::AuthoredPropertyKey::string(name.as_ref()),
                 )
             }
-            crate::flow_slice_content::SliceObjectKey::Computed { value } => value.as_ref(),
+            verter_session_query::flow::slice::SliceObjectKey::Computed { value } => value.as_ref(),
         };
         // A hold inside a KEY is not this object's value any more than a
         // hold inside a spread source is: drop it and read the outcome.
@@ -13467,19 +13522,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn narrow_subject(
         &self,
-        root: &crate::flow_slice_content::SliceNarrowRoot,
+        root: &verter_session_query::flow::slice::SliceNarrowRoot,
     ) -> FlowProductSubject {
         match root {
-            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Param { binding, .. } => {
                 FlowProductSubject::Local(*binding)
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => binding.clone(),
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
+                binding.clone()
+            }
         }
     }
 
     fn resolved_narrow_subject(
         &self,
-        root: &crate::flow_slice_content::SliceNarrowRoot,
+        root: &verter_session_query::flow::slice::SliceNarrowRoot,
     ) -> Option<FlowProductSubject> {
         let binding = self.canonical_runtime_subject(&self.narrow_subject(root));
         self.products.contains_subject(&binding).then_some(binding)
@@ -13626,7 +13683,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// a read always observes the newest established narrow.
     fn push_narrowing(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
         self.push_narrowing_with_fresh_literal(subject, node, None);
@@ -13636,7 +13693,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// the compared literal when the narrow took it from the compared value.
     fn push_narrowing_with_fresh_literal(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
         fresh_literal: Option<SemanticNodeId>,
     ) {
@@ -13680,7 +13737,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         mark: &NarrowingSnapshot,
     ) -> Vec<(
-        crate::flow_slice_content::SliceNarrowSubject,
+        verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     )> {
         standing_narrowings(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..])
@@ -13881,7 +13938,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn bind_local(
         &mut self,
         binding: &FlowProductSubject,
-        kind: crate::flow_slice_content::SliceBindingKind,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
         node: SemanticNodeId,
         widening: Option<WideningMembership>,
         degraded: bool,
@@ -13895,7 +13952,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn bind_local_value(
         &mut self,
         binding: &FlowProductSubject,
-        kind: crate::flow_slice_content::SliceBindingKind,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
         node: SemanticNodeId,
         widening: Option<WideningMembership>,
         degraded: bool,
@@ -13919,7 +13976,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // is exact, and a join where some predecessor never ran the
         // declarator raises the conditional-definition refusal
         // ([`Self::join_continuations`]).
-        let single_path = if kind == crate::flow_slice_content::SliceBindingKind::Var {
+        let single_path = if kind == verter_session_query::flow::slice::SliceBindingKind::Var {
             false
         } else {
             self.products.assignment(binding).single_path()
@@ -13940,7 +13997,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn bind_local_reaching(
         &mut self,
         binding: &FlowProductSubject,
-        kind: crate::flow_slice_content::SliceBindingKind,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
         reaching: ReachingTypeProduct,
         degraded: bool,
     ) {
@@ -13957,7 +14014,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .key(super::flow_solve::FlowDomain::ReachingValue, binding)
                 .map(|key| key.node()),
         };
-        let single_path = if kind == crate::flow_slice_content::SliceBindingKind::Var {
+        let single_path = if kind == verter_session_query::flow::slice::SliceBindingKind::Var {
             false
         } else {
             self.products.assignment(binding).single_path()
@@ -14007,14 +14064,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .finalize_evolving_array(&elements, self.nullability);
         if finalized.incomplete {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::NominalRelation,
+                verter_session_query::flow::policy::FlowGap::NominalRelation,
             ));
         }
         ReachingTypeProduct::evolving(finalized.node, Arc::from(elements.into_boxed_slice()))
     }
 
     /// Evaluate one operation on an EVOLVING array
-    /// ([`crate::flow_slice_content::SliceEvolvingOperation`]) — the
+    /// ([`verter_session_query::flow::slice::SliceEvolvingOperation`]) — the
     /// checker's array-mutation flow node over the binding's reaching
     /// value. Each operand evaluates in source order; a binding that no
     /// longer holds an evolving array (it was assigned an ordinary value)
@@ -14026,10 +14083,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// under a number-like index (`a["k"] = 1` adds nothing).
     fn eval_evolving_operation(
         &mut self,
-        operation: &crate::flow_slice_content::SliceEvolvingOperation,
+        operation: &verter_session_query::flow::slice::SliceEvolvingOperation,
     ) -> Positional<SemanticNodeId> {
         use super::flow_products::EvolvingElement;
-        use crate::flow_slice_content::SliceEvolvingOperationKind;
+        use verter_session_query::flow::slice::SliceEvolvingOperationKind;
         let subject = operation.binding.clone();
         let graph = self.dispatch.graph();
         match &operation.kind {
@@ -14140,9 +14197,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// join after it as an `if`'s do. The value is the arms' union.
     fn eval_branching_union(
         &mut self,
-        consequent: &crate::flow_slice_content::SliceExpr,
-        alternate: &crate::flow_slice_content::SliceExpr,
-        guard: &crate::flow_slice_content::SliceGuard,
+        consequent: &verter_session_query::flow::slice::SliceExpr,
+        alternate: &verter_session_query::flow::slice::SliceExpr,
+        guard: &verter_session_query::flow::slice::SliceGuard,
     ) -> Positional<SemanticNodeId> {
         let entry_products = self.products.clone();
         let entry_writes = self.products.observe_writes();
@@ -14259,10 +14316,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn record_inferred_declared(
         &mut self,
         binding: SkeletonBindingId,
-        kind: crate::flow_slice_content::SliceBindingKind,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
         node: SemanticNodeId,
     ) {
-        if kind == crate::flow_slice_content::SliceBindingKind::Const {
+        if kind == verter_session_query::flow::slice::SliceBindingKind::Const {
             return;
         }
         let subject = self.canonical_runtime_subject(&FlowProductSubject::Local(binding));
@@ -14281,10 +14338,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn set_declared_local(
         &mut self,
         binding: &FlowProductSubject,
-        kind: crate::flow_slice_content::SliceBindingKind,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
         declared: Option<SemanticNodeId>,
     ) {
-        if kind != crate::flow_slice_content::SliceBindingKind::Var || declared.is_some() {
+        if kind != verter_session_query::flow::slice::SliceBindingKind::Var || declared.is_some() {
             self.products.set_declared_type(binding, declared);
         }
     }
@@ -14296,18 +14353,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// binding's type is the join of what the writes assign.
     fn target_declared_node(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } = &target.root {
+        if let verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } =
+            &target.root
+        {
             if self.local_value(binding).is_none() {
                 self.seed_destructured_param_element(binding);
             }
         }
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => {
                 self.params.get(*ordinal as usize).copied()
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                 self.local_declared(binding)
             }
         }
@@ -14323,7 +14382,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// own fresh/regular literal split, measured per assignment).
     fn assignment_node_for_target(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
         value: SemanticNodeId,
     ) -> SemanticNodeId {
         // An unannotated `let` / `var` declared by its initializer's widened
@@ -14331,7 +14390,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // assignment rule over that declared type exactly as an annotated
         // one does.
         let inferred_declared = match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. }
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. }
                 if target.path.is_empty() =>
             {
                 let subject = self.canonical_runtime_subject(binding);
@@ -14352,10 +14411,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // manufacture `number | number` instead of deduplicating the
             // assignment path.
             let current = match &target.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
+                verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied()),
-                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.local_value(binding)
                 }
             };
@@ -14389,12 +14448,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// checker's union collapse keeps the regular literal).
     fn eval_evolving_rhs(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Positional<SemanticNodeId> {
         if let (
-            crate::flow_slice_content::SliceExpr::Union { .. },
-            crate::flow_slice_content::SliceFreshness::PerArm(_),
+            verter_session_query::flow::slice::SliceExpr::Union { .. },
+            verter_session_query::flow::slice::SliceFreshness::PerArm(_),
         ) = (expr, freshness)
         {
             let parts = self.collect_reduced_evolving_parts(expr, freshness);
@@ -14437,7 +14496,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Positional::Value(node) = outcome else {
             return outcome;
         };
-        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
+        let fresh = matches!(
+            freshness,
+            verter_session_query::flow::slice::SliceFreshness::Fresh
+        );
         Positional::Value(if fresh {
             widen_fresh_read_node(self.dispatch, node, self.nullability)
         } else {
@@ -14461,11 +14523,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// degraded, never warm) rather than guessing either direction.
     fn collect_evolving_parts(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         parts: &mut Vec<EvolvingPart>,
     ) {
-        use crate::flow_slice_content::{SliceExpr, SliceFreshness, SliceGuard};
+        use verter_session_query::flow::slice::{SliceExpr, SliceFreshness, SliceGuard};
         // A ternary nested in a ternary's arm costs no native level: the
         // arms are visited from an explicit stack, each entered under its
         // guard reading and left at its own narrowing mark, in order.
@@ -14500,7 +14562,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                             _ => {
                                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                                 ));
                             }
                         }
@@ -14527,14 +14589,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ternary of per-arm freshness, evaluated.
     fn collect_evolving_part(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         parts: &mut Vec<EvolvingPart>,
     ) {
         let holds_before = self.holds.len();
         let outcome = self.eval_expr(expr);
         let node = self.settle_composite_part(outcome, holds_before);
-        let bare_literal = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
+        let bare_literal = matches!(
+            freshness,
+            verter_session_query::flow::slice::SliceFreshness::Fresh
+        );
         let fresh = bare_literal
             || self.reads_widening_literal_local(expr)
             || self
@@ -14559,8 +14624,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// the typed relation gap.
     fn collect_reduced_evolving_parts(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Vec<EvolvingPart> {
         let mut parts: Vec<EvolvingPart> = Vec::new();
         self.collect_evolving_parts(expr, freshness, &mut parts);
@@ -14583,7 +14648,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .collect(),
             ReunionReduction::Undecided => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::NominalRelation,
+                    verter_session_query::flow::policy::FlowGap::NominalRelation,
                 ));
                 parts
             }
@@ -14647,7 +14712,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// values are pinned.
     fn position_fresh_values(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
         bare_literal: bool,
     ) -> Vec<SemanticNodeId> {
@@ -14667,7 +14732,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !operator_fresh.is_empty() {
             return operator_fresh;
         }
-        if let crate::flow_slice_content::SliceExpr::Local {
+        if let verter_session_query::flow::slice::SliceExpr::Local {
             binding,
             name: _,
             captured: false,
@@ -14715,7 +14780,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// established one.
     fn narrowed_read(
         &self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
         let root = self.resolved_narrow_subject(&subject.root)?;
         self.products
@@ -14739,7 +14804,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// auto-typed local keeps that fact on the value it now holds.
     fn apply_write(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
         definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
@@ -14748,10 +14813,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> SemanticNodeId {
         if target.path.is_empty() {
             let subject = match &target.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                verter_session_query::flow::slice::SliceNarrowRoot::Param { binding, .. } => {
                     FlowProductSubject::Local(*binding)
                 }
-                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     binding.clone()
                 }
             };
@@ -14770,7 +14835,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `any[]` (tsc 7.0.2: `a = [1]` is `number[]`, `a = "s" as string`
         // `any[]`).
         let node = match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. }
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. }
                 if !degraded && self.is_evolving_subject(binding) =>
             {
                 let graph = self.dispatch.graph();
@@ -14812,7 +14877,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         node
     }
 
-    /// Apply one member-path write ([`crate::flow_slice_content::SliceStatement::MemberWrite`]):
+    /// Apply one member-path write ([`verter_session_query::flow::slice::SliceStatement::MemberWrite`]):
     /// the checker narrows the written reference (`getTypeAtFlowAssignment`)
     /// to the assigned value reduced against the reference's declared type
     /// when that type is a union, and to the declared type otherwise; a
@@ -14825,8 +14890,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// declared type.
     fn apply_member_write(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-        write: &crate::flow_slice_content::SliceMemberWrite,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
+        write: &verter_session_query::flow::slice::SliceMemberWrite,
     ) {
         let declared = self.member_declared_node(target);
         self.apply_member_write_declared(target, write, declared);
@@ -14836,15 +14901,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// (unnarrowed) type `declared`.
     pub(super) fn apply_member_write_declared(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-        write: &crate::flow_slice_content::SliceMemberWrite,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
+        write: &verter_session_query::flow::slice::SliceMemberWrite,
         declared: Option<SemanticNodeId>,
     ) {
         let (node, fresh_literal) = match write {
             // A declared type that is not a union is the reference's type
             // whatever is assigned: the value is evaluated only for the
             // writes it performs.
-            crate::flow_slice_content::SliceMemberWrite::Assign { value, .. }
+            verter_session_query::flow::slice::SliceMemberWrite::Assign { value, .. }
                 if declared
                     .is_some_and(|declared| self.dispatch.union_arms_of(declared).is_none()) =>
             {
@@ -14856,7 +14921,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 (declared, None)
             }
-            crate::flow_slice_content::SliceMemberWrite::Assign { value, freshness } => {
+            verter_session_query::flow::slice::SliceMemberWrite::Assign { value, freshness } => {
                 self.prescan_statement_value_writes(Some(value));
                 let holds_before = self.holds.len();
                 let outcome = self.eval_expr(value);
@@ -14870,14 +14935,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         // A FRESH boolean literal the reduction keeps stays
                         // fresh (`getAssignmentReducedType` maps kept
                         // constituents to their fresh literal types).
-                        let fresh =
-                            matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
-                                && matches!(
-                                    self.dispatch.arena().node_data(reduced).as_deref(),
-                                    Some(SemanticNodeData::Literal(
-                                        crate::semantic_query::LiteralValue::Boolean(_)
-                                    ))
-                                );
+                        let fresh = matches!(
+                            freshness,
+                            verter_session_query::flow::slice::SliceFreshness::Fresh
+                        ) && matches!(
+                            self.dispatch.arena().node_data(reduced).as_deref(),
+                            Some(SemanticNodeData::Literal(
+                                crate::semantic_query::LiteralValue::Boolean(_)
+                            ))
+                        );
                         (Some(reduced), fresh.then_some(reduced))
                     }
                     // A callee hold settles on a later pass, exactly as
@@ -14886,7 +14952,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     (Positional::Value(_) | Positional::Unmodeled, _) => (None, None),
                 }
             }
-            crate::flow_slice_content::SliceMemberWrite::Compound => {
+            verter_session_query::flow::slice::SliceMemberWrite::Compound => {
                 match declared.map(|declared| self.base_type_of_literal(declared)) {
                     Some(base) if self.dispatch.union_arms_of(base).is_none() => (Some(base), None),
                     // A union base is reduced by the operation's result,
@@ -14924,7 +14990,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// [`Self::bind_written_with`] carrying no literal widening.
     fn bind_written(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
         definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
@@ -14938,7 +15004,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// membership its value carries.
     fn bind_written_with(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
         definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
@@ -14946,7 +15012,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         widening: Option<WideningMembership>,
     ) {
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param {
+            verter_session_query::flow::slice::SliceNarrowRoot::Param {
                 ordinal: _,
                 binding,
                 ..
@@ -14969,7 +15035,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     );
                 }
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                 // A write defines a conditional-definition-policy binding
                 // on the path executing it — inside a conditional arm or a
                 // loop body too: a read on that path observes exactly the
@@ -15002,7 +15068,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
-    /// Apply one VALUE-position `=` write ([`crate::flow_slice_content::SliceExpr::Assignment`])
+    /// Apply one VALUE-position `=` write ([`verter_session_query::flow::slice::SliceExpr::Assignment`])
     /// in evaluation order, reusing the statement pre-scan's verdict: the
     /// written (assignment-reduced) node, and the right-hand side's own
     /// value before the reduction and widening — the assignment
@@ -15010,9 +15076,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// when it is kept apart from the write.
     fn eval_value_assignment(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-        value: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        target: &verter_session_query::flow::slice::SliceNarrowSubject,
+        value: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         span: verter_session_query::flow::frame_span::FrameSpan,
     ) -> (Positional<SemanticNodeId>, Option<SemanticNodeId>) {
@@ -15033,7 +15099,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     false,
                     definition,
                     widening_nullish,
-                    matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh),
+                    matches!(
+                        freshness,
+                        verter_session_query::flow::slice::SliceFreshness::Fresh
+                    ),
                 );
                 // Without a declared type the evaluation widened exactly
                 // the right-hand side's FRESH positions: a bare literal's
@@ -15044,16 +15113,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     (true, _)
                     | (
                         false,
-                        crate::flow_slice_content::SliceFreshness::Pinned
-                        | crate::flow_slice_content::SliceFreshness::WideningNullish,
+                        verter_session_query::flow::slice::SliceFreshness::Pinned
+                        | verter_session_query::flow::slice::SliceFreshness::WideningNullish,
                     ) => Some(node),
-                    (false, crate::flow_slice_content::SliceFreshness::Fresh) => {
+                    (false, verter_session_query::flow::slice::SliceFreshness::Fresh) => {
                         match self.eval_expr(value) {
                             Positional::Value(literal) => Some(literal),
                             Positional::Hold | Positional::Unmodeled => None,
                         }
                     }
-                    (false, crate::flow_slice_content::SliceFreshness::PerArm(_)) => None,
+                    (false, verter_session_query::flow::slice::SliceFreshness::PerArm(_)) => None,
                 };
                 (Positional::Value(written), assigned)
             }
@@ -15103,7 +15172,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// (`const n = i; i = n + 1` over `let i = 0` is not circular).
     fn circular_loop_bindings(
         &mut self,
-        lowered: &crate::flow_slice_content::SliceLoop,
+        lowered: &verter_session_query::flow::slice::SliceLoop,
     ) -> Vec<SkeletonBindingId> {
         let mut circular = Vec::new();
         for candidate in lowered.inferred.iter() {
@@ -15179,7 +15248,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// every other one.
     fn loop_reference_dependencies(
         &self,
-        lowered: &crate::flow_slice_content::SliceLoop,
+        lowered: &verter_session_query::flow::slice::SliceLoop,
         carried: &[FlowProductSubject],
     ) -> Vec<Vec<usize>> {
         let canonical: Vec<FlowProductSubject> = carried
@@ -15268,7 +15337,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn guarded_state(
         &mut self,
         state: &FlowLayerState,
-        guard: &crate::flow_slice_content::SliceGuard,
+        guard: &verter_session_query::flow::slice::SliceGuard,
         positive: bool,
     ) -> FlowLayerState {
         let live = self.layer_state();
@@ -15292,9 +15361,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// no modeled identifier still evaluates its iterated expression.
     fn loop_element_node<'l>(
         &mut self,
-        element: &'l crate::flow_slice_content::SliceLoopElement,
+        element: &'l verter_session_query::flow::slice::SliceLoopElement,
     ) -> Option<(
-        &'l crate::flow_slice_content::SliceLoopElement,
+        &'l verter_session_query::flow::slice::SliceLoopElement,
         SemanticNodeId,
     )> {
         let outcome = self.eval_expr(&element.iterable);
@@ -15912,12 +15981,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .unwrap_or_else(|| (self.unmodeled_position(), true));
         self.set_declared_local(
             binding,
-            crate::flow_slice_content::SliceBindingKind::Const,
+            verter_session_query::flow::slice::SliceBindingKind::Const,
             Some(node),
         );
         self.bind_local(
             binding,
-            crate::flow_slice_content::SliceBindingKind::Const,
+            verter_session_query::flow::slice::SliceBindingKind::Const,
             node,
             None,
             degraded,
@@ -15963,7 +16032,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return None;
         }
         let binding = binding?;
-        let root = crate::flow_slice_content::SliceNarrowRoot::Local {
+        let root = verter_session_query::flow::slice::SliceNarrowRoot::Local {
             name: Arc::from(value_ref.path[0].as_str()),
             binding: binding.clone(),
         };
@@ -15972,7 +16041,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .map(|part| Arc::from(part.as_str()))
             .collect();
         for prefix_len in (0..=segments.len()).rev() {
-            let subject = crate::flow_slice_content::SliceNarrowSubject {
+            let subject = verter_session_query::flow::slice::SliceNarrowSubject {
                 root: root.clone(),
                 path: segments[..prefix_len].to_vec().into(),
             };
@@ -16262,7 +16331,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
         if gapped {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         arms
@@ -16315,7 +16384,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// behaviour for that reference.
     fn subject_current_node(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
         self.reference_node(subject, true)
     }
@@ -16328,7 +16397,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// property type).
     fn member_declared_node(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
         self.reference_node(subject, false)
     }
@@ -16337,7 +16406,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// path only when `exact` is set.
     fn reference_node(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         exact: bool,
     ) -> Option<SemanticNodeId> {
         // The longest narrowed prefix of the path is what a read of the
@@ -16352,7 +16421,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             subject.path.len().saturating_sub(1)
         };
         for prefix_len in (1..=longest).rev() {
-            let prefix = crate::flow_slice_content::SliceNarrowSubject {
+            let prefix = verter_session_query::flow::slice::SliceNarrowSubject {
                 root: subject.root.clone(),
                 path: Arc::from(subject.path[..prefix_len].to_vec().into_boxed_slice()),
             };
@@ -16360,7 +16429,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return self.project_segments_navigate(base, &subject.path[prefix_len..]);
             }
         }
-        let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+        let root_subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -16368,10 +16437,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
+                verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.read_local(binding)?
                 }
             }
@@ -16810,10 +16879,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// never pops anything itself.
     fn apply_guard_scoped(
         &mut self,
-        guard: &crate::flow_slice_content::SliceGuard,
+        guard: &verter_session_query::flow::slice::SliceGuard,
         positive: bool,
     ) {
-        use crate::flow_slice_content::SliceGuard;
+        use verter_session_query::flow::slice::SliceGuard;
         #[cfg(test)]
         GUARD_APPLICATIONS.with(|count| count.set(count.get() + 1));
         let fact = match guard {
@@ -16979,7 +17048,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 CalleeControlEffect::Undecided => {
                     self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                     ));
                     GuardNarrowing::Unchanged
                 }
@@ -17034,8 +17103,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// truthiness for a targetless `asserts v`.
     fn apply_assertion(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        target: Option<&crate::flow_slice_content::GatedType>,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        target: Option<&verter_session_query::flow::slice::GatedType>,
         call: verter_span::Span,
     ) {
         self.capture_throw_point();
@@ -17089,7 +17158,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         alternatives: Vec<
             Vec<(
-                crate::flow_slice_content::SliceNarrowSubject,
+                verter_session_query::flow::slice::SliceNarrowSubject,
                 SemanticNodeId,
             )>,
         >,
@@ -17106,16 +17175,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// Apply one entered effect of a comma sequence's discarded operands:
     /// an `asserts` call, or the join of a conditional's arms.
-    fn apply_entered_effect(&mut self, effect: &crate::flow_slice_content::SliceStatement) {
+    fn apply_entered_effect(&mut self, effect: &verter_session_query::flow::slice::SliceStatement) {
         match effect {
-            crate::flow_slice_content::SliceStatement::Assertion {
+            verter_session_query::flow::slice::SliceStatement::Assertion {
                 subject,
                 target,
                 call,
             } => {
                 self.apply_assertion(subject, target.as_ref(), *call);
             }
-            crate::flow_slice_content::SliceStatement::If {
+            verter_session_query::flow::slice::SliceStatement::If {
                 guard,
                 consequent,
                 alternate,
@@ -17126,12 +17195,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .is_err()
                 {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                     ));
                 }
             }
             _ => self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             )),
         }
     }
@@ -17147,12 +17216,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// for it.
     fn apply_guard_union(
         &mut self,
-        parts: &[crate::flow_slice_content::SliceGuard],
+        parts: &[verter_session_query::flow::slice::SliceGuard],
         positive: bool,
     ) {
         let mut alternatives: Vec<
             Vec<(
-                crate::flow_slice_content::SliceNarrowSubject,
+                verter_session_query::flow::slice::SliceNarrowSubject,
                 SemanticNodeId,
             )>,
         > = Vec::with_capacity(parts.len());
@@ -17201,19 +17270,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         alternatives: Vec<
             Vec<(
-                crate::flow_slice_content::SliceNarrowSubject,
+                verter_session_query::flow::slice::SliceNarrowSubject,
                 SemanticNodeId,
             )>,
         >,
     ) -> Vec<(
-        crate::flow_slice_content::SliceNarrowSubject,
+        verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     )> {
         let alternatives: Vec<Vec<_>> = alternatives
             .into_iter()
             .map(|applied| {
                 let mut final_overlay: Vec<(
-                    crate::flow_slice_content::SliceNarrowSubject,
+                    verter_session_query::flow::slice::SliceNarrowSubject,
                     SemanticNodeId,
                 )> = Vec::with_capacity(applied.len());
                 for (subject, node) in applied {
@@ -17229,7 +17298,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
             .collect();
         let mut unions = Vec::new();
-        let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
+        let mut subjects: Vec<verter_session_query::flow::slice::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
             for (subject, _) in alternative {
                 if !subjects.contains(subject) {
@@ -17262,7 +17331,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// Read the type predicate the function's single return establishes
-    /// ([`crate::flow_slice_content::ReturnPredicateTest`]) once the
+    /// ([`verter_session_query::flow::slice::ReturnPredicateTest`]) once the
     /// returned expression evaluated to `returned`: the checker's
     /// `getTypePredicateFromBody`. Only a `boolean` return infers one. For
     /// each candidate parameter in order, the parameter's type on the
@@ -17276,10 +17345,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// substrate cannot compute.
     fn infer_return_predicate(
         &mut self,
-        test: &crate::flow_slice_content::ReturnPredicateTest,
+        test: &verter_session_query::flow::slice::ReturnPredicateTest,
         returned: SemanticNodeId,
     ) {
-        use crate::flow_slice_content::{ReturnPredicateTest, SliceNarrowRoot, SliceNarrowSubject};
+        use verter_session_query::flow::slice::{
+            ReturnPredicateTest, SliceNarrowRoot, SliceNarrowSubject,
+        };
         let is_primitive = |dispatch: &FlowCx<'_, D>, node, kind| {
             dispatch.arena().node_data(node).as_deref() == Some(&SemanticNodeData::Primitive(kind))
         };
@@ -17289,7 +17360,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let (guard, parameters) = match test {
             ReturnPredicateTest::Unexpressible => {
                 self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
                 return;
             }
@@ -17361,7 +17432,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// subject on a still-alive edge).
     fn narrow_arms_by(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         mut keep: impl FnMut(&mut Self, SemanticNodeId) -> Option<bool>,
     ) -> ArmFilter {
         let Some(current) = self.subject_current_node(subject) else {
@@ -17412,8 +17483,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// lose that branch's return contributor.
     fn narrow_typeof(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        kind: crate::flow_slice_content::SliceTypeofKind,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        kind: verter_session_query::flow::slice::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
         let leaf = self.narrow_typeof_reference(subject, kind, negated);
@@ -17429,13 +17500,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// member is comparable to the member's narrowed type.
     fn narrow_parent_by_narrowed_member(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         narrowed: SemanticNodeId,
     ) {
         let Some((last, prefix)) = subject.path.split_last() else {
             return;
         };
-        let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+        let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(prefix.to_vec().into_boxed_slice()),
         };
@@ -17447,7 +17518,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(false) => return,
             None => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
                 return;
             }
@@ -17471,7 +17542,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         match filtered {
@@ -17494,8 +17565,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// [`Self::narrow_typeof`] of the tested reference itself.
     fn narrow_typeof_reference(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        kind: crate::flow_slice_content::SliceTypeofKind,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        kind: verter_session_query::flow::slice::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
         let Some(current) = self.subject_current_node(subject) else {
@@ -17512,8 +17583,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `typeof x === "undefined"` over `x: string` is `undefined`.
         let implied_nullish = match kind {
             _ if negated || self.nullability.is_strict() => None,
-            crate::flow_slice_content::SliceTypeofKind::Undefined => Some(PrimitiveKind::Undefined),
-            crate::flow_slice_content::SliceTypeofKind::Object => Some(PrimitiveKind::Null),
+            verter_session_query::flow::slice::SliceTypeofKind::Undefined => {
+                Some(PrimitiveKind::Undefined)
+            }
+            verter_session_query::flow::slice::SliceTypeofKind::Object => Some(PrimitiveKind::Null),
             _ => None,
         };
         let mut implies_nullish = false;
@@ -17528,7 +17601,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // edges, scalar kinds are proved off, and the negated
             // `"function"` edge keeps the arm unchanged — the checker has
             // no "object minus functions" type to narrow to.
-            if kind == crate::flow_slice_content::SliceTypeofKind::Function
+            if kind == verter_session_query::flow::slice::SliceTypeofKind::Function
                 && !negated
                 && matches!(
                     self.dispatch.arena().node_data(*arm).as_deref(),
@@ -17586,7 +17659,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         if unclassified {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         if out.is_empty() {
@@ -17655,10 +17728,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn top_arm_typeof_edge(
         &mut self,
         arm: SemanticNodeId,
-        kind: crate::flow_slice_content::SliceTypeofKind,
+        kind: verter_session_query::flow::slice::SliceTypeofKind,
         negated: bool,
     ) -> Option<TopTypeofEdge> {
-        use crate::flow_slice_content::SliceTypeofKind;
+        use verter_session_query::flow::slice::SliceTypeofKind;
         let primitive = |this: &Self, kind| {
             this.dispatch
                 .graph()
@@ -17751,9 +17824,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn arm_typeof_class(
         &self,
         arm: SemanticNodeId,
-        kind: crate::flow_slice_content::SliceTypeofKind,
+        kind: verter_session_query::flow::slice::SliceTypeofKind,
     ) -> ArmGuardClass {
-        use crate::flow_slice_content::SliceTypeofKind;
+        use verter_session_query::flow::slice::SliceTypeofKind;
         // An enum member's `typeof` is its value's.
         if let Some(SemanticNodeData::EnumLiteral(literal)) =
             self.dispatch.arena().node_data(arm).as_deref()
@@ -17841,7 +17914,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
     fn narrow_truthy(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
         // A truthiness test over a PROPERTY narrows two references, both
@@ -17855,7 +17928,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // narrow, so both land under the same guard scope.
         let mut undecided = false;
         if !subject.path.is_empty() {
-            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+            let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
                 root: subject.root.clone(),
                 path: Arc::from(
                     subject.path[..subject.path.len() - 1]
@@ -17921,7 +17994,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(is_any) = self.top_subject(subject) {
             if undecided {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
             }
             if is_any || negated || !self.nullability.is_strict() {
@@ -17935,7 +18008,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(fact) = self.narrow_boolean_by_truthiness(subject, negated) {
             if undecided {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
             }
             return fact;
@@ -17952,7 +18025,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         match fact {
@@ -17967,7 +18040,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// undecidable arm stays on the tested edge and degrades.
     fn narrow_boolean_by_truthiness(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         negated: bool,
     ) -> Option<GuardNarrowing> {
         use crate::semantic_query::TruthinessInhabitance;
@@ -18002,7 +18075,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 TruthinessInhabitance::Yes => survivors.push(arm),
                 TruthinessInhabitance::Undecided => {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                     ));
                     survivors.push(arm);
                 }
@@ -18071,8 +18144,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ([`Self::narrow_eq_literal_parent`]).
     fn narrow_eq_literal(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        literal: &verter_session_query::flow::slice::SliceGuardLiteral,
         negated: bool,
         comparison: LiteralComparison,
     ) -> GuardNarrowing {
@@ -18084,8 +18157,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// value's declared literal type is not, and never widens.
     fn narrow_eq_literal_with(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        literal: &verter_session_query::flow::slice::SliceGuardLiteral,
         negated: bool,
         comparison: LiteralComparison,
         fresh: bool,
@@ -18097,8 +18170,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !self.nullability.is_strict()
             && matches!(
                 literal,
-                crate::flow_slice_content::SliceGuardLiteral::Null
-                    | crate::flow_slice_content::SliceGuardLiteral::Undefined
+                verter_session_query::flow::slice::SliceGuardLiteral::Null
+                    | verter_session_query::flow::slice::SliceGuardLiteral::Undefined
             )
         {
             return GuardNarrowing::Unchanged;
@@ -18113,7 +18186,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !self.is_guard_unit(literal_node) {
             if matches!(
                 literal,
-                crate::flow_slice_content::SliceGuardLiteral::Value(_)
+                verter_session_query::flow::slice::SliceGuardLiteral::Value(_)
             ) {
                 return self.narrow_reference_by_value(
                     subject,
@@ -18123,7 +18196,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 );
             }
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
             return GuardNarrowing::Unchanged;
         }
@@ -18196,18 +18269,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// at the test.
     fn narrow_eq_value(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        value: &crate::flow_slice_content::SliceEqOther,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        value: &verter_session_query::flow::slice::SliceEqOther,
         negated: bool,
         loose: bool,
     ) -> GuardNarrowing {
-        use crate::flow_slice_content::SliceEqOther;
+        use verter_session_query::flow::slice::SliceEqOther;
         let (value_node, mirror) = match value {
             SliceEqOther::Value(expr) => match self.eval_expr(expr) {
                 Positional::Value(node) => (node, None),
                 Positional::Hold | Positional::Unmodeled => {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                     ));
                     return GuardNarrowing::Unchanged;
                 }
@@ -18242,12 +18315,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// parent as a discriminant ([`Self::narrow_parent_by_discriminant`]).
     fn narrow_reference_by_value(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         value: SemanticNodeId,
         negated: bool,
         loose: bool,
     ) -> GuardNarrowing {
-        use crate::flow_slice_content::{SliceGuard, SliceGuardLiteral};
+        use verter_session_query::flow::slice::{SliceGuard, SliceGuardLiteral};
         if let Some(literal) = self.unit_guard_literal(value) {
             if loose
                 && matches!(
@@ -18288,7 +18361,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         let Some(narrowed) = self.narrow_type_by_equality(current, value, negated, loose) else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
             return GuardNarrowing::Unchanged;
         };
@@ -18313,8 +18386,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn unit_guard_literal(
         &self,
         value: SemanticNodeId,
-    ) -> Option<crate::flow_slice_content::SliceGuardLiteral> {
-        use crate::flow_slice_content::SliceGuardLiteral;
+    ) -> Option<verter_session_query::flow::slice::SliceGuardLiteral> {
+        use verter_session_query::flow::slice::SliceGuardLiteral;
         let settled = match self.dispatch.unwrap_identity_carrier_for_relation(value) {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
@@ -18731,30 +18804,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// that value's top-level constituents.
     fn fresh_narrowed_literal(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
         let (root, path): (_, Arc<[Arc<str>]>) = match expr {
-            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => (
-                crate::flow_slice_content::SliceNarrowRoot::Param {
+            verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => (
+                verter_session_query::flow::slice::SliceNarrowRoot::Param {
                     ordinal: *ordinal,
                     binding: *binding,
                 },
                 Arc::from([]),
             ),
-            crate::flow_slice_content::SliceExpr::Local {
+            verter_session_query::flow::slice::SliceExpr::Local {
                 binding,
                 name,
                 captured: false,
                 ..
             } => (
-                crate::flow_slice_content::SliceNarrowRoot::Local {
+                verter_session_query::flow::slice::SliceNarrowRoot::Local {
                     name: Arc::clone(name),
                     binding: binding.clone(),
                 },
                 Arc::from([]),
             ),
-            crate::flow_slice_content::SliceExpr::Type(leaf) => {
+            verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
                 let verter_type_expr::TypeExpr::TypeOf(value_ref) = leaf.ty() else {
                     return None;
                 };
@@ -18762,7 +18835,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return None;
                 }
                 (
-                    crate::flow_slice_content::SliceNarrowRoot::Local {
+                    verter_session_query::flow::slice::SliceNarrowRoot::Local {
                         name: Arc::from(value_ref.path[0].as_str()),
                         binding: leaf.frame_root()?.clone(),
                     },
@@ -18772,7 +18845,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .collect(),
                 )
             }
-            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
                 return self.fresh_narrowed_literal(inner, node);
             }
             _ => return None,
@@ -18804,13 +18877,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// keeps `unknown` or `{}`.
     fn narrow_eq_literal_reference(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        literal: &verter_session_query::flow::slice::SliceGuardLiteral,
         literal_node: SemanticNodeId,
         negated: bool,
         comparison: LiteralComparison,
     ) -> GuardNarrowing {
-        use crate::flow_slice_content::SliceGuardLiteral;
+        use verter_session_query::flow::slice::SliceGuardLiteral;
         let nullish = matches!(
             literal,
             SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
@@ -18899,7 +18972,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         match narrowed {
@@ -18951,8 +19024,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// unnarrowed behind the typed guard gap.
     fn narrow_by_equality(
         &mut self,
-        left: &crate::flow_slice_content::SliceEqOperand,
-        right: &crate::flow_slice_content::SliceEqOperand,
+        left: &verter_session_query::flow::slice::SliceEqOperand,
+        right: &verter_session_query::flow::slice::SliceEqOperand,
         loose: bool,
         assume_true: bool,
     ) {
@@ -18967,7 +19040,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
             if !decided {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
             }
         }
@@ -18977,7 +19050,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// (already narrowed) type, any other operand's evaluated value.
     fn equality_operand_value(
         &mut self,
-        operand: &crate::flow_slice_content::SliceEqOperand,
+        operand: &verter_session_query::flow::slice::SliceEqOperand,
     ) -> Option<SemanticNodeId> {
         if let Some(subject) = operand.subject.as_ref() {
             return self.subject_current_node(subject);
@@ -19005,12 +19078,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// value narrows: it removes the unit arms comparable to it.
     fn narrow_by_equality_value(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         value: SemanticNodeId,
         loose: bool,
         assume_true: bool,
     ) -> bool {
-        use crate::flow_slice_content::{SliceGuard, SliceGuardLiteral};
+        use verter_session_query::flow::slice::{SliceGuard, SliceGuardLiteral};
         let Some(current) = self.subject_current_node(subject) else {
             return true;
         };
@@ -19423,10 +19496,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// union type is `string`, which excluding `"a"` leaves `string`).
     fn narrow_parent_by_discriminant(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         narrow_member: &mut dyn FnMut(&mut Self, SemanticNodeId) -> Option<SemanticNodeId>,
     ) -> GuardNarrowing {
-        let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+        let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(
                 subject.path[..subject.path.len() - 1]
@@ -19470,7 +19543,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let member_type = self.union(&projected);
         let Some(narrowed) = narrow_member(self, member_type) else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
             return GuardNarrowing::Unchanged;
         };
@@ -19495,7 +19568,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         if survivors.len() == arms.len() {
@@ -19547,7 +19620,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `any`, `Some(false)` for `unknown` — which no arm filter can split.
     fn top_subject(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<bool> {
         let current = self.subject_current_node(subject)?;
         match self.dispatch.arena().node_data(current).as_deref() {
@@ -19577,9 +19650,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// nor as narrowed here, so no member of it discriminates.
     fn parent_is_never_a_union(
         &mut self,
-        parent: &crate::flow_slice_content::SliceNarrowSubject,
+        parent: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> bool {
-        let crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } = &parent.root else {
+        let verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } =
+            &parent.root
+        else {
             return false;
         };
         if !parent.path.is_empty() {
@@ -19606,10 +19681,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn refine_arms_by_literal(
         &mut self,
         node: SemanticNodeId,
-        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        literal: &verter_session_query::flow::slice::SliceGuardLiteral,
         negated: bool,
     ) -> SemanticNodeId {
-        use crate::flow_slice_content::SliceGuardLiteral;
+        use verter_session_query::flow::slice::SliceGuardLiteral;
         let Some(literal_ty) = guard_literal_type_expr(literal) else {
             return node;
         };
@@ -19689,10 +19764,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `x.kind !== "foo"`.
     fn declared_parent_discriminates(
         &mut self,
-        parent: &crate::flow_slice_content::SliceNarrowSubject,
+        parent: &verter_session_query::flow::slice::SliceNarrowSubject,
         member: &[Arc<str>],
     ) -> bool {
-        let crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } = &parent.root else {
+        let verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } =
+            &parent.root
+        else {
             return false;
         };
         if !parent.path.is_empty() {
@@ -19730,7 +19807,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn guarded_switch_state(
         &mut self,
         entry: &FlowLayerState,
-        applied: &[(&crate::flow_slice_content::SliceGuard, bool)],
+        applied: &[(&verter_session_query::flow::slice::SliceGuard, bool)],
     ) -> (FlowLayerState, bool) {
         self.restore_layer_state(entry.clone());
         let mark = self.narrowing_snapshot();
@@ -19740,10 +19817,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let narrowed = self.narrowings_since(&mark);
         self.restore_narrowings(mark);
         self.restore_layer_state(entry.clone());
-        let typeof_subjects: Vec<&crate::flow_slice_content::SliceNarrowSubject> = applied
+        let typeof_subjects: Vec<&verter_session_query::flow::slice::SliceNarrowSubject> = applied
             .iter()
             .filter_map(|(guard, _)| match guard {
-                crate::flow_slice_content::SliceGuard::Typeof { subject, .. } => Some(subject),
+                verter_session_query::flow::slice::SliceGuard::Typeof { subject, .. } => {
+                    Some(subject)
+                }
                 _ => None,
             })
             .collect();
@@ -19771,7 +19850,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn bake_narrow_into_state(
         &mut self,
         state: &mut FlowLayerState,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
         let root = self.narrow_subject(&subject.root);
@@ -19806,10 +19885,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             );
         };
         let target = match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Param { binding, .. } => {
                 FlowProductSubject::Local(*binding)
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+            verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                 if state.products.reaching(binding).is_none() {
                     return;
                 }
@@ -19936,8 +20015,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// (survivors == arms) from a real one.
     fn switch_discriminant_remainder(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        tests: &[crate::flow_slice_content::SliceGuardLiteral],
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
     ) -> Option<(Vec<SemanticNodeId>, usize)> {
         // The narrow lands at the tested property's PARENT reference
         // (the root itself for a whole-subject or one-segment
@@ -19948,7 +20027,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // folding a membership flag: asking about coverage is not an
         // observation of the binding's value, so it must not degrade
         // one.
-        let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+        let root_subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -19956,16 +20035,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
+                verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.local_value(binding)?
                 }
             }
         };
         let parent = if subject.path.len() > 1 {
-            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+            let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
                 root: subject.root.clone(),
                 path: Arc::from(
                     subject.path[..subject.path.len() - 1]
@@ -20129,7 +20208,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// wrong binding.
     fn narrow_instanceof(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         ctor: &Arc<str>,
         negated: bool,
     ) -> GuardNarrowing {
@@ -20204,7 +20283,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
             if gapped {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
             }
             return match fact {
@@ -20275,7 +20354,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
                 return GuardNarrowing::Unchanged;
             }
@@ -20329,7 +20408,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 InstanceofHeritage::Undecidable => {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                     ));
                     return GuardNarrowing::Unchanged;
                 }
@@ -20354,7 +20433,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // the fallback is not entered on a guess.
         if structurally_undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
             return GuardNarrowing::Unchanged;
         }
@@ -20524,7 +20603,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
         let Some(current) = self.subject_current_node(subject) else {
@@ -20616,7 +20695,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         if gapped {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
         }
         fact
@@ -21006,7 +21085,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ) {
                 if distributed.undecided {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::NominalRelation,
+                        verter_session_query::flow::policy::FlowGap::NominalRelation,
                     ));
                 }
                 return (Some(distributed.node), consumption);
@@ -21015,7 +21094,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let comparable = self.comparable(current, candidate);
         if matches!(comparable, ComparabilityVerdict::Undecided) {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::NominalRelation,
+                verter_session_query::flow::policy::FlowGap::NominalRelation,
             ));
         }
         // An undecided REVERSE relation leaves the choice between the
@@ -21078,8 +21157,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// intersection rule either way.
     fn narrow_to_predicate_target_consuming(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
-        target: &crate::flow_slice_content::GatedType,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        target: &verter_session_query::flow::slice::GatedType,
         negated: bool,
     ) -> (GuardNarrowing, PredicateNarrowConsumption) {
         use PredicateNarrowConsumption as Consumption;
@@ -21100,7 +21179,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// whose signatures declares one narrows nothing.
     fn callee_control_effect(
         &mut self,
-        callee: &crate::flow_slice_content::GatedType,
+        callee: &verter_session_query::flow::slice::GatedType,
     ) -> CalleeControlEffect {
         let Some(signatures) = self.callee_call_signatures(callee) else {
             return CalleeControlEffect::Undecided;
@@ -21153,7 +21232,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// are never inferred for a call's effect).
     fn callee_statement_effect(
         &mut self,
-        callee: &crate::flow_slice_content::GatedType,
+        callee: &verter_session_query::flow::slice::GatedType,
     ) -> CalleeStatementEffect {
         let Some(signatures) = self.callee_call_signatures(callee) else {
             return CalleeStatementEffect::Undecided;
@@ -21215,7 +21294,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// lowered in owner scope; `None` when they do not settle.
     fn callee_call_signatures(
         &mut self,
-        callee: &crate::flow_slice_content::GatedType,
+        callee: &verter_session_query::flow::slice::GatedType,
     ) -> Option<Vec<SemanticNodeId>> {
         let node = self.callee_node(callee)?;
         match self
@@ -21231,7 +21310,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// scope; `None` when a frame binding shadows it or it does not lower.
     fn callee_node(
         &mut self,
-        callee: &crate::flow_slice_content::GatedType,
+        callee: &verter_session_query::flow::slice::GatedType,
     ) -> Option<SemanticNodeId> {
         if callee
             .shadowed()
@@ -21252,7 +21331,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// resolved target type.
     fn narrow_to_predicate_node(
         &mut self,
-        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         target_node: SemanticNodeId,
         negated: bool,
     ) -> (GuardNarrowing, PredicateNarrowConsumption) {
@@ -21327,15 +21406,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// nothing; a call the executor cannot decide degrades.
     fn narrow_by_call_predicate(
         &mut self,
-        callee: &crate::flow_slice_content::SliceExpr,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &[Option<crate::flow_slice_content::SliceNarrowSubject>],
-        receiver: Option<&crate::flow_slice_content::SliceNarrowSubject>,
+        callee: &verter_session_query::flow::slice::SliceExpr,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &[Option<verter_session_query::flow::slice::SliceNarrowSubject>],
+        receiver: Option<&verter_session_query::flow::slice::SliceNarrowSubject>,
         negated: bool,
     ) -> (GuardNarrowing, PredicateNarrowConsumption) {
         let undecided = |this: &mut Self| {
             this.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             ));
             (
                 GuardNarrowing::Unchanged,
@@ -21369,7 +21448,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     _ => match self.resolve_call_step(
                         callee,
                         site,
-                        &crate::flow_slice_content::SliceCallArguments::none(),
+                        &verter_session_query::flow::slice::SliceCallArguments::none(),
                     ) {
                         Some(Positional::Value(
                             super::call_resolve::ResolveCallStep::Complete(
@@ -21502,15 +21581,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// every other spelling establish none.
     fn binding_init_membership(
         &self,
-        kind: crate::flow_slice_content::SliceBindingKind,
-        init: &crate::flow_slice_content::SliceExpr,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
+        init: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> Option<WideningMembership> {
-        if kind == crate::flow_slice_content::SliceBindingKind::Const && freshness.all_fresh() {
+        if kind == verter_session_query::flow::slice::SliceBindingKind::Const
+            && freshness.all_fresh()
+        {
             return Some(WideningMembership::All);
         }
-        if let crate::flow_slice_content::SliceExpr::Local {
+        if let verter_session_query::flow::slice::SliceExpr::Local {
             binding,
             name: _,
             captured: false,
@@ -21561,13 +21642,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// evaluation and never a fabricated `undefined` member.
     fn eval_member_projected_return(
         &mut self,
-        argument: Option<&crate::flow_slice_content::SliceExpr>,
+        argument: Option<&verter_session_query::flow::slice::SliceExpr>,
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
         let member_name = match self.member_filter.as_ref() {
             Some(filter) => Arc::clone(&filter.member),
             None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
         };
-        let Some(crate::flow_slice_content::SliceExpr::Object { entries, .. }) = argument else {
+        let Some(verter_session_query::flow::slice::SliceExpr::Object { entries, .. }) = argument
+        else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
         // Last write wins for duplicate keys (JS object-literal
@@ -21580,8 +21662,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut member = None;
         for entry in entries.iter().rev() {
             match entry {
-                crate::flow_slice_content::SliceObjectEntry::Spread { .. } => break,
-                crate::flow_slice_content::SliceObjectEntry::Member(candidate) => {
+                verter_session_query::flow::slice::SliceObjectEntry::Spread { .. } => break,
+                verter_session_query::flow::slice::SliceObjectEntry::Member(candidate) => {
                     // A COMPUTED key may name the demanded member and may
                     // not, and deciding that needs its value. A later
                     // entry that MIGHT provision the key is the same hard
@@ -21626,11 +21708,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// PATHS reaching the read: where a widening path and a path holding a
     /// declared nullable (or the initializer-less `undefined`) meet, the
     /// value is the non-widening one, as the checker's union keeps it.
-    fn reads_widening_nullish_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
+    fn reads_widening_nullish_local(
+        &self,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+    ) -> bool {
         if self.nullability.is_strict() {
             return false;
         }
-        let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr else {
+        let verter_session_query::flow::slice::SliceExpr::Local { binding, .. } = expr else {
             return false;
         };
         self.products
@@ -21645,10 +21730,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// arm is one of those. Always false under the strict algebra.
     fn widening_nullish_value(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> bool {
-        use crate::flow_slice_content::{SliceExpr, SliceFreshness};
+        use verter_session_query::flow::slice::{SliceExpr, SliceFreshness};
         if self.nullability.is_strict() {
             return false;
         }
@@ -21674,8 +21759,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Whether `expr` is a read of a WIDENING-literal local (`const b =
     /// 1` — unannotated, no const assertion). `as const` / annotated
     /// literals, parameters, and non-local reads are never widening.
-    fn reads_widening_literal_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
-        let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr else {
+    fn reads_widening_literal_local(
+        &self,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+    ) -> bool {
+        let verter_session_query::flow::slice::SliceExpr::Local { binding, .. } = expr else {
             return false;
         };
         self.widening_of(binding)
@@ -21688,16 +21776,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// yielded; a read that yields no literal has nothing to widen.
     fn reads_widening_declaration(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> bool {
         let leaf = match expr {
-            crate::flow_slice_content::SliceExpr::Type(leaf) => leaf,
+            verter_session_query::flow::slice::SliceExpr::Type(leaf) => leaf,
             // A member read through a frame binding holding an enum's
             // object: the object's member is the member's fresh literal.
-            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
                 return match inner.as_ref() {
-                    crate::flow_slice_content::SliceExpr::Type(leaf) => {
+                    verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
                         self.reads_enum_object_member(leaf, node)
                     }
                     _ => false,
@@ -21720,7 +21808,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// FRESH literal types, so the read widens as `E.A` does.
     fn reads_enum_object_member(
         &self,
-        leaf: &crate::flow_slice_content::GatedLeaf,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
         node: SemanticNodeId,
     ) -> bool {
         let verter_type_expr::TypeExpr::TypeOf(value) = leaf.ty() else {
@@ -21732,8 +21820,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !value.type_args.is_empty() {
             return false;
         }
-        let subject = crate::flow_slice_content::SliceNarrowSubject {
-            root: crate::flow_slice_content::SliceNarrowRoot::Local {
+        let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+            root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                 name: Arc::from(root.as_str()),
                 binding: binding.clone(),
             },
@@ -21760,21 +21848,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// value can never borrow a call's freshness.
     fn fresh_call_return_for(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> Option<&FreshCallReturn> {
         match expr {
-            crate::flow_slice_content::SliceExpr::Call(_, site, _) => {
+            verter_session_query::flow::slice::SliceExpr::Call(_, site, _) => {
                 let span = site.span();
                 self.call_fresh_literal_returns
                     .iter()
                     .rev()
                     .find(|call| call.span == span && call.node == node)
             }
-            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
                 self.fresh_call_return_for(inner, node)
             }
-            crate::flow_slice_content::SliceExpr::MemberOf { span, .. } => self
+            verter_session_query::flow::slice::SliceExpr::MemberOf { span, .. } => self
                 .call_fresh_literal_returns
                 .iter()
                 .rev()
@@ -21793,7 +21881,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// through unchanged.
     fn widen_value_position_read(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
         // `strictNullChecks` off: a read of an auto-typed local still
@@ -21818,7 +21906,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             return widen_values_within(self.dispatch, node, &[literal], self.nullability);
         }
-        if let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr {
+        if let verter_session_query::flow::slice::SliceExpr::Local { binding, .. } = expr {
             match self.membership_of(binding) {
                 Some(WideningMembership::All) => {
                     return widen_fresh_read_node(self.dispatch, node, self.nullability);
@@ -21866,7 +21954,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// nothing, so nothing can be mis-bound.
     fn owner_scope_answers_name(
         &self,
-        name: &crate::flow_slice_content::FrameShadowedName,
+        name: &verter_session_query::flow::slice::FrameShadowedName,
     ) -> bool {
         owner_scope_answers_frame_name(self.dispatch, self.binder_env, name)
     }
@@ -21883,7 +21971,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Begin a region's evaluation.
     fn start_region_run<'r>(
         &mut self,
-        region: &'r crate::flow_slice_content::SliceRegion,
+        region: &'r verter_session_query::flow::slice::SliceRegion,
     ) -> RegionRun<'r> {
         RegionRun {
             frames: vec![self.region_eval_frame(region)],
@@ -21946,7 +22034,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// entry and exit).
     fn region_eval_frame<'r>(
         &mut self,
-        region: &'r crate::flow_slice_content::SliceRegion,
+        region: &'r verter_session_query::flow::slice::SliceRegion,
     ) -> RegionEvalFrame<'r> {
         self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
         RegionEvalFrame {
@@ -21967,9 +22055,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn bind_initialized_local(
         &mut self,
         binding: verter_session_query::flow::skeleton::SkeletonBindingId,
-        kind: crate::flow_slice_content::SliceBindingKind,
-        init: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
+        kind: verter_session_query::flow::slice::SliceBindingKind,
+        init: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
         auto_typed: bool,
         widening_nullish_init: bool,
         outcome: Positional<SemanticNodeId>,
@@ -21990,7 +22078,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     node
                 };
                 match kind {
-                    crate::flow_slice_content::SliceBindingKind::Const => {
+                    verter_session_query::flow::slice::SliceBindingKind::Const => {
                         self.bind_local(
                             &FlowProductSubject::Local(binding),
                             kind,
@@ -22004,8 +22092,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // (`let a = idInf(1)` is `number`),
                     // exactly as a bare literal
                     // initializer already lowered widened.
-                    crate::flow_slice_content::SliceBindingKind::Let
-                    | crate::flow_slice_content::SliceBindingKind::Var => {
+                    verter_session_query::flow::slice::SliceBindingKind::Let
+                    | verter_session_query::flow::slice::SliceBindingKind::Var => {
                         let widened = match &membership {
                             Some(WideningMembership::All) => {
                                 widen_fresh_read_node(self.dispatch, node, self.nullability)
@@ -22280,7 +22368,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if !path_alive
                 && !matches!(
                     statement,
-                    crate::flow_slice_content::SliceStatement::Unreachable(_)
+                    verter_session_query::flow::slice::SliceStatement::Unreachable(_)
                 )
                 && frame.dead_tail.is_none()
             {
@@ -22290,7 +22378,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.executed_walk.statements_executed =
                 self.executed_walk.statements_executed.saturating_add(1);
             match statement {
-                crate::flow_slice_content::SliceStatement::Gap(gap) => {
+                verter_session_query::flow::slice::SliceStatement::Gap(gap) => {
                     self.pending_statement_gap.get_or_insert(*gap);
                 }
                 // A statement-position `yield x` contributes the YIELD
@@ -22310,7 +22398,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // fixed point discharges into the caller's RETURN join —
                 // that would union a fellow component member's resolved
                 // return into a value only the yield ever produced.
-                crate::flow_slice_content::SliceStatement::Yield {
+                verter_session_query::flow::slice::SliceStatement::Yield {
                     argument,
                     freshness,
                 } => {
@@ -22320,7 +22408,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 self.prescan_statement_value_writes(Some(expr));
                                 let bare_literal = matches!(
                                     freshness,
-                                    crate::flow_slice_content::SliceFreshness::Fresh
+                                    verter_session_query::flow::slice::SliceFreshness::Fresh
                                 );
                                 let bare_fresh =
                                     bare_literal || self.reads_widening_literal_local(expr);
@@ -22377,7 +22465,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Return {
+                verter_session_query::flow::slice::SliceStatement::Return {
                     argument,
                     freshness,
                     predicate_test,
@@ -22412,7 +22500,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         Some(expr) => {
                             let bare_literal = matches!(
                                 freshness,
-                                crate::flow_slice_content::SliceFreshness::Fresh
+                                verter_session_query::flow::slice::SliceFreshness::Fresh
                             );
                             // A FRESH literal contribution is a bare literal
                             // return argument or a read of a
@@ -22440,8 +22528,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // the joined node.
                             let evaluated = match (expr, freshness) {
                                 (
-                                    crate::flow_slice_content::SliceExpr::Union { .. },
-                                    crate::flow_slice_content::SliceFreshness::PerArm(_),
+                                    verter_session_query::flow::slice::SliceExpr::Union { .. },
+                                    verter_session_query::flow::slice::SliceFreshness::PerArm(_),
                                 ) => {
                                     let parts =
                                         self.collect_reduced_evolving_parts(expr, freshness);
@@ -22544,7 +22632,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // A branch statement's regions evaluate next, from the
                 // caller's stack; this region resumes past the statement once
                 // the statement finishes (`flow_return_branches`).
-                crate::flow_slice_content::SliceStatement::If {
+                verter_session_query::flow::slice::SliceStatement::If {
                     guard,
                     consequent,
                     alternate,
@@ -22559,7 +22647,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     frame.path_alive = path_alive;
                     return RegionEvalStep::EnterBlock(next);
                 }
-                crate::flow_slice_content::SliceStatement::Switch {
+                verter_session_query::flow::slice::SliceStatement::Switch {
                     discriminant,
                     cases,
                     has_default,
@@ -22583,7 +22671,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         ))
                     }
                 },
-                crate::flow_slice_content::SliceStatement::Try {
+                verter_session_query::flow::slice::SliceStatement::Try {
                     block,
                     catch,
                     finally,
@@ -22604,7 +22692,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     frame.path_alive = path_alive;
                     return RegionEvalStep::EnterBlock(next);
                 }
-                crate::flow_slice_content::SliceStatement::Labeled { label, body } => {
+                verter_session_query::flow::slice::SliceStatement::Labeled { label, body } => {
                     let BranchStep::Enter(entered, next) = self.begin_labeled(label, body) else {
                         unreachable!("a labeled statement enters its body")
                     };
@@ -22613,7 +22701,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     frame.path_alive = path_alive;
                     return RegionEvalStep::EnterBlock(next);
                 }
-                crate::flow_slice_content::SliceStatement::Block(block) => {
+                verter_session_query::flow::slice::SliceStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
                     // never escapes it — and a write to a binding that
                     // PREDATES the block survives it, because the block
@@ -22636,7 +22724,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     frame.path_alive = path_alive;
                     return RegionEvalStep::EnterBlock(block);
                 }
-                crate::flow_slice_content::SliceStatement::Break { target } => {
+                verter_session_query::flow::slice::SliceStatement::Break { target } => {
                     // The edge past the absorbing construct is THIS state:
                     // capture it complete and end the region's path (the
                     // lowering already proved the target exists).
@@ -22651,7 +22739,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // A back edge of the loop the lowering resolved: this
                 // state, carried like a break's across every construct it
                 // leaves.
-                crate::flow_slice_content::SliceStatement::Continue { target } => {
+                verter_session_query::flow::slice::SliceStatement::Continue { target } => {
                     let state = self.layer_state();
                     self.break_exits.push(FlowBreakExit {
                         target: target.clone(),
@@ -22666,14 +22754,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // read their declared types (the checker answers an
                 // unreachable flow node with the declared type); this region
                 // resumes past it with the path dead.
-                crate::flow_slice_content::SliceStatement::Unreachable(unreachable) => {
+                verter_session_query::flow::slice::SliceStatement::Unreachable(unreachable) => {
                     let dead = self.open_dead_path(true);
                     frame.entered = Some(Entered::Unreachable(Box::new(dead)));
                     frame.contributors = contributors;
                     frame.path_alive = false;
                     return RegionEvalStep::EnterBlock(unreachable);
                 }
-                crate::flow_slice_content::SliceStatement::Loop(lowered) => {
+                verter_session_query::flow::slice::SliceStatement::Loop(lowered) => {
                     let BranchStep::Enter(entered, next) = self.begin_loop(lowered) else {
                         unreachable!("a loop enters its init")
                     };
@@ -22686,7 +22774,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // holds the base type of the literal type it held before
                 // — the checker's flow type for a compound assignment,
                 // whatever the operand.
-                crate::flow_slice_content::SliceStatement::CompoundAssignment {
+                verter_session_query::flow::slice::SliceStatement::CompoundAssignment {
                     target,
                     definition,
                     ..
@@ -22697,13 +22785,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             (Some(site), _) => Some(self.flow_graph.expr_site_node(*site)),
                             (
                                 None,
-                                crate::flow_slice_content::SliceNarrowRoot::Param {
-                                    binding, ..
+                                verter_session_query::flow::slice::SliceNarrowRoot::Param {
+                                    binding,
+                                    ..
                                 },
                             )
                             | (
                                 None,
-                                crate::flow_slice_content::SliceNarrowRoot::Local {
+                                verter_session_query::flow::slice::SliceNarrowRoot::Local {
                                     binding: FlowProductSubject::Local(binding),
                                     ..
                                 },
@@ -22718,7 +22807,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.bind_written(target, marker, true, None, false);
                     }
                 },
-                crate::flow_slice_content::SliceStatement::MemberWrite {
+                verter_session_query::flow::slice::SliceStatement::MemberWrite {
                     target,
                     key: None,
                     write,
@@ -22726,7 +22815,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 } => {
                     self.apply_member_write(target, write);
                 }
-                crate::flow_slice_content::SliceStatement::MemberWrite {
+                verter_session_query::flow::slice::SliceStatement::MemberWrite {
                     target,
                     key: Some(key),
                     write,
@@ -22734,14 +22823,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 } => {
                     self.apply_keyed_member_write(target, key, write);
                 }
-                crate::flow_slice_content::SliceStatement::DestructureAssign {
+                verter_session_query::flow::slice::SliceStatement::DestructureAssign {
                     pattern,
                     value,
                     definition,
                 } => {
                     self.eval_destructure_assign(pattern, value, *definition);
                 }
-                crate::flow_slice_content::SliceStatement::Destructure {
+                verter_session_query::flow::slice::SliceStatement::Destructure {
                     pattern,
                     kind,
                     init,
@@ -22760,23 +22849,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         source.as_ref(),
                     );
                 }
-                crate::flow_slice_content::SliceStatement::Throw => {
+                verter_session_query::flow::slice::SliceStatement::Throw => {
                     // A throw point the enclosing `try`'s catch / finally
                     // is entered from — then the path ends here.
                     self.capture_throw_point();
                     path_alive = false;
                 }
-                crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
+                verter_session_query::flow::slice::SliceStatement::EvolvingArray(operation) => {
                     let holds_before = self.holds.len();
                     let _ = self.eval_evolving_operation(operation);
                     self.holds.truncate(holds_before);
                 }
-                crate::flow_slice_content::SliceStatement::ThrowPoint => {
+                verter_session_query::flow::slice::SliceStatement::ThrowPoint => {
                     // A bare call statement: value-neutral, but a throw
                     // point for an enclosing `try`.
                     self.capture_throw_point();
                 }
-                crate::flow_slice_content::SliceStatement::Binding {
+                verter_session_query::flow::slice::SliceStatement::Binding {
                     binding,
                     name: _,
                     kind,
@@ -22791,7 +22880,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // the shadow BEFORE binding, so the scope close can
                     // restore the shadowed value without losing the
                     // scope's writes to bindings that predate it.
-                    if !matches!(kind, crate::flow_slice_content::SliceBindingKind::Var) {
+                    if !matches!(
+                        kind,
+                        verter_session_query::flow::slice::SliceBindingKind::Var
+                    ) {
                         self.record_scope_shadow(&FlowProductSubject::Local(*binding));
                     }
                     // The checker's EVOLVING array (`noImplicitAny` on): an
@@ -22842,7 +22934,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     //     `getAssignmentReducedType`, below.
                     if let Some(declared) = declared.as_ref() {
                         let no_init_var_with_reaching_value = init.is_none()
-                            && matches!(kind, crate::flow_slice_content::SliceBindingKind::Var)
+                            && matches!(
+                                kind,
+                                verter_session_query::flow::slice::SliceBindingKind::Var
+                            )
                             && (self
                                 .local_value(&FlowProductSubject::Local(*binding))
                                 .is_some()
@@ -22948,7 +23043,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             (Some(init), Some(arms)) => {
                                 let fresh = matches!(
                                     freshness,
-                                    crate::flow_slice_content::SliceFreshness::Fresh
+                                    verter_session_query::flow::slice::SliceFreshness::Fresh
                                 );
                                 let node = match self.eval_assignment_expr(init) {
                                     Positional::Value(init_node) => self.assignment_reduced_union(
@@ -23016,7 +23111,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     let widening_nullish_init = init
                         .as_ref()
                         .is_some_and(|init| self.widening_nullish_value(init, freshness));
-                    let mutable = *kind != crate::flow_slice_content::SliceBindingKind::Const;
+                    let mutable =
+                        *kind != verter_session_query::flow::slice::SliceBindingKind::Const;
                     // The checker's AUTO-TYPED variable (TypeScript 7.0.2,
                     // `noImplicitAny` on): an unannotated `let` / `var` with
                     // no initializer or a bare `null` / `undefined` one. Its
@@ -23073,7 +23169,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             self.record_inferred_declared(*binding, *kind, declared);
                             self.set_declared_local(&subject, *kind, Some(declared));
                             let redeclares_reaching_var = init.is_none()
-                                && *kind == crate::flow_slice_content::SliceBindingKind::Var
+                                && *kind
+                                    == verter_session_query::flow::slice::SliceBindingKind::Var
                                 && self.local_value(&subject).is_some();
                             if !redeclares_reaching_var {
                                 self.bind_local(&subject, *kind, declared, None, false);
@@ -23093,7 +23190,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     if auto_typed && init.is_none() {
                         let redeclares_reaching_var = *kind
-                            == crate::flow_slice_content::SliceBindingKind::Var
+                            == verter_session_query::flow::slice::SliceBindingKind::Var
                             && self.local_value(&subject).is_some();
                         if !redeclares_reaching_var {
                             let undefined = self
@@ -23126,9 +23223,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         // membership over the surviving fresh values. An
                         // all-fresh or all-pinned tree keeps the plain
                         // path below.
-                        if *kind == crate::flow_slice_content::SliceBindingKind::Const
+                        if *kind == verter_session_query::flow::slice::SliceBindingKind::Const
                             && freshness.is_mixed()
-                            && matches!(init, crate::flow_slice_content::SliceExpr::Union { .. })
+                            && matches!(
+                                init,
+                                verter_session_query::flow::slice::SliceExpr::Union { .. }
+                            )
                         {
                             let mut parts = self.collect_reduced_evolving_parts(init, freshness);
                             // Under `strictNullChecks` off a nullable arm
@@ -23229,7 +23329,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         );
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assignment {
+                verter_session_query::flow::slice::SliceStatement::Assignment {
                     target,
                     value,
                     freshness,
@@ -23263,7 +23363,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 widening_nullish,
                                 matches!(
                                     freshness,
-                                    crate::flow_slice_content::SliceFreshness::Fresh
+                                    verter_session_query::flow::slice::SliceFreshness::Fresh
                                 ),
                             );
                         }
@@ -23278,13 +23378,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::CallEffect { callee, site } => {
+                verter_session_query::flow::slice::SliceStatement::CallEffect { callee, site } => {
                     if !self.settle_call_effect(callee, *site) {
                         path_alive = false;
                         frame.dead_at_never_call = true;
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assertion {
+                verter_session_query::flow::slice::SliceStatement::Assertion {
                     subject,
                     target,
                     call,
@@ -23300,7 +23400,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // definitely-falsy arms leave the subject's type.
                     self.apply_assertion(subject, target.as_ref(), *call);
                 }
-                crate::flow_slice_content::SliceStatement::CalleeEffect {
+                verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
                     arguments,
                     site,
@@ -23331,36 +23431,36 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         CalleeStatementEffect::Undecided => {
                             self.record_degradation(
                                 crate::semantic_query::FlowReturnDegradation::FlowGap(
-                                    crate::semantic_query::FlowGap::GuardNarrowing,
+                                    verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                                 ),
                             );
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::TransparentLoop => {}
+                verter_session_query::flow::slice::SliceStatement::TransparentLoop => {}
                 // The loop is entered and never completes normally: the
                 // region's normal path ends here, exactly as at a `throw`.
                 // The lowering already dropped the unreachable suffix; this
                 // keeps the evaluator's own reachability in agreement.
-                crate::flow_slice_content::SliceStatement::DivergentLoop => {
+                verter_session_query::flow::slice::SliceStatement::DivergentLoop => {
                     path_alive = false;
                 }
-                crate::flow_slice_content::SliceStatement::Unsupported(kind) => {
+                verter_session_query::flow::slice::SliceStatement::Unsupported(kind) => {
                     return RegionEvalStep::Done((
                         Err(FlowReturnFailure::Unsupported(match kind {
-                            crate::flow_slice_content::SliceUnsupported::Loop => {
+                            verter_session_query::flow::slice::SliceUnsupported::Loop => {
                                 FlowReturnUnsupported::Loop
                             }
-                            crate::flow_slice_content::SliceUnsupported::Jump => {
+                            verter_session_query::flow::slice::SliceUnsupported::Jump => {
                                 FlowReturnUnsupported::Jump
                             }
-                            crate::flow_slice_content::SliceUnsupported::InvokedClosureEffect => {
+                            verter_session_query::flow::slice::SliceUnsupported::InvokedClosureEffect => {
                                 FlowReturnUnsupported::InvokedClosureEffect
                             }
-                            crate::flow_slice_content::SliceUnsupported::With => {
+                            verter_session_query::flow::slice::SliceUnsupported::With => {
                                 FlowReturnUnsupported::With
                             }
-                            crate::flow_slice_content::SliceUnsupported::ModuleDeclaration => {
+                            verter_session_query::flow::slice::SliceUnsupported::ModuleDeclaration => {
                                 FlowReturnUnsupported::ModuleDeclaration
                             }
                         })),
@@ -23384,9 +23484,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// is `evaluated` (with its fresh values), or none when it has none.
     fn return_contribution(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
-        freshness: &crate::flow_slice_content::SliceFreshness,
-        predicate_test: Option<&crate::flow_slice_content::ReturnPredicateTest>,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        freshness: &verter_session_query::flow::slice::SliceFreshness,
+        predicate_test: Option<&verter_session_query::flow::slice::ReturnPredicateTest>,
         evaluated: Option<(SemanticNodeId, Vec<SemanticNodeId>)>,
         mut fresh_literal: bool,
         holds_before: usize,
@@ -23427,8 +23527,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// remain source-ordered in [`Self::eval_region`]. An annotation whose
     /// frame gate is unresolved stays source-ordered so an unreachable or
     /// unobserved declaration cannot degrade the frame merely by existing.
-    fn seed_hoisted_var_declarations(&mut self, region: &crate::flow_slice_content::SliceRegion) {
-        use crate::flow_slice_content::{SliceBindingKind, SliceRegion, SliceStatement};
+    fn seed_hoisted_var_declarations(
+        &mut self,
+        region: &verter_session_query::flow::slice::SliceRegion,
+    ) {
+        use verter_session_query::flow::slice::{SliceBindingKind, SliceRegion, SliceStatement};
         // The regions a region nests (a block, an `if`'s arms, a loop's
         // parts) are walked from an explicit stack of statement cursors, in
         // source order: a region nested however deep costs no native level.
@@ -23523,7 +23626,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn capture_source_products(
         &self,
-        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
+        locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
     ) -> Option<(FlowProductStore, FlowProductSubject)> {
         let products = if &locator.declaration.defining_function == self.bindings.function() {
             self.products.clone()
@@ -23541,8 +23644,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn lower_capture_authority(
         &mut self,
-        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
-        authority: crate::flow_slice_content::SliceCaptureAuthority,
+        locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
+        authority: verter_session_query::flow::slice::SliceCaptureAuthority,
     ) -> Option<SemanticNodeId> {
         let binder_env = if &locator.declaration.defining_function == self.bindings.function() {
             Some(self.binder_env)
@@ -23576,7 +23679,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 )
             };
         let node = match &authority.source {
-            crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+            verter_session_query::flow::slice::SliceCaptureAuthoritySource::Parameter {
                 key: Some(key),
                 has_default,
             } => self
@@ -23594,12 +23697,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn nested_signature_prefix(
         &mut self,
-        nested_params: &[crate::flow_slice_content::SliceParam],
-        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
-        capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
+        nested_params: &[verter_session_query::flow::slice::SliceParam],
+        type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
+        capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
         declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
-        declared_return: Option<&crate::flow_slice_content::GatedType>,
-        declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
+        declared_return: Option<&verter_session_query::flow::slice::GatedType>,
+        declared_predicate: Option<&verter_session_query::flow::slice::SlicePredicate>,
         bindings: &Arc<FlowBindingMap>,
         skeleton: Arc<FunctionBodySkeleton>,
         bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
@@ -23907,7 +24010,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // The declarator never supplied its type (it was not
                     // evaluated on any path before the creation).
                     self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::ClosureCapture,
+                        verter_session_query::flow::policy::FlowGap::ClosureCapture,
                     ));
                 }
                 let inferred_declared = inferred_declared.flatten();
@@ -24178,7 +24281,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn direct_callee_clause(
         &mut self,
         target: &verter_session_query::function_program::FunctionProgramKey,
-        site: crate::flow_slice_content::SliceCallSite,
+        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> CalleeClauseLookup {
         let Some((_serve, source_demand)) = self
             .dispatch
@@ -24194,7 +24297,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let entry = matched.entry();
         // The lowered clause is demanded lazily and at most once, and
         // only when some parameter's default is actually needed.
-        let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
+        let mut lowered: Option<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> =
+            None;
         // The clause is BUILT by its owning module, from the entry the
         // index answered with. This route reads the authority and hands
         // it over; it cannot assemble a clause out of nothing, because
@@ -24247,7 +24351,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn call_return_of_callee_node(
         &mut self,
         callee_node: SemanticNodeId,
-        site: crate::flow_slice_content::SliceCallSite,
+        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> Positional<CallValue> {
         let resolved = self.dispatch.resolve_signature_source_carrier(
             callee_node,
@@ -24316,8 +24420,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         object: SemanticNodeId,
         member: &Arc<str>,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &crate::flow_slice_content::SliceCallArguments,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Positional<CallValue> {
         self.call_receivers.insert(site.span(), object);
         let Some(callee) = self
@@ -24351,7 +24455,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ([`ProjectSemanticDispatch::erase_nullable_members`]).
     fn eval_expr(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
     ) -> Positional<SemanticNodeId> {
         let mut run = ExprRun::new(expr);
         match self.run_expr(&mut run, None, false) {
@@ -24397,7 +24501,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             _ => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                 ));
                 Positional::Unmodeled
             }
@@ -24415,7 +24519,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         mut delivered: Option<Positional<SemanticNodeId>>,
         suspend: bool,
     ) -> ExprProgress {
-        use crate::flow_slice_content::SliceExpr;
+        use verter_session_query::flow::slice::SliceExpr;
         // An operator form's operands (a `!`, a non-null assertion, an
         // arithmetic operator's operands) and a conditional's branches
         // evaluate from an explicit stack of the forms waiting on them, each
@@ -24808,14 +24912,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// the value.
     fn eval_expr_unerased(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
     ) -> Positional<SemanticNodeId> {
         let graph = self.dispatch.graph();
         match expr {
-            crate::flow_slice_content::SliceExpr::Type(leaf) => {
+            verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
                 Positional::Value(self.lower_body_type(leaf.ty()))
             }
-            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, shadowed } => {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, shadowed } => {
                 // The root-identifier gate's decision point. The content
                 // half found that this leaf's answer names bindings the
                 // FRAME owns, and the shared shallow-pass lowering that
@@ -24841,7 +24945,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // through the one shared path projection. So whatever the
                 // owner scope answers for the same name, the frame's read
                 // is the answer.
-                if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
+                if let verter_session_query::flow::slice::SliceExpr::Type(leaf) = inner.as_ref() {
                     if let Some(node) =
                         self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
                     {
@@ -24852,8 +24956,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // (`c.m()` over a local or parameter `c`) is the same read:
                 // its callee references no other name, and the call rail
                 // resolves that root through the frame.
-                if let crate::flow_slice_content::SliceExpr::Call(
-                    crate::flow_slice_content::SliceCall::Symbolic(
+                if let verter_session_query::flow::slice::SliceExpr::Call(
+                    verter_session_query::flow::slice::SliceCall::Symbolic(
                         verter_type_expr::TypeExpr::Ref { type_arguments, .. },
                         binding,
                     ),
@@ -24881,7 +24985,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // carry: the slice and the signature disagree about this
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
-            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
+            verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
                 if self.reads_declared(&FlowProductSubject::Local(*binding)) {
                     return match self.params.get(*ordinal as usize).copied() {
                         Some(node) => Positional::Value(node),
@@ -24890,8 +24994,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 // A guard narrow (or an applied write) substitutes the
                 // parameter's CURRENT value positionally.
-                let subject = crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param {
+                let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+                    root: verter_session_query::flow::slice::SliceNarrowRoot::Param {
                         ordinal: *ordinal,
                         binding: *binding,
                     },
@@ -24920,7 +25024,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     None => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceExpr::OptionalAnyChain { root } => {
+            verter_session_query::flow::slice::SliceExpr::OptionalAnyChain { root } => {
                 match self.eval_expr(root) {
                     Positional::Value(node) if self.node_is_semantic_any(node) => {
                         Positional::Value(
@@ -24929,7 +25033,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     Positional::Value(_) => {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                            verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                         ));
                         Positional::Unmodeled
                     }
@@ -24945,7 +25049,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // the chain unions `undefined` once if any strip removed arms —
             // a non-nullable base publishes the plain member type, exactly
             // as the checker does.
-            crate::flow_slice_content::SliceExpr::OptionalMember { root, links } => {
+            verter_session_query::flow::slice::SliceExpr::OptionalMember { root, links } => {
                 let node = match self.eval_expr(root) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
@@ -24960,18 +25064,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // link reads (`o.y = "b"; return o?.y` is `"b"`), exactly
                 // as for the dotted spelling.
                 let narrow_root = match root.as_ref() {
-                    crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
-                        Some(crate::flow_slice_content::SliceNarrowRoot::Param {
+                    verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
+                        Some(verter_session_query::flow::slice::SliceNarrowRoot::Param {
                             ordinal: *ordinal,
                             binding: *binding,
                         })
                     }
-                    crate::flow_slice_content::SliceExpr::Local {
+                    verter_session_query::flow::slice::SliceExpr::Local {
                         binding,
                         name,
                         captured: false,
                         ..
-                    } => Some(crate::flow_slice_content::SliceNarrowRoot::Local {
+                    } => Some(verter_session_query::flow::slice::SliceNarrowRoot::Local {
                         name: Arc::clone(name),
                         binding: binding.clone(),
                     }),
@@ -25008,7 +25112,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 Positional::Value(current)
             }
-            crate::flow_slice_content::SliceExpr::Local {
+            verter_session_query::flow::slice::SliceExpr::Local {
                 binding,
                 name,
                 param,
@@ -25027,8 +25131,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         return Positional::Value(node);
                     }
                 } else {
-                    let subject = crate::flow_slice_content::SliceNarrowSubject {
-                        root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                    let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+                        root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                             name: Arc::clone(name),
                             binding: binding.clone(),
                         },
@@ -25050,7 +25154,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             Some(node) => Positional::Value(node),
                             None => {
                                 self.record_degradation(FlowReturnDegradation::FlowGap(
-                                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                                    verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                                 ));
                                 Positional::Unmodeled
                             }
@@ -25058,10 +25162,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                 }
             }
-            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+            verter_session_query::flow::slice::SliceExpr::Object { entries, offset } => {
                 self.eval_object_literal(entries, *offset, false, None)
             }
-            crate::flow_slice_content::SliceExpr::Array {
+            verter_session_query::flow::slice::SliceExpr::Array {
                 elements,
                 const_asserted,
             } => self.eval_array_literal(elements, *const_asserted, None),
@@ -25069,7 +25173,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // own value, contextually typed by the target. A target whose
             // names the frame shadows has no modelled type, so the
             // literal's widening decisions are unproven.
-            crate::flow_slice_content::SliceExpr::Satisfies { operand, target } => {
+            verter_session_query::flow::slice::SliceExpr::Satisfies { operand, target } => {
                 if target
                     .shadowed()
                     .iter()
@@ -25081,7 +25185,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let contextual = self.lower_body_type(target.ty());
                 self.eval_in_context(operand, None, contextual)
             }
-            crate::flow_slice_content::SliceExpr::Assignment {
+            verter_session_query::flow::slice::SliceExpr::Assignment {
                 target,
                 value,
                 freshness,
@@ -25114,22 +25218,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     other => other,
                 }
             }
-            crate::flow_slice_content::SliceExpr::NestedFunctionValue { .. } => {
+            verter_session_query::flow::slice::SliceExpr::NestedFunctionValue { .. } => {
                 let (demand, gap) = NestedDemand::of(expr, None).expect("a nested function value");
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(gap));
                 }
                 Positional::Value(self.eval_nested_demand(demand))
             }
-            crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
-            crate::flow_slice_content::SliceExpr::This(this) => self.eval_this(this),
+            verter_session_query::flow::slice::SliceExpr::Class(class) => {
+                self.eval_class_value(class)
+            }
+            verter_session_query::flow::slice::SliceExpr::This(this) => self.eval_this(this),
 
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
             // type-parameter clause, so no arm below can hand a callee's
             // return back to this frame untouched by accident — only by
             // asking for `own_frame_binder` by name.
-            crate::flow_slice_content::SliceExpr::Call(call, site, arguments) => {
+            verter_session_query::flow::slice::SliceExpr::Call(call, site, arguments) => {
                 // A call is a throw point: an enclosing `try`'s catch /
                 // finally can be entered from HERE, with the state as it
                 // stands BEFORE the call (an enclosing write has not
@@ -25141,10 +25247,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
+            verter_session_query::flow::slice::SliceExpr::EvolvingArray(operation) => {
                 self.eval_evolving_operation(operation)
             }
-            crate::flow_slice_content::SliceExpr::SemanticAny => Positional::Value(
+            verter_session_query::flow::slice::SliceExpr::SemanticAny => Positional::Value(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
             // An `await x`: the operand evaluates through its own arm (a
@@ -25160,29 +25266,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // order, and the expression's value is its own answer whatever
             // the write produced — a write the evaluator cannot type still
             // applies its typed marker to the target.
-            crate::flow_slice_content::SliceExpr::Void { operand, value } => {
+            verter_session_query::flow::slice::SliceExpr::Void { operand, value } => {
                 match self.eval_expr(operand) {
                     Positional::Value(_) | Positional::Unmodeled => self.eval_expr(value),
                     Positional::Hold => Positional::Hold,
                 }
             }
-            crate::flow_slice_content::SliceExpr::ConstTemplate { quasis, holes } => {
+            verter_session_query::flow::slice::SliceExpr::ConstTemplate { quasis, holes } => {
                 self.eval_const_template(quasis, holes)
             }
-            crate::flow_slice_content::SliceExpr::Arithmetic { operator, operands } => {
+            verter_session_query::flow::slice::SliceExpr::Arithmetic { operator, operands } => {
                 self.eval_arithmetic(*operator, operands)
             }
-            crate::flow_slice_content::SliceExpr::ElementAccess {
+            verter_session_query::flow::slice::SliceExpr::ElementAccess {
                 object,
                 index,
                 reference,
                 key,
             } => self.eval_element_access(object, index, reference.as_ref().zip(key.as_ref())),
-            crate::flow_slice_content::SliceExpr::Update { target, .. } => self.eval_update(target),
-            crate::flow_slice_content::SliceExpr::NonNull { operand } => {
+            verter_session_query::flow::slice::SliceExpr::Update { target, .. } => {
+                self.eval_update(target)
+            }
+            verter_session_query::flow::slice::SliceExpr::NonNull { operand } => {
                 self.eval_non_null(operand)
             }
-            crate::flow_slice_content::SliceExpr::MemberOf {
+            verter_session_query::flow::slice::SliceExpr::MemberOf {
                 object,
                 member,
                 span,
@@ -25190,13 +25298,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 Positional::Value(object) => self.finish_member_of(object, member, *span),
                 other => other,
             },
-            crate::flow_slice_content::SliceExpr::ParamValue { ordinal } => {
+            verter_session_query::flow::slice::SliceExpr::ParamValue { ordinal } => {
                 match self.params.get(*ordinal as usize).copied() {
                     Some(node) => Positional::Value(node),
                     None => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceExpr::Logical {
+            verter_session_query::flow::slice::SliceExpr::Logical {
                 operator,
                 left,
                 right,
@@ -25216,7 +25324,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 other => other,
             },
-            crate::flow_slice_content::SliceExpr::Not { operand, widen } => {
+            verter_session_query::flow::slice::SliceExpr::Not { operand, widen } => {
                 match self.eval_not(operand) {
                     Positional::Value(node) if *widen => {
                         Positional::Value(widen_literal_node(self.dispatch, node))
@@ -25224,7 +25332,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     other => other,
                 }
             }
-            crate::flow_slice_content::SliceExpr::Awaited { operand } => {
+            verter_session_query::flow::slice::SliceExpr::Awaited { operand } => {
                 match self.eval_expr(operand) {
                     Positional::Value(node) => {
                         match self.dispatch.awaited_normalize_for_flow(node) {
@@ -25236,7 +25344,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceExpr::Sequence {
+            verter_session_query::flow::slice::SliceExpr::Sequence {
                 before,
                 value,
                 after,
@@ -25254,7 +25362,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 outcome
             }
-            crate::flow_slice_content::SliceExpr::Gap(gap) => {
+            verter_session_query::flow::slice::SliceExpr::Gap(gap) => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
                 Positional::Unmodeled
             }
@@ -25266,7 +25374,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // RESOLVED — never free — so there is no honest value to
             // publish: fail closed with the typed no-value failure
             // rather than bind an unrelated same-named declaration.
-            crate::flow_slice_content::SliceExpr::UnmodeledBinding => Positional::Unmodeled,
+            verter_session_query::flow::slice::SliceExpr::UnmodeledBinding => Positional::Unmodeled,
             // A conditional expression's branch VALUES. Each arm was
             // lowered as a flow expression, so a call in a branch already
             // took the one call sink above — the union here only joins
@@ -25276,7 +25384,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // evaluates under the test's POSITIVE narrow, the alternate
             // under its NEGATED one — the same overlay the `if` twin
             // applies, arm-scoped.
-            crate::flow_slice_content::SliceExpr::Union { arms, guard } => {
+            verter_session_query::flow::slice::SliceExpr::Union { arms, guard } => {
                 if let [consequent, alternate] = &arms[..] {
                     if union_branches_change_reaching_values(arms) {
                         return self.eval_branching_union(consequent, alternate, guard);
@@ -25314,12 +25422,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // own binders and skipped its overload group entirely.
             // Publishing it is a warm-admissible wrong answer with a
             // FOREIGN binder in it, so the evaluation fails closed.
-            crate::flow_slice_content::SliceExpr::UnreducedCallValue => Positional::Unmodeled,
+            verter_session_query::flow::slice::SliceExpr::UnreducedCallValue => {
+                Positional::Unmodeled
+            }
             // Content the demand slice did not select: never lowered,
             // never evaluable. Reaching one is a planner/content mismatch
             // at THIS position — the marker, never a fabricated `any` and
             // never the enclosing structure.
-            crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
+            verter_session_query::flow::slice::SliceExpr::Elided => Positional::Unmodeled,
         }
     }
 
@@ -25336,7 +25446,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         mut current: SemanticNodeId,
         links: &[(Arc<str>, bool)],
         index: usize,
-        narrow_root: Option<&crate::flow_slice_content::SliceNarrowRoot>,
+        narrow_root: Option<&verter_session_query::flow::slice::SliceNarrowRoot>,
         stripped: &mut bool,
     ) -> OptionalLink {
         let (name, optional) = &links[index];
@@ -25351,7 +25461,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
         }
         if let Some(narrowed) = narrow_root.and_then(|root| {
-            self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
+            self.narrowed_read(&verter_session_query::flow::slice::SliceNarrowSubject {
                 root: root.clone(),
                 path: links[..=index]
                     .iter()
@@ -25374,7 +25484,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .or_else(|| self.project_path_navigate(read_base, std::slice::from_ref(name)))
         else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::UnmodeledExpression,
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             ));
             return OptionalLink::Unmodeled;
         };
@@ -25390,7 +25500,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             )
         {
             self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::UnmodeledExpression,
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             ));
             return OptionalLink::Unmodeled;
         }
@@ -25521,7 +25631,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn eval_frame_call_argument(
         &mut self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
     ) -> Option<SemanticNodeId> {
         // An argument that reads nothing of this frame is the indexed
         // program's own value, typed where the parameter's context (a
@@ -25529,7 +25639,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // except a branch join, whose arms the checker types each as its
         // own fresh literal (`c ? { a: 1 } : { a: 2 }` passes `{ a: number
         // }`), where the indexed program keeps the arms' member literals.
-        let branch_join = matches!(expr, crate::flow_slice_content::SliceExpr::Union { .. });
+        let branch_join = matches!(
+            expr,
+            verter_session_query::flow::slice::SliceExpr::Union { .. }
+        );
         if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
         {
             return None;
@@ -25557,10 +25670,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ([`FreshCallReturn`]).
     fn is_fresh_call_value(
         &self,
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
     ) -> bool {
-        let crate::flow_slice_content::SliceExpr::Call(_, site, _) = expr else {
+        let verter_session_query::flow::slice::SliceExpr::Call(_, site, _) = expr else {
             return false;
         };
         let graph = self.dispatch.graph();
@@ -25598,8 +25711,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
         {
             let name = self.products.identity(binding)?.name;
-            let subject = crate::flow_slice_content::SliceNarrowSubject {
-                root: crate::flow_slice_content::SliceNarrowRoot::Local {
+            let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+                root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                     name,
                     binding: binding.clone(),
                 },
@@ -25679,7 +25792,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn call_group_needs_executor(
         &self,
         node: SemanticNodeId,
-        site: crate::flow_slice_content::SliceCallSite,
+        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> bool {
         let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(node) else {
             return false;
@@ -25823,8 +25936,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn resolve_call_step(
         &mut self,
         callee: SemanticNodeId,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &crate::flow_slice_content::SliceCallArguments,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Option<Positional<super::call_resolve::ResolveCallStep>> {
         // The route types its arguments one at a time
         // ([`call_stack`]); a lowered one evaluates here.
@@ -25864,8 +25977,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn eval_call_via_resolve_call(
         &mut self,
         callee: SemanticNodeId,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &crate::flow_slice_content::SliceCallArguments,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Option<Positional<CallValue>> {
         if let Some(answer) = self.driven_call_route(callee, site, arguments) {
             return answer;
@@ -25880,7 +25993,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         step: Option<Positional<super::call_resolve::ResolveCallStep>>,
         callee: SemanticNodeId,
-        site: crate::flow_slice_content::SliceCallSite,
+        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> Option<Positional<CallValue>> {
         let step = match step {
             Some(Positional::Value(step)) => step,
@@ -26000,9 +26113,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// deposits nothing — its obligations stay unclaimed.
     fn eval_call(
         &mut self,
-        call: &crate::flow_slice_content::SliceCall,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &crate::flow_slice_content::SliceCallArguments,
+        call: &verter_session_query::flow::slice::SliceCall,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Positional<CallValue> {
         let mark = self.call_evidence_mark();
         let value = self.eval_call_value(call, site, arguments);
@@ -26020,13 +26133,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// leaves no way to say otherwise.
     fn eval_call_value(
         &mut self,
-        call: &crate::flow_slice_content::SliceCall,
-        site: crate::flow_slice_content::SliceCallSite,
-        arguments: &crate::flow_slice_content::SliceCallArguments,
+        call: &verter_session_query::flow::slice::SliceCall,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Positional<CallValue> {
         let graph = self.dispatch.graph();
         match call {
-            crate::flow_slice_content::SliceCall::Nested(function) => {
+            verter_session_query::flow::slice::SliceCall::Nested(function) => {
                 // An IIFE: the call's value is the nested function's
                 // evaluated return. The nested function's signature node
                 // carries its OWN clause — `(<T>(x: T): T => x)("a")`
@@ -26078,7 +26191,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     | SignatureCall::ClauseUnavailable => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceCall::Direct(target) => {
+            verter_session_query::flow::slice::SliceCall::Direct(target) => {
                 // An exact same-file direct call — a Flow obligation edge
                 // through the ONE key construction when the callee's return
                 // is body-derived, or its DECLARED carrier when the callee
@@ -26365,7 +26478,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     },
                 }
             }
-            crate::flow_slice_content::SliceCall::OnBinding {
+            verter_session_query::flow::slice::SliceCall::OnBinding {
                 binding,
                 param,
                 name: _,
@@ -26478,7 +26591,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                 }
             }
-            crate::flow_slice_content::SliceCall::LocalFunctionShadow => {
+            verter_session_query::flow::slice::SliceCall::LocalFunctionShadow => {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
                 // recovery of the nested declaration's own return is not
@@ -26486,7 +26599,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // outer callee's value, and never the enclosing frame.
                 Positional::Unmodeled
             }
-            crate::flow_slice_content::SliceCall::DirectSelf => {
+            verter_session_query::flow::slice::SliceCall::DirectSelf => {
                 // Only the frame that OWNS a flow slot can hold on it.
                 let Some(self_slot) = self.self_slot else {
                     return Positional::Unmodeled;
@@ -26505,7 +26618,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     FlowReturnStep::NoValue(_) => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceCall::OnHeritage {
+            verter_session_query::flow::slice::SliceCall::OnHeritage {
                 heritage,
                 member,
                 static_side,
@@ -26548,7 +26661,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 self.call_return_of_callee_node(callee, site)
             }
-            crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
+            verter_session_query::flow::slice::SliceCall::Symbolic(ty, binding) => {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -26627,7 +26740,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 self.call_return_of_callee_node(callee_node, site)
             }
-            crate::flow_slice_content::SliceCall::Member { receiver, member } => {
+            verter_session_query::flow::slice::SliceCall::Member { receiver, member } => {
                 // `this.m()`: the member of the receiver's value, called
                 // through the executor that reads its receiver-bound
                 // signatures, else the lone signature read.
@@ -26680,7 +26793,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 self.call_return_of_callee_node(callee_node, site)
             }
-            crate::flow_slice_content::SliceCall::OptionalChain {
+            verter_session_query::flow::slice::SliceCall::OptionalChain {
                 root,
                 links,
                 optional_call,
@@ -26707,18 +26820,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                 let narrow_root = match root.as_ref() {
-                    crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
-                        Some(crate::flow_slice_content::SliceNarrowRoot::Param {
+                    verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
+                        Some(verter_session_query::flow::slice::SliceNarrowRoot::Param {
                             ordinal: *ordinal,
                             binding: *binding,
                         })
                     }
-                    crate::flow_slice_content::SliceExpr::Local {
+                    verter_session_query::flow::slice::SliceExpr::Local {
                         binding,
                         name,
                         captured: false,
                         ..
-                    } => Some(crate::flow_slice_content::SliceNarrowRoot::Local {
+                    } => Some(verter_session_query::flow::slice::SliceNarrowRoot::Local {
                         name: Arc::clone(name),
                         binding: binding.clone(),
                     }),
@@ -26809,7 +26922,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 Positional::Value(CallValue::of_resolved_call(self.dispatch, current))
             }
-            crate::flow_slice_content::SliceCall::OnValue { object, member } => {
+            verter_session_query::flow::slice::SliceCall::OnValue { object, member } => {
                 // `new C().m()`, `b.m().m()`: the member of the value is
                 // the callee, resolved through the executor (the value its
                 // receiver) exactly like a frame-rooted member callee, else
@@ -26821,7 +26934,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 self.call_member_of_value(object, member, site, arguments)
             }
-            crate::flow_slice_content::SliceCall::OnElement { object, index } => {
+            verter_session_query::flow::slice::SliceCall::OnElement { object, index } => {
                 // `t[k]()`: the key is a binding read (a leaf, evaluated
                 // here), and its literal type names the member of the
                 // object the call resolves over, the object its receiver.
@@ -26849,7 +26962,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 self.call_member_of_value(object, &member, site, arguments)
             }
-            crate::flow_slice_content::SliceCall::Construct(constructor) => {
+            verter_session_query::flow::slice::SliceCall::Construct(constructor) => {
                 // `new C(…)` — the checker's `resolveNewExpression`: the
                 // constructor's construct signatures, from the shared
                 // signature list, resolved by the call executor exactly as
@@ -26865,7 +26978,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.eval_call_via_resolve_call(constructor, site, arguments)
                     .unwrap_or_else(|| self.degraded_unrepresentable_callee())
             }
-            crate::flow_slice_content::SliceCall::TaggedTemplate(tag) => {
+            verter_session_query::flow::slice::SliceCall::TaggedTemplate(tag) => {
                 // `` tag`a${x}b` `` — the checker's
                 // `resolveTaggedTemplateExpression`: a call of the tag whose
                 // first argument is the template strings. It takes the
@@ -27003,7 +27116,9 @@ mod plan_refusal_class_tests {
         // The contained causes: evidence-shaped, not faulting.
         assert_eq!(
             flow_partial_reason_class(
-                &FlowPartialReason::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                &FlowPartialReason::Gap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                ),
                 None
             ),
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
@@ -27078,9 +27193,12 @@ mod narrowing_ledger_tests {
         FlowProductSubject::Local(binding)
     }
 
-    fn authored(ordinal: u32, path: &[&str]) -> crate::flow_slice_content::SliceNarrowSubject {
-        crate::flow_slice_content::SliceNarrowSubject {
-            root: crate::flow_slice_content::SliceNarrowRoot::Local {
+    fn authored(
+        ordinal: u32,
+        path: &[&str],
+    ) -> verter_session_query::flow::slice::SliceNarrowSubject {
+        verter_session_query::flow::slice::SliceNarrowSubject {
+            root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                 name: Arc::from(format!("p{ordinal}")),
                 binding: param(ordinal),
             },

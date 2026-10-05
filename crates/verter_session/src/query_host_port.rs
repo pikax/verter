@@ -29,9 +29,9 @@ use verter_session_query::{
 };
 use verter_type_expr::locators::AuthoredBodyLocator;
 
-use crate::decl_body_memo::locator_deref::DerefedAuthoredBody;
-use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
 use crate::resolver_core::RequestBoundResolverContext;
+use verter_session_query::source::deref::DerefedAuthoredBody;
+use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 /// Host-backed adapter implementing the query layer's host port.
 ///

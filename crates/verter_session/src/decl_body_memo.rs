@@ -25,6 +25,7 @@
 //! backfills exactly those siblings' entries (the work was actually
 //! performed — path-independent population of only what the compute
 //! produced).
+use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -69,30 +70,18 @@ use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
 use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
-use crate::decl_lowering::{DeclLoweringService, SnapshotKey, SnapshotLease};
+use crate::decl_lowering::{DeclLoweringService, SnapshotLease};
 use crate::fact_emission::{RouteLens, ShallowLens};
 use crate::resolver_core::shallow_file_state::collect_typeof_roots;
 use crate::types::MetaProvenance;
+use verter_session_query::source::snapshot::SnapshotKey;
 
 pub(crate) mod locator_deref;
-pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 /// Dependency-neutral lowered declaration values are owned by
 /// `verter_session_query::resolution::lowered_decl`. This module re-exports
 /// them for the session-owned lazy-lowering machinery and its consumers.
 pub use verter_session_query::resolution::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
-
-/// Transient call lowering and the exact source origins used to evaluate its
-/// argument/receiver types. Value reads and authored type queries retain
-/// distinct roles from the same AST borrow as `call`; the memo retains neither
-/// this IR nor another body index.
-pub(crate) struct IndexedFlowCallExpression {
-    pub(crate) call: verter_type_expr::IndexedValueCall,
-    pub(crate) argument_roots:
-        Box<[verter_session_query::analysis::indexed_value::IndexedValueReadRoot]>,
-    pub(crate) receiver_root:
-        Option<verter_session_query::analysis::indexed_value::IndexedValueReadRoot>,
-}
 
 /// Lower one call, `new` or tagged template through `lower` while
 /// collecting the read root of each of its `argument_count` arguments and
@@ -528,7 +517,7 @@ impl IndexedExpressionDemand {
     pub(crate) fn function_type_param_clause(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
+    ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
         let service = self.snapshot.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
@@ -560,21 +549,21 @@ impl IndexedExpressionDemand {
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: crate::flow_slice_content::FlowSliceSelection,
+        selection: verter_session_query::flow::slice::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-        policy: crate::semantic_query::FlowReturnPolicy,
-    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
     }
 
     pub(crate) fn flow_slice_content_with_context(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: Option<crate::flow_slice_content::FlowSliceSelection>,
+        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-        context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
-        policy: crate::semantic_query::FlowReturnPolicy,
-    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         if bound.key().function != entry.key
             || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
             || context
@@ -602,7 +591,7 @@ impl IndexedExpressionDemand {
         let lowering_work = Arc::clone(&self.lowering_work);
         let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
             #[cfg(test)]
-            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
             #[cfg(test)]
             let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
             program.and_then(|p| {
@@ -642,8 +631,8 @@ impl IndexedExpressionDemand {
 
     pub(crate) fn flow_capture_authorities(
         &self,
-        locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
-    ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
+        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
         let service = self.snapshot.service.as_ref()?;
         let index = self.function_program_index();
         let snapshot = self.snapshot.key.clone();
@@ -653,7 +642,7 @@ impl IndexedExpressionDemand {
         self.snapshot.ensure_lease();
         service.run_leased(&self.snapshot.key, move |program| {
             #[cfg(test)]
-            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
             let program = program?;
             Some(
                 locators
@@ -1029,7 +1018,7 @@ impl DeclBodyMemo {
 
     /// The canonical id this memo's snapshot lowers (anchors route-fact
     /// recipe locators).
-    pub(crate) fn snapshot_identity(&self) -> crate::decl_lowering::SnapshotKey {
+    pub(crate) fn snapshot_identity(&self) -> verter_session_query::source::snapshot::SnapshotKey {
         self.key.clone()
     }
 
@@ -1609,10 +1598,10 @@ impl DeclBodyMemo {
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: crate::flow_slice_content::FlowSliceSelection,
+        selection: verter_session_query::flow::slice::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-        policy: crate::semantic_query::FlowReturnPolicy,
-    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
             .flow_slice_content(entry, selection, bound, policy)
     }
@@ -1621,11 +1610,11 @@ impl DeclBodyMemo {
     pub(crate) fn flow_slice_content_with_context(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: Option<crate::flow_slice_content::FlowSliceSelection>,
+        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-        context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
-        policy: crate::semantic_query::FlowReturnPolicy,
-    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
             .flow_slice_content_with_context(entry, selection, bound, context, policy)
     }
@@ -1635,8 +1624,8 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_capture_authorities(
         &self,
-        locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
-    ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
+        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
         self.indexed_expression_demand()
             .flow_capture_authorities(locators)
     }
@@ -1644,8 +1633,8 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_capture_authority(
         &self,
-        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
-    ) -> Option<Option<crate::flow_slice_content::SliceCaptureAuthority>> {
+        locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
+    ) -> Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>> {
         self.flow_capture_authorities(std::slice::from_ref(locator))?
             .pop()?
     }

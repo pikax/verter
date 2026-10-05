@@ -1,6 +1,6 @@
 //! Class-expression evaluation: the flow evaluator's composition of
 //! TypeScript's class rules over a lowered class body
-//! ([`crate::flow_slice_content::SliceClass`]), measured on 7.0.2 — and
+//! ([`verter_session_query::flow::slice::SliceClass`]), measured on 7.0.2 — and
 //! the late-bound computed-key rule a class side shares with an object
 //! literal (an open-typed key feeds its side's implicit index signature).
 
@@ -10,9 +10,11 @@ use super::{
     signature_answer_is_frame_shadowed, FlowBinderEnv, FlowDemandDriver, FlowEvaluator,
     FlowProductSubject, Positional,
 };
-use crate::flow_slice_content::{SliceClass, SliceClassMemberValue, SliceExpr, SliceObjectKey};
 use crate::semantic_query::{
     AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
+};
+use verter_session_query::flow::slice::{
+    SliceClass, SliceClassMemberValue, SliceExpr, SliceObjectKey,
 };
 
 /// The instance a class expression's members run against while the class
@@ -716,7 +718,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn record_receiver_member(
         &self,
         receiver: &ClassReceiver,
-        member: &crate::flow_slice_content::SliceClassMember,
+        member: &verter_session_query::flow::slice::SliceClassMember,
         value: SemanticNodeId,
     ) {
         let SliceObjectKey::Static(name) = &member.key else {
@@ -746,7 +748,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn lower_gated_in(
         &mut self,
         env: &FlowBinderEnv,
-        gated: &crate::flow_slice_content::GatedType,
+        gated: &verter_session_query::flow::slice::GatedType,
     ) -> SemanticNodeId {
         if signature_answer_is_frame_shadowed(self.dispatch, env, gated) {
             return self.unmodeled_position();
@@ -760,10 +762,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// member, the constructor `typeof C` in a static one.
     pub(super) fn eval_this(
         &mut self,
-        this: &crate::flow_slice_content::SliceThis,
+        this: &verter_session_query::flow::slice::SliceThis,
     ) -> Positional<SemanticNodeId> {
         match this {
-            crate::flow_slice_content::SliceThis::Instance {
+            verter_session_query::flow::slice::SliceThis::Instance {
                 class,
                 type_parameters,
             } => {
@@ -782,12 +784,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(instance),
                 ))
             }
-            crate::flow_slice_content::SliceThis::Untyped => Positional::Value(
+            verter_session_query::flow::slice::SliceThis::Untyped => Positional::Value(
                 self.dispatch
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
-            crate::flow_slice_content::SliceThis::Receiver => match &self.receiver {
+            verter_session_query::flow::slice::SliceThis::Receiver => match &self.receiver {
                 Some(receiver) => Positional::Value(receiver.binder),
                 None => {
                     self.record_degradation(
@@ -796,8 +798,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Positional::Unmodeled
                 }
             },
-            crate::flow_slice_content::SliceThis::Static { class: value, .. }
-            | crate::flow_slice_content::SliceThis::Value { value, .. } => {
+            verter_session_query::flow::slice::SliceThis::Static { class: value, .. }
+            | verter_session_query::flow::slice::SliceThis::Value { value, .. } => {
                 // The deferred `typeof C` / `typeof value` carrier: the
                 // value is read where a consumer demands it, never while its
                 // own member's return is still being evaluated.

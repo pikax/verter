@@ -10,10 +10,11 @@ use std::sync::Arc;
 use super::{
     FlowDemandDriver, FlowEvaluator, FlowProductSubject, GuardNarrowing, LiteralComparison,
 };
-use crate::flow_slice_content::{
+use crate::semantic_query::{FlowReturnDegradation, SemanticNodeData, SemanticNodeId};
+use verter_session_query::flow::policy::FlowGap;
+use verter_session_query::flow::slice::{
     SliceGuard, SliceNarrowRoot, SliceNarrowSubject, SlicePattern, SlicePatternKey,
 };
-use crate::semantic_query::{FlowGap, FlowReturnDegradation, SemanticNodeData, SemanticNodeId};
 
 /// One correlated pattern: the pseudo-reference the checker narrows (the
 /// pattern itself) and the elements that read their members of it.
@@ -412,7 +413,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }
             SliceGuard::EqReference { subject, value, .. } => {
                 self.degrade_discriminant_test(subject);
-                if let crate::flow_slice_content::SliceEqOther::Reference(reference) = value {
+                if let verter_session_query::flow::slice::SliceEqOther::Reference(reference) = value
+                {
                     self.degrade_discriminant_test(reference);
                 }
                 return;

@@ -93,10 +93,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::absorb::SpecialKind;
 use crate::semantic_query::checker_policy;
 use crate::semantic_query::{
-    authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, NullabilityPolicy,
-    PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
+    authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, PrimitiveKind,
+    SemanticNodeData, SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
 };
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
+use verter_session_query::flow::policy::NullabilityPolicy;
 
 #[cfg(test)]
 mod literal_provenance_tests {
@@ -118,7 +119,7 @@ mod literal_provenance_tests {
         let result = intern_ordered_union(
             &graph,
             &members,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
         assert!(!result.evidence.incomplete);
         let data = graph.node_data(result.node).unwrap();
@@ -176,7 +177,7 @@ mod literal_provenance_tests {
             let result = intern_ordered_union(
                 &graph,
                 &[left, right],
-                crate::semantic_query::NullabilityPolicy::Strict,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
             )
             .node;
             let (membership, evidence) = inspect_literal_provenance(
@@ -202,13 +203,13 @@ mod literal_provenance_tests {
         let root = intern_ordered_union(
             &graph,
             &[c, b, a],
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
         .node;
         let partial = intern_ordered_union(
             &graph,
             &[c, a],
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
         .node;
         let members = [partial; 32];
@@ -282,7 +283,7 @@ mod literal_provenance_tests {
         let root = intern_ordered_union(
             &graph,
             &[string, bigint],
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
         .node;
         let partial = [string];

@@ -10818,7 +10818,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
             members: Arc::from(projected.into_boxed_slice()),
-            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
         match norm.value {
             QueryResult::Value(id) => {
@@ -12131,7 +12131,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 let united = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(mapped.into_boxed_slice()),
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 });
                 match united.value {
                     QueryResult::Value(node) => {
@@ -12425,7 +12425,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 self.intern_normalized_union(
                     &arms,
-                    crate::semantic_query::NullabilityPolicy::Erased,
+                    verter_session_query::flow::policy::NullabilityPolicy::Erased,
                 )
             });
         }
@@ -14084,7 +14084,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_reduce_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute!(ReduceUnion);
         self.build_normalize_composite(
@@ -14231,7 +14231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect();
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(mapped.into_boxed_slice()),
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
@@ -16075,7 +16075,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => {
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(members.into_boxed_slice()),
-                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
@@ -16315,7 +16315,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // matches).
                 let reduced = self.intern_normalized_union(
                     &members,
-                    crate::semantic_query::NullabilityPolicy::Strict,
+                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 );
                 let members: Arc<[SemanticNodeId]> = match graph.node_data(reduced).as_deref() {
                     Some(SemanticNodeData::Union(reduced)) => reduced.members_arc(),
@@ -16726,7 +16726,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let distributed = super::canonical_algebra::distribute_over_unions(
             self.graph(),
             arms,
-            crate::semantic_query::NullabilityPolicy::Strict,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
             super::canonical_algebra::DistributionOrigin::Distributed,
             &mut evidence,
         );
@@ -16740,7 +16740,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         is_union: bool,
     ) -> SemanticNodeId {
         if is_union {
-            self.intern_normalized_union(members, crate::semantic_query::NullabilityPolicy::Strict)
+            self.intern_normalized_union(
+                members,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            )
         } else {
             match self
                 .execute_read(
@@ -16767,13 +16770,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The canonical union of `members` under `nullability` — the union
     /// half of [`Self::intern_normalized_union_or_intersection`] with the
     /// `null` / `undefined` algebra stated by the caller. Under
-    /// [`NullabilityPolicy::Erased`](crate::semantic_query::NullabilityPolicy::Erased)
+    /// [`NullabilityPolicy::Erased`](verter_session_query::flow::policy::NullabilityPolicy::Erased)
     /// the result carries no `null` / `undefined` member beside any other
     /// member, and its canonical stamp records the erased algebra.
     pub(super) fn intern_normalized_union(
         &self,
         members: &[SemanticNodeId],
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         let composite =
             super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);

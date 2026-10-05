@@ -35,7 +35,7 @@ use super::*;
 /// read from.
 pub(super) struct NestedDemand {
     pub(super) function: verter_session_query::function_program::FunctionProgramKey,
-    pub(super) context: Arc<crate::flow_slice_content::NestedFlowContext>,
+    pub(super) context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
     pub(super) has_declared_return: bool,
     pub(super) extended_captures: Arc<[SkeletonBindingId]>,
     pub(super) declared_evolving_captures:
@@ -51,10 +51,10 @@ impl NestedDemand {
     /// The demand of `expr` when it is a nested function value, and the
     /// flow gap its lowering recorded.
     pub(super) fn of(
-        expr: &crate::flow_slice_content::SliceExpr,
+        expr: &verter_session_query::flow::slice::SliceExpr,
         contextual: Option<ContextualSignature>,
-    ) -> Option<(Self, Option<crate::semantic_query::FlowGap>)> {
-        let crate::flow_slice_content::SliceExpr::NestedFunctionValue {
+    ) -> Option<(Self, Option<verter_session_query::flow::policy::FlowGap>)> {
+        let verter_session_query::flow::slice::SliceExpr::NestedFunctionValue {
             function,
             context,
             has_declared_return,
@@ -130,7 +130,7 @@ impl ResolvingFunctions {
 
 /// What a nested function's own evaluator borrows, owned by the drive.
 pub(super) struct NestedOwned {
-    content: Arc<crate::flow_slice_content::SliceContent>,
+    content: Arc<verter_session_query::flow::slice::SliceContent>,
     params: Vec<SemanticNodeId>,
     binder_env: FlowBinderEnv,
 }
@@ -274,7 +274,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// statements reach from the stack (see the module docs).
     pub(super) fn eval_region(
         &mut self,
-        region: &crate::flow_slice_content::SliceRegion,
+        region: &verter_session_query::flow::slice::SliceRegion,
     ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
         let store = NestedStore::new();
         let run = self.start_region_run(region);
@@ -449,7 +449,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 )?;
                 Some((
                     planned,
-                    crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered),
+                    verter_session_query::flow::slice::FlowSliceSelection::from_slice_ir(&lowered),
                 ))
             };
             let content = site.source_demand.flow_slice_content_with_context(
@@ -616,7 +616,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // against the receiver the class binds.
             receiver: matches!(
                 capture_context.this(),
-                Some(crate::flow_slice_content::SliceThis::Receiver)
+                Some(verter_session_query::flow::slice::SliceThis::Receiver)
             )
             .then(|| self.receiver.clone())
             .flatten(),
@@ -748,7 +748,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         Ok(evidence)
                     } else {
                         Err(FlowProductFailure::Gap(
-                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                            verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
                         ))
                     }
                 });

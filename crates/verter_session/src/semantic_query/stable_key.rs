@@ -12,12 +12,13 @@ use rustc_hash::FxHashMap;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, FunctionParam, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy,
-    OptionalityMod, PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId,
-    SemanticNodeData, SemanticNodeId, SignatureKind, SignatureNodeOccurrence,
-    SignatureReturnCarrier, SurfaceEntry, SurfaceMember, TypeParamDecl,
+    AuthoredPropertyKey, FunctionParam, LiteralValue, MapperKind, NodeScopeId, OptionalityMod,
+    PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
+    SemanticNodeId, SignatureKind, SignatureNodeOccurrence, SignatureReturnCarrier, SurfaceEntry,
+    SurfaceMember, TypeParamDecl,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
+use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_expr::facts::{
     FlowFunctionReturnIdentity, FunctionPartIdentity, FunctionReturnSource, ValueDeclIdentityPart,
 };

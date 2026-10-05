@@ -36,18 +36,18 @@ use verter_session::for_tests::{
 };
 use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
 use verter_session::semantic_query::{
-    CanonicalTypeSubstitution, ContextualTypingKey, FlowFunctionSlotIdentity, FlowGap,
-    FlowInputContext, FlowNarrowingKey, FlowReturnContext, FlowReturnKey, FlowReturnPolicy,
-    FlowReturnResult, NullabilityPolicy, PathSegment, PrimitiveKind, ProgramAnalysisContext,
-    ProgramPointId, PropertyKey, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
-    SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace,
-    SubstitutionCanonicalHash,
+    CanonicalTypeSubstitution, ContextualTypingKey, FlowFunctionSlotIdentity, FlowInputContext,
+    FlowNarrowingKey, FlowReturnContext, FlowReturnKey, FlowReturnResult, PathSegment,
+    PrimitiveKind, ProgramAnalysisContext, ProgramPointId, PropertyKey, ResolvedDeclSlotIdentity,
+    ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag,
+    SemanticSymbolSpace, SubstitutionCanonicalHash,
 };
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::flow::flow_graph::FlowEdgeClass;
 use verter_session_query::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
 };
+use verter_session_query::flow::policy::{FlowGap, FlowReturnPolicy, NullabilityPolicy};
 
 /// The fixture body: one parameter, one local, one object-literal return
 /// with a call entry, so the demand plan exercises binding-slot, return-site,
@@ -1694,7 +1694,7 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
         let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
-            nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         }
     };
     // The pending typed-gap roots.

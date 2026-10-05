@@ -34,13 +34,14 @@ mod tests {
     use super::*;
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, PrimitiveKind,
-        ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
+        FlowReturnKey, PrimitiveKind, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+        SemanticNodeData, SemanticQueryKey,
     };
     use std::sync::Arc;
     use verter_session_query::flow::flow_graph::FlowNodeKind;
     use verter_session_query::flow::hashing::compute_flow_slice_hash;
     use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
     fn fixture(
         source: &str,
@@ -880,7 +881,7 @@ impl FlowFrameProducts {
         let key = FlowWriteSubject(identity.defining_function, identity.binding_slot);
         let Some(sequence) = frame.write_sequence.checked_add(1) else {
             frame.failure = Some(FlowProductFailure::Gap(
-                crate::semantic_query::FlowGap::UnmodeledExpression,
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             ));
             return None;
         };

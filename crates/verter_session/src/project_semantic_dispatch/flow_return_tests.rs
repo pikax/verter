@@ -5477,7 +5477,7 @@ pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_
                 assert_eq!(
                     degradation,
                     Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        crate::semantic_query::FlowGap::AbruptCompletion
+                        verter_session_query::flow::policy::FlowGap::AbruptCompletion
                     )),
                     "an undecided destination fails closed: {suffix}"
                 );
@@ -6140,7 +6140,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
                 ));
         let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
-            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
 
         // The pending typed-gap roots: a typed refusal, never a graph or
@@ -6203,7 +6203,8 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
 #[test]
 fn pending_flow_roots_surface_their_operation_specific_gap() {
     use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
-    use crate::semantic_query::{FlowGap, PartialReasonSet};
+    use crate::semantic_query::PartialReasonSet;
+    use verter_session_query::flow::policy::FlowGap;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -6623,7 +6624,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let raw_member = crate::semantic_query::FlowReturnResult::new(
             graph,
             binder,
-            crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
             None,
         );
         let step = dispatch.flow_frame_close_with_evidence_for_tests(
@@ -6644,7 +6645,9 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
                 crate::semantic_query::FlowReturnResult::new(
                     graph,
                     number,
-                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                    verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
+                        false,
+                    ),
                     None,
                 ),
             ),
@@ -6985,7 +6988,7 @@ fn assert_control_callee_gaps_unwarmed(
     assert_eq!(
         result.degradation(),
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         )),
         "{name}: the control test degrades to the typed guard-narrowing gap"
     );
@@ -7077,7 +7080,7 @@ fn assert_class_evaluation_write_gaps_unwarmed(
     assert_eq!(
         result.degradation(),
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         )),
         "{name}: the unmodelled write degrades to the typed guard-narrowing gap"
     );
@@ -7490,7 +7493,7 @@ function f(x: A | B, A: typeof B) {
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "the shadowed constructor test degrades to the typed guard-narrowing gap"
         );
@@ -7671,7 +7674,7 @@ function typeofFunction(x: object) {
             assert_eq!(
                 result.degradation(),
                 Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
                 )),
                 "`{function}` keeps the typed guard gap when `{global}` is unavailable"
             );
@@ -8066,7 +8069,7 @@ function f(x: Base) { if (x instanceof KSub) return x; return 0; }
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "an unreadable heritage hop leaves the typed guard-narrowing gap"
         );
@@ -8232,7 +8235,7 @@ function f(x: Derived | string) { if (x instanceof K) return x; return 0; }
             assert_eq!(
                 result.degradation(),
                 Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
                 )),
                 "{what} leaves the typed guard-narrowing gap"
             );
@@ -8279,7 +8282,7 @@ fn assert_instanceof_class_arms_gap_unwarmed(
     assert_eq!(
         result.degradation(),
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         )),
         "{name}: the constructor test degrades to the typed guard-narrowing gap"
     );
@@ -8389,7 +8392,7 @@ function inherited(x: C | B) {
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "inherited: the constructor test degrades to the typed guard-narrowing gap"
         );
@@ -8480,7 +8483,7 @@ function f(x: string | number) {
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "f: the wrapped discarded assertion degrades to the typed guard-narrowing gap"
         );
@@ -8545,7 +8548,7 @@ function f(x: string | number) {
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "f: the heritage discarded assertion degrades to the typed guard-narrowing gap"
         );
@@ -8624,7 +8627,7 @@ fn assert_object_read_gaps_unwarmed(
     assert_eq!(
         result.degradation(),
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         )),
         "{name}: the unprovable call degrades to the typed guard-narrowing gap"
     );
@@ -9144,7 +9147,7 @@ function f(x: "a" | "b" | "c") {
         assert_eq!(
             result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
             )),
             "the uncarried dispatch relation degrades to the typed guard-narrowing gap"
         );
@@ -9516,7 +9519,9 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
                 crate::semantic_query::FlowReturnResult::new(
                     graph,
                     number,
-                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                    verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
+                        false,
+                    ),
                     None,
                 ),
             ),
@@ -10230,7 +10235,7 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         let result = crate::semantic_query::FlowReturnResult::new(
             graph,
             number,
-            crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
             None,
         );
         let verdict = dispatch.finalize_flow_demand(
@@ -11451,7 +11456,7 @@ fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warm
     assert_eq!(
         degradation,
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::NominalRelation
+            verter_session_query::flow::policy::FlowGap::NominalRelation
         )),
         "an undecided arm pair records the typed relation gap"
     );
@@ -11666,7 +11671,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
             super::canonical_algebra::reduced_authored_intersection(
                 graph,
                 written,
-                crate::semantic_query::NullabilityPolicy::Strict,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
             ),
             None,
             "a written `string & {{}}` keeps both constituents"

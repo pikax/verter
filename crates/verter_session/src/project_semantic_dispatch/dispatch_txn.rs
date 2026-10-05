@@ -1214,7 +1214,8 @@ pub(crate) mod flow_obligation_state {
         FlowConvergencePolicy, FlowDemandBasis, FlowDemandPlan, FlowDemandSubject,
         FlowExpansionRule, FlowFactFamily, FlowFailure, FlowOperationRole, FlowRequirement,
     };
-    use crate::semantic_query::{FlowGap, FlowReturnResult, SemanticQueryKeyTag};
+    use crate::semantic_query::{FlowReturnResult, SemanticQueryKeyTag};
+    use verter_session_query::flow::policy::FlowGap;
 
     /// The plan-local identity of one flow-solve obligation (work order).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

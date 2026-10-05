@@ -218,8 +218,8 @@ fn flow_return_key() -> FlowReturnKey {
             project_identity: crate::semantic_query::HashValue::default(),
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy {
-                nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            policy: verter_session_query::flow::policy::FlowReturnPolicy {
+                nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 no_implicit_any: true,
                 use_unknown_in_catch_variables: true,
                 no_implicit_this: true,
@@ -798,8 +798,8 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             project_identity: crate::semantic_query::HashValue::default(),
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy {
-                nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            policy: verter_session_query::flow::policy::FlowReturnPolicy {
+                nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 no_implicit_any: true,
                 use_unknown_in_catch_variables: true,
                 no_implicit_this: true,
@@ -1025,9 +1025,9 @@ fn flow_demand_carriers_default_none_and_round_trip() {
     };
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, ReturnProjectionDemand,
-        SemanticQueryKey,
+        FlowReturnKey, ReturnProjectionDemand, SemanticQueryKey,
     };
+    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
     let fixture = flow_graph_fixture_for_tests("function carry_me(x) { return x; }\n", 31);
     let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
@@ -1142,9 +1142,9 @@ fn zero_obligation_demand_never_converges_or_seals() {
     };
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, ReturnProjectionDemand,
-        SemanticQueryKey,
+        FlowReturnKey, ReturnProjectionDemand, SemanticQueryKey,
     };
+    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
     let fixture = flow_graph_fixture_for_tests("function seal_me(x) { return x; }\n", 33);
     let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
@@ -1218,7 +1218,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
     let value = crate::semantic_query::FlowReturnResult::new(
         &graph,
         number,
-        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
         None,
     );
     assert!(

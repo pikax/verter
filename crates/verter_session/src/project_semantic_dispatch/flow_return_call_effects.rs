@@ -1,13 +1,13 @@
 //! The effects signature of a statement call the content half could not
-//! settle alone ([`crate::flow_slice_content::SliceStatement::CallEffect`]).
+//! settle alone ([`verter_session_query::flow::slice::SliceStatement::CallEffect`]).
 
 use super::{FlowCallEvidence, FlowDemandDriver, FlowEvaluator, Positional};
-use crate::flow_slice_content::{
-    SliceCallArguments, SliceCallSite, SliceEffectCallee, SliceNarrowSubject,
-};
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, PrimitiveKind, SemanticNodeData, SemanticNodeId,
-    SignatureReturnCarrier,
+    FlowReturnDegradation, PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureReturnCarrier,
+};
+use verter_session_query::flow::policy::FlowGap;
+use verter_session_query::flow::slice::{
+    SliceCallArguments, SliceCallSite, SliceEffectCallee, SliceNarrowSubject,
 };
 
 /// What one call signature of an effects callee says about the path.

@@ -2700,8 +2700,8 @@ pub(super) fn deref_slot_body(
         &serve.indexed.shallow_state,
         &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
     ) {
-        Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
-            shape: crate::decl_body_memo::DerefedBodyShape::Single(expr),
+        Ok(verter_session_query::source::deref::DerefedAuthoredBody {
+            shape: verter_session_query::source::deref::DerefedBodyShape::Single(expr),
             ..
         }) => Some(expr),
         // ONLY a broken decl-body lease pin marks non-cacheability: a
@@ -2710,7 +2710,7 @@ pub(super) fn deref_slot_body(
         // later live-lease demand recomputes. Every other error variant
         // (`UnknownSymbol`, canonical mismatch, path/annotation absence) is a
         // DETERMINISTIC refusal — cacheable, never marked.
-        Err(crate::decl_body_memo::locator_deref::LocatorBodyDerefError::LeaseMiss) => {
+        Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss) => {
             crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                 crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
             );

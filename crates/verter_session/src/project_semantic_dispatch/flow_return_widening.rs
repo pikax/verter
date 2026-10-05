@@ -22,9 +22,10 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    AuthoredPropertyKey, NullabilityPolicy, PrimitiveKind, SemanticNodeData, SemanticNodeId,
-    SurfaceMember, SurfaceView,
+    AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    SurfaceView,
 };
+use verter_session_query::flow::policy::NullabilityPolicy;
 
 use super::ProjectSemanticDispatch;
 

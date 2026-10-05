@@ -728,7 +728,7 @@ impl VerterHost {
         // below stays instance-isolated, so overlay body results never
         // populate a base read. The cold job builds only INDEX
         // products; zero declaration bodies lower here.
-        let snapshot_key = crate::decl_lowering::SnapshotKey {
+        let snapshot_key = verter_session_query::source::snapshot::SnapshotKey {
             canonical: Arc::from(analysis_canonical_id),
             whole_hash,
             parse_env_hash: flight_parse_env_hash,

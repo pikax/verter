@@ -42,11 +42,11 @@ use std::sync::Arc;
 
 use super::*;
 use crate::semantic_query::{
-    FlowGap, FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput,
-    SemanticQueryValue,
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::flow::policy::FlowGap;
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{
     CompilerIntrinsicTypeOp, LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue,

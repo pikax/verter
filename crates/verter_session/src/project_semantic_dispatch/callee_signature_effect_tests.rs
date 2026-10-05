@@ -134,7 +134,7 @@ fn an_imported_function_callee_keeps_the_typed_gap() {
     assert_eq!(
         degradation_in(project(), FIXTURE, "i5"),
         Ok(Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         ))),
         "i5"
     );

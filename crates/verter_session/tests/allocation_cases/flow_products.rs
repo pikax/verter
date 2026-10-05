@@ -4,9 +4,10 @@ use verter_identity::identity::InputBasisId;
 use verter_session::for_tests::*;
 use verter_session::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, PrimitiveKind, ResolvedDeclSlotIdentity,
-    ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
+    FlowReturnKey, PrimitiveKind, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+    SemanticNodeData, SemanticQueryKey,
 };
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
 struct Basis(u8);
 impl CanonicalEncode for Basis {

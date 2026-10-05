@@ -335,7 +335,7 @@ pub(super) enum FamilyKey {
         members: Arc<[SemanticNodeId]>,
         /// The union algebra is family identity: a strict-null reduction
         /// and an erased one over the same members are different answers.
-        nullability: crate::semantic_query::NullabilityPolicy,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     },
     ReduceIntersection {
         input: crate::semantic_query::IntersectionInputRef,

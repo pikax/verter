@@ -5935,7 +5935,7 @@ fn flow_return_sequence_call_context_value_surfaces() {
     assert_eq!(
         discarded.degradation,
         Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::GuardNarrowing
+            verter_session_query::flow::policy::FlowGap::GuardNarrowing
         )),
         "tnAmbSeqDiscard: the discarded unprovable call degrades to the typed gap"
     );

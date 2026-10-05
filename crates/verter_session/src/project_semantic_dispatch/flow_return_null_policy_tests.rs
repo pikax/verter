@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowReturnStep, LiteralValue, NullabilityPolicy, PrimitiveKind, QueryResult,
-    ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    FlowReturnStep, LiteralValue, PrimitiveKind, QueryResult, ReturnProjectionDemand,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_session_query::flow::policy::NullabilityPolicy;
 
 const STRICT_ROOT: &str = "/strict";
 const LOOSE_ROOT: &str = "/loose";
@@ -792,7 +793,7 @@ fn canonical_stamp_is_scoped_to_its_null_algebra() {
     let result = crate::semantic_query::FlowReturnResult::new(
         graph,
         strict_with_null,
-        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
         None,
     );
     let sealed_strict =

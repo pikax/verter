@@ -710,9 +710,7 @@
           "build_toolchain_fingerprint",
           "cache_runtime",
           "decl_body_memo",
-          "flow_completion_inventory",
           "flow_return_audit",
-          "flow_slice_content",
           "graph_walk",
           "project_semantic_dispatch",
           "request_context",
@@ -1347,7 +1345,7 @@
           "oxc_syntax",
           "rustc_hash"
         ],
-        "crateInternal": ["decl_lowering", "flow_completion_inventory", "semantic_query"],
+        "crateInternal": ["semantic_query"],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
@@ -1372,10 +1370,10 @@
         },
         {
           "state": "owned slice content IR (SliceContent and friends)",
-          "owner": "flow_slice_content.rs",
+          "owner": "flow/slice.rs",
           "lifetime": "content-version",
-          "evidence": "arena-free owned typed IR lowered from exactly the slice-selected expression content",
-          "soleOwner": "crates/verter_session/src/flow_slice_content.rs"
+          "evidence": "arena-free owned typed IR lowered from exactly the slice-selected expression content; the IR types live in the parser-free boundary crate and flow_slice_content.rs lowers into them",
+          "soleOwner": "crates/verter_session_query/src/flow/slice.rs"
         }
       ],
       "minimalPublicSurface": {
@@ -1386,13 +1384,19 @@
       },
       "cohesiveModules": [
         {
-          "module": "crates/verter_session/src/flow_slice_content.rs",
+          "module": "crates/verter_session_query/src/flow/slice.rs",
           "responsibility": "flow slice content projection",
           "stateOwnership": [
             {
               "state": "owned slice content IR (SliceContent and friends)",
               "mode": "sole"
-            },
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/flow_slice_content.rs",
+          "responsibility": "flow slice content projection",
+          "stateOwnership": [
             {
               "state": "retained parse-snapshot lease",
               "mode": "readonly"

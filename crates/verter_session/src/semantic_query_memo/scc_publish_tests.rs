@@ -15,10 +15,10 @@
 use super::*;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, FlowReturnResult, NullabilityPolicy, PrimitiveKind,
-    RelateMemoKey, RelationContext, RelationOutcome, ResolvedDeclSlotIdentity,
-    ReturnProjectionDemand, SemanticNodeData,
+    FlowReturnKey, FlowReturnResult, PrimitiveKind, RelateMemoKey, RelationContext,
+    RelationOutcome, ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData,
 };
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 use verter_session_query::retention::{
     ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
 };
@@ -177,7 +177,7 @@ fn pending_flow_members(
             let value = FlowReturnResult::new(
                 store,
                 return_type,
-                crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
                 None,
             );
             PendingFlowReturnMember {
@@ -659,7 +659,9 @@ fn run_exact_fit_pressure_batch(
                 SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
                     &store,
                     return_type,
-                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                    verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
+                        false,
+                    ),
                     None,
                 ))),
                 flow_whole_return_projection(),
@@ -974,7 +976,7 @@ fn flow_scc_publish_accepts_proof_tokens_only() {
     let degraded = FlowReturnResult::new(
         &store,
         degraded_node,
-        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
         Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
     );
     assert!(

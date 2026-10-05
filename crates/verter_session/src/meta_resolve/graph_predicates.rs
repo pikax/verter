@@ -60,7 +60,7 @@ pub(crate) fn build_keys_union_node(
     let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         graph,
         &key_ids,
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
     verter_debug_assert::verter_debug_assert!(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,

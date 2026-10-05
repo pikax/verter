@@ -599,8 +599,8 @@ pub trait OwnedLowering {
         source: &ShallowInputRecord,
         locator: &verter_type_expr::locators::AuthoredBodyLocator,
     ) -> Result<
-        crate::decl_body_memo::locator_deref::DerefedAuthoredBody,
-        crate::decl_body_memo::LocatorBodyDerefError,
+        verter_session_query::source::deref::DerefedAuthoredBody,
+        verter_session_query::source::deref::LocatorBodyDerefError,
     >;
 
     fn prepared_type_from_input(
@@ -705,7 +705,10 @@ pub trait OwnedLowering {
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
         locator: &verter_type_expr::locators::TypeArgLocator,
-    ) -> Result<verter_type_expr::TypeExpr, crate::decl_body_memo::LocatorBodyDerefError>;
+    ) -> Result<
+        verter_type_expr::TypeExpr,
+        verter_session_query::source::deref::LocatorBodyDerefError,
+    >;
 
     fn lower_authored_body(
         &self,
