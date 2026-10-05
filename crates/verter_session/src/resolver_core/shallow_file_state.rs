@@ -59,6 +59,24 @@ pub struct ShallowFileState {
     input_projection: InputProjectionCell,
 }
 
+/// Presence lookups into the process-wide Svelte rune ambient inventory.
+/// The inventory is built lazily by its owner on first lookup; a shallow
+/// record of a rune module carries these so header-presence probes consult
+/// the same inventory without naming its owner.
+#[derive(Clone, Copy)]
+pub struct RuneAmbientLookup {
+    /// Whether the inventory declares a VALUE symbol of this name.
+    pub has_value: fn(&str) -> bool,
+    /// Whether the inventory declares a TYPE symbol of this name.
+    pub has_type: fn(&str) -> bool,
+}
+
+impl std::fmt::Debug for RuneAmbientLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RuneAmbientLookup")
+    }
+}
+
 /// Immutable syntax and routing facts. Contains no lowering service or cache
 /// capable of requesting source work.
 #[derive(Debug, Clone)]
@@ -77,7 +95,9 @@ pub struct ShallowInputRecord {
     pub(crate) owners: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     synthesised_value_symbols: FxHashMap<DeclBindingKey, Arc<ShallowValueSymbol>>,
     export_assignment: Option<String>,
-    rune_ambient_visible: bool,
+    /// The rune ambient inventory's presence lookups for a Svelte rune
+    /// module; `None` for every other file.
+    rune_ambient: Option<RuneAmbientLookup>,
 }
 
 #[derive(Debug, Default)]
@@ -928,7 +948,9 @@ impl ShallowFileState {
                 observation_id: 0,
                 headers: Arc::clone(decl_bodies.header_index()),
                 owners: Arc::clone(decl_bodies.owner_table()),
-                rune_ambient_visible: decl_bodies.rune_ambient_visible(),
+                rune_ambient: decl_bodies
+                    .rune_ambient_visible()
+                    .then_some(crate::host_resolve::RUNE_AMBIENT_LOOKUP),
                 synthesised_value_symbols: FxHashMap::default(),
             },
             decl_bodies,
@@ -2439,8 +2461,9 @@ impl ShallowInputRecord {
             return true;
         }
         owner == TopLevelOwnerId::ordinary_file()
-            && self.rune_ambient_visible
-            && crate::host_resolve::rune_ambient_has_value(name)
+            && self
+                .rune_ambient
+                .is_some_and(|lookup| (lookup.has_value)(name))
     }
 
     /// TYPE-symbol PRESENCE under the centralized effective lookup.
@@ -2457,8 +2480,9 @@ impl ShallowInputRecord {
             return true;
         }
         owner == TopLevelOwnerId::ordinary_file()
-            && self.rune_ambient_visible
-            && crate::host_resolve::rune_ambient_has_type(name)
+            && self
+                .rune_ambient
+                .is_some_and(|lookup| (lookup.has_type)(name))
     }
 
     /// The ambient block whose value `(owner, name)` the file's identity

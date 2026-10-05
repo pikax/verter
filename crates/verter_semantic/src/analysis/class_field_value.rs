@@ -49,49 +49,73 @@ pub struct ClassFieldValues {
 }
 
 impl ClassFieldValues {
-    /// Classify `prop`, a field of `class`, and record the answer.
-    pub fn classify(
-        &mut self,
-        class: &Class<'_>,
-        prop: &PropertyDefinition<'_>,
-        source: &str,
-    ) -> Option<ClassFieldValueSource> {
-        self.classes.insert(class.span.start);
-        let classified = classify_field(prop, source);
-        if let (Some(kind), Some(value)) = (classified, prop.value.as_ref()) {
-            self.fields.insert(value.span().start, kind);
-        }
-        classified
+    /// Record that the class starting at `class_start` was classified here.
+    pub fn record_class(&mut self, class_start: u32) {
+        self.classes.insert(class_start);
     }
 
-    /// Record every field of `class` ([`Self::classify`]).
-    pub fn classify_class(&mut self, class: &Class<'_>, source: &str) {
-        self.classes.insert(class.span.start);
-        for element in &class.body.body {
-            if let ClassElement::PropertyDefinition(prop) = element {
-                self.classify(class, prop, source);
-            }
-        }
+    /// Record the classification of the field whose initializer starts at
+    /// `value_start`.
+    pub fn record_field(&mut self, value_start: u32, kind: ClassFieldValueSource) {
+        self.fields.insert(value_start, kind);
     }
 
-    /// The classification of `prop`, a field of `class`: the recorded one
-    /// when this table classified the class, else classified here (a class
-    /// the header walk does not index).
+    /// Whether the class starting at `class_start` was classified here.
     #[must_use]
-    pub fn field(
-        &self,
-        class: &Class<'_>,
-        prop: &PropertyDefinition<'_>,
-        source: &str,
-    ) -> Option<ClassFieldValueSource> {
-        if self.classes.contains(&class.span.start) {
-            return prop
-                .value
-                .as_ref()
-                .and_then(|value| self.fields.get(&value.span().start).copied());
-        }
-        classify_field(prop, source)
+    pub fn classified_class(&self, class_start: u32) -> bool {
+        self.classes.contains(&class_start)
     }
+
+    /// The recorded classification of the field whose initializer starts at
+    /// `value_start`.
+    #[must_use]
+    pub fn recorded_field(&self, value_start: u32) -> Option<ClassFieldValueSource> {
+        self.fields.get(&value_start).copied()
+    }
+}
+
+/// Classify `prop`, a field of `class`, and record the answer in `values`.
+pub fn classify_class_field(
+    values: &mut ClassFieldValues,
+    class: &Class<'_>,
+    prop: &PropertyDefinition<'_>,
+    source: &str,
+) -> Option<ClassFieldValueSource> {
+    values.record_class(class.span.start);
+    let classified = classify_field(prop, source);
+    if let (Some(kind), Some(value)) = (classified, prop.value.as_ref()) {
+        values.record_field(value.span().start, kind);
+    }
+    classified
+}
+
+/// Record every field of `class` ([`classify_class_field`]).
+pub fn classify_class_fields(values: &mut ClassFieldValues, class: &Class<'_>, source: &str) {
+    values.record_class(class.span.start);
+    for element in &class.body.body {
+        if let ClassElement::PropertyDefinition(prop) = element {
+            classify_class_field(values, class, prop, source);
+        }
+    }
+}
+
+/// The classification of `prop`, a field of `class`: the recorded one
+/// when `values` classified the class, else classified here (a class the
+/// header walk does not index).
+#[must_use]
+pub fn class_field_value(
+    values: &ClassFieldValues,
+    class: &Class<'_>,
+    prop: &PropertyDefinition<'_>,
+    source: &str,
+) -> Option<ClassFieldValueSource> {
+    if values.classified_class(class.span.start) {
+        return prop
+            .value
+            .as_ref()
+            .and_then(|value| values.recorded_field(value.span().start));
+    }
+    classify_field(prop, source)
 }
 
 /// Classify one field's initializer (see the module documentation). `None`

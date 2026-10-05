@@ -2848,7 +2848,14 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| out.class_fields.field(decl, prop, source))
+                    .then(|| {
+                        crate::analysis::class_field_value::class_field_value(
+                            &out.class_fields,
+                            decl,
+                            prop,
+                            source,
+                        )
+                    })
                     .flatten()
                     .and_then(|_| class_field_value_name(&name, prop))
                     .map(|field_name| {

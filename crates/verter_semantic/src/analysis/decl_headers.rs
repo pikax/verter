@@ -1518,8 +1518,12 @@ fn index_class_field_value(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
-    let classified =
-        std::sync::Arc::make_mut(&mut index.class_field_values).classify(class, prop, ctx.source);
+    let classified = crate::analysis::class_field_value::classify_class_field(
+        std::sync::Arc::make_mut(&mut index.class_field_values),
+        class,
+        prop,
+        ctx.source,
+    );
     if let (Some(_), Some(field_name), Some(value)) = (
         classified,
         crate::analysis::type_eval_build::class_field_value_name(name, prop),
@@ -1749,7 +1753,11 @@ fn index_variable_in(
         .filter(|_| decl.type_annotation.is_none())
         .and_then(crate::analysis::type_eval_build::initializer_class_expression)
     {
-        std::sync::Arc::make_mut(&mut index.class_field_values).classify_class(class, ctx.source);
+        crate::analysis::class_field_value::classify_class_fields(
+            std::sync::Arc::make_mut(&mut index.class_field_values),
+            class,
+            ctx.source,
+        );
     }
 }
 

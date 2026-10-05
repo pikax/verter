@@ -66,7 +66,7 @@ pub(crate) use rune_ambient::is_svelte_rune_module;
 #[allow(unused_imports)]
 pub(crate) use rune_ambient::{
     merge_rune_ambient_into_env, merge_rune_ambient_inventory_into_env, rune_ambient_has_type,
-    rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl,
+    rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl, RUNE_AMBIENT_LOOKUP,
 };
 #[cfg(test)]
 pub(crate) use vue_script_extract::extract_vue_script_content;

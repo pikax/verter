@@ -2313,7 +2313,12 @@ fn discover_class_members<'ast>(
                 // reads the receiver: the synthetic value is its
                 // body-derived return.
                 if let (Some(kind), Some(value), Some(anchor)) = (
-                    ctx.class_fields.field(class, prop, ctx.source),
+                    crate::analysis::class_field_value::class_field_value(
+                        ctx.class_fields,
+                        class,
+                        prop,
+                        ctx.source,
+                    ),
                     prop.value.as_ref(),
                     ctx.anchor(contributor_index),
                 ) {
