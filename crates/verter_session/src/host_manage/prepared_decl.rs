@@ -2879,7 +2879,7 @@ impl VerterHost {
         let indexed = ctx.indexed_for_current_content(canonical_id);
         let indexed = indexed.as_ref().filter(|indexed| {
             known_shallow.is_none_or(|known| {
-                indexed.shallow_state.observation_id == known.observation_id
+                indexed.shallow_state.observation_id() == known.observation_id()
                     && indexed.shallow_state.source_identity == known.source_identity
             })
         });

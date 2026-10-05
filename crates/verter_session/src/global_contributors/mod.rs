@@ -1266,21 +1266,21 @@ pub fn population_fact_decl_name<'a>(
 }
 
 pub(crate) trait IndexedModuleFacts {
-    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputRecord;
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly;
 }
 impl IndexedModuleFacts for IndexedReady {
-    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         &self.shallow_state
     }
 }
 impl IndexedModuleFacts for crate::resolver_core::request_inputs::IndexedInputRecord {
-    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         &self.shallow_state
     }
 }
 
 impl<T: IndexedModuleFacts> IndexedModuleFacts for Arc<T> {
-    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         self.as_ref().shallow_inputs()
     }
 }

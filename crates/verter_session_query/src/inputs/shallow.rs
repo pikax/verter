@@ -32,14 +32,18 @@ impl std::fmt::Debug for RuneAmbientLookup {
     }
 }
 
-/// Immutable syntax and routing facts. Contains no lowering service or cache
-/// capable of requesting source work.
+/// The syntax and routing facts of one file while its owner assembles them.
+/// Contains no lowering service or cache capable of requesting source work.
+///
+/// Public and mutable: shallow assembly (the parse-domain index, a
+/// synthesised component default, a hermetic routing fixture) fills it in.
+/// Nothing shares an assembly as an observation; [`ShallowInputRecord::finalize`]
+/// seals one into the published record.
 #[derive(Debug, Clone)]
-pub struct ShallowInputRecord {
+pub struct ShallowInputAssembly {
     pub whole_hash: Hash16,
     pub canonical_id: Arc<str>,
     pub source_identity: crate::source::snapshot::SnapshotKey,
-    pub observation_id: u64,
     pub exports: FxHashMap<String, ExportTarget>,
     pub wildcard_reexports: Vec<WildcardReexport>,
     pub import_locals: FxHashSet<String>,
@@ -55,6 +59,48 @@ pub struct ShallowInputRecord {
     pub rune_ambient: Option<RuneAmbientLookup>,
 }
 
+/// One published observation of a file's shallow facts: the sealed
+/// source association (canonical, content hash, retained snapshot) and
+/// every observed fact, under an observation id the finalizer assigned.
+///
+/// Both fields are private and the record is read-only: it derefs to its
+/// facts for reading, with no mutable access. [`Self::finalize`] is the
+/// only constructor and assigns a fresh observation id, so facts that
+/// change are a new observation; a clone is the same observation and keeps
+/// its id. The id selects retained source objects and matches known inputs
+/// against indexed ones, so it never outlives the facts it was assigned to.
+#[derive(Debug, Clone)]
+pub struct ShallowInputRecord {
+    observation_id: u64,
+    facts: ShallowInputAssembly,
+}
+
+impl ShallowInputRecord {
+    /// Seal assembled facts into a published observation with a fresh,
+    /// process-unique observation id.
+    #[must_use]
+    pub fn finalize(facts: ShallowInputAssembly) -> Self {
+        static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        Self {
+            observation_id: NEXT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            facts,
+        }
+    }
+
+    /// The id this observation was finalized under.
+    #[must_use]
+    pub fn observation_id(&self) -> u64 {
+        self.observation_id
+    }
+}
+
+impl std::ops::Deref for ShallowInputRecord {
+    type Target = ShallowInputAssembly;
+    fn deref(&self) -> &ShallowInputAssembly {
+        &self.facts
+    }
+}
 /// A wildcard `export * from ‘...’` reexport — the AUTHORED specifier only.
 ///
 /// Parse domain: the resolved target is NOT retained here. Resolution is
@@ -285,7 +331,7 @@ pub struct ExternalSymbolRef {
     pub route: RouteDemand,
 }
 
-impl ShallowInputRecord {
+impl ShallowInputAssembly {
     /// Returns `true` when the shallow state carries no meaningful content
     /// (no type symbols, no value symbols, no exports, no wildcard reexports,
     /// and no import targets). A non-empty state is worth caching and

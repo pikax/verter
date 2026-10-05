@@ -356,7 +356,7 @@ impl InputArtifactLeases {
         let mut retained = self.retained.write();
         retained
             .sources
-            .entry(input.shallow_state.observation_id)
+            .entry(input.shallow_state.observation_id())
             .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
         retained
             .indexed
@@ -375,7 +375,7 @@ impl InputArtifactLeases {
         self.retained
             .write()
             .sources
-            .entry(input.observation_id)
+            .entry(input.observation_id())
             .or_insert(source);
         input
     }
@@ -395,7 +395,7 @@ impl InputArtifactLeases {
             .retained
             .read()
             .sources
-            .get(&input.observation_id)
+            .get(&input.observation_id())
             .cloned()?;
         (source.source_identity == input.source_identity).then_some(source)
     }

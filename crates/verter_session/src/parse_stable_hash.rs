@@ -91,7 +91,7 @@ pub(crate) fn compute_parse_stable_hash_inputs(
     compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
 }
 fn compute_parse_stable_hash_parts(
-    shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    shallow: &verter_session_query::inputs::shallow::ShallowInputAssembly,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Hash16 {
     verter_audit::attribute!(ParseStableHash);

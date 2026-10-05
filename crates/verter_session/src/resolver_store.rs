@@ -2860,7 +2860,7 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
     hash_route_surface_from_syntactic(state.whole_hash, syntactic_route_interface_hash(state))
 }
 pub(crate) fn hash_route_surface_inputs(
-    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
 ) -> Hash16 {
     hash_route_surface_from_syntactic(
         state.whole_hash,
@@ -2888,7 +2888,7 @@ pub(crate) fn syntactic_route_interface_hash(
 }
 
 fn syntactic_route_interface_hash_uncached(
-    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
 ) -> Hash16 {
     hash16_from_sorted(|hasher| {
         b"verter:syntactic-route-interface:v2".hash(hasher);

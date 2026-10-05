@@ -116,7 +116,7 @@ pub fn fingerprint_of(entries: &[ContributorEntry]) -> Hash16 {
 /// [`classify_module_kind`] over the retained shallow inventory alone.
 #[must_use]
 pub fn classify_shallow_module_kind(
-    shallow: &crate::inputs::shallow::ShallowInputRecord,
+    shallow: &crate::inputs::shallow::ShallowInputAssembly,
 ) -> FileModuleKind {
     if !shallow.exports.is_empty()
         || !shallow.wildcard_reexports.is_empty()

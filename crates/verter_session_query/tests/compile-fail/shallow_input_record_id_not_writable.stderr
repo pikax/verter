@@ -1,0 +1,5 @@
+error[E0616]: field `observation_id` of struct `ShallowInputRecord` is private
+ --> tests/compile-fail/shallow_input_record_id_not_writable.rs:5:12
+  |
+5 |     record.observation_id = 7;
+  |            ^^^^^^^^^^^^^^ private field

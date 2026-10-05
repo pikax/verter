@@ -8,7 +8,7 @@ Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.)
 - `symbols` (slim locally-declared type headers and content-free member/type-parameter facts)
 - `import_locals` / `import_targets` (import classification for closure)
 
-Populated once through the shared host ensure-path and cached in `FileArtifactStore`. Invalidated when the file's whole-hash changes. The backend state retains its lazy body/dependency memo privately. Engine consumers receive `ShallowInputRecord` header projections through `IndexedInputs` and request demanded bodies and dependency edges through `OwnedLowering`.
+Populated once through the shared host ensure-path and cached in `FileArtifactStore`. Invalidated when the file's whole-hash changes. The backend state retains its lazy body/dependency memo privately. Engine consumers receive `ShallowInputRecord` header projections through `IndexedInputs` and request demanded bodies and dependency edges through `OwnedLowering`. Assembly fills a mutable `ShallowInputAssembly` (the state derefs to it); `ShallowInputRecord::finalize` seals it into the published record, assigning the observation id internally. The record has private fields and read-only `Deref` to its facts (no `DerefMut`): changed facts are a new observation with a new id, while a clone is the same observation and keeps it.
 
 **ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
 1. Seed with initial `(canonical_id, exported_name)` pairs

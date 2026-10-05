@@ -12,8 +12,9 @@
 //! - Cross-file references are returned as `ExternalSymbolRef` for the
 //!   frontier engine to handle â€” this module never crosses import boundaries.
 use verter_session_query::inputs::shallow::{
-    ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef, ImportTarget, ShallowInputRecord,
-    ShallowTypeSymbol, ShallowValueSymbol, WildcardReexport, IMPORT_EQUALS_NAME,
+    ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef, ImportTarget, ShallowInputAssembly,
+    ShallowInputRecord, ShallowTypeSymbol, ShallowValueSymbol, WildcardReexport,
+    IMPORT_EQUALS_NAME,
 };
 
 use std::collections::BTreeSet;
@@ -53,7 +54,7 @@ enum RequiredImportClosure {
 /// authority.
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
-    inputs: ShallowInputRecord,
+    inputs: ShallowInputAssembly,
     decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
     type_deps_cache: dashmap::DashMap<DeclBindingKey, Option<Arc<ClassifiedTypeDeps>>>,
     synthesised_value_bodies: FxHashMap<DeclBindingKey, Arc<LoweredValueDecl>>,
@@ -71,7 +72,7 @@ impl Clone for InputProjectionCell {
 }
 
 impl std::ops::Deref for ShallowFileState {
-    type Target = ShallowInputRecord;
+    type Target = ShallowInputAssembly;
     fn deref(&self) -> &Self::Target {
         &self.inputs
     }
@@ -84,15 +85,15 @@ impl std::ops::DerefMut for ShallowFileState {
 }
 
 impl ShallowFileState {
+    /// The published observation of this state's current facts, finalized
+    /// once per assembled version: a mutation through `DerefMut` resets it,
+    /// so changed facts are always a new observation.
     pub(crate) fn input_record(&self) -> Arc<ShallowInputRecord> {
-        Arc::clone(self.input_projection.0.get_or_init(|| {
-            static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(1);
-            let mut record = self.inputs.clone();
-            record.observation_id =
-                NEXT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Arc::new(record)
-        }))
+        Arc::clone(
+            self.input_projection
+                .0
+                .get_or_init(|| Arc::new(ShallowInputRecord::finalize(self.inputs.clone()))),
+        )
     }
 }
 
@@ -629,7 +630,7 @@ impl ShallowFileState {
             .map(|assignment| assignment.local.clone());
 
         Self {
-            inputs: ShallowInputRecord {
+            inputs: ShallowInputAssembly {
                 whole_hash,
                 exports,
                 wildcard_reexports,
@@ -640,7 +641,6 @@ impl ShallowFileState {
                 route_inventory,
                 canonical_id: decl_bodies.canonical_id(),
                 source_identity: decl_bodies.snapshot_identity(),
-                observation_id: 0,
                 headers: Arc::clone(decl_bodies.header_index()),
                 owners: Arc::clone(decl_bodies.owner_table()),
                 rune_ambient: decl_bodies

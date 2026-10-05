@@ -610,7 +610,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host<C: crate::resolver_core::Resol
 #[allow(dead_code)]
 pub(crate) fn resolve_namespace_sibling_in_scope(
     payload: &crate::semantic_query::LocalScopePayload,
-    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
     scope_canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
