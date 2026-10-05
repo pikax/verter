@@ -911,10 +911,13 @@ pub struct FunctionProgramDiscovery {
 /// One SERVED function position: a sealed [`FunctionProgramDiscovery`].
 ///
 /// The fields are private and there are no setters, so an entry is
-/// constructed in exactly one place —
-/// [`FunctionProgramIndex::from_discovery`] — and never changes after it
+/// sealed from discovery data only by
+/// [`FunctionProgramIndex::from_discovery`] and never changes after it
 /// is sealed: no code outside this module can assemble one with a struct
-/// literal or rewrite a field of a served one. Each accessor documents
+/// literal or rewrite a field of a served one. The one in-module
+/// derivation, [`FunctionProgramIndex::map_stable_hashes`], builds a
+/// refolded COPY whose entries form a new index — a witness of the
+/// original is not served by it. Each accessor documents
 /// the matching [`FunctionProgramDiscovery`] field.
 ///
 /// Sealing guarantees STRUCTURE, not provenance: `from_discovery` is
@@ -1363,8 +1366,10 @@ impl FunctionProgramIndex {
     /// The keyed lookups are derived here from the entries, so every way out
     /// of the index stays consistent with what discovery recorded.
     ///
-    /// This is the ONLY constructor of a [`FunctionProgramEntry`]: each
-    /// discovery record is sealed by moving its fields, in source order.
+    /// This is the only way to seal discovery data into a
+    /// [`FunctionProgramEntry`] (the in-module `map_stable_hashes` only
+    /// derives a refolded copy of already-sealed entries, as a new index):
+    /// each discovery record is sealed by moving its fields, in source order.
     /// Where two records share a lookup key the FIRST in source order wins.
     /// Sealing proves structure and lookup consistency, not parser
     /// provenance — any caller may seal discovery data of its own, which is
