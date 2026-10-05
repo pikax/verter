@@ -4873,7 +4873,7 @@ mod tests {
             node_raised_shape_facts_with_dispatch,
             node_root_is_unmaterialized_sentinel_with_dispatch,
         };
-        use crate::resolver_core::type_expr_root_is_unmaterialized_sentinel;
+        use crate::project_semantic_dispatch::raise_sentinel::type_expr_root_is_unmaterialized_sentinel;
         use crate::semantic_query::QueryError;
 
         let host = VerterHost::new_standalone(Default::default());
@@ -4947,7 +4947,7 @@ mod tests {
             node_contains_semantic_miss_with_dispatch,
             node_root_is_unmaterialized_sentinel_with_dispatch,
         };
-        use crate::resolver_core::type_expr_contains_semantic_miss;
+        use crate::project_semantic_dispatch::raise_sentinel::type_expr_contains_semantic_miss;
         use crate::semantic_query::QueryError;
 
         let host = VerterHost::new_standalone(Default::default());

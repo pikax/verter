@@ -305,7 +305,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         canonical: &str,
     ) -> SemanticNodeId {
         let mut carriers: Vec<SemanticNodeId> = Vec::new();
-        crate::resolver_core::component_meta_registry::collect_owner_local_nominal_carriers(
+        super::reference_carriers::collect_owner_local_nominal_carriers(
             self,
             node,
             canonical,

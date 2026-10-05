@@ -303,248 +303,242 @@ fn member_shape_peek_or_compute(
     // unobserved.
     let dispatch = query_engine.dispatch;
     let value = dispatch.with_shape_scope(|scope| {
-            // The admitted member's value graph node is the raise/reduce subject; the
-            // cache key keys on the ADMITTED member (`admitted.member().value`) so an
-            // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
-            // sealed shape subject.
-            let member_value = admitted.member().value;
-            let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
-            // Publication sink: one dispatch for the cold-path raise and every
-            // sealed-carrier assembly below. The capability mint + unwrap are the
-            // module-private primitives of this terminal `output_sink` sink — they
-            // mint from this already-constructed dispatch.
-            let dispatch = query_engine.dispatch;
-            // Key the per-member MemberValueNode slot by the EXACT reduction
-            // context the cold path reduces under
-            // (`node_materialize_reduction_context(ctx, member_value, mode)` —
-            // `Published(Navigate)` when the member's raised root is a published
-            // operator, since the explicit member demand IS consumer demand for a
-            // closed whole-utility terminal; `StructuralTransit` for every other
-            // `Navigate`; `Published` otherwise). A bare `published(mode)` key
-            // collided a transit-lowered carrier publication with a published
-            // consumer over the same `(scope, node)`.
-            let member_reduction_context =
-                crate::meta_resolve::materialize::node_materialize_reduction_context(dispatch,
-                    member_value,
-                    mode,
-                );
-            let key = crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
-        Arc::<str>::from(scope_canonical_id),
-        admitted,
-        member_reduction_context,
-    );
-
-            // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
-            // entry's dep_signature must be re-emitted into the active fact
-            // tracer + dispatch dep-signature accumulator so the request's
-            // dep set sees the same facts the cold compute emitted.
-            if let Some(cached) = scope.peek(&key) {
-                emit_dispatch_dep_signature_facts(dispatch,  cached.dep_signature());
-                return cached;
-            }
-
-            // (2) Node-domain package-backed gate on `member_value` — decided from the
-            // node's root identity (Pick/Omit source-root trap + indexed-access roots
-            // handled), NEVER by materialising the value first. Gates run BEFORE any
-            // reduction: `MaterializeMemoDb` is shared with the typed-IR materialiser
-            // callers (model / registry candidate materialisation) which do not apply
-            // these projector shallow gates, so honouring the gates first publishes a
-            // package-backed root (`External['x']`) as the shallow carrier the
-            // shallow-by-default rule requires.
-            //
-            // The gate's cross-file fence is threaded into the admit so an edit to the
-            // package-backing declaration file invalidates the gate-shortcut entry.
-            // The fence is `Option<DepSignature>`; `None` means "refuse shared
-            // admission" (a contributing canonical's `authoritative_current_content_hash`
-            // was unavailable, so the verdict cannot be rooted on the file state it was
-            // decided against) — the caller returns the carrier verbatim without admitting.
-            //
-            // NON-CACHEABILITY: the fence is HASH-AVAILABILITY, not publication status — a
-            // FENCED (ReturnOnly, `store_published == false`) serve WITH an available
-            // content hash passes it. The gate itself CONSUMES such serves: it resolves the
-            // member value's carrier head through the shared carrier resolver
-            // (`node_root_identity` -> `resolve_carrier_subject_node`), which rides
-            // `ensure_indexed_ready_serve`. The enclosing cacheability scope already covers
-            // it — as it covers the key classification, the peek, the cycle gate, the shell
-            // raises, and the cold reduce — so every admission arm below reads ONE verdict
-            // off `probe` instead of stitching per-step tracer bits together.
-            let (route_is_package_backed, package_backed_fence_opt) =
-                crate::meta_resolve::node_package_backed_object_like_root_with_fence(
-                    query_engine,
-                    scope_canonical_id,
-                    member_value,
-                );
-            if route_is_package_backed {
-                // Package-backed roots stay shallow carriers. Admit so sibling members of
-                // the same package-backed parent reuse the verdict at peek time.
-                let Some(package_backed_fence) = package_backed_fence_opt else {
-                    return raise_node_to_sealed_carrier(
-                        dispatch,
-                        member_value,
-                        Arc::from(Vec::new()),
-                    );
-                };
-                let value =
-                    raise_node_to_sealed_carrier(dispatch, member_value, package_backed_fence);
-                return admit_member_shape_if_possible(ctx, &key, value, &scope);
-            }
-            // Non-package-backed: the gate returns `Some(empty)` unless a contributing
-            // canonical's authoritative hash was unavailable mid-gate, in which case it
-            // refuses (`None`) and the carrier is returned without admission.
-            let Some(package_backed_fence) = package_backed_fence_opt else {
-                return raise_node_to_sealed_carrier(
-                    dispatch,
-                    member_value,
-                    Arc::from(Vec::new()),
-                );
-            };
-
-            // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
-            // reducible-operator facts read off `member_value` directly (no materialise).
-            let gates = super::classify_node_reduction_gates(dispatch,  member_value);
-
-            // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
-            // so the gate fires lazily on that fact. A recursive parameterised helper stays
-            // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
-            // peeks skip the gate. The gate resolves carrier heads through the same shared
-            // resolver; the enclosing cacheability scope observes those serves.
-            let cycle_fence: crate::semantic_query::DepSignature = if gates
-                .generic_instantiation_ref
-            {
-                let (reaches_cycle, fence) =
-                    crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(dispatch,
-                        scope_canonical_id,
-                        member_value,
-                    );
-                if reaches_cycle {
-                    // Combine both gate fences (package-backed + cycle gate) so the
-                    // admit's `fact_dep_signature` invalidates on edits to any visited
-                    // declaration file.
-                    let combined_fence =
-                        combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
-                    let value =
-                        raise_node_to_sealed_carrier(dispatch, member_value, combined_fence);
-                    return admit_member_shape_if_possible(ctx, &key, value, &scope);
-                }
-                fence
-            } else {
-                Arc::from(Vec::new())
-            };
-
-            // The carrier-stop decision lives on the dispatch-layer reduction-demand
-            // context, NOT on a projector-side name predicate. A generic instantiation
-            // enters the reducer; the dispatch carrier-stops downstream operators when the
-            // context does not admit reduction.
-            let needs_reduction =
-                gates.contains_reducible_operator || gates.generic_instantiation_ref;
-            // The combined gate fence is threaded through the remaining admit paths so the
-            // cache entries do not self-root on the scope file only.
-            let gate_fence =
-                combine_dep_signatures(&package_backed_fence, &cycle_fence, scope_canonical_id);
-            if !needs_reduction {
-                // Universal-caching invariant: a non-reducible shape (primitive / literal /
-                // bare alias / closed object / function / union / intersection without
-                // operator nodes) is a STABLE shape — admit it as the shallow carrier so
-                // sibling members hitting the same `SurfaceMember.value` short-circuit at
-                // peek time.
-                let value = raise_node_to_sealed_carrier(dispatch, member_value, gate_fence);
-                return admit_member_shape_if_possible(ctx, &key, value, &scope);
-            }
-
-            // (5) Cold compute via the graph-native reducer. Single-shot —
-            // pre-computed ONCE outside the cache call (single-compute
-            // pattern). The cache's `get_or_compute` closure either captures
-            // and moves the pre-computed `materialized` into the cache entry,
-            // or returns `None` (signature-refusal) — in either case the
-            // pre-computed value is the correct answer; no second reducer
-            // call.
-            //
-            // The reducer uses the same demand context as the node-start
-            // materializer: `Expanded` remains whole-surface publication; a
-            // per-prop `Navigate` whose raised root is a published operator
-            // (`Pick`/`Omit`/`IndexedAccess`/...) reduces under
-            // `Published(Navigate)` — the explicit member demand IS consumer
-            // demand, so a closed whole-utility terminal materialises its named
-            // keys path-precisely; every other per-prop `Navigate` stays a
-            // structural-transit carrier publication that does not enumerate
-            // mapped/keyof interiors. The cache `key` uses this SAME context so
-            // carrier publication does not collide with a published consumer
-            // slot over the same `(scope, node)`.
-            let reduction_context =
-                crate::meta_resolve::materialize::node_materialize_reduction_context(dispatch,
-                    member_value,
-                    mode,
-                );
-            // The cold reduce runs inside the caller's cacheability scope, alongside every
-            // other read this producer makes. A FENCED (ReturnOnly, `store_published ==
-            // false`) `IndexedReady` serve consumed anywhere in the compute derives this
-            // member SHAPE from a served-without-publication basis while its fact signature
-            // validates against the LIVE view — a non-cacheable read the
-            // `MaterializedOutputTypeExpr` `result_is_partial()`-only admission gate cannot
-            // reject (a fenced serve is non-cacheable but NOT partial), so a fenced-but-
-            // `Complete` shape would otherwise stale-serve a later same-generation warm hit.
-            //
-            // The admit below builds its own signature from the carrier's `dep_signature`,
-            // NOT from a tracer's finalised set, so the boundary reads the scope's
-            // CACHEABILITY verdict — which folds the non-cacheable-read bit together with a
-            // fact-signature overflow (a second, INDEPENDENT non-admission condition that
-            // must not be dropped here).
-            let materialized =
-                crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(dispatch,
-                    scope_canonical_id,
-                    member_value,
-                    reduction_context,
-                );
-            let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
-            // Merge the gate fence into the materialised entry's dep
-            // signature so the cold-path admit's `fact_dep_signature` also
-            // captures the gates' cross-file observations. Without this, the
-            // cold-path admit would self-root only on `scope` + the reducer's
-            // observed deps, missing gate-only deps (e.g., package-backed
-            // declaration scope) that should invalidate.
-            let materialized_with_gate_fence = merge_gate_fence_into_materialized(
-                materialized.clone(),
-                &gate_fence,
-                scope_canonical_id,
+        // The admitted member's value graph node is the raise/reduce subject; the
+        // cache key keys on the ADMITTED member (`admitted.member().value`) so an
+        // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
+        // sealed shape subject.
+        let member_value = admitted.member().value;
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
+        // Publication sink: one dispatch for the cold-path raise and every
+        // sealed-carrier assembly below. The capability mint + unwrap are the
+        // module-private primitives of this terminal `output_sink` sink — they
+        // mint from this already-constructed dispatch.
+        let dispatch = query_engine.dispatch;
+        // Key the per-member MemberValueNode slot by the EXACT reduction
+        // context the cold path reduces under
+        // (`node_materialize_reduction_context(ctx, member_value, mode)` —
+        // `Published(Navigate)` when the member's raised root is a published
+        // operator, since the explicit member demand IS consumer demand for a
+        // closed whole-utility terminal; `StructuralTransit` for every other
+        // `Navigate`; `Published` otherwise). A bare `published(mode)` key
+        // collided a transit-lowered carrier publication with a published
+        // consumer over the same `(scope, node)`.
+        let member_reduction_context =
+            crate::meta_resolve::materialize::node_materialize_reduction_context(
+                dispatch,
+                member_value,
+                mode,
             );
-            // Local early return: a GENUINE-partial member shape (keyed on the
-            // value's OWN `result_is_partial` — a budget-tripped contributing read
-            // folds its partiality onto this value via the per-cold-compute
-            // completeness scope) must NOT enter the shared shape cache. The gate
-            // is PURE over `result_is_partial`; it does NOT OR-in a request-global
-            // partial sticky. The central `get_or_compute` gate also refuses, but
-            // returning here keeps the per-member producer from depending on the
-            // cache layer remembering the rule and skips the futile admission
-            // plumbing.
-            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                materialized_with_gate_fence.result_is_partial(),
-            ) || scope.non_cacheable()
-            {
-                // A non-cacheable read was consumed ANYWHERE in this compute — the key
-                // classification, a gate whose fence roots this entry, or the reduce: the
-                // value flows to the caller, but the shared `ShapeCacheDb` slot is NOT
-                // written; the next request recomputes cold and revalidates against the
-                // then-live view. (The `get_or_compute` funnel refuses independently; this
-                // early return skips the futile admission plumbing.)
-                return materialized_with_gate_fence;
-            }
-            let materialized_for_closure = materialized_with_gate_fence.clone();
-            let admitted = scope.get_or_compute(&key, move || {
-        let scope_obs = observed_scope?;
-        let parse_fact = scope_obs.syntactic_export_set.clone()?;
-        match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-            &scope_obs,
-            parse_fact,
-            materialized_for_closure.dep_signature(),
-        ) {
-            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
-                Some((materialized_for_closure, sig.facts))
-            }
-            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => None,
+        let key =
+            crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
+                Arc::<str>::from(scope_canonical_id),
+                admitted,
+                member_reduction_context,
+            );
+
+        // (1) Peek FIRST — warm path pays zero raise/gate cost. The cached
+        // entry's dep_signature must be re-emitted into the active fact
+        // tracer + dispatch dep-signature accumulator so the request's
+        // dep set sees the same facts the cold compute emitted.
+        if let Some(cached) = scope.peek(&key) {
+            emit_dispatch_dep_signature_facts(dispatch, cached.dep_signature());
+            return cached;
         }
-    });
-            admitted.unwrap_or(materialized_with_gate_fence)
+
+        // (2) Node-domain package-backed gate on `member_value` — decided from the
+        // node's root identity (Pick/Omit source-root trap + indexed-access roots
+        // handled), NEVER by materialising the value first. Gates run BEFORE any
+        // reduction: `MaterializeMemoDb` is shared with the typed-IR materialiser
+        // callers (model / registry candidate materialisation) which do not apply
+        // these projector shallow gates, so honouring the gates first publishes a
+        // package-backed root (`External['x']`) as the shallow carrier the
+        // shallow-by-default rule requires.
+        //
+        // The gate's cross-file fence is threaded into the admit so an edit to the
+        // package-backing declaration file invalidates the gate-shortcut entry.
+        // The fence is `Option<DepSignature>`; `None` means "refuse shared
+        // admission" (a contributing canonical's `authoritative_current_content_hash`
+        // was unavailable, so the verdict cannot be rooted on the file state it was
+        // decided against) — the caller returns the carrier verbatim without admitting.
+        //
+        // NON-CACHEABILITY: the fence is HASH-AVAILABILITY, not publication status — a
+        // FENCED (ReturnOnly, `store_published == false`) serve WITH an available
+        // content hash passes it. The gate itself CONSUMES such serves: it resolves the
+        // member value's carrier head through the shared carrier resolver
+        // (`node_root_identity` -> `resolve_carrier_subject_node`), which rides
+        // `ensure_indexed_ready_serve`. The enclosing cacheability scope already covers
+        // it — as it covers the key classification, the peek, the cycle gate, the shell
+        // raises, and the cold reduce — so every admission arm below reads ONE verdict
+        // off `probe` instead of stitching per-step tracer bits together.
+        let (route_is_package_backed, package_backed_fence_opt) =
+            crate::meta_resolve::node_package_backed_object_like_root_with_fence(
+                query_engine,
+                scope_canonical_id,
+                member_value,
+            );
+        if route_is_package_backed {
+            // Package-backed roots stay shallow carriers. Admit so sibling members of
+            // the same package-backed parent reuse the verdict at peek time.
+            let Some(package_backed_fence) = package_backed_fence_opt else {
+                return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+            };
+            let value = raise_node_to_sealed_carrier(dispatch, member_value, package_backed_fence);
+            return admit_member_shape_if_possible(ctx, &key, value, &scope);
+        }
+        // Non-package-backed: the gate returns `Some(empty)` unless a contributing
+        // canonical's authoritative hash was unavailable mid-gate, in which case it
+        // refuses (`None`) and the carrier is returned without admission.
+        let Some(package_backed_fence) = package_backed_fence_opt else {
+            return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+        };
+
+        // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
+        // reducible-operator facts read off `member_value` directly (no materialise).
+        let gates = super::classify_node_reduction_gates(dispatch, member_value);
+
+        // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
+        // so the gate fires lazily on that fact. A recursive parameterised helper stays
+        // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
+        // peeks skip the gate. The gate resolves carrier heads through the same shared
+        // resolver; the enclosing cacheability scope observes those serves.
+        let cycle_fence: crate::semantic_query::DepSignature = if gates.generic_instantiation_ref {
+            let (reaches_cycle, fence) =
+                crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
+                    dispatch,
+                    scope_canonical_id,
+                    member_value,
+                );
+            if reaches_cycle {
+                // Combine both gate fences (package-backed + cycle gate) so the
+                // admit's `fact_dep_signature` invalidates on edits to any visited
+                // declaration file.
+                let combined_fence =
+                    combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
+                let value = raise_node_to_sealed_carrier(dispatch, member_value, combined_fence);
+                return admit_member_shape_if_possible(ctx, &key, value, &scope);
+            }
+            fence
+        } else {
+            Arc::from(Vec::new())
+        };
+
+        // The carrier-stop decision lives on the dispatch-layer reduction-demand
+        // context, NOT on a projector-side name predicate. A generic instantiation
+        // enters the reducer; the dispatch carrier-stops downstream operators when the
+        // context does not admit reduction.
+        let needs_reduction = gates.contains_reducible_operator || gates.generic_instantiation_ref;
+        // The combined gate fence is threaded through the remaining admit paths so the
+        // cache entries do not self-root on the scope file only.
+        let gate_fence =
+            combine_dep_signatures(&package_backed_fence, &cycle_fence, scope_canonical_id);
+        if !needs_reduction {
+            // Universal-caching invariant: a non-reducible shape (primitive / literal /
+            // bare alias / closed object / function / union / intersection without
+            // operator nodes) is a STABLE shape — admit it as the shallow carrier so
+            // sibling members hitting the same `SurfaceMember.value` short-circuit at
+            // peek time.
+            let value = raise_node_to_sealed_carrier(dispatch, member_value, gate_fence);
+            return admit_member_shape_if_possible(ctx, &key, value, &scope);
+        }
+
+        // (5) Cold compute via the graph-native reducer. Single-shot —
+        // pre-computed ONCE outside the cache call (single-compute
+        // pattern). The cache's `get_or_compute` closure either captures
+        // and moves the pre-computed `materialized` into the cache entry,
+        // or returns `None` (signature-refusal) — in either case the
+        // pre-computed value is the correct answer; no second reducer
+        // call.
+        //
+        // The reducer uses the same demand context as the node-start
+        // materializer: `Expanded` remains whole-surface publication; a
+        // per-prop `Navigate` whose raised root is a published operator
+        // (`Pick`/`Omit`/`IndexedAccess`/...) reduces under
+        // `Published(Navigate)` — the explicit member demand IS consumer
+        // demand, so a closed whole-utility terminal materialises its named
+        // keys path-precisely; every other per-prop `Navigate` stays a
+        // structural-transit carrier publication that does not enumerate
+        // mapped/keyof interiors. The cache `key` uses this SAME context so
+        // carrier publication does not collide with a published consumer
+        // slot over the same `(scope, node)`.
+        let reduction_context =
+            crate::meta_resolve::materialize::node_materialize_reduction_context(
+                dispatch,
+                member_value,
+                mode,
+            );
+        // The cold reduce runs inside the caller's cacheability scope, alongside every
+        // other read this producer makes. A FENCED (ReturnOnly, `store_published ==
+        // false`) `IndexedReady` serve consumed anywhere in the compute derives this
+        // member SHAPE from a served-without-publication basis while its fact signature
+        // validates against the LIVE view — a non-cacheable read the
+        // `MaterializedOutputTypeExpr` `result_is_partial()`-only admission gate cannot
+        // reject (a fenced serve is non-cacheable but NOT partial), so a fenced-but-
+        // `Complete` shape would otherwise stale-serve a later same-generation warm hit.
+        //
+        // The admit below builds its own signature from the carrier's `dep_signature`,
+        // NOT from a tracer's finalised set, so the boundary reads the scope's
+        // CACHEABILITY verdict — which folds the non-cacheable-read bit together with a
+        // fact-signature overflow (a second, INDEPENDENT non-admission condition that
+        // must not be dropped here).
+        let materialized =
+            crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(
+                dispatch,
+                scope_canonical_id,
+                member_value,
+                reduction_context,
+            );
+        let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+        // Merge the gate fence into the materialised entry's dep
+        // signature so the cold-path admit's `fact_dep_signature` also
+        // captures the gates' cross-file observations. Without this, the
+        // cold-path admit would self-root only on `scope` + the reducer's
+        // observed deps, missing gate-only deps (e.g., package-backed
+        // declaration scope) that should invalidate.
+        let materialized_with_gate_fence = merge_gate_fence_into_materialized(
+            materialized.clone(),
+            &gate_fence,
+            scope_canonical_id,
+        );
+        // Local early return: a GENUINE-partial member shape (keyed on the
+        // value's OWN `result_is_partial` — a budget-tripped contributing read
+        // folds its partiality onto this value via the per-cold-compute
+        // completeness scope) must NOT enter the shared shape cache. The gate
+        // is PURE over `result_is_partial`; it does NOT OR-in a request-global
+        // partial sticky. The central `get_or_compute` gate also refuses, but
+        // returning here keeps the per-member producer from depending on the
+        // cache layer remembering the rule and skips the futile admission
+        // plumbing.
+        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            materialized_with_gate_fence.result_is_partial(),
+        ) || scope.non_cacheable()
+        {
+            // A non-cacheable read was consumed ANYWHERE in this compute — the key
+            // classification, a gate whose fence roots this entry, or the reduce: the
+            // value flows to the caller, but the shared `ShapeCacheDb` slot is NOT
+            // written; the next request recomputes cold and revalidates against the
+            // then-live view. (The `get_or_compute` funnel refuses independently; this
+            // early return skips the futile admission plumbing.)
+            return materialized_with_gate_fence;
+        }
+        let materialized_for_closure = materialized_with_gate_fence.clone();
+        let admitted = scope.get_or_compute(&key, move || {
+            let scope_obs = observed_scope?;
+            let parse_fact = scope_obs.syntactic_export_set.clone()?;
+            match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+                &scope_obs,
+                parse_fact,
+                materialized_for_closure.dep_signature(),
+            ) {
+                verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                    Some((materialized_for_closure, sig.facts))
+                }
+                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => {
+                    None
+                }
+            }
         });
+        admitted.unwrap_or(materialized_with_gate_fence)
+    });
     value
 }
 
@@ -667,13 +661,15 @@ fn admit_member_shape_if_possible(
     let Some(parse_fact) = observed_scope.syntactic_export_set.clone() else {
         return value;
     };
-    let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+    let fact_sig = match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
         &observed_scope,
         parse_fact,
         value.dep_signature(),
     ) {
         verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => sig.facts,
-        verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => return value,
+        verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => {
+            return value
+        }
     };
     owner_scope.admit_computed(key, value, fact_sig)
 }

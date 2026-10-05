@@ -122,3 +122,69 @@ pub(crate) fn spells_legacy_sentinel_family(raw: &str) -> bool {
         || raw.starts_with(ALIAS_CYCLE_PREFIX);
     is_exact || is_prefixed
 }
+
+/// The terminal compatibility projection of a typed [`QueryError`] — the
+/// inert `Unknown` spelling the compat tree carries. Every spelling/prefix is
+/// built from the owned consts in
+/// [`crate::semantic_query::compat_spelling`] (the single family home), so
+/// producer and detector can never fork a spelling.
+pub(crate) fn semantic_query_error_raw(err: &crate::semantic_query::QueryError) -> String {
+    use crate::semantic_query::compat_spelling as spell;
+    use crate::semantic_query::QueryError;
+    match err {
+        QueryError::Miss => spell::SEMANTIC_MISS.to_string(),
+        QueryError::Other(text) => text.as_ref().to_string(),
+        QueryError::PermissiveWildcard => "permissiveWildcard".to_string(),
+        QueryError::UnsupportedIntrinsic { name } => {
+            format!("{}{name})", spell::UNSUPPORTED_INTRINSIC_PREFIX)
+        }
+        QueryError::BudgetExceeded(failure) => {
+            format!(
+                "{}{:?})",
+                spell::BUDGET_EXCEEDED_SENTINEL_PREFIX,
+                failure.domain
+            )
+        }
+        QueryError::Cancelled => spell::CANCELLED.to_string(),
+        QueryError::UnstableState { attempts } => {
+            format!("{}{attempts})", spell::UNSTABLE_STATE_PREFIX)
+        }
+        QueryError::AliasCycle { chain } => {
+            format!("{}{})", spell::ALIAS_CYCLE_PREFIX, chain.len())
+        }
+        QueryError::RecursiveRef { name, .. } => format!("{}{name})", spell::RECURSIVE_REF_PREFIX),
+        QueryError::DeclPlaceholder { name, .. } => {
+            format!("{}{name})", spell::DECL_PLACEHOLDER_PREFIX)
+        }
+        QueryError::ValueDomainMismatch { expected, actual } => {
+            format!(
+                "{}expected={expected:?},actual={actual:?})",
+                spell::VALUE_DOMAIN_MISMATCH_PREFIX
+            )
+        }
+        QueryError::RaiseAliasCycle => spell::SEMANTIC_ALIAS_CYCLE.to_string(),
+        QueryError::TypeParamCycle => spell::SEMANTIC_TYPE_PARAM_CYCLE.to_string(),
+        QueryError::RaiseMiss => spell::RAISE_MISS.to_string(),
+        QueryError::UnrepresentableSurface => spell::SEMANTIC_OBJECT_SURFACE.to_string(),
+        QueryError::UnrepresentableSurfaceMember => spell::SEMANTIC_SURFACE_MEMBER.to_string(),
+        QueryError::OpenSurface => spell::OPEN_SURFACE.to_string(),
+        QueryError::UnmodeledPosition => spell::UNMODELED_POSITION.to_string(),
+        QueryError::SignatureOverflow => spell::SEMANTIC_SIGNATURE_OVERFLOW.to_string(),
+        QueryError::ForeignSemanticOperand => spell::SEMANTIC_FOREIGN_OPERAND.to_string(),
+        QueryError::StaleSemanticOperand => spell::SEMANTIC_STALE_OPERAND.to_string(),
+        QueryError::IncompleteSemanticOperand { reasons } => {
+            format!(
+                "{}{})",
+                spell::SEMANTIC_INCOMPLETE_OPERAND_PREFIX,
+                spell::spell_partial_reasons(*reasons)
+            )
+        }
+        QueryError::CheckerRecovery { diagnostic, .. } => {
+            format!(
+                "{}TS{})",
+                spell::CHECKER_RECOVERY_PREFIX,
+                diagnostic.code.code()
+            )
+        }
+    }
+}

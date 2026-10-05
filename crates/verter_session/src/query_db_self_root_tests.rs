@@ -743,7 +743,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
 /// rejection is driven purely by the observed-dep `FileWholeHash` fact.
 #[test]
 fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1410,7 +1410,7 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
 /// valid and serve stale.
 #[test]
 fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1517,7 +1517,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 /// PASSES.
 #[test]
 fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1671,7 +1671,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 ///    would leave the entry valid and serve it stale.
 #[test]
 fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_generation() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1843,7 +1843,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
 /// that preserves the observed hash.
 #[test]
 fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::DepVersion;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1972,7 +1972,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
 /// be unrecoverable; the production ordering observes it first.
 #[test]
 fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_scope_observed.ts";
@@ -2083,7 +2083,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
 /// provenance-pure builder.
 #[test]
 fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -2208,7 +2208,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 /// post-fix body that performs the equality check.
 #[test]
 fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::DepVersion;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -2273,7 +2273,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
 /// post-fix body that performs the canonical-equality guard.
 #[test]
 fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_canon_scope.ts";
@@ -2926,7 +2926,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
 /// eviction-aware authority returns `None` and this test PASSES.
 #[test]
 fn observe_materialize_scope_refuses_evicted_stale_artifact() {
-    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());

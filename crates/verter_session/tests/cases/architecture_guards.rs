@@ -5993,7 +5993,7 @@ pub(crate) mod foundations_guards {
         // a purpose other than a fence merge (interning, dedup probe).
         let allowed = [
             // Legitimate fence merge of a cached read's own carrier.
-            "    crate::component_meta_audit::merge_dep_signature_into_local_fence(local_fence, &read.dep_signature);",
+            "    crate::fact_signature_helpers::merge_dep_signature_into_local_fence(local_fence, &read.dep_signature);",
             "        fence.merge_signature(&read.dep_signature);",
             // `edge_dep_signature` touched for interning / dedup — no
             // fence merge on the line.

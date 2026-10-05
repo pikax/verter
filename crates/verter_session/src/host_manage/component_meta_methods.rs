@@ -2269,7 +2269,7 @@ impl VerterHost {
                     .raise_authored_locator_to_hot(locator, seed_transit_ctx)
                     .at_optional_boundary()
                     .and_then(|hot| {
-                        crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(dispatch,
+                        crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,
                             hot.node(),
                         )
                     })

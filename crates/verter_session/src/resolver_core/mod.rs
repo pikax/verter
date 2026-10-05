@@ -95,20 +95,10 @@ pub(crate) use component_meta_request::{
 // reach them via `super::surface::`; out-of-subtree callers route through the
 // engine's sink-local methods (`materialize_registry_whole_surface_candidate`
 // for the whole-surface candidate / the routed-surface methods).
+pub use component_meta::ResolvedNativeProp;
 pub(crate) use component_meta_query_engine::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
     AdmittedRouteProjectionNode,
-};
-// `type_expr_contains_semantic_miss` and `type_expr_root_is_unmaterialized_sentinel`
-// survive only as the `#[cfg(test)]` parity oracles for the node-domain
-// whole-tree-miss / root-sentinel facts (production reads
-// `node_contains_semantic_miss_with_dispatch` /
-// `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
-// imports them through these re-exports.
-pub use component_meta::ResolvedNativeProp;
-#[cfg(test)]
-pub(crate) use component_meta_query_engine::{
-    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
 };
 pub(crate) use component_meta_request::run_component_meta_request;
 pub(crate) use component_meta_request::ComponentMetaRequestHost;

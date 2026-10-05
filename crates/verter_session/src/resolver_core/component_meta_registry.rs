@@ -8,6 +8,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::project_semantic_dispatch::reference_carriers::{
+    reference_carrier_head, walk_reference_carriers,
+};
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
@@ -491,7 +494,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
         if node_root_is_type_parameter(dispatch, root) {
             return None;
         }
-        component_meta_registry_node_ref_head(dispatch, root)
+        reference_carrier_head(dispatch, root)
     }
 
     let Some((ref_name, type_arguments)) = body_head(ctx, dispatch, owner_canonical, owner, name)
@@ -875,7 +878,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                     .as_str(),
                 )
         });
-    let direct_ref = component_meta_registry_node_ref_head(dispatch, node);
+    let direct_ref = reference_carrier_head(dispatch, node);
     let skip_imported_generic_non_object_ref =
         direct_ref.as_ref().is_some_and(|(name, type_arguments)| {
             if type_arguments.is_empty() {
@@ -1234,29 +1237,6 @@ fn registry_unalias<C: crate::resolver_core::ResolverCapabilities>(
     }
 }
 
-/// The node's reference HEAD: `(name, type-argument nodes)` for the three
-/// reference carriers (`BareRef` / `InstantiationRef` / `DeclRef`).
-pub(crate) fn component_meta_registry_node_ref_head<
-    C: crate::resolver_core::ResolverCapabilities,
->(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    node: SemanticNodeId,
-) -> Option<(String, Vec<SemanticNodeId>)> {
-    let data = registry_node_data(dispatch, registry_unalias(dispatch, node))?;
-    if let Some((name, _scope)) = data.bare_ref_head() {
-        return Some((name.to_string(), data.carrier_type_args().to_vec()));
-    }
-    match data.as_ref() {
-        SemanticNodeData::DeclRef { identity } => {
-            Some((identity.decl_name.to_string(), Vec::new()))
-        }
-        SemanticNodeData::InstantiationRef { base, args } => {
-            Some((base.decl_name.to_string(), args.to_vec()))
-        }
-        _ => None,
-    }
-}
-
 /// The node-domain sibling of [`component_meta_registry_ref_name`]: the
 /// bare (argument-free) reference head name.
 pub(crate) fn component_meta_registry_node_ref_name(
@@ -1266,7 +1246,7 @@ pub(crate) fn component_meta_registry_node_ref_name(
     >,
     node: SemanticNodeId,
 ) -> Option<String> {
-    component_meta_registry_node_ref_head(dispatch, node)
+    reference_carrier_head(dispatch, node)
         .filter(|(_, args)| args.is_empty())
         .map(|(name, _)| name)
 }
@@ -1318,14 +1298,14 @@ pub(crate) fn component_meta_registry_node_utility_route(
     >,
     node: SemanticNodeId,
 ) -> Option<(String, RouteDemand)> {
-    let (name, args) = component_meta_registry_node_ref_head(dispatch, node)?;
+    let (name, args) = reference_carrier_head(dispatch, node)?;
     if args.len() != 2 || !matches!(name.as_str(), "Pick" | "Omit") {
         return None;
     }
     // The inner reference may carry type arguments (`Pick<Foo<T>, K>`) —
     // the route filter operates on member NAMES, matching the `TypeExpr`
     // sibling's contract.
-    let (root_name, _) = component_meta_registry_node_ref_head(dispatch, args[0])?;
+    let (root_name, _) = reference_carrier_head(dispatch, args[0])?;
     let members = component_meta_registry_node_string_literal_keys(dispatch, args[1])?;
     if members.is_empty() {
         return None;
@@ -1400,7 +1380,7 @@ pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
     node: SemanticNodeId,
 ) -> Option<InstantiatedIndexedAccessRoute> {
     let (path_rev, cursor) = indexed_access_string_key_spine(dispatch, node)?;
-    let (_, args) = component_meta_registry_node_ref_head(dispatch, cursor)?;
+    let (_, args) = reference_carrier_head(dispatch, cursor)?;
     if args.is_empty() {
         // A bare root belongs to the plain extractor above.
         return None;
@@ -1464,7 +1444,7 @@ pub(crate) fn component_meta_registry_node_has_actionable_route(
     >,
     node: SemanticNodeId,
 ) -> bool {
-    component_meta_registry_node_ref_head(dispatch, node).is_some()
+    reference_carrier_head(dispatch, node).is_some()
         || component_meta_registry_node_utility_route(dispatch, node).is_some()
         || component_meta_registry_node_indexed_access_route(dispatch, node).is_some()
 }
@@ -1484,7 +1464,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     producer_scope: &RegistryProducerScope,
 ) {
-    if let Some((name, _)) = component_meta_registry_node_ref_head(dispatch, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
@@ -1628,7 +1608,7 @@ fn collect_registry_refs_node_inner(
         );
         return;
     }
-    if let Some((name, _)) = component_meta_registry_node_ref_head(dispatch, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
@@ -1721,7 +1701,7 @@ fn collect_registry_refs_node_inner(
             let heritage_shape = intersection_is_lone_extends_heritage(dispatch, arms);
             for arm in arms.iter() {
                 if heritage_shape
-                    && component_meta_registry_node_ref_head(dispatch, *arm)
+                    && reference_carrier_head(dispatch, *arm)
                         .is_some_and(|(_, args)| args.is_empty())
                 {
                     continue;
@@ -1943,7 +1923,7 @@ fn collect_registry_member_surface_refs_node(
         }
         return;
     }
-    if let Some((name, _)) = component_meta_registry_node_ref_head(dispatch, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         if member_ref_policy.allows_plain_member_refs() {
             enqueue_component_meta_registry_ref(
                 published_names,
@@ -2220,129 +2200,6 @@ pub(crate) fn collect_node_ref_names(
     });
 }
 
-/// Every distinct NOMINAL `typeof` carrier reachable from `node` whose
-/// declaring identity lives in `canonical`, in visit order.
-///
-/// Shares [`walk_reference_carriers`] with [`collect_node_ref_names`] by
-/// construction, so the two answers cannot disagree: a carrier whose head
-/// name a rendered surface must have in scope is exactly a carrier this
-/// returns, and a shape the walk does not descend contributes neither a
-/// name nor a carrier.
-pub(crate) fn collect_owner_local_nominal_carriers<
-    C: crate::resolver_core::ResolverCapabilities,
->(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    node: SemanticNodeId,
-    canonical: &str,
-    carriers: &mut Vec<SemanticNodeId>,
-) {
-    walk_reference_carriers(dispatch, node, &mut |reached, data, _| {
-        if data
-            .typeof_nominal_identity()
-            .is_some_and(|identity| identity.canonical_id.as_ref() == canonical)
-            && !carriers.contains(&reached)
-        {
-            carriers.push(reached);
-        }
-    });
-}
-
-/// The ONE bounded, visited-guarded walk over the reference carriers
-/// reachable from `node`. `visit` sees every reached node together with its
-/// reference-head name when it has one; descent stays the walk's own
-/// decision, so two consumers can never disagree about what the rendered
-/// surface reaches.
-fn walk_reference_carriers<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    node: SemanticNodeId,
-    visit: &mut dyn FnMut(SemanticNodeId, &SemanticNodeData, Option<&str>),
-) {
-    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let mut worklist: Vec<SemanticNodeId> = vec![node];
-    while let Some(node) = worklist.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-        let Some(data) = registry_node_data(dispatch, node) else {
-            continue;
-        };
-        if let Some((name, args)) = component_meta_registry_node_ref_head(dispatch, node) {
-            visit(node, data.as_ref(), Some(name.as_str()));
-            worklist.extend(args);
-            continue;
-        }
-        visit(node, data.as_ref(), None);
-        match data.as_ref() {
-            SemanticNodeData::Alias(target) => worklist.push(*target),
-            SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
-                worklist.push(*element)
-            }
-            SemanticNodeData::Tuple { elements, .. } => {
-                worklist.extend(elements.iter().map(|element| element.value));
-            }
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let arms = composite.composite_members().expect("composite arm");
-                worklist.extend(arms.iter().copied());
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                worklist.extend(expressions.iter().copied());
-            }
-            SemanticNodeData::Object(surface) => {
-                worklist.extend(surface.positive_members().iter().map(|member| member.value));
-                worklist.extend(surface.call_signatures.iter().copied());
-                worklist.extend(surface.construct_signatures.iter().copied());
-                for signature in surface.index_signatures.iter() {
-                    worklist.push(signature.key_type);
-                    worklist.push(signature.value_type);
-                }
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            } => {
-                worklist.extend(params.iter().map(|param| param.ty));
-                worklist.push(*return_type);
-                worklist.extend(predicate.and_then(|predicate| predicate.ty));
-            }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                worklist.push(*object);
-                if let IndexKey::Computed(index_node) = index {
-                    worklist.push(*index_node);
-                }
-            }
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                pending,
-                ..
-            } => {
-                if let Some(frame) = pending {
-                    worklist.extend(frame.argument_nodes());
-                }
-                worklist.push(*check);
-                worklist.push(*extends);
-                worklist.push(*true_branch_ref);
-                worklist.push(*false_branch_ref);
-            }
-            SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
-            SemanticNodeData::MergedDecl { contributors } => {
-                worklist.extend(contributors.iter().copied());
-            }
-            // A `typeof` carrier's own head is not a further node — the
-            // visitor records what a rendered surface needs from it — but
-            // its type arguments are, so the walk descends into them.
-            typeof_carrier @ (SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => {
-                worklist.extend(typeof_carrier.carrier_type_args().iter().copied());
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Fact-domain classification of a published registry SOURCE as an explicit
 /// object surface: a closed / synthesized / projected object-shape fact IS
 /// one; a leaf, function, tuple, indexed-access, or authored-locator source
@@ -2431,7 +2288,7 @@ pub(crate) fn node_root_has_non_object_top_level_surface(
     let Some(data) = registry_node_data(dispatch, node) else {
         return false;
     };
-    if component_meta_registry_node_ref_head(dispatch, node).is_some() {
+    if reference_carrier_head(dispatch, node).is_some() {
         return true;
     }
     match data.as_ref() {

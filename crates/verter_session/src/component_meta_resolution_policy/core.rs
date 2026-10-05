@@ -22,10 +22,9 @@ use verter_type_expr::TopLevelOwnerId;
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
 
+use crate::project_semantic_dispatch::reference_carriers::reference_carrier_head;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::component_meta_registry::{
-    component_meta_registry_node_ref_head, source_bare_ref_name,
-};
+use crate::resolver_core::component_meta_registry::source_bare_ref_name;
 use crate::resolver_core::{ComponentMetaQueryEngine, ResolverContext};
 use crate::semantic_query::{
     DeclIdentity, HotTypeRef, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
@@ -199,7 +198,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         &self,
         node: SemanticNodeId,
     ) -> Option<(String, Vec<SemanticNodeId>)> {
-        component_meta_registry_node_ref_head(self.engine.dispatch, node)
+        reference_carrier_head(self.engine.dispatch, node)
     }
 
     /// Locate `name`'s declaration body SOURCE. The body lookup itself is

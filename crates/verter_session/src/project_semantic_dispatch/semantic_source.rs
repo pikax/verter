@@ -1184,81 +1184,82 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // CACHEABILITY verdict (which also folds a fact-signature overflow) is the
         // rail the `ShapeCacheDb` admission funnel consults.
         let value = self.with_shape_scope(|scope| {
-                let id = crate::semantic_query::SyntheticBindingId::from_carrier_key(key);
-                let cache_key =
-            crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole_with_context(
-                id, context,
-            );
-                if let Some(cached) = scope.peek(&cache_key) {
-                    crate::meta_resolve::emit_dispatch_dep_signature_facts(self,
-                        cached.dep_signature(),
-                    );
-                    // A warm entry serves its reduced node. An entry without a node
-                    // cannot serve a raise; fall through to the cold seed reduce.
-                    if let Some(node) = cached.node_id() {
-                        return Some(HotTypeRef::new(node));
-                    }
-                }
-                // SAME-GENERATION seed gate: the `value_node` arena ordinal is only
-                // meaningful while the graph still holds the node AND the node's
-                // minting file scope content is that file's LIVE content. Anything
-                // else fails closed to the shallow carrier.
-                //
-                // The deepen's CACHE identity is the content-free
-                // `SyntheticBindingId` sealed into the `ShapeCacheKey` above — the
-                // ordinal here is ONLY the cold-compute reduction SUBJECT, never any
-                // key: it re-attaches the carrier's value-side provenance to the
-                // live graph (the same provenance channel the raise boundary uses
-                // via `to_carrier_key`), and the content gate below refuses a stale
-                // re-attachment.
-                let seed_ordinal: u64 = key.value_node;
-                let seed = SemanticNodeId(seed_ordinal);
-                self.graph().node_data(seed)?;
-                let NodeScopeId::File {
-                    canonical_id,
-                    whole_hash,
-                    ..
-                } = self.graph().node_scope(seed)?
-                else {
-                    return None;
-                };
-                if self.ctx.get_whole_hash(canonical_id.as_ref())? != whole_hash {
-                    return None;
-                }
-                // Cold reduce from the seed under the caller's terminal context —
-                // the one self reducer, no second walker.
-                let reduced = self.raise_and_reduce_with_context(seed, context);
-                crate::meta_resolve::emit_dispatch_dep_signature_facts(self,
-                    reduced.dep_signature(),
+            let id = crate::semantic_query::SyntheticBindingId::from_carrier_key(key);
+            let cache_key =
+                crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole_with_context(
+                    id, context,
                 );
-                let node = reduced.node_id()?;
-                // Genuine-partial results never warm the shared slot (no-poison);
-                // the reduced value still answers this caller.
-                if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                    reduced.result_is_partial(),
-                ) {
+            if let Some(cached) = scope.peek(&cache_key) {
+                crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                    self,
+                    cached.dep_signature(),
+                );
+                // A warm entry serves its reduced node. An entry without a node
+                // cannot serve a raise; fall through to the cold seed reduce.
+                if let Some(node) = cached.node_id() {
                     return Some(HotTypeRef::new(node));
                 }
-                let observed_scope = self
-                    .ctx
-                    .observe_materialize_scope(key.scope_canonical_id.as_ref());
-                let reduced_for_closure = reduced.clone();
-                let _ = scope.get_or_compute(&cache_key, move || {
-            let scope_obs = observed_scope?;
-            let parse_fact = scope_obs.syntactic_export_set.clone()?;
-            match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-                &scope_obs,
-                parse_fact,
-                reduced_for_closure.dep_signature(),
-            ) {
-                verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
-                    Some((reduced_for_closure, sig.facts))
-                }
-                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => None,
             }
-        });
-                Some(HotTypeRef::new(node))
+            // SAME-GENERATION seed gate: the `value_node` arena ordinal is only
+            // meaningful while the graph still holds the node AND the node's
+            // minting file scope content is that file's LIVE content. Anything
+            // else fails closed to the shallow carrier.
+            //
+            // The deepen's CACHE identity is the content-free
+            // `SyntheticBindingId` sealed into the `ShapeCacheKey` above — the
+            // ordinal here is ONLY the cold-compute reduction SUBJECT, never any
+            // key: it re-attaches the carrier's value-side provenance to the
+            // live graph (the same provenance channel the raise boundary uses
+            // via `to_carrier_key`), and the content gate below refuses a stale
+            // re-attachment.
+            let seed_ordinal: u64 = key.value_node;
+            let seed = SemanticNodeId(seed_ordinal);
+            self.graph().node_data(seed)?;
+            let NodeScopeId::File {
+                canonical_id,
+                whole_hash,
+                ..
+            } = self.graph().node_scope(seed)?
+            else {
+                return None;
+            };
+            if self.ctx.get_whole_hash(canonical_id.as_ref())? != whole_hash {
+                return None;
+            }
+            // Cold reduce from the seed under the caller's terminal context —
+            // the one self reducer, no second walker.
+            let reduced = self.raise_and_reduce_with_context(seed, context);
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, reduced.dep_signature());
+            let node = reduced.node_id()?;
+            // Genuine-partial results never warm the shared slot (no-poison);
+            // the reduced value still answers this caller.
+            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                reduced.result_is_partial(),
+            ) {
+                return Some(HotTypeRef::new(node));
+            }
+            let observed_scope = self
+                .ctx
+                .observe_materialize_scope(key.scope_canonical_id.as_ref());
+            let reduced_for_closure = reduced.clone();
+            let _ = scope.get_or_compute(&cache_key, move || {
+                let scope_obs = observed_scope?;
+                let parse_fact = scope_obs.syntactic_export_set.clone()?;
+                match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+                    &scope_obs,
+                    parse_fact,
+                    reduced_for_closure.dep_signature(),
+                ) {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                        Some((reduced_for_closure, sig.facts))
+                    }
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        _,
+                    ) => None,
+                }
             });
+            Some(HotTypeRef::new(node))
+        });
         value
     }
 

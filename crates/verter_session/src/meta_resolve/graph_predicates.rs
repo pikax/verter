@@ -329,7 +329,7 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
         }
         let read = dispatch.classify_materialization_cycle_gate(identity);
         crate::request_context::observe_component_meta_read_suppress(&read);
-        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut fence,
             &read.dep_signature,
         );

@@ -49,7 +49,7 @@ use super::raise::{
     PublicationScore, RaisedNodeShapeFacts,
 };
 use super::ProjectSemanticDispatch;
-use crate::resolver_core::component_meta_query_engine::{
+use crate::project_semantic_dispatch::raise_sentinel::{
     type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
 };
 use crate::semantic_query::{
@@ -422,7 +422,7 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
 ///   discriminating test below).
 #[test]
 fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain_verdict() {
-    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+    use crate::semantic_query::compat_spelling::semantic_query_error_raw;
 
     let host = host();
     let graph = graph_of(&host);

@@ -2293,7 +2293,7 @@ fn incomplete_operand_refusals_spell_their_reasons_by_name() {
     // reason classes. Rendering the reason set's `Debug` shape instead
     // would leak a bitflag newtype's numeric representation into a string
     // consumers read, and would churn whenever a bit is added or reordered.
-    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+    use crate::semantic_query::compat_spelling::semantic_query_error_raw;
     use crate::semantic_query::PartialReasonSet;
 
     assert_eq!(

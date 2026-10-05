@@ -520,7 +520,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             type_args: Arc::from([product.hot.node()]),
             context: self.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
-        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut dep_facts,
             &payload_read.dep_signature,
         );
@@ -575,7 +575,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         provenance,
                     ),
                 });
-                crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
                     &mut dep_facts,
                     &member_read.dep_signature,
                 );

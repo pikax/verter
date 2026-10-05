@@ -872,23 +872,6 @@ pub fn emit_json(record: &RequestAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
 }
 
-/// Merge the `dep_signature` entries from a `CacheRead` (or any
-/// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
-///
-/// The `dep_signature_merges` / `dep_signature_intern_hits` audit
-/// counters are NOT bumped here — they are owned by the shared dispatch
-/// fact fan-in and the semantic signature interner.
-/// This helper is now a pure fence merge for its remaining
-/// non-dispatch-fan-in callers.
-pub fn merge_dep_signature_into_local_fence(
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
-) {
-    for entry in incoming {
-        local_fence.push(entry.clone());
-    }
-}
-
 /// Record a fresh [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// insertion in the active request's accumulator. Pushes both a
 /// typed [`IndexedReadyBuildRecord`] (direct lane used by the miner

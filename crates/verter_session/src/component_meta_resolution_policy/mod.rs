@@ -458,7 +458,7 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
             continue;
         }
         if let Some((name, args)) =
-            crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+            crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(
                 dispatch, node,
             )
         {

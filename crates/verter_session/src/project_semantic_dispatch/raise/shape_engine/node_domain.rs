@@ -26,7 +26,7 @@ use super::{
     RootOnlySummary, ShapeInterner,
 };
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
-use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+use crate::semantic_query::compat_spelling::semantic_query_error_raw;
 use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId};
 
 // ===========================================================================

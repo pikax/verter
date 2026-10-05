@@ -19,9 +19,9 @@ use verter_type_expr::{PrimitiveName, SyntheticCarrierKey, SyntheticCarrierSurfa
 
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_OBJECT_SURFACE,
-    SEMANTIC_SURFACE_MEMBER,
+    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
 };
+use crate::semantic_query::compat_spelling::semantic_query_error_raw;
 use crate::semantic_query::{
     HotTypeRef, NodeScopeId, PrimitiveKind, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
     SyntheticBindingId, TupleElement, ValueRootKey,

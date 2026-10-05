@@ -312,7 +312,7 @@ fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> 
         let fixture_dispatch_2 =
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
-        out = crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+        out = crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(
             &fixture_dispatch_2,
             node,
         )

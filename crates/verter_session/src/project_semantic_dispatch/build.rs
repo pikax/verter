@@ -16564,7 +16564,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
                         Arc::clone(type_args),
                     ));
-                    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                    crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
                         &mut local_fence,
                         &read.dep_signature,
                     );

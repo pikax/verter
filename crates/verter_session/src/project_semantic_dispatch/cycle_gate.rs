@@ -293,7 +293,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             let read = self.execute_read(hop_key);
             crate::request_context::observe_component_meta_read_suppress(&read);
-            crate::component_meta_audit::merge_dep_signature_into_local_fence(
+            crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
                 &mut dep_facts,
                 &read.dep_signature,
             );

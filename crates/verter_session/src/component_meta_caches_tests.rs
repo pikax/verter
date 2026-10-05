@@ -998,7 +998,7 @@ fn shape_value_and_fact_sig_for_scope(
         Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
         result_is_partial,
     );
-    let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+    let fact_sig = match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
         &observed,
         parse_fact,
         value.dep_signature(),
