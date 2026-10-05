@@ -1239,7 +1239,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         crate::fact_signature_helpers::install_fact_tracer(
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound_observers(
                 &self.binding.observers.overflow,
-                #[cfg(test)]
                 &self.binding.observers.forcing,
             ),
             compute,

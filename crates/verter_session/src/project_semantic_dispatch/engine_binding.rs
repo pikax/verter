@@ -95,8 +95,8 @@ pub(crate) struct EngineObservers {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) flow:
         Arc<super::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs>,
-    #[cfg(test)]
-    pub(super) forcing: Arc<crate::host_test_force::TestForceKnobs>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) forcing: Arc<crate::engine_test_knobs::TestKnobs>,
 }
 impl EngineObservers {
     #[allow(clippy::too_many_arguments)]
@@ -107,7 +107,9 @@ impl EngineObservers {
         #[cfg(any(test, feature = "test-support"))] flow: Arc<
             super::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs,
         >,
-        #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
+        #[cfg(any(test, feature = "test-support"))] forcing: Arc<
+            crate::engine_test_knobs::TestKnobs,
+        >,
     ) -> Self {
         Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -116,7 +118,7 @@ impl EngineObservers {
             relation,
             #[cfg(any(test, feature = "test-support"))]
             flow,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             forcing,
         }
     }

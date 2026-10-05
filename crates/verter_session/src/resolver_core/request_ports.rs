@@ -380,21 +380,6 @@ pub trait RouteLookup {
 
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);
 
-    /// Whether `canonical_id` is workspace-owned per the workspace's
-    /// resolver-classification (NOT a path-substring check on
-    /// `node_modules`). True for workspace package sources, including
-    /// pnpm-symlink hops whose realpath resolves into a workspace
-    /// project, and workspace-linked packages that happen to live under
-    /// `node_modules/`.
-    ///
-    /// Used by Issue #5 (indexed-access early-out) and Issue #11
-    /// (workspace-local canonical cache reuse) to gate fast paths on
-    /// actual workspace ownership. Per CLAUDE.md macro-traversal rule,
-    /// callers MUST NOT substitute `path.contains("/node_modules/")`
-    /// for this method.
-    #[cfg(test)]
-    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool;
-
     /// Whether `canonical_id` is package-backed per the workspace's
     /// resolver-classification (NOT a path-substring check on
     /// `node_modules`). True only when the realpath sits under
@@ -647,8 +632,12 @@ pub trait OwnedLowering {
             verter_session_query::source::artifact_key::FileArtifactKey,
         )>,
     );
+    /// Whether the host has armed the augmentation source-environment
+    /// unobservability knob. Inert by default.
     #[cfg(any(test, feature = "test-support"))]
-    fn augmentation_source_env_forced_unobservable(&self) -> bool;
+    fn augmentation_source_env_forced_unobservable(&self) -> bool {
+        false
+    }
     fn ordered_sfc_structure(
         &self,
         canonical: &str,
@@ -706,12 +695,6 @@ pub trait OwnedLowering {
         name: &str,
     ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<PreparedValueDecl>;
 
-    #[cfg(test)]
-    fn function_program_index(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>>;
-
     fn transient_type_parts(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -729,18 +712,6 @@ pub trait OwnedLowering {
         verter_session_query::source::transient_parts::TransientValueParts,
     >;
 
-    /// The owner's `TypeDecl` with its body already lowered — the port's
-    /// eager type-body demand. Its value-decl twin `lowered_value_decl` is the
-    /// read path in use. Gated to the `typeinfo::oracle_core` consumer module
-    /// (`#[cfg(any(test, feature = "oracle-gen"))]`, see `typeinfo/mod.rs`),
-    /// so a shipped build carries no unread method on the port contract.
-    #[cfg(any(test, feature = "oracle-gen"))]
-    fn lowered_type_decl(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
     fn lowered_value_decl(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -765,19 +736,6 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<verter_session_query::inputs::shallow::ClassifiedTypeDeps>>;
-    /// The owner's raw-source surfaces in one `SymbolSpace` — the port's
-    /// escape-free read for the syntactic symbol inventory. Gated to the
-    /// `typeinfo::oracle_core` consumer module
-    /// (`#[cfg(any(test, feature = "oracle-gen"))]`, see `typeinfo/mod.rs`),
-    /// so a shipped build carries no unread method on the port contract.
-    #[cfg(any(test, feature = "oracle-gen"))]
-    fn raw_source_surfaces(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &str,
-        space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
     fn deref_type_argument(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,

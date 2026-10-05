@@ -523,6 +523,7 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
     // incomplete claim with a usable subset; the recovered subset must keep
     // the role mapping.
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let recovered = host
@@ -532,6 +533,7 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
         .into_parts()
         .0;
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let row = recovered
@@ -1125,8 +1127,8 @@ let { title }: Props = $props();
     overflow_host
         .get_component_meta("/Overflow.svelte")
         .expect("prime admitted analysis");
-    crate::host_test_force::arm_fact_tracer_overflow_once(
-        crate::host_test_force::TracerScope::ComponentMetaOutput,
+    crate::engine_test_knobs::arm_fact_tracer_overflow_once(
+        crate::engine_test_knobs::TracerScope::ComponentMetaOutput,
         verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let overflow = overflow_host
@@ -1134,8 +1136,8 @@ let { title }: Props = $props();
         .expect("overflow projection request")
         .expect("overflow still returns the projection");
     assert_eq!(
-        crate::host_test_force::fact_tracer_overflow_claimed_by(),
-        Some(crate::host_test_force::TracerScope::ComponentMetaOutput),
+        crate::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        Some(crate::engine_test_knobs::TracerScope::ComponentMetaOutput),
         "the forced overflow must land on the separately-finalized output scope",
     );
     assert!(overflow.publication_witness.is_none());
@@ -1149,6 +1151,7 @@ let { title }: Props = $props();
         .expect("prime admitted analysis");
     noncacheable_host
         .test_force
+        .engine
         .force_fact_tracer_non_cacheable_read
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let noncacheable = noncacheable_host
@@ -1157,6 +1160,7 @@ let { title }: Props = $props();
         .expect("non-cacheable output still returns the projection");
     noncacheable_host
         .test_force
+        .engine
         .force_fact_tracer_non_cacheable_read
         .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(noncacheable.publication_witness.is_none());

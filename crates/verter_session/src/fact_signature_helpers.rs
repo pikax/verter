@@ -112,7 +112,7 @@ where
     F: FnOnce() -> R,
 {
     let (value, read_set) = source.with_fact_tracer(|| {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         force_tracer_overflow_observations(source, None);
         f()
     });
@@ -152,7 +152,7 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
 pub(crate) struct StepwiseFactTracer<'h, W> {
     source: FactTracerBasisSource<'h, W>,
     tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     forced: bool,
 }
 
@@ -165,7 +165,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         Self {
             source,
             tracer,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             forced: false,
         }
     }
@@ -175,7 +175,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         &mut self,
     ) -> crate::resolver_core::resolver_context::OwnedTracerScope<'_> {
         let scope = self.tracer.install();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !std::mem::replace(&mut self.forced, true) {
             force_tracer_overflow_observations(&self.source, None);
         }
@@ -213,9 +213,9 @@ enum BasisAuthority<'h, W> {
     },
     Unbound {
         overflow: &'h std::sync::atomic::AtomicU64,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         non_cacheable: &'h std::sync::atomic::AtomicBool,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         observations: &'h std::sync::atomic::AtomicUsize,
     },
 }
@@ -260,14 +260,12 @@ impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn unbound_observers(
         overflow: &'h std::sync::atomic::AtomicU64,
-        #[cfg(test)] forcing: &'h crate::host_test_force::TestForceKnobs,
+        forcing: &'h crate::engine_test_knobs::TestKnobs,
     ) -> Self {
         Self {
             authority: BasisAuthority::Unbound {
                 overflow,
-                #[cfg(test)]
                 non_cacheable: &forcing.force_fact_tracer_non_cacheable_read,
-                #[cfg(test)]
                 observations: &forcing.force_fact_tracer_overflow_observations,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
@@ -334,10 +332,13 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         Self {
             authority: BasisAuthority::Unbound {
                 overflow: &host.signature_overflow_at_install,
-                #[cfg(test)]
-                non_cacheable: &host.test_force.force_fact_tracer_non_cacheable_read,
-                #[cfg(test)]
-                observations: &host.test_force.force_fact_tracer_overflow_observations,
+                #[cfg(any(test, feature = "test-support"))]
+                non_cacheable: &host.test_force.engine.force_fact_tracer_non_cacheable_read,
+                #[cfg(any(test, feature = "test-support"))]
+                observations: &host
+                    .test_force
+                    .engine
+                    .force_fact_tracer_overflow_observations,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
@@ -351,7 +352,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn tracer_forcing(&self) -> (bool, usize) {
         match &self.authority {
             BasisAuthority::Bound { port, .. } => port.tracer_forcing(),
@@ -466,7 +467,7 @@ fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceC
 ///   EVERY scope in the flow, named or not — the right tool when the boundary
 ///   under test is the only one whose overflow can refuse the publication;
 /// - the THREAD-SCOPED TARGETED ONE-SHOT
-///   (`host_test_force::arm_fact_tracer_overflow_once`) is claimed by the NAMED
+///   (`engine_test_knobs::arm_fact_tracer_overflow_once`) is claimed by the NAMED
 ///   scope it was armed for, on the arming thread, and overflows that scope
 ///   ALONE. It is the seam for a flow with TWO tracers where either overflow
 ///   would independently refuse the same write: the sticky knob is
@@ -485,12 +486,12 @@ fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceC
 /// rather than relying on a boundary-specific hook — a production site that
 /// reverts to a raw, overflow-discarding tracer still fans the observations and
 /// still fails the test. The production build compiles it out.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn force_tracer_overflow_observations<
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
 >(
     source: &FactTracerBasisSource<'_, W>,
-    scope: Option<crate::host_test_force::TracerScope>,
+    scope: Option<crate::engine_test_knobs::TracerScope>,
 ) {
     let (non_cacheable, sticky) = source.tracer_forcing();
     if non_cacheable {
@@ -498,7 +499,7 @@ fn force_tracer_overflow_observations<
             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         );
     }
-    let once = crate::host_test_force::claim_fact_tracer_overflow_once(scope);
+    let once = crate::engine_test_knobs::claim_fact_tracer_overflow_once(scope);
     for i in 0..sticky.max(once).min(FACT_SIGNATURE_CAP + 1) {
         let fact = if i % 2 == 0 {
             FactVersionRef::FileWholeHash {
@@ -515,20 +516,20 @@ fn force_tracer_overflow_observations<
 }
 
 /// [`with_cacheability_scope`] for a scope that carries an ADDRESSABLE
-/// [`TracerScope`](crate::host_test_force::TracerScope) identity, so a test can
+/// [`TracerScope`](crate::engine_test_knobs::TracerScope) identity, so a test can
 /// target it by NAME with the one-shot overflow knob.
 ///
 /// Reached only through the [`named_cacheability_scope`] macro, whose production
-/// arm expands to the plain, unnamed opener — the identity exists in test builds
-/// alone.
-#[cfg(test)]
+/// arm expands to the plain, unnamed opener — the identity exists in test-support
+/// builds alone.
+#[cfg(any(test, feature = "test-support"))]
 fn with_cacheability_scope_named<
     F,
     R,
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
 >(
     source: &FactTracerBasisSource<'_, W>,
-    scope: crate::host_test_force::TracerScope,
+    scope: crate::engine_test_knobs::TracerScope,
     f: F,
 ) -> (R, bool)
 where
@@ -547,14 +548,14 @@ where
 
 /// [`install_fact_tracer_cacheability`] for an ADDRESSABLE scope. See
 /// [`with_cacheability_scope_named`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install_fact_tracer_cacheability_named<
     F,
     R,
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
 >(
     source: &FactTracerBasisSource<'_, W>,
-    scope: crate::host_test_force::TracerScope,
+    scope: crate::engine_test_knobs::TracerScope,
     f: F,
 ) -> (R, bool)
 where
@@ -565,14 +566,14 @@ where
 
 /// [`install_fact_tracer`] for an ADDRESSABLE scope. See
 /// [`with_cacheability_scope_named`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install_fact_tracer_named<
     F,
     R,
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
 >(
     source: &FactTracerBasisSource<'_, W>,
-    scope: crate::host_test_force::TracerScope,
+    scope: crate::engine_test_knobs::TracerScope,
     f: F,
 ) -> (R, FactReadSetFinalise)
 where
@@ -603,7 +604,7 @@ where
 /// named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || { .. })
 /// ```
 ///
-/// ZERO production footprint: the non-test arm expands to the plain
+/// ZERO production footprint: the arm compiled without test support expands to the plain
 /// [`install_fact_tracer_cacheability`] call and DROPS the scope tokens entirely
 /// — no argument, no `&'static` datum, no type. The identity exists only where a
 /// test can consume it, and the production build is byte-identical to the unnamed
@@ -612,14 +613,14 @@ where
 /// Naming a scope is what makes the one-shot overflow knob TARGETED instead of
 /// positional: the knob is claimed by identity, so a tracer scope added anywhere
 /// UPSTREAM cannot silently retarget it (an unnamed scope claims nothing).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 macro_rules! named_cacheability_scope {
     ($source:expr, $scope:expr, $f:expr) => {
         $crate::fact_signature_helpers::install_fact_tracer_cacheability_named($source, $scope, $f)
     };
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 macro_rules! named_cacheability_scope {
     ($source:expr, $scope:expr, $f:expr) => {
         $crate::fact_signature_helpers::install_fact_tracer_cacheability($source, $f)
@@ -629,14 +630,14 @@ macro_rules! named_cacheability_scope {
 /// Open an [`install_fact_tracer`] scope that a test can TARGET BY NAME. The
 /// signature-CONSUMING sibling of [`named_cacheability_scope`]; same zero
 /// production footprint.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 macro_rules! named_fact_tracer {
     ($source:expr, $scope:expr, $f:expr) => {
         $crate::fact_signature_helpers::install_fact_tracer_named($source, $scope, $f)
     };
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 macro_rules! named_fact_tracer {
     ($source:expr, $scope:expr, $f:expr) => {
         $crate::fact_signature_helpers::install_fact_tracer($source, $f)
@@ -765,7 +766,7 @@ where
     F: for<'t> FnOnce(&CacheabilityProbe<'t, W>) -> R,
 {
     let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         force_tracer_overflow_observations(source, None);
         f(&CacheabilityProbe { cell, source })
     });
@@ -787,6 +788,11 @@ where
 /// signature (building the entry's `ReadSetSignature` from it) uses
 /// [`install_fact_tracer`] and routes `Overflow` through
 /// [`SignatureAdmission::from_finalise`].
+///
+/// Present exactly where a reader is compiled: the unnamed arm of
+/// [`named_cacheability_scope`] (a build without test support) and this
+/// module's own tests. A test-support build opens every such scope named.
+#[cfg(any(test, not(feature = "test-support")))]
 pub(crate) fn install_fact_tracer_cacheability<
     F,
     R,

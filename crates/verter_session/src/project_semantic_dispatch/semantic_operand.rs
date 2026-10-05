@@ -545,7 +545,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Test-only repeating seam: a real workspace republication landing
             // between the two halves of the composite read, with every read
             // VALUE unchanged. Production has no hook here.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.binding
                 .observers
                 .forcing
@@ -797,7 +797,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // completed (and published its own candidate) at this point, while
         // the force's own result is still being built. Admission tests fire
         // a cancellation or budget drain here. Production has no hook.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.binding
             .observers
             .forcing

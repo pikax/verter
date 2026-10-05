@@ -902,21 +902,31 @@ fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
     // Warm the owner's IndexedReady up front so the concurrent burst races the
     // per-slot cold build, not the owner materialisation.
     host.ensure_indexed_ready("/C.vue").expect("owner indexes");
-    host.macro_hot_lowering_count.store(0, Ordering::Relaxed);
+    host.test_force
+        .engine
+        .macro_hot_cold_builds
+        .store(0, Ordering::Relaxed);
 
     const N: usize = 16;
     // The POST-WARM-MISS rendezvous: N threads, released only once every one of them
     // has observed the vacant slot. This is what makes the race deterministic rather
     // than scheduler-dependent.
-    *host.test_force.macro_hot_post_warm_miss_barrier.lock() =
-        Some(std::sync::Arc::new(std::sync::Barrier::new(N)));
+    *host
+        .test_force
+        .engine
+        .macro_hot_post_warm_miss_barrier
+        .lock() = Some(std::sync::Arc::new(std::sync::Barrier::new(N)));
     let handles: Vec<Option<crate::semantic_query::HotTypeRef>> = std::thread::scope(|scope| {
         let joins: Vec<_> = (0..N)
             .map(|_| scope.spawn(|| macro_type_arg_hot_ref(&host, "/C.vue", macro_index)))
             .collect();
         joins.into_iter().map(|j| j.join().unwrap()).collect()
     });
-    *host.test_force.macro_hot_post_warm_miss_barrier.lock() = None;
+    *host
+        .test_force
+        .engine
+        .macro_hot_post_warm_miss_barrier
+        .lock() = None;
 
     // Every concurrent demand received the committed hot ref, all identical.
     assert!(
@@ -930,7 +940,10 @@ fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
     );
     // THE PIN: the per-slot build lock collapsed the whole burst onto ONE cold build.
     assert_eq!(
-        host.macro_hot_lowering_count.load(Ordering::Relaxed),
+        host.test_force
+            .engine
+            .macro_hot_cold_builds
+            .load(Ordering::Relaxed),
         1,
         "SINGLEFLIGHT: {N} concurrent first demands of one macro must collapse onto ONE \
          `build_macro_hot_ref` — a count > 1 means the per-slot build lock is not serialising \

@@ -4729,6 +4729,10 @@ pub(crate) mod foundations_guards {
         // wrap, so the line-based extractor records the bare prefix).
         "pub mod input_basis",
         "pub use input_basis::",
+        // Engine-owned test forcing state (`TestKnobs`, `SeamHook`, the named
+        // tracer-scope one-shot), gated `any(test, feature = "test-support")`
+        // and `#[doc(hidden)]`: absent from every production build.
+        "pub mod engine_test_knobs",
         // crates/verter_wasm/src/input_snapshot.rs — the browser
         // acquisition boundary commits asynchronously-acquired rows
         // through the session handoff core (AcquiredFile /
@@ -4874,9 +4878,9 @@ pub(crate) mod foundations_guards {
         "pub(crate) mod host_batch_coordinator",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
-        // Test-only per-host force-injection knobs (`TestForceKnobs`), grouped off
-        // the root `VerterHost` so the struct stays thin. Both the module's contents
-        // and the `VerterHost` field are `#[cfg(test)]`, so a release build carries
+        // Host-specific per-host force-injection knobs (`TestForceKnobs`), grouped
+        // off the root `VerterHost` so the struct stays thin. The module and the
+        // `VerterHost` field are test-support gated, so a release build carries
         // none of it; the `mod` declaration itself is the only public-surface trace.
         "pub(crate) mod host_test_force",
         "pub(crate) mod instant",

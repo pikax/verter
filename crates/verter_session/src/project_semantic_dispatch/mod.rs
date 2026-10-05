@@ -2400,7 +2400,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if self
                         .binding
                         .observers
@@ -2527,7 +2527,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // whose subject is NOT a carrier, e.g. the ImportType
         // qualified-path `ProjectPath`). Per-host, so concurrent
         // tests on distinct hosts never contaminate one another.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .binding
             .observers
@@ -2544,7 +2544,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // inner build runs (deterministic in-process equivalent of a
         // budget-/recursion-truncated nested read). Folds inline
         // because it needs the dispatch's taint frame. Per-host.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .binding
             .observers
@@ -2554,7 +2554,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             self.fold_into_top_build_local_taint(true, false);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.binding
             .observers
             .forcing

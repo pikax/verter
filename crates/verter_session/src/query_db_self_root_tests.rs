@@ -5158,6 +5158,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
         let rctx = RequestContext::new(1, Arc::from(scope), false, None);
         let _guard = RequestContextGuard::install(rctx);
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(
                 verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
@@ -5165,6 +5166,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
             );
         let after = drive(&host, scope);
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(0, Ordering::Relaxed);
         // Orthogonality: overflow is non-cacheable, NOT partial.

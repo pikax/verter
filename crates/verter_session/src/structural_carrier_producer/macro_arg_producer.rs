@@ -1262,10 +1262,8 @@ struct MacroSlot {
 
 pub struct MacroMirrorAttachment {
     cells: Arc<OnceLock<Box<[MacroSlot]>>>,
-    #[cfg(test)]
-    forcing: Arc<crate::host_test_force::TestForceKnobs>,
-    #[cfg(test)]
-    cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    knobs: Arc<crate::engine_test_knobs::TestKnobs>,
 }
 
 impl MacroMirrorAttachment {
@@ -1283,15 +1281,12 @@ impl MacroMirrorAttachment {
 impl MacroHotMirror {
     pub(crate) fn attach(
         &self,
-        #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
-        #[cfg(test)] cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+        #[cfg(any(test, feature = "test-support"))] knobs: Arc<crate::engine_test_knobs::TestKnobs>,
     ) -> MacroMirrorAttachment {
         MacroMirrorAttachment {
             cells: Arc::clone(&self.cells),
-            #[cfg(test)]
-            forcing,
-            #[cfg(test)]
-            cold_builds,
+            #[cfg(any(test, feature = "test-support"))]
+            knobs,
         }
     }
 
@@ -1449,11 +1444,11 @@ fn macro_hot_product<
     // Test-only rendezvous between the lock-free warm MISS and the build lock: when
     // armed it holds every thread that has just missed until ALL of them have, which
     // is the precise interleaving the per-slot build lock exists to serialise (see
-    // `TestForceKnobs::macro_hot_post_warm_miss_barrier`, whose NON-RE-ENTRANCY
+    // `TestKnobs::macro_hot_post_warm_miss_barrier`, whose NON-RE-ENTRANCY
     // invariant this cold path upholds: the builder below produces inert carrier
     // nodes and resolves nothing, so it never re-enters this demand).
-    #[cfg(test)]
-    mirror.forcing.wait_macro_hot_post_warm_miss_barrier();
+    #[cfg(any(test, feature = "test-support"))]
+    mirror.knobs.wait_macro_hot_post_warm_miss_barrier();
     // Cold path: SINGLEFLIGHT the lowering under the per-slot build lock so
     // concurrent first demands of ONE macro collapse onto a single
     // `build_macro_hot_ref` (the slot is no `get_or_init` cell: a
@@ -1474,7 +1469,7 @@ fn macro_hot_product<
         owner_canonical,
         &indexed,
         macro_index,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         &mirror,
     ) {
         MacroHotRefOutcome::Ready(result) => {
@@ -1522,13 +1517,14 @@ fn build_macro_hot_ref(
     owner_canonical: &str,
     indexed: &verter_session_query::inputs::indexed::IndexedInputRecord,
     macro_index: usize,
-    #[cfg(test)] mirror: &MacroMirrorAttachment,
+    #[cfg(any(test, feature = "test-support"))] mirror: &MacroMirrorAttachment,
 ) -> MacroHotRefOutcome {
     // Singleflight probe: count each COLD build entry. The per-slot build lock
     // must collapse concurrent first demands of one macro onto ONE entry.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     mirror
-        .cold_builds
+        .knobs
+        .macro_hot_cold_builds
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Genuine, cacheable absences (no script analysis, no macro at the index,
     // no authored type argument): commit `Ready(None)`.

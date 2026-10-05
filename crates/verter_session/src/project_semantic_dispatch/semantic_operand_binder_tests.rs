@@ -588,7 +588,12 @@ fn republication_inside_the_environment_read_window_refuses_to_seal() {
     let seam_host = Arc::clone(&host);
     let republications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = Arc::clone(&republications);
-    *host.test_force.semantic_operand_env_window_seam.0.lock() = Some(Arc::new(move || {
+    *host
+        .test_force
+        .engine
+        .semantic_operand_env_window_seam
+        .0
+        .lock() = Some(Arc::new(move || {
         let round = counter.fetch_add(1, Ordering::Relaxed);
         upsert_at(
             &seam_host,
@@ -604,7 +609,12 @@ fn republication_inside_the_environment_read_window_refuses_to_seal() {
     assert_eq!(republications.load(Ordering::Relaxed), 3);
 
     // With the window quiet again the same operand seals and forces.
-    *host.test_force.semantic_operand_env_window_seam.0.lock() = None;
+    *host
+        .test_force
+        .engine
+        .semantic_operand_env_window_seam
+        .0
+        .lock() = None;
     let settled = force(&dispatch, &operand, ProjectionMode::Identity);
     assert!(matches!(
         host.project_type_store()
@@ -647,7 +657,12 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
         );
         let seam_ctx = Arc::clone(&ctx);
         let cancelling = leg == "cancel";
-        *host.test_force.semantic_operand_post_child_seam.0.lock() = Some(Arc::new(move || {
+        *host
+            .test_force
+            .engine
+            .semantic_operand_post_child_seam
+            .0
+            .lock() = Some(Arc::new(move || {
             if cancelling {
                 seam_ctx.cancel();
             } else {

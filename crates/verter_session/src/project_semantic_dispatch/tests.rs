@@ -30072,10 +30072,12 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
 
     // FENCED (knob ON): the prelude observes a fenced serve → cache_suppress.
     host.test_force
+        .engine
         .carrier_normalization_force_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let fenced_read = dispatch.execute_read(make_key());
     host.test_force
+        .engine
         .carrier_normalization_force_fence_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -30179,6 +30181,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
     // Arm the fence so the MappedType carrier-subject prelude observes a fenced
     // serve → cache_suppress on the read → accumulated into the outcome.
     host.test_force
+        .engine
         .carrier_normalization_force_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     // FRAMELESS release through the build-scoped sugar. Post-change this panics
@@ -30268,11 +30271,13 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     // serve → the read is Complete-but-cache_suppress → the evaluated entry
     // aggregates cache_suppress while staying Complete.
     host.test_force
+        .engine
         .carrier_normalization_force_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (_node, completeness, cache_suppress) =
         dispatch.evaluate_deferred_outcome_for_tests(mapped, context);
     host.test_force
+        .engine
         .carrier_normalization_force_fence_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -30362,11 +30367,13 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
     // read. Per-host (not process-global), so this cannot contaminate a
     // concurrently-running test on another host.
     host.test_force
+        .engine
         .force_fenced_serve_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (_node, completeness, cache_suppress) =
         dispatch.evaluate_deferred_outcome_for_tests(import_type, context);
     host.test_force
+        .engine
         .force_fenced_serve_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -30451,6 +30458,7 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
     // treats the present serve as fenced and fans a non-cacheable read onto every
     // active tracer.
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (_node, completeness, cache_suppress) =
@@ -30492,6 +30500,7 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
         "the fenced entry must stay ABSENT from evaluate_deferred_memo across repeated evals"
     );
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
@@ -30588,11 +30597,13 @@ fn carrier_unresolved_name_stays_cacheable_even_with_fence_armed() {
     // Fence ARMED — but an unresolved name never hits the resolved direct-serve
     // probe, so the injection is skipped.
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (_node, completeness, cache_suppress) =
         dispatch.evaluate_deferred_outcome_for_tests(bare, context);
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 

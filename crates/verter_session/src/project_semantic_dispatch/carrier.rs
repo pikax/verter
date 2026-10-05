@@ -841,7 +841,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the production resolution shape is byte-identical; placing the
                 // injection AT the probe proves the direct serve lies inside the
                 // evaluator's nested-tracer scope.
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if serve.is_some()
                     && self
                         .binding

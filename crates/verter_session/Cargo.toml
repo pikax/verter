@@ -38,6 +38,15 @@ attribution = ["verter_audit/attribution"]
 # that call them) use this gate so the reverse-materialization fence holds in
 # every build profile, not release-only. Production-unreachability is asserted
 # by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
+# This feature is the single FORWARDING POINT for every test-support seam
+# beneath the session: each lower crate whose test seams session tests reach
+# (the scheduler, `verter_session_query`, and any crate the semantic engine
+# or source layer is built in) exposes its own default-off
+# `test-support`, and it is forwarded from here so one session opt-in turns on
+# the matching seam in every layer. Engine test seams (port-method defaults,
+# the engine-owned `engine_test_knobs::TestKnobs` record and its injection
+# sites) are gated `any(test, feature = "test-support")` for exactly that
+# reason: a session test reaches them through a non-`cfg(test)` engine build.
 # The reusable worker-substrate seam exposes scheduler pool identities, so an
 # explicit session test-support opt-in must carry the scheduler's matching
 # default-off identity surface for downstream test crates too.

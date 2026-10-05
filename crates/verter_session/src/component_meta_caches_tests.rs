@@ -188,8 +188,8 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     // not claim this named one-shot and therefore remain ordinarily
     // cacheable; the test discriminates the request-level refusal rail from
     // any inner cache's independent admission policy.
-    crate::host_test_force::arm_fact_tracer_overflow_once(
-        crate::host_test_force::TracerScope::ComponentMetaRequest,
+    crate::engine_test_knobs::arm_fact_tracer_overflow_once(
+        crate::engine_test_knobs::TracerScope::ComponentMetaRequest,
         verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let first = run_component_meta_request(
@@ -1196,6 +1196,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
         host;
     let db = host.project_type_store().shape_cache_db();
+    let source_port: &dyn crate::resolver_core::HostRequestContext = host;
 
     // CONTROL — the same funnel, the same shape, a LIVE decl-body lease: admits.
     let control_key = ShapeCacheKey::member_value_node_whole_for_test(
@@ -1249,12 +1250,13 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         .shallow_state
         .clone();
     assert!(
-        ctx.lowered_type_decl(
-            &state,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "Pin"
-        )
-        .is_some(),
+        source_port
+            .lowered_type_decl(
+                &state,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Pin"
+            )
+            .is_some(),
         "fixture invariant: the pin demand must acquire the retained-snapshot lease",
     );
     raw_state.decl_bodies().release_retained_snapshot_for_test();
@@ -1265,7 +1267,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         .get_or_compute_traced_for_test(&poison_key, || {
             // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
             // funnel-entry check would have run and passed.
-            let leased = ctx.lowered_type_decl(
+            let leased = source_port.lowered_type_decl(
                 &state,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "Probe",

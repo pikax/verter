@@ -34,8 +34,8 @@ use crate::VerterHost;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
-#[cfg(test)]
-use crate::host_test_force::TracerScope;
+#[cfg(any(test, feature = "test-support"))]
+use crate::engine_test_knobs::TracerScope;
 
 use crate::instant::Instant;
 

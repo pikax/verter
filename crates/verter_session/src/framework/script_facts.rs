@@ -430,11 +430,11 @@ static_assertions::assert_not_impl_any!(
 );
 
 /// The addressable identity of the entry-point's two sibling tracer scopes.
-/// `#[cfg(test)]` because the identity exists only where a test can target it —
-/// the production arms of `named_cacheability_scope!` / `named_fact_tracer!`
+/// Test-support gated because the identity exists only where a test can target
+/// it — the production arms of `named_cacheability_scope!` / `named_fact_tracer!`
 /// drop the scope tokens unexpanded.
-#[cfg(test)]
-use crate::host_test_force::TracerScope;
+#[cfg(any(test, feature = "test-support"))]
+use crate::engine_test_knobs::TracerScope;
 
 /// The content-addressed candidate-store key.
 ///

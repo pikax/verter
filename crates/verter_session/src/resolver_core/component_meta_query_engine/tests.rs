@@ -1970,14 +1970,14 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
     )]);
     assert!(host.ensure_loaded(workspace_linked_canonical));
 
-    // Sanity: the typed accessor on the host's resolver-context
+    // Sanity: the host's typed ownership accessor and its resolver-context
     // surface must classify the workspace-linked-package canonical
     // as workspace-owned (NOT package-backed). The substring check
     // on the same canonical would return `true` (path contains
     // `/node_modules/`).
     let ctx: &dyn super::super::ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
-        ctx.workspace_is_workspace_owned(workspace_linked_canonical),
+        host.workspace_is_workspace_owned(workspace_linked_canonical),
         "workspace-linked package must be workspace-owned per typed accessor",
     );
     assert!(
@@ -2845,6 +2845,7 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_20);
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(
                 verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
@@ -2857,6 +2858,7 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
             None,
         );
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(0, Ordering::Relaxed);
         // The verdict still flows to THIS caller (overflow is cache-only).

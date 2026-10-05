@@ -85,9 +85,7 @@ const MAX_IMPORT_HOPS: usize = 64;
 /// cycle guard. The returned [`SourceWalkResult`] feeds
 /// [`super::admission::admit_source_walk`] directly.
 #[allow(dead_code)]
-pub(crate) fn resolve_source_declarations<
-    C: ResolverContext<crate::resolver_core::HostCapabilities>,
->(
+pub(crate) fn resolve_source_declarations<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
 ) -> SourceWalkResult {
@@ -109,7 +107,7 @@ enum WalkOutcome {
     Cycle,
 }
 
-fn walk<C: ResolverContext<crate::resolver_core::HostCapabilities>>(
+fn walk<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
     visited: &mut FxHashSet<(String, String, SymbolSpace)>,

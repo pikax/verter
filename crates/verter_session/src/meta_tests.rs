@@ -30877,6 +30877,7 @@ defineProps<P>()
     // the live view. No generation bump ⇒ the token fence stays admissible,
     // isolating the non-cacheability rail.
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(true, Relaxed);
     let payload = session
@@ -30886,6 +30887,7 @@ defineProps<P>()
         .expect("a fenced output serve still serves the caller (ReturnOnly)")
         .expect("component resolves");
     host.test_force
+        .engine
         .force_carrier_direct_serve_fence_for_tests
         .store(false, Relaxed);
     assert!(

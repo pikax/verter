@@ -308,6 +308,7 @@ mod tracer_cacheability_tests {
     fn cacheability_verdict_folds_overflow_with_no_non_cacheable_read() {
         let host = VerterHost::new_standalone(HostConfig::default());
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(OVER_CAP, std::sync::atomic::Ordering::Relaxed);
 
@@ -344,6 +345,7 @@ mod tracer_cacheability_tests {
         );
 
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
@@ -389,6 +391,7 @@ mod tracer_cacheability_tests {
 
         let host = VerterHost::new_standalone(HostConfig::default());
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(OVER_CAP, Ordering::Relaxed);
 
@@ -427,6 +430,7 @@ mod tracer_cacheability_tests {
         );
 
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(0, Ordering::Relaxed);
 

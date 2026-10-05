@@ -2603,7 +2603,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         }
         let run = || {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if self
                 .binding
                 .observers

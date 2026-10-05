@@ -472,18 +472,26 @@ impl RouteLookup for crate::VerterHost {
     }
 
     #[inline]
-    #[cfg(test)]
-    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
-        self.workspace().is_workspace_owned(canonical_id)
-    }
-
-    #[inline]
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
         self.workspace().is_package_backed(canonical_id)
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
+/// Session-side ownership classification read beside the engine's route port.
+#[cfg(test)]
+impl crate::VerterHost {
+    /// Whether `canonical_id` is workspace-owned per the workspace's
+    /// resolver-classification (NOT a path-substring check on
+    /// `node_modules`). True for workspace package sources, including
+    /// pnpm-symlink hops whose realpath resolves into a workspace project,
+    /// and workspace-linked packages that happen to live under
+    /// `node_modules/`.
+    pub(crate) fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
+        self.workspace().is_workspace_owned(canonical_id)
+    }
+}
+
 impl Cancellation for crate::VerterHost {}
 
 #[cfg(any(test, feature = "test-support"))]
@@ -493,10 +501,8 @@ impl ExecutionSubmission for crate::VerterHost {
         self.project_type_store().bind_engine(
             self.engine_observers(),
             self.source_input_leases.macro_selector(
-                #[cfg(test)]
-                Arc::clone(&self.test_force),
-                #[cfg(test)]
-                Arc::clone(&self.macro_hot_lowering_count),
+                #[cfg(any(test, feature = "test-support"))]
+                Arc::clone(&self.test_force.engine),
             ),
         )
     }
@@ -1049,12 +1055,6 @@ where
     }
 
     #[inline]
-    #[cfg(test)]
-    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
-        self.0.host().workspace().is_workspace_owned(canonical_id)
-    }
-
-    #[inline]
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
         self.0.host().workspace().is_package_backed(canonical_id)
     }
@@ -1078,10 +1078,8 @@ where
                 .overlay()
                 .input_artifacts
                 .macro_selector(
-                    #[cfg(test)]
-                    Arc::clone(&self.0.host().test_force),
-                    #[cfg(test)]
-                    Arc::clone(&self.0.host().macro_hot_lowering_count),
+                    #[cfg(any(test, feature = "test-support"))]
+                    Arc::clone(&self.0.host().test_force.engine),
                 ),
         )
     }
@@ -1275,17 +1273,19 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             .signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn tracer_forcing(&self) -> (bool, usize) {
         (
             self.0
                 .host()
                 .test_force
+                .engine
                 .force_fact_tracer_non_cacheable_read
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.0
                 .host()
                 .test_force
+                .engine
                 .force_fact_tracer_overflow_observations
                 .load(std::sync::atomic::Ordering::Relaxed),
         )

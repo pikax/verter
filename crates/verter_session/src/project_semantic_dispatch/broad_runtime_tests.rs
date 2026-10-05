@@ -545,6 +545,7 @@ fn partial_classifier_values_never_admit_and_retry_cold() {
     let key = macro_classifier_key(&dispatch, "/partial.vue", None);
 
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = dispatch.execute(key.clone());
@@ -558,6 +559,7 @@ fn partial_classifier_values_never_admit_and_retry_cold() {
     );
 
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = dispatch.execute(key.clone());

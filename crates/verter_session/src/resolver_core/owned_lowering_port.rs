@@ -420,6 +420,35 @@ pub(crate) trait HostSourcePort {
         &self,
         input: &verter_session_query::inputs::indexed::IndexedInputRecord,
     ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>;
+    /// The retained source's function program index — a test probe over the
+    /// source lease the request retains.
+    #[cfg(test)]
+    fn function_program_index(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>>;
+    /// The owner's `TypeDecl` with its body already lowered — the eager
+    /// type-body demand the `typeinfo::oracle_core` source walk reads. Gated to
+    /// that consumer (`#[cfg(any(test, feature = "oracle-gen"))]`, see
+    /// `typeinfo/mod.rs`), so a shipped build carries no unread method.
+    #[cfg(any(test, feature = "oracle-gen"))]
+    fn lowered_type_decl(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
+    /// The owner's raw-source surfaces in one `SymbolSpace` — the escape-free
+    /// read of the syntactic symbol inventory the `typeinfo::oracle_core`
+    /// source walk consumes. Same gate as [`Self::lowered_type_decl`].
+    #[cfg(any(test, feature = "oracle-gen"))]
+    fn raw_source_surfaces(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
+    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
 }
 impl<T: SourceInputProvider> HostSourcePort for T {
     fn svelte_script_facts(
@@ -435,6 +464,46 @@ impl<T: SourceInputProvider> HostSourcePort for T {
         input: &verter_session_query::inputs::indexed::IndexedInputRecord,
     ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
         self.indexed(input)?.framework_parse.clone()
+    }
+    #[cfg(test)]
+    fn function_program_index(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
+        let Some(source) = self.source(source) else {
+            missing_source();
+            return None;
+        };
+        Some(crate::host_source_demand::consume_walked_read(
+            source.decl_bodies().function_program_index(),
+        ))
+    }
+    #[cfg(any(test, feature = "oracle-gen"))]
+    fn lowered_type_decl(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
+        let Some(source) = self.source(source) else {
+            missing_source();
+            return None;
+        };
+        source.type_decl_in(owner, name)
+    }
+    #[cfg(any(test, feature = "oracle-gen"))]
+    fn raw_source_surfaces(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
+    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>> {
+        let Some(source) = self.source(source) else {
+            missing_source();
+            return None;
+        };
+        Some(source.decl_bodies().raw_surfaces_for_in(owner, name, space))
     }
 }
 
@@ -785,20 +854,6 @@ impl<
     ) -> Result<Option<KeyedFunctionStructure>, FlowBindingMapError> {
         prepare_structure(self, key)
     }
-    #[cfg(test)]
-    fn function_program_index(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
-        let Some(source) = self.source(source) else {
-            missing_source();
-            return None;
-        };
-        Some(crate::host_source_demand::consume_walked_read(
-            source.decl_bodies().function_program_index(),
-        ))
-    }
-
     fn transient_type_parts(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -828,19 +883,6 @@ impl<
         source.decl_bodies().transient_value_parts_in(owner, name)
     }
 
-    #[cfg(any(test, feature = "oracle-gen"))]
-    fn lowered_type_decl(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
-        let Some(source) = self.source(source) else {
-            missing_source();
-            return None;
-        };
-        source.type_decl_in(owner, name)
-    }
     fn lowered_value_decl(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -888,20 +930,6 @@ impl<
             return None;
         };
         source.type_deps_in(owner, name)
-    }
-    #[cfg(any(test, feature = "oracle-gen"))]
-    fn raw_source_surfaces(
-        &self,
-        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &str,
-        space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
-    ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>> {
-        let Some(source) = self.source(source) else {
-            missing_source();
-            return None;
-        };
-        Some(source.decl_bodies().raw_surfaces_for_in(owner, name, space))
     }
     fn deref_type_argument(
         &self,

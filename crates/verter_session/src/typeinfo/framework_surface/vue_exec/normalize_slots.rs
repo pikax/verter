@@ -711,10 +711,12 @@ mod raise_miss_normalization_tests {
         // on another host cannot be contaminated.
         let armed_root = {
             host.test_force
+                .engine
                 .force_result_partial_for_tests
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let root = super::pick_source_root_node(&dispatch, first_param);
             host.test_force
+                .engine
                 .force_result_partial_for_tests
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             root

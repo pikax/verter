@@ -16,8 +16,8 @@ use crate::instant::Instant;
 use crate::fact_signature_helpers::named_fact_tracer;
 use crate::VerterHost;
 
-#[cfg(test)]
-use crate::host_test_force::TracerScope;
+#[cfg(any(test, feature = "test-support"))]
+use crate::engine_test_knobs::TracerScope;
 
 use super::{
     component_meta_options_fingerprint, extract_component_meta_from_resolved, ComponentMetaOptions,

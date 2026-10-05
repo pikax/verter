@@ -235,10 +235,8 @@ struct RetainedInputs {
 /// the retained source, its workers, or any session/cache service.
 pub struct MacroMirrorSelector {
     retained: Arc<parking_lot::RwLock<RetainedInputs>>,
-    #[cfg(test)]
-    forcing: Arc<crate::host_test_force::TestForceKnobs>,
-    #[cfg(test)]
-    cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    knobs: Arc<crate::engine_test_knobs::TestKnobs>,
 }
 impl super::request_ports::MacroMirrorSource for MacroMirrorSelector {
     fn attachment(
@@ -247,25 +245,20 @@ impl super::request_ports::MacroMirrorSource for MacroMirrorSelector {
     ) -> Option<crate::structural_carrier_producer::MacroMirrorAttachment> {
         let indexed = self.retained.read().indexed.get(identity).cloned()?;
         Some(indexed.macro_hot_mirror.attach(
-            #[cfg(test)]
-            Arc::clone(&self.forcing),
-            #[cfg(test)]
-            Arc::clone(&self.cold_builds),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.knobs),
         ))
     }
 }
 impl InputArtifactLeases {
     pub(crate) fn macro_selector(
         &self,
-        #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
-        #[cfg(test)] cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+        #[cfg(any(test, feature = "test-support"))] knobs: Arc<crate::engine_test_knobs::TestKnobs>,
     ) -> MacroMirrorSelector {
         MacroMirrorSelector {
             retained: Arc::clone(&self.retained),
-            #[cfg(test)]
-            forcing,
-            #[cfg(test)]
-            cold_builds,
+            #[cfg(any(test, feature = "test-support"))]
+            knobs,
         }
     }
 

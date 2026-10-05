@@ -2209,9 +2209,11 @@ fn a_chain_refused_persistent_admission_evaluates_each_level_once() {
     for levels in [8usize, 64] {
         let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
         host.test_force
+            .engine
             .force_fenced_serve_for_tests
             .store(true, std::sync::atomic::Ordering::Relaxed);
         host.test_force
+            .engine
             .force_flow_member_fenced_serve_for_tests
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let before = super::flow_return::flow_evaluations_for_tests();

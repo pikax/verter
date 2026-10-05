@@ -312,7 +312,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let ctx: &dyn crate::resolver_core::HostRequestContext = &host;
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
@@ -435,7 +435,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let ctx: &dyn crate::resolver_core::HostRequestContext = &host;
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
@@ -1128,7 +1128,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let ctx: &dyn crate::resolver_core::HostRequestContext = &host;
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
@@ -1717,7 +1717,7 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
     let hash_of = |source: &str| {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         upsert_source(&host, canonical, source);
-        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
+        let ctx: &dyn crate::resolver_core::HostRequestContext = host.as_ref();
         let serve = ctx
             .ensure_indexed_ready_serve(canonical)
             .expect("the fixture file is served");

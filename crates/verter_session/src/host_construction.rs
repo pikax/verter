@@ -521,7 +521,7 @@ impl VerterHost {
         // fresh `insert`s bump `total_shallow_processes` + `loaded_files`
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let test_force = Arc::new(crate::host_test_force::TestForceKnobs::default());
         #[cfg(test)]
         project_type_store
@@ -669,10 +669,8 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             flow_fault_injection:
                 Arc::new(crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_force,
-            #[cfg(test)]
-            macro_hot_lowering_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1724,8 +1722,8 @@ impl crate::VerterHost {
             Arc::clone(&self.relation_knobs),
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.flow_fault_injection),
-            #[cfg(test)]
-            Arc::clone(&self.test_force),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.test_force.engine),
         )
     }
 }
@@ -1783,13 +1781,14 @@ mod fact_validation_authority {
             self.signature_overflow_at_install
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        #[cfg(test)]
         fn tracer_forcing(&self) -> (bool, usize) {
             (
                 self.test_force
+                    .engine
                     .force_fact_tracer_non_cacheable_read
                     .load(std::sync::atomic::Ordering::Relaxed),
                 self.test_force
+                    .engine
                     .force_fact_tracer_overflow_observations
                     .load(std::sync::atomic::Ordering::Relaxed),
             )

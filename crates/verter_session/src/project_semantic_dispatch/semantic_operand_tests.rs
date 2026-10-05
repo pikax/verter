@@ -1191,7 +1191,12 @@ fn concurrent_same_force_joins_the_existing_flight(
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = parking_lot::Mutex::new(release_rx);
-    *host.test_force.semantic_operand_cold_build_seam.0.lock() = Some(Arc::new(move || {
+    *host
+        .test_force
+        .engine
+        .semantic_operand_cold_build_seam
+        .0
+        .lock() = Some(Arc::new(move || {
         entered_tx.send(()).expect("winner entry receiver");
         release_rx
             .lock()
@@ -1418,8 +1423,12 @@ fn cancellation_discovered_inside_the_cold_build_never_warms() {
     let operand = mint(&dispatch, locator);
     let ctx = RequestContext::new(10, Arc::from(OWNER), false, None);
     let cancel = Arc::clone(&ctx);
-    *host.test_force.semantic_operand_cold_build_seam.0.lock() =
-        Some(Arc::new(move || cancel.cancel()));
+    *host
+        .test_force
+        .engine
+        .semantic_operand_cold_build_seam
+        .0
+        .lock() = Some(Arc::new(move || cancel.cancel()));
     let _guard = RequestContextGuard::install(ctx);
     assert!(matches!(
         dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded)),
@@ -1459,6 +1468,7 @@ fn partial_and_signature_overflow_discovered_during_force_never_warm() {
         );
         if overflow {
             host.test_force
+                .engine
                 .force_fact_tracer_overflow_observations
                 .store(
                     verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
@@ -1466,6 +1476,7 @@ fn partial_and_signature_overflow_discovered_during_force_never_warm() {
                 );
         } else {
             host.test_force
+                .engine
                 .force_result_partial_for_tests
                 .store(true, Ordering::Relaxed);
         }
@@ -1511,6 +1522,7 @@ fn complete_cache_suppressed_force_still_returns_its_typed_value() {
     let context = ProjectionReductionContext::published(ProjectionMode::Identity);
     let key = force_key(&dispatch, &operand, context);
     host.test_force
+        .engine
         .force_fenced_serve_for_tests
         .store(true, Ordering::Relaxed);
     let forced = force_with_context(&dispatch, &operand, context);

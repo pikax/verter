@@ -328,7 +328,7 @@ pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod host_test_force;
 mod host_upsert;
 mod host_views;
@@ -355,6 +355,9 @@ mod artifact_root_retention_tests;
 pub mod cancel_trace;
 pub(crate) mod compile_output_node;
 pub mod component_meta_cached_result;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod engine_test_knobs;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed
@@ -833,17 +836,10 @@ pub struct VerterHost {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) flow_fault_injection:
         Arc<project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs>,
-    /// Test-only force-injection knobs, grouped so the root struct stays thin;
-    /// `#[cfg(test)]`-gated. See [`crate::host_test_force::TestForceKnobs`].
-    #[cfg(test)]
+    /// Test force-injection knobs, grouped so the root struct stays thin;
+    /// test-support gated. See [`crate::host_test_force::TestForceKnobs`].
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_force: Arc<crate::host_test_force::TestForceKnobs>,
-    /// Per-host count of macro-hot-mirror COLD builds (`build_macro_hot_ref`
-    /// entries). The per-slot singleflight guarantee is that concurrent first
-    /// demands of ONE macro collapse onto ONE cold build; a test asserts this
-    /// counter is `1` after a barrier-synchronised concurrent demand burst.
-    /// `#[cfg(test)]`-gated: no production reader.
-    #[cfg(test)]
-    pub(crate) macro_hot_lowering_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute
