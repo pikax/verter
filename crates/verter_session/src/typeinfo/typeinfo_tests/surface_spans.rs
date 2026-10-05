@@ -616,6 +616,15 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     };
 
     let surface = TypeInfoSurface::build(graph, &view);
+    // The graph-only one-level surface the shared projection produces converts
+    // to the identical span-rich surface (index-signature spans included).
+    assert_eq!(
+        TypeInfoSurface::from_one_level(
+            graph,
+            &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+        ),
+        surface,
+    );
     assert_eq!(surface.index_signatures.len(), 1);
     let idx = &surface.index_signatures[0];
 

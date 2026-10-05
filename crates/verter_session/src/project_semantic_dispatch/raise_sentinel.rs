@@ -370,10 +370,9 @@ mod tests {
         query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
         query_error_is_unmaterialized_sentinel, QueryError,
     };
-    use crate::resolver_core::component_meta_query_engine::{
-        SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
+    use crate::semantic_query::compat_spelling::{
+        semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     };
-    use crate::semantic_query::compat_spelling::semantic_query_error_raw;
     use crate::semantic_query::SemanticQueryValueTag;
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 

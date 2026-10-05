@@ -651,12 +651,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Re-project the one-level Vue macro surface identified by a stamped
     /// type-argument payload. Member-path, callable-parameter, and index-
-    /// position sources all replay through this single producer so their
-    /// substitution, heritage filtering, and provenance match publication.
+    /// position sources all replay through the SAME macro surface producer
+    /// publication uses ([`super::one_level_surface::project_macro_argument_surface`]),
+    /// so their substitution, heritage filtering, and provenance match
+    /// publication.
     fn replay_vue_macro_type_argument_surface(
         &self,
         payload: &verter_type_expr::locators::MacroPayloadLocator,
-    ) -> Option<crate::typeinfo::framework_surface::vue_exec::VueMacroSurface> {
+    ) -> Option<super::one_level_surface::MacroArgumentSurface> {
         if payload.payload != MacroPayloadPosition::TypeArgument {
             return None;
         }
@@ -670,16 +672,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .get(payload.macro_index as usize)?
                 .kind
         };
-        crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface_with_ctx(
+        super::one_level_surface::project_macro_argument_surface(
             self.ctx,
             self,
-            &crate::typeinfo::types::VueMacroSurfaceRequest {
-                owner_canonical: Arc::from(canonical),
-                macro_index: payload.macro_index as usize,
-                macro_kind,
-                root_identity: [0u8; 16],
-                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-            },
+            &Arc::from(canonical),
+            payload.macro_index as usize,
+            macro_kind,
         )
     }
 
@@ -709,8 +707,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 };
                 let Some(member) = surface
                     .surface
-                    .members
-                    .iter()
+                    .members()
                     .find(|member| member.key.cloned_known().as_ref() == Some(&path[0]))
                 else {
                     return SourceRaiseOutcome::Absent;
@@ -827,13 +824,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let Some(signature) = surface
                 .surface
-                .call_signatures
-                .iter()
-                .find(|signature| occurrence.matches_subject(signature.node.0))
+                .call_signatures()
+                .find(|signature| occurrence.matches_subject(signature.0))
             else {
                 return SourceRaiseOutcome::Absent;
             };
-            signature.node
+            signature
         } else {
             let occurrence_path: Arc<[verter_type_expr::facts::FactPropertyKey]> = occurrence
                 .path()
@@ -1041,7 +1037,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// ([`ProjectedTypeFact::IndexPosition`]) by replaying the publication
     /// surface's own producing route: the BASE macro type argument re-projects
     /// to the SAME one-level macro surface the normalization read
-    /// (`resolve_vue_macro_surface_with_ctx` — the one existing surface entry,
+    /// (`project_macro_argument_surface` — the one existing surface entry,
     /// so projection context, provenance, and heritage substitution are
     /// IDENTICAL by construction), the index signature at `signature_ordinal`
     /// is selected in the NODE domain (the surface's declaration-order
@@ -1080,8 +1076,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // drift is an honest miss.
         let Some(sig) = surface
             .surface
-            .index_signatures
-            .get(signature_ordinal as usize)
+            .index_signatures()
+            .nth(signature_ordinal as usize)
         else {
             return SourceRaiseOutcome::Absent;
         };

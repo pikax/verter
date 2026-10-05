@@ -1030,10 +1030,9 @@ mod tests {
         MaterializePathSegment, MaterializeTypeExprAlg, MaterializedTypeExpr, ObjectMemberSlot,
         RaisedShapeAlgebra,
     };
-    use crate::resolver_core::component_meta_query_engine::{
-        SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
+    use crate::semantic_query::compat_spelling::{
+        semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
     };
-    use crate::semantic_query::compat_spelling::semantic_query_error_raw;
     use crate::semantic_query::QueryError;
 
     /// The typed `opaque_sentinel` algebra entry point on the materializer:

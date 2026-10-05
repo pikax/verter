@@ -410,7 +410,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// MOVING each [`SurfaceMember`] out of the enumerated vector.
 ///
 /// AUTHORITY-PRIVATE enumeration: wraps the single shared
-/// [`super::read_positive_surface_members`] node→members reader (this is NOT a
+/// [`crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members`] node→members reader (this is NOT a
 /// second reader — it is the candidate-tokenising wrapper
 /// over that one reader). Each candidate carries the surface's derived kind so
 /// admission can compare against the cursor's surface kind.
@@ -424,7 +424,12 @@ pub(crate) fn read_surface_member_candidates(
 ) -> Vec<SurfaceMemberCandidate> {
     // An INCOMPLETE member read records its typed reason and enumerates only
     // the usable subset — never a silently truncated candidate set.
-    let members = super::read_positive_surface_members(ctx, dispatch, surface.node)
+    let members =
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            ctx,
+            dispatch,
+            surface.node,
+        )
         .recorded()
         .unwrap_or_default();
     members

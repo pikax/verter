@@ -94,8 +94,8 @@ use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::output_sinks::OutputProjector;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::typeinfo::framework_surface::results::{EmitsSurface, MacroSurfaceDtos, PropsSurface};
 use crate::typeinfo::framework_surface::VueSurfaceKey;
@@ -163,86 +163,8 @@ pub struct VueMacroSurface {
     /// compile-facing collector classifies each arm (import-backed vs
     /// ambient) and tiers import-backed misses as fatal; ambient names stay
     /// silent.
-    pub(crate) unresolved_surface_arms: Vec<UnresolvedSurfaceArm>,
-}
-
-/// One unresolvable SURFACE-COMPOSITION reference arm dropped during macro
-/// surface synthesis: the arm's head name plus the canonical file whose
-/// declaration authored it (the file whose import bindings classify the miss
-/// as import-backed vs ambient).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnresolvedSurfaceArm {
-    /// The reference's head name as written (`NotFound` in `extends NotFound`).
-    pub(crate) name: Arc<str>,
-    /// Canonical id of the file whose declaration authored the arm.
-    pub(crate) owner_canonical: Arc<str>,
-    /// Exact top-level lexical owner that authored the arm.
-    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
-}
-
-/// The typed partiality an UNRESOLVABLE macro-type-argument ROOT contributes.
-///
-/// `None` means the root resolved to a real surface the caller can project.
-/// Every `Some` is the resolver's OWN proof that the authored root could not
-/// be reached, so the surface the producer would publish is a SUBSET of what
-/// the author wrote — the case an empty published surface must never be
-/// confused with:
-///
-/// - an authored reference Navigate preserved as a carrier (`BareRef` /
-///   `ImportType`) — the declaration owner did not resolve, which is exactly
-///   the imported-dependency class the taxonomy already names;
-/// - a body the lowerer kept as raw text (`RawFallback`) — no structural
-///   surface was produced;
-/// - a typed failure carrier (`Opaque`), which names its own class through the
-///   shared query-error classification;
-/// - no interned node at all under the resolved id.
-fn unresolved_macro_root_partiality(
-    base: Option<&SemanticNodeData>,
-) -> Option<crate::semantic_query::PartialReasonSet> {
-    use crate::semantic_query::PartialReasonSet;
-
-    match base {
-        None => Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
-        Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
-            Some(PartialReasonSet::MISSING_DEPENDENCY)
-        }
-        Some(SemanticNodeData::RawFallback { .. }) => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
-        Some(SemanticNodeData::Opaque(error)) => Some(
-            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(error),
-        ),
-        Some(_) => None,
-    }
-}
-
-/// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
-/// walker diagnostics, name-sorted (then by declaring file) and deduplicated
-/// so consumers emit deterministically ordered reports.
-fn unresolved_surface_arms_from_diags(
-    diags: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
-) -> Vec<UnresolvedSurfaceArm> {
-    let mut arms: Vec<UnresolvedSurfaceArm> = diags
-        .iter()
-        .filter_map(|diag| match diag {
-            crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
-                name,
-                owner_canonical,
-                owner,
-            } => Some(UnresolvedSurfaceArm {
-                name: Arc::clone(name),
-                owner_canonical: Arc::clone(owner_canonical),
-                owner: *owner,
-            }),
-            _ => None,
-        })
-        .collect();
-    arms.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
-            .then_with(|| a.owner.cmp(&b.owner))
-    });
-    arms.dedup();
-    arms
+    pub(crate) unresolved_surface_arms:
+        Vec<crate::project_semantic_dispatch::one_level_surface::UnresolvedSurfaceArm>,
 }
 
 impl VueMacroSurface {
@@ -616,21 +538,6 @@ impl VerterHost {
         vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request)
             .map(|read| read.dtos)
     }
-}
-
-/// Intern (or reuse the interned) `unknown` primitive node — the honest
-/// placeholder value for a runtime-object macro member whose real type is
-/// not re-derived by [`VerterHost::runtime_object_macro_surface`]. Content-
-/// addressed like every other `intern_node` call: repeated calls across
-/// members / requests collapse onto the same node.
-fn unknown_member_value_node<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-) -> crate::semantic_query::SemanticNodeId {
-    dispatch
-        .graph()
-        .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Unknown,
-        ))
 }
 
 /// Navigate an authored type-payload REF to its one-level object
@@ -1272,262 +1179,31 @@ pub(crate) fn resolve_vue_macro_surface_with_ctx<C: crate::resolver_core::Resolv
         "resolve_vue_macro_surface serves the FullMetadata level"
     );
 
-    // Structurally read-only: surface resolution runs inside the
-    // DTO producer's traced scope; fenced-ness gates admission there.
-    let indexed = ctx
-        .ensure_indexed_ready_serve(request.owner_canonical.as_ref())?
-        .indexed;
-    let mac = indexed.snapshot.macros.get(request.macro_index)?;
-    if !mac.is_type_based {
-        // A runtime-object `defineExpose({...})` / `defineProps({...})`
-        // has no type argument to lower, but the analyzer already
-        // captured its member names (`mac.expose_fields` /
-        // `mac.prop_fields` are populated for BOTH type-based and
-        // runtime macro forms). Synthesize a one-level surface directly
-        // from those already-typed facts instead of reporting an empty
-        // surface for every runtime-declared macro. See
-        // `runtime_object_macro_surface` for the structural (not
-        // name-string) kind dispatch and the honest-unknown member
-        // value policy.
-        return runtime_object_macro_surface(ctx, dispatch, request, mac);
-    }
-
-    // `defineModel` does NOT carry a props OBJECT type argument — its type
-    // argument is the model VALUE type (`defineModel<string>()`), which has
-    // no one-level member surface. Its props come from the analyzer-
-    // synthesized model prop (`AnalyzedMacro.prop_fields`), so the macro
-    // surface is the EMPTY object surface; `props_from_typeinfo_surface`
-    // routes `DefineModel` to the analyzer-fact path.
-    if request.macro_kind == AnalyzedMacroKind::DefineModel {
-        return Some(VueMacroSurface {
-            surface: TypeInfoSurface::empty(),
-            macro_kind: request.macro_kind,
-            owner_canonical: Arc::clone(&request.owner_canonical),
-            macro_index: request.macro_index,
-            macro_call_span: mac.span,
-            level: request.level,
-            // The empty model surface projects nothing — no arms.
-            unresolved_surface_arms: Vec::new(),
-        });
-    }
-
-    let _ = mac.parsed_type_argument.as_ref()?;
-
-    // Provenance per macro axis. Props request the macro-T own-body
-    // provenance on the terminal surface synthesis so the author-declared
-    // members are flagged; emits / slots / exposed are structural
-    // (`declared_in_macro_type_arg` is a props-axis concern). The terminal
-    // `MacroTypeArgOwnBody` synthesis restamps `declared_in_macro_type_arg =
-    // true` for EXACTLY the declaration's own-body direct members — it reads
-    // the prepared decl's `member_index`, which is populated from direct
-    // Object members only and SKIPS heritage `extends` `Ref` arms
-    // (`build.rs::overlay_macro_type_arg_own_body`). Heritage-reached members
-    // are NOT in `member_index`, so they are left at the structural `false`
-    // the empty-path Shallow body lowering assigned. The surface's
-    // `merge_role` is independently baked per arm (`Heritage` for
-    // `extends`-reached members, `OwnBody` for the declaration's own body).
-    // See `props_from_typeinfo_surface`.
-    // Only `DefineProps` reaches here as a props macro: `WithDefaults` is
-    // never `is_type_based` (it bailed at the guard above) and `DefineModel`
-    // returned its empty surface above. `DefineProps` requests the macro-T
-    // own-body provenance; emits / slots / exposed are structural.
-    let terminal_context = match request.macro_kind {
-        AnalyzedMacroKind::DefineProps => ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            SurfaceProvenanceContext::MacroTypeArgOwnBody,
-        ),
-        _ => ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            SurfaceProvenanceContext::Structural,
-        ),
-    };
-
-    // Dispatch is bound to the active `ctx`: an overlay session threads its
-    // session view through every dispatch-tier read, so the type-argument
-    // lowering and cross-file carrier projection below read overlay content.
-
-    // Read the macro arg's mode-neutral mirror handle (the ONE producer),
-    // then decompose its indexed-access structure GRAPH-NATIVE. A deep
-    // indexed-access type argument (`defineProps<DeepConfig['ui']['header']>()`)
-    // lowered to nested `IndexedAccess` carrier shells; this walks those
-    // shells into `(base_node, path)` WITHOUT lowering the base a second
-    // time — the base node IS a different DEMAND on the same handle. The
-    // shared path walker runs intermediate hops in `Navigate` and the
-    // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
-    // argument decomposes to `(handle_node, [])`.
-    let product =
-        dispatch.macro_type_arg_hot_ref(request.owner_canonical.as_ref(), request.macro_index)?;
-    let (base_carrier, path) =
-        crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain_node(
+    // The ONE macro surface producer (shared with the semantic-source raise
+    // replay): indexed-access decomposition, macro provenance, root
+    // normalization, unresolved-root partiality, one-level projection and
+    // incomplete-arm folding all run there. This adapter pairs the graph
+    // surface with its declaration-file spans and hydrates JSDoc.
+    let projected =
+        crate::project_semantic_dispatch::one_level_surface::project_macro_argument_surface(
+            ctx,
             dispatch,
-            product.hot.node(),
-        );
-    // Resolve the carrier base ONE Navigate hop through the shared dispatch
-    // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
-    // a `TypeOf` shell executes its value root, member values stay shallow),
-    // reproducing the eager structural-transit-Navigate base lowering. The
-    // path-precise `Shallow` projection then synthesises the one-level
-    // surface of the terminal hop.
-    let base = dispatch.resolve_hot_handle_with_context(
-        crate::semantic_query::HotTypeRef::new(base_carrier),
-        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-    );
-    // Navigate preserves an authored reference as a carrier when its
-    // declaration cannot currently be resolved. That carrier is the
-    // resolver-owned proof that the root surface is unavailable, not an
-    // authoritative empty slot surface.
-    //
-    // Dropping the surface here publishes an EMPTY macro-DTO bundle, which
-    // is byte-identical to the bundle a component that authored no macro
-    // type at all publishes. So the drop RECORDS its typed partiality into
-    // the producer's cold-compute completeness scope: the empty bundle is
-    // returned to the caller as PARTIAL, is refused surface-store
-    // admission, and reaches the published payload as a degraded surface
-    // instead of a wrong-complete silence.
-    let unresolved_root = unresolved_macro_root_partiality(
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), base).as_deref(),
-    );
-    if let Some(reasons) = unresolved_root {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(reasons),
-        );
-        return None;
-    }
-
-    // Collect the walker's side-band diagnostics so unresolvable
-    // SURFACE-COMPOSITION arms (heritage / intersection / union) the
-    // shallow synthesis dropped ride the resolved surface to the
-    // compile-facing collector.
-    let mut walker_diagnostics = Vec::new();
-    // The terminal-hop discharge: a projection that could not produce the
-    // demanded surface (a MISSED terminal hop on a deep indexed access, an
-    // unresolved carrier mid-path) records its typed partiality — the
-    // empty macro-DTO bundle the caller then publishes is PARTIAL, refused
-    // surface-store admission, and reaches the payload as a degraded
-    // surface instead of a wrong-complete silence. A genuinely non-object
-    // terminal stays the complete "no surface" miss.
-    let surface = crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+            &request.owner_canonical,
+            request.macro_index,
+            request.macro_kind,
+        )?;
+    let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(
         ctx,
-        dispatch,
-        base,
-        path,
-        terminal_context,
-        Some(&mut walker_diagnostics),
-    )
-    .recorded()?;
-    let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
-    // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
-    // union contributor the shallow synthesis dropped) makes the published
-    // METADATA surface partial: the members behind that arm are missing,
-    // so the surface must never publish (or warm) as the complete answer.
-    // The codegen lanes keep their own diagnostic channel for these arms.
-    if !unresolved_surface_arms.is_empty() {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(
-                crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-            ),
-        );
-    }
+        TypeInfoSurface::from_one_level(dispatch.graph(), &projected.surface),
+    );
     Some(VueMacroSurface {
         surface,
         macro_kind: request.macro_kind,
         owner_canonical: Arc::clone(&request.owner_canonical),
         macro_index: request.macro_index,
-        macro_call_span: mac.span,
+        macro_call_span: projected.macro_call_span,
         level: request.level,
-        unresolved_surface_arms,
-    })
-}
-fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    request: &VueMacroSurfaceRequest,
-    mac: &verter_session_query::analysis::types::AnalyzedMacro,
-) -> Option<VueMacroSurface> {
-    use crate::semantic_query::{
-        AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SurfaceEntry, SurfaceMember,
-        SurfaceView,
-    };
-
-    let declaration_origin = Some(Arc::clone(&request.owner_canonical));
-    let mut entries: Vec<SurfaceEntry> = Vec::new();
-    match request.macro_kind {
-        AnalyzedMacroKind::DefineExpose => {
-            for field in &mac.expose_fields {
-                entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
-                    // The exposed value's real type is not re-derived
-                    // here (see the doc comment above) — `unknown` is
-                    // the honest placeholder, never a fabricated shape.
-                    value: unknown_member_value_node(dispatch),
-                    optional: false,
-                    readonly: false,
-                    method_kind: None,
-                    has_implementation_body: false,
-                    visibility: verter_type_expr::MemberVisibility::Public,
-                    spans: verter_type_expr::MemberSpans::name_only(
-                        field.span.unwrap_or(verter_span::Span::new(0, 0)),
-                    ),
-                    declaration_origin: declaration_origin.clone(),
-                    declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: MergeRoleStamp::NEUTRAL,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                }));
-            }
-        }
-        AnalyzedMacroKind::DefineProps => {
-            for field in &mac.prop_fields {
-                entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
-                    value: unknown_member_value_node(dispatch),
-                    optional: field.is_optional,
-                    readonly: false,
-                    method_kind: None,
-                    has_implementation_body: false,
-                    visibility: verter_type_expr::MemberVisibility::Public,
-                    spans: verter_type_expr::MemberSpans::name_only(field.span),
-                    declaration_origin: declaration_origin.clone(),
-                    declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: MergeRoleStamp::NEUTRAL,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                }));
-            }
-        }
-        // Every other non-type-based macro kind has no synthesized
-        // surface here (`DefineEmits`/`DefineSlots` runtime-object forms
-        // and the `WithDefaults` outer macro).
-        _ => return None,
-    }
-    if entries.is_empty() {
-        // A bare `defineExpose()` / an object-less `defineProps()` call
-        // has genuinely nothing to surface — `None` stays correct there,
-        // distinct from the "has members but they were dropped" defect.
-        return None;
-    }
-
-    let base = dispatch
-        .graph()
-        .intern_node(crate::semantic_query::SemanticNodeData::Object(
-            SurfaceView::from_entries(entries, None, false),
-        ));
-
-    let surface = crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
-        ctx,
-        dispatch,
-        base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        ProjectionReductionContext::published(ProjectionMode::Shallow),
-        None,
-    )
-    .recorded()?;
-    Some(VueMacroSurface {
-        surface,
-        macro_kind: request.macro_kind,
-        owner_canonical: Arc::clone(&request.owner_canonical),
-        macro_index: request.macro_index,
-        macro_call_span: mac.span,
-        level: request.level,
-        unresolved_surface_arms: Vec::new(),
+        unresolved_surface_arms: projected.unresolved_surface_arms,
     })
 }
 

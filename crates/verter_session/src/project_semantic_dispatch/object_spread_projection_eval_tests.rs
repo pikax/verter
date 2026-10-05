@@ -3315,13 +3315,14 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
     let names_of = |node: SemanticNodeId| -> Vec<String> {
         let fixture_dispatch_0 =
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
-        let members = crate::meta_resolve::projectors::read_positive_surface_members(
-            &host,
-            &fixture_dispatch_0,
-            node,
-        )
-        .resolved_for_tests()
-        .expect("resolvable fixture surface");
+        let members =
+            crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+                &host,
+                &fixture_dispatch_0,
+                node,
+            )
+            .resolved_for_tests()
+            .expect("resolvable fixture surface");
         let mut names: Vec<String> = members
             .iter()
             .map(|member| {
@@ -3618,9 +3619,11 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         panic!("expected a terminal value, got {:?}", read.value)
     };
     let members =
-        crate::meta_resolve::projectors::read_positive_surface_members(&host, &dispatch, terminal)
-            .resolved_for_tests()
-            .expect("resolvable carrier fixture");
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            &host, &dispatch, terminal,
+        )
+        .resolved_for_tests()
+        .expect("resolvable carrier fixture");
     let mut names: Vec<String> = members
         .iter()
         .map(|member| {
@@ -3684,7 +3687,7 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
     let names_of = |node: SemanticNodeId| -> Vec<crate::semantic_query::SurfaceMember> {
         let fixture_dispatch_1 =
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
-        crate::meta_resolve::projectors::read_positive_surface_members(
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
             &host,
             &fixture_dispatch_1,
             node,
@@ -3823,13 +3826,14 @@ fn macro_union_merge_collapses_dual_spelling_members() {
     ));
 
     let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(
-        &host,
-        &fixture_dispatch_2,
-        union_root,
-    )
-    .resolved_for_tests()
-    .expect("resolvable union fixture");
+    let members =
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            &host,
+            &fixture_dispatch_2,
+            union_root,
+        )
+        .resolved_for_tests()
+        .expect("resolvable union fixture");
     assert_eq!(
         members.len(),
         1,

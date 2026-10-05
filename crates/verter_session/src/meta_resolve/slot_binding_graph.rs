@@ -864,31 +864,36 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = match super::projectors::read_positive_surface_members(
-        ctx,
-        dispatch,
-        slot_surface,
-    ) {
-        crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
-        | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-            members.into_inner()
-        }
-        crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
-        // An unresolvable slot-surface member read suppresses warm promotion
-        // and records its typed reason; the usable subset still publishes.
-        crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            ledger.suppress(incomplete.non_empty_reasons());
-            diag_sink.push(macro_expansion_for_query_error(
-                owner_macro.macro_index,
-                MacroExpansionKind::DefineSlots,
-                format!(
-                    "slot-surface-members-unresolved::{:?}",
-                    incomplete.reasons()
-                ),
-            ));
-            incomplete.into_recorded_partial().unwrap_or_default()
-        }
-    };
+    let slot_members =
+        match crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            ctx,
+            dispatch,
+            slot_surface,
+        ) {
+            crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
+            | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+                members.into_inner()
+            }
+            crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                Vec::new()
+            }
+            // An unresolvable slot-surface member read suppresses warm promotion
+            // and records its typed reason; the usable subset still publishes.
+            crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => {
+                ledger.suppress(incomplete.non_empty_reasons());
+                diag_sink.push(macro_expansion_for_query_error(
+                    owner_macro.macro_index,
+                    MacroExpansionKind::DefineSlots,
+                    format!(
+                        "slot-surface-members-unresolved::{:?}",
+                        incomplete.reasons()
+                    ),
+                ));
+                incomplete.into_recorded_partial().unwrap_or_default()
+            }
+        };
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1049,7 +1054,11 @@ pub(crate) fn compute_bindings_via_graph(
             }
         };
         let binding_members =
-            match super::projectors::read_positive_surface_members(ctx, dispatch, param_surface) {
+            match crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+                ctx,
+                dispatch,
+                param_surface,
+            ) {
                 crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
                 | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
                     members,

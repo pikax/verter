@@ -350,252 +350,35 @@ impl TypeInfoSurface {
         }
     }
 
-    /// Build a presence-only surface from POSITIVE member evidence
-    /// gathered by recursing an open carrier (`Union` / `Intersection` /
-    /// `Conditional` branches — the walker's typed open evidence for
-    /// compound roots containing open programs). Named members only
-    /// (signatures / index facts are not recovered from open carriers).
-    /// Presence-only: the producer publishes the result through the
-    /// open-presence resolution arm — omission is not absence evidence.
-    #[must_use]
-    pub fn from_presence_members(
-        graph: &SemanticGraphStore,
-        members: &[crate::semantic_query::SurfaceMember],
-    ) -> Self {
-        let members: Vec<TypeInfoSurfaceMember> = members
-            .iter()
-            .map(|member| build_member(graph, member))
-            .collect();
-        Self::from_ordered_entries(
-            members
-                .into_iter()
-                .map(TypeInfoSurfaceEntry::Member)
-                .collect(),
-            None,
-            false,
-        )
-    }
-
-    /// Join a spread-program projection into one shallow surface.
+    /// Build a span-rich surface from a graph-only one-level surface.
     ///
-    /// A single closed alternative yields the exact complete surface
-    /// (`Resolved`) — the closed witness is the only completeness proof.
-    /// Every other shape (open residuals, correlated multi-branch formulas)
-    /// joins POSITIVE members only and returns `OpenPresence`: omission from
-    /// the joined view is never absence evidence, and the joined view is
-    /// typeinfo output that never re-enters binary semantic relation. A
-    /// closed witness whose view cannot be built is `Incomplete` — never an
-    /// empty success.
-    pub(crate) fn from_spread_projection(
+    /// THIN projection: every span comes from the graph payload that already
+    /// carries it, paired with the declaration / node origin file. No source
+    /// text is scanned and no type is re-resolved.
+    #[must_use]
+    pub(crate) fn from_one_level(
         graph: &SemanticGraphStore,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
-        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<Self> {
-        use crate::semantic_query::{
-            AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
-            PropertyKey,
-        };
-
-        fn union_value(
-            graph: &SemanticGraphStore,
-            values: Vec<SemanticNodeId>,
-            evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-        ) -> SemanticNodeId {
-            // Canonical construction: the joined per-alternative value union
-            // routes through the one authority (recursive flatten +
-            // structural dedup replace the hand-rolled one-level splice);
-            // the evidence threads to the caller's disposition boundary.
-            let composite =
-                crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-                    graph,
-                    &values,
-                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                );
-            evidence.absorb(composite.evidence);
-            composite.node
-        }
-
-        let alternatives = formula.alternatives();
-        if let [only] = alternatives {
-            if let Some(closed) = only.closed() {
-                let Some(view) = closed.to_closed_surface_view() else {
-                    return crate::semantic_query::surface_resolution::SurfaceResolution::incomplete(
-                        crate::semantic_query::surface_resolution::NonEmptyReasons::of(
-                            crate::semantic_query::PartialReason::SemanticQueryFault,
-                        ),
-                    );
-                };
-                return crate::semantic_query::surface_resolution::SurfaceResolution::resolved(
-                    Self::build(graph, &view),
-                );
-            }
-        }
-
-        struct MemberJoin {
-            key: PropertyKey,
-            present_in: usize,
-            optional_somewhere: bool,
-            values: Vec<SemanticNodeId>,
-            readonly_all: bool,
-            method_kind: Option<verter_type_expr::ObjectMethodKind>,
-            has_implementation_body: bool,
-        }
-
-        let alternative_count = alternatives.len();
-        let mut joins: Vec<MemberJoin> = Vec::new();
-        let mut call_nodes: Vec<SemanticNodeId> = Vec::new();
-        let mut construct_nodes: Vec<SemanticNodeId> = Vec::new();
-        let mut index_joins: Vec<(usize, SemanticNodeId, Vec<SemanticNodeId>, bool)> = Vec::new();
-        for alternative in alternatives {
-            alternative.positive().visit(|fact| {
-                // JS property identity: dual spellings of one property
-                // join into ONE row (matching the walker and macro
-                // merges), so a colliding second alternative unions the
-                // value instead of publishing a mis-optionaled duplicate.
-                let join = match joins
-                    .iter_mut()
-                    .find(|join| join.key.element_access_collides(fact.key()))
-                {
-                    Some(join) => join,
-                    None => {
-                        joins.push(MemberJoin {
-                            key: fact.key().clone(),
-                            present_in: 0,
-                            optional_somewhere: false,
-                            values: Vec::new(),
-                            readonly_all: true,
-                            method_kind: None,
-                            has_implementation_body: false,
-                        });
-                        joins.last_mut().expect("just pushed")
-                    }
-                };
-                join.present_in += 1;
-                join.optional_somewhere |= fact.presence() == PositiveKeyPresence::Optional;
-                if let ProjectionEvidence::Proven(value) = fact.value() {
-                    if !join.values.contains(value) {
-                        join.values.push(*value);
-                    }
+        surface: &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface,
+    ) -> Self {
+        let entries = surface
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                crate::semantic_query::SurfaceEntry::Member(member) => {
+                    TypeInfoSurfaceEntry::Member(build_member(graph, member))
                 }
-                match fact.facets() {
-                    ProjectionEvidence::Proven(facets) => {
-                        join.readonly_all &= facets.readonly();
-                        if join.method_kind.is_none() {
-                            join.method_kind = facets.method_kind();
-                            join.has_implementation_body = facets.has_implementation_body();
-                        }
-                    }
-                    ProjectionEvidence::Indeterminate => join.readonly_all = false,
+                crate::semantic_query::SurfaceEntry::CallSignature(node) => {
+                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, *node))
                 }
-            });
-            for signature in alternative.signatures() {
-                let bucket = match signature.kind() {
-                    ObjectSignatureKind::Call => &mut call_nodes,
-                    ObjectSignatureKind::Construct => &mut construct_nodes,
-                };
-                if !bucket.contains(&signature.node()) {
-                    bucket.push(signature.node());
+                crate::semantic_query::SurfaceEntry::ConstructSignature(node) => {
+                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, *node))
                 }
-            }
-            for index in alternative.indices() {
-                let domain = index.domain() as usize;
-                let entry = match index_joins.iter_mut().find(|(d, ..)| *d == domain) {
-                    Some(entry) => entry,
-                    None => {
-                        index_joins.push((domain, index.key_type(), Vec::new(), true));
-                        index_joins.last_mut().expect("just pushed")
-                    }
-                };
-                if let ProjectionEvidence::Proven(value) = index.value() {
-                    if !entry.2.contains(value) {
-                        entry.2.push(*value);
-                    }
+                crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, signature))
                 }
-                entry.3 &= matches!(index.readonly(), ProjectionEvidence::Proven(true));
-            }
-        }
-
-        let members: Vec<TypeInfoSurfaceMember> = joins
-            .into_iter()
-            .map(|join| {
-                // A definitely-present key whose value is Indeterminate in
-                // EVERY alternative (an open residual may overwrite it)
-                // still publishes its row — with the honest open value,
-                // matching the walker's `Opaque(OpenSurface)` convention —
-                // never a dropped row.
-                let value = if join.values.is_empty() {
-                    graph.intern_node(SemanticNodeData::Opaque(
-                        crate::semantic_query::QueryError::OpenSurface,
-                    ))
-                } else {
-                    union_value(graph, join.values, evidence)
-                };
-                build_member(
-                    graph,
-                    &SurfaceMember {
-                        key: AuthoredPropertyKey::from_known(join.key),
-                        value,
-                        optional: join.optional_somewhere || join.present_in < alternative_count,
-                        readonly: join.readonly_all,
-                        method_kind: join.method_kind,
-                        has_implementation_body: join.has_implementation_body,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        spans: verter_type_expr::MemberSpans::default(),
-                        declaration_origin: None,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    },
-                )
             })
             .collect();
-        let call_signatures: Vec<TypeInfoSurfaceSignature> = call_nodes
-            .into_iter()
-            .map(|node| build_signature(graph, node))
-            .collect();
-        let construct_signatures: Vec<TypeInfoSurfaceSignature> = construct_nodes
-            .into_iter()
-            .map(|node| build_signature(graph, node))
-            .collect();
-        let index_signatures: Vec<TypeInfoIndexSignature> = index_joins
-            .into_iter()
-            .filter(|(.., values, _)| !values.is_empty())
-            .map(|(_, key_type, values, readonly)| TypeInfoIndexSignature {
-                key_type,
-                value_type: union_value(graph, values, evidence),
-                key_span: None,
-                value_span: None,
-                declaration_span: None,
-                readonly,
-            })
-            .collect();
-        let has_index_signature = !index_signatures.is_empty();
-        crate::semantic_query::surface_resolution::SurfaceResolution::open_presence(
-            Self::from_ordered_entries(
-                members
-                    .into_iter()
-                    .map(TypeInfoSurfaceEntry::Member)
-                    .chain(
-                        call_signatures
-                            .into_iter()
-                            .map(TypeInfoSurfaceEntry::CallSignature),
-                    )
-                    .chain(
-                        construct_signatures
-                            .into_iter()
-                            .map(TypeInfoSurfaceEntry::ConstructSignature),
-                    )
-                    .chain(
-                        index_signatures
-                            .into_iter()
-                            .map(TypeInfoSurfaceEntry::IndexSignature),
-                    )
-                    .collect(),
-                None,
-                has_index_signature,
-            ),
-        )
+        Self::from_ordered_entries(entries, surface.keyspace(), surface.has_index_signature())
     }
 
     /// Enrich each member AND each call / construct signature with its

@@ -187,6 +187,7 @@ pub(crate) mod flow_products;
 pub mod interior_source;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
+pub(crate) mod one_level_surface;
 mod output_materialization_guards;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;

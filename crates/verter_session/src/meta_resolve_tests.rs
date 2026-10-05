@@ -8036,9 +8036,11 @@ defineEmits<ConditionalEmits>()
          payload surface by following the DeclRef carrier to the Conditional root",
     );
     let members =
-        crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
-            .resolved_for_tests()
-            .expect("a resolvable branch-merge surface reads its members");
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            host, &dispatch, surface,
+        )
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())
@@ -8187,12 +8189,14 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
         // reasons into the active scope at the discharge, not as a producer
         // side effect.
         let names = surface.recorded().map(|surface| {
-            crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
-                .resolved_for_tests()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|m| m.string_name().map(|n| n.to_string()))
-                .collect::<Vec<_>>()
+            crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+                host, &dispatch, surface,
+            )
+            .resolved_for_tests()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| m.string_name().map(|n| n.to_string()))
+            .collect::<Vec<_>>()
         });
         let completeness = crate::request_context::current_cold_compute_completeness();
         drop(scope);
@@ -8353,9 +8357,11 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // from the open program branch), and the open signal is retained in
     // the diagnostic envelope.
     let members =
-        crate::meta_resolve::projectors::read_positive_surface_members(&host, &dispatch, surface)
-            .resolved_for_tests()
-            .expect("a resolvable branch-merge surface reads its members");
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            &host, &dispatch, surface,
+        )
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let mut names: Vec<String> = members
         .iter()
         .map(|member| {
@@ -8502,9 +8508,11 @@ defineEmits<EmitChain0>()
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
     let members =
-        crate::meta_resolve::projectors::read_positive_surface_members(host, &dispatch, surface)
-            .resolved_for_tests()
-            .expect("a resolvable branch-merge surface reads its members");
+        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            host, &dispatch, surface,
+        )
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())
