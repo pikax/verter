@@ -331,6 +331,15 @@ impl<
     > {
         self.raw_svelte_script_facts(canonical)
     }
+    fn script_setup_type_params(
+        &self,
+        serve: &super::request_inputs::IndexedInputServe,
+    ) -> Vec<verter_type_expr::TypeParam> {
+        crate::host_resolve::sfc_script_setup_type_params(
+            &serve.indexed.raw_source,
+            serve.indexed.framework_parse.as_deref(),
+        )
+    }
     fn terminal_macro_inventory(
         &self,
         canonical: &str,

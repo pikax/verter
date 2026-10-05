@@ -446,6 +446,13 @@ pub trait OwnedLowering {
         key: verter_session_query::facts::registry::FactKey,
     ) -> Option<bool>;
     fn terminal_macro_inventory(&self, canonical: &str) -> TerminalMacroInventory;
+    /// The `<script setup generic="…">` type parameters of the indexed input
+    /// `serve` names, re-borrowed from its retained parse. Empty for inputs
+    /// without such a clause.
+    fn script_setup_type_params(
+        &self,
+        serve: &IndexedInputServe,
+    ) -> Vec<verter_type_expr::TypeParam>;
     fn svelte_script_facts(
         &self,
         canonical: &str,

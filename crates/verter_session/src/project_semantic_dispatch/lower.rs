@@ -787,13 +787,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ensure_indexed_ready_serve(canonical_id.as_ref())
                 .filter(|serve| serve.indexed.whole_hash == *whole_hash)
                 .and_then(|serve| {
-                    crate::host_resolve::sfc_script_setup_type_params(
-                        &serve.indexed.raw_source,
-                        serve.indexed.framework_parse.as_deref(),
-                    )
-                    .into_iter()
-                    .nth(binding.ordinal as usize)
-                    .filter(|param| param.name == binding.name.as_ref())
+                    self.ctx
+                        .script_setup_type_params(&serve)
+                        .into_iter()
+                        .nth(binding.ordinal as usize)
+                        .filter(|param| param.name == binding.name.as_ref())
                 }),
         };
         let Some(param) = transient_param else {

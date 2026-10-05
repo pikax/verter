@@ -1692,8 +1692,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.ctx
             .ensure_indexed_ready_serve(canonical)
             .is_some_and(|serve| {
-                crate::global_contributors::classify_module_kind(&serve.indexed)
-                    == verter_session_query::inputs::contributors::FileModuleKind::Module
+                verter_session_query::inputs::contributors::classify_shallow_module_kind(
+                    &serve.indexed.shallow_state,
+                ) == verter_session_query::inputs::contributors::FileModuleKind::Module
             })
     }
 
@@ -5845,8 +5846,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // (the augmenter set still fingerprints the file, so the
                     // script gaining module syntax misses the warm read).
                     if matches!(target, AugmentationTargetKind::GlobalAugmentation)
-                        && crate::global_contributors::classify_module_kind(&indexed)
-                            == verter_session_query::inputs::contributors::FileModuleKind::Script
+                        && verter_session_query::inputs::contributors::classify_shallow_module_kind(
+                            &indexed.shallow_state,
+                        ) == verter_session_query::inputs::contributors::FileModuleKind::Script
                     {
                         continue;
                     }
@@ -7142,7 +7144,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return false;
         };
         let shallow = &indexed.shallow_state;
-        match crate::global_contributors::classify_module_kind(&indexed) {
+        match verter_session_query::inputs::contributors::classify_shallow_module_kind(
+            &indexed.shallow_state,
+        ) {
             verter_session_query::inputs::contributors::FileModuleKind::Module => {
                 !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
             }
