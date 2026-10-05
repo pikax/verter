@@ -41,7 +41,7 @@ attribution = ["verter_audit/attribution"]
 # The reusable worker-substrate seam exposes scheduler pool identities, so an
 # explicit session test-support opt-in must carry the scheduler's matching
 # default-off identity surface for downstream test crates too.
-test-support = ["verter_scheduler/test-support"]
+test-support = ["verter_scheduler/test-support", "verter_session_query/test-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
 # entry — never in a production build, so it cannot weaken a witness discipline.

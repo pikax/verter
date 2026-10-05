@@ -1,6 +1,5 @@
 //! The fact key of a module augmentation index's shape.
 
-#[cfg(any(test, feature = "test-support"))]
 use crate::resolution::augmentation_key::AugmentationTargetKind;
 use std::sync::Arc;
 
