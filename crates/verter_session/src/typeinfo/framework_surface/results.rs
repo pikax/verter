@@ -658,6 +658,33 @@ impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurface
     }
 }
 
+/// Why a `.vue` macro DTO demand was refused before any DTO was computed.
+///
+/// A refusal is never a surface: it is not cached and never reads as a
+/// complete empty bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroDtosRefusal {
+    /// The host's framework options do not admit the Vue adapter, so it has
+    /// no Vue surface store.
+    VueNotAdmitted,
+    /// The owner file is a carrier (or adapter module) of another framework.
+    IncompatibleCarrier,
+}
+
+impl MacroDtosRefusal {
+    /// The refusal as a read an in-request consumer folds: an empty bundle
+    /// marked PARTIAL, so the enclosing result is never admitted as complete.
+    #[must_use]
+    pub fn into_partial_read(self) -> MacroDtosRead {
+        MacroDtosRead {
+            dtos: std::sync::Arc::new(MacroSurfaceDtos::default()),
+            completeness: crate::semantic_query::ResultCompleteness::partial(
+                crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            ),
+        }
+    }
+}
+
 /// A resolved macro DTO bundle PLUS the per-result completeness the cold
 /// compute observed.
 ///

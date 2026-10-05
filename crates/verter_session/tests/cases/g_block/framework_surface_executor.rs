@@ -399,13 +399,15 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
         .iter()
         .position(|m| m.kind == AnalyzedMacroKind::DefineProps)
         .expect("defineProps macro present");
-    let props_dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: Arc::from("/Parity.vue"),
-        macro_index: props_index,
-        macro_kind: AnalyzedMacroKind::DefineProps,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let props_dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: Arc::from("/Parity.vue"),
+            macro_index: props_index,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let mut live_prop_names: Vec<String> = props_dtos
         .prop_fields()
         .iter()
@@ -433,13 +435,15 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
         .iter()
         .position(|m| m.kind == AnalyzedMacroKind::DefineEmits)
         .expect("defineEmits macro present");
-    let emits_dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: Arc::from("/Parity.vue"),
-        macro_index: emits_index,
-        macro_kind: AnalyzedMacroKind::DefineEmits,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let emits_dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: Arc::from("/Parity.vue"),
+            macro_index: emits_index,
+            macro_kind: AnalyzedMacroKind::DefineEmits,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let mut live_emit_names: Vec<String> = emits_dtos
         .emit_fields()
         .iter()
@@ -466,13 +470,15 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
         .iter()
         .position(|m| m.kind == AnalyzedMacroKind::DefineSlots)
         .expect("defineSlots macro present");
-    let slots_dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: Arc::from("/Parity.vue"),
-        macro_index: slots_index,
-        macro_kind: AnalyzedMacroKind::DefineSlots,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let slots_dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: Arc::from("/Parity.vue"),
+            macro_index: slots_index,
+            macro_kind: AnalyzedMacroKind::DefineSlots,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let mut live_slot_names: Vec<String> = slots_dtos
         .slot_fields()
         .iter()

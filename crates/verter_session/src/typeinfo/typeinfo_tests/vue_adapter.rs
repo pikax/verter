@@ -890,7 +890,9 @@ fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
         "the outer withDefaults macro has no type arg, so it resolves no surface (negative)"
     );
     // And its DTO bundle is empty — the props are NOT double-counted here.
-    let outer_dtos = host.vue_macro_dtos(&outer_request);
+    let outer_dtos = host
+        .vue_macro_dtos(&outer_request)
+        .expect("the Vue adapter is admitted");
     assert!(
         outer_dtos.prop_fields().is_empty(),
         "the outer withDefaults macro contributes no props (the inner DefineProps does)"
@@ -898,7 +900,9 @@ fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
 
     // The INNER DefineProps macro (routed separately) carries the props.
     let inner_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let inner_dtos = host.vue_macro_dtos(&inner_request);
+    let inner_dtos = host
+        .vue_macro_dtos(&inner_request)
+        .expect("the Vue adapter is admitted");
     let mut names: Vec<&str> = inner_dtos
         .prop_fields()
         .iter()

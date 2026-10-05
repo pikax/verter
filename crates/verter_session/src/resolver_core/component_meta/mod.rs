@@ -376,7 +376,8 @@ pub(crate) fn component_meta_resolved_macros(
                 root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             },
-        );
+        )
+        .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
         // Fold a genuine partial macro surface into the request-result
         // completeness so the enclosing component-meta result is refused warm
         // promotion (the no-poison invariant).

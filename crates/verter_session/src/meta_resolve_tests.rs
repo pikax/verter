@@ -53,6 +53,7 @@ fn macro_dtos_for_kind(
                 root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             })
+            .expect("the Vue adapter is admitted")
         })
         .collect()
 }
@@ -4478,6 +4479,7 @@ const emitB = defineEmits<Events>()
                         .unwrap_or([0u8; 16]),
                     level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
                 })
+                .expect("the Vue adapter is admitted")
                 .emit_fields()
                 .iter()
                 .any(|emit| emit.name == "save")
@@ -5660,8 +5662,8 @@ defineExpose({ exposed })
         .iter()
         .find(|entry| entry.type_name == "Props")
         .expect("fallthrough-expanded state should still materialize the props surface");
-    let fallthrough_props_dtos =
-        host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+    let fallthrough_props_dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from("/src/App.vue"),
             macro_index: fallthrough_props.macro_index,
             macro_kind: fallthrough_props.macro_kind,
@@ -5669,7 +5671,8 @@ defineExpose({ exposed })
                 .current_or_read_whole_hash("/src/App.vue")
                 .unwrap_or([0u8; 16]),
             level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-        });
+        })
+        .expect("the Vue adapter is admitted");
     assert!(
         fallthrough_props_dtos
             .prop_fields()
@@ -5784,8 +5787,8 @@ defineEmits<Emits>()
         .iter()
         .find(|entry| entry.type_name == "Props")
         .expect("fallthrough state should still materialize the imported props surface");
-    let fallthrough_props_dtos =
-        host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+    let fallthrough_props_dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from("/src/App.vue"),
             macro_index: fallthrough_props.macro_index,
             macro_kind: fallthrough_props.macro_kind,
@@ -5793,7 +5796,8 @@ defineEmits<Emits>()
                 .current_or_read_whole_hash("/src/App.vue")
                 .unwrap_or([0u8; 16]),
             level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-        });
+        })
+        .expect("the Vue adapter is admitted");
     assert!(
         fallthrough_props_dtos
             .prop_fields()
@@ -7412,15 +7416,17 @@ defineEmits<Emits>()
     // The published emit surface (the payload display + honest locator-less
     // payload) is owned by the SOLE typeinfo macro-surface authority, keyed
     // on the macro index.
-    let define_emits_dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/src/App.vue"),
-        macro_index: define_emits.macro_index,
-        macro_kind: define_emits.macro_kind,
-        root_identity: host
-            .current_or_read_whole_hash("/src/App.vue")
-            .unwrap_or([0u8; 16]),
-        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-    });
+    let define_emits_dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: define_emits.macro_index,
+            macro_kind: define_emits.macro_kind,
+            root_identity: host
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
 
     let emit = define_emits_dtos
         .emit_fields()
@@ -7522,15 +7528,17 @@ defineEmits<{ save: [id: number] }>()
         .unwrap();
     let host = project.host();
 
-    let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/src/App.vue"),
-        macro_index: 0,
-        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
-        root_identity: host
-            .current_or_read_whole_hash("/src/App.vue")
-            .unwrap_or([0u8; 16]),
-        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: 0,
+            macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
+            root_identity: host
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let emit = dtos
         .emit_fields()
         .iter()
@@ -7611,15 +7619,17 @@ defineEmits<ImportedEmits>()
         .unwrap();
     let host = project.host();
 
-    let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/src/App.vue"),
-        macro_index: 0,
-        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
-        root_identity: host
-            .current_or_read_whole_hash("/src/App.vue")
-            .unwrap_or([0u8; 16]),
-        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: 0,
+            macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
+            root_identity: host
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let emit = dtos
         .emit_fields()
         .iter()
@@ -8743,9 +8753,11 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     };
 
     // Base-view read (no overlay): only the base prop `a`.
-    let base_dtos = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos),
         vec!["a".to_string()],
@@ -8784,6 +8796,7 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         &fixture_dispatch_17,
         &request_for(overlay_hash),
     )
+    .expect("the Vue adapter is admitted")
     .dtos;
     let overlay_props = prop_names(&overlay_dtos);
     assert!(
@@ -8799,9 +8812,11 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
 
     // No leak: a fresh base-view read still sees only `[a]`. The overlay surface
     // was keyed on a distinct `whole_hash`, so the base slot is untouched.
-    let base_dtos_after = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos_after = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos_after),
         vec!["a".to_string()],
@@ -8878,9 +8893,11 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     };
 
     // Base-view read (no overlay): only the base model prop `old`.
-    let base_dtos = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos),
         vec!["old".to_string()],
@@ -8916,6 +8933,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         &fixture_dispatch_18,
         &request_for(overlay_hash),
     )
+    .expect("the Vue adapter is admitted")
     .dtos;
     let overlay_props = prop_names(&overlay_dtos);
     assert!(
@@ -8932,9 +8950,11 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     );
 
     // No leak: a fresh base-view read still sees only `[old]`.
-    let base_dtos_after = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos_after = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos_after),
         vec!["old".to_string()],
@@ -9025,9 +9045,11 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         };
 
     // Base-view read: the slot binding is `old`.
-    let base_dtos = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         default_binding_names(&base_dtos),
         vec!["old".to_string()],
@@ -9066,6 +9088,7 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         &fixture_dispatch_19,
         &request_for(overlay_hash),
     )
+    .expect("the Vue adapter is admitted")
     .dtos;
     let overlay_bindings = default_binding_names(&overlay_dtos);
     assert_eq!(
@@ -9078,9 +9101,11 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     );
 
     // No leak: a fresh base-view read still sees only `old`.
-    let base_dtos_after = host.vue_macro_dtos(&request_for(
-        host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
-    ));
+    let base_dtos_after = host
+        .vue_macro_dtos(&request_for(
+            host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
+        ))
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         default_binding_names(&base_dtos_after),
         vec!["old".to_string()],

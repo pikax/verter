@@ -46,16 +46,20 @@
 //! without the authority.
 //!
 //! The carrier `_for_test` accessors are gated
-//! `#[cfg(any(test, feature = "test-support"))]` (the production-unreachable
-//! test-support feature), so they are COMPILE-ABSENT from every production
-//! build.
+//! `#[cfg(any(test, feature = "test-support"))]`. `test-support` is not a
+//! default feature: per-package artifact builds (the LSP, napi and wasm
+//! packages) omit it. A whole-workspace build does compile it in — the
+//! compile-contract variant crate depends on it as a normal dependency — so
+//! the gate keeps these accessors out of shipped artifacts, not out of every
+//! workspace build. A carrier assembled through them is stamped with no
+//! engine and unwraps under no authority.
 //!
 //! [`ProjectSemanticDispatch::output_shell_raise_sealed`]: super::ProjectSemanticDispatch
 //! [`ProjectSemanticDispatch::raise_and_reduce_with_context`]: super::ProjectSemanticDispatch
 
 use verter_type_expr::TypeExpr;
 
-use super::engine_resources::OutputAuthority;
+use super::engine_resources::{EngineIdentity, OutputAuthority};
 use crate::semantic_query::{DepSignature, SemanticNodeId};
 
 pub(crate) use carrier::{MaterializedOutputTypeExpr, OutputTypeExpr};
@@ -69,7 +73,7 @@ pub(crate) use carrier::{MaterializedOutputTypeExpr, OutputTypeExpr};
 /// [`MaterializedOutputTypeExpr`]) hold the vault and forward the
 /// authority-gated reads to the vault's `pub(super)` accessors.
 mod carrier {
-    use super::{DepSignature, OutputAuthority, SemanticNodeId, TypeExpr};
+    use super::{DepSignature, EngineIdentity, OutputAuthority, SemanticNodeId, TypeExpr};
     use crate::project_semantic_dispatch::raise::{DegradedLeaf, MaterializedTypeExpr};
 
     /// The PAYLOAD VAULT: the inner [`TypeExpr`] lives here and is reachable
@@ -86,7 +90,9 @@ mod carrier {
     /// borrowed `&OutputAuthority` on the read accessors is the
     /// unwrap-locality proof; the authority is not otherwise consulted.
     mod payload {
-        use super::{DegradedLeaf, MaterializedTypeExpr, OutputAuthority, TypeExpr};
+        use super::{
+            DegradedLeaf, EngineIdentity, MaterializedTypeExpr, OutputAuthority, TypeExpr,
+        };
 
         /// The sealed inner-`TypeExpr` payload. BOTH fields are private
         /// to this `payload` module — NOT `pub`, NOT `pub(super)`, NOT
@@ -95,6 +101,9 @@ mod carrier {
         /// `from_parts` choke point and is discarded ONLY at the
         /// capability-gated terminal unwrap.
         pub(super) struct OutputPayload {
+            /// The engine that produced this payload; every unwrap checks it
+            /// against the authority.
+            engine: EngineIdentity,
             type_expr: TypeExpr,
             degraded_leaves: Vec<DegradedLeaf>,
         }
@@ -103,9 +112,10 @@ mod carrier {
             /// Seal a [`MaterializedTypeExpr`] (tree + sidecar) into the
             /// vault. `pub(super)` — only the parent `carrier` module's
             /// carrier constructors reach it.
-            pub(super) fn new(materialized: MaterializedTypeExpr) -> Self {
+            pub(super) fn new(engine: EngineIdentity, materialized: MaterializedTypeExpr) -> Self {
                 let (type_expr, degraded_leaves) = materialized.into_parts();
                 Self {
+                    engine,
                     type_expr,
                     degraded_leaves,
                 }
@@ -122,6 +132,7 @@ mod carrier {
             /// by the carrier's [`Clone`] impl.
             pub(super) fn clone_payload(&self) -> Self {
                 Self {
+                    engine: self.engine.clone(),
                     type_expr: self.type_expr.clone(),
                     degraded_leaves: self.degraded_leaves.clone(),
                 }
@@ -136,7 +147,10 @@ mod carrier {
             /// never warm-admitted as complete, and the observation never
             /// faults the enclosing compute's completeness (a contained
             /// member-level degradation stays entry-local).
-            pub(super) fn into_type_expr(self, _authority: &OutputAuthority) -> TypeExpr {
+            pub(super) fn into_type_expr(self, authority: &OutputAuthority) -> TypeExpr {
+                // The payload opens only for the authority of the engine that
+                // produced it.
+                authority.verify_carrier(&self.engine);
                 if !self.degraded_leaves.is_empty() {
                     crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
@@ -183,10 +197,38 @@ mod carrier {
         /// directly in `output_materialization`, where `pub(super)` resolved to
         /// `project_semantic_dispatch`); the vault moved the carrier one level
         /// deeper, so the same reach is now spelled explicitly.
-        pub(in crate::project_semantic_dispatch) fn from_raise(
+        pub(in crate::project_semantic_dispatch) fn from_raise<
+            C: crate::resolver_core::ResolverCapabilities,
+        >(
+            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
             materialized: MaterializedTypeExpr,
         ) -> Self {
-            Self(payload::OutputPayload::new(materialized))
+            Self(payload::OutputPayload::new(
+                EngineIdentity::of(dispatch),
+                materialized,
+            ))
+        }
+
+        /// Seal a payload under `authority`'s engine (the raw-wrapping
+        /// helpers' path).
+        pub(super) fn sealed_by(
+            authority: &OutputAuthority,
+            materialized: MaterializedTypeExpr,
+        ) -> Self {
+            Self(payload::OutputPayload::new(
+                authority.engine().clone(),
+                materialized,
+            ))
+        }
+
+        /// Test-only: seal a payload stamped with no engine (it unwraps under
+        /// no authority).
+        #[cfg(test)]
+        pub(crate) fn unbound_for_test(materialized: MaterializedTypeExpr) -> Self {
+            Self(payload::OutputPayload::new(
+                EngineIdentity::unbound(),
+                materialized,
+            ))
         }
 
         /// Read the inner [`TypeExpr`] out, consuming the carrier. Requires an
@@ -314,19 +356,19 @@ mod carrier {
         /// required). Gated `#[cfg(any(test, feature = "test-support"))]` — NOT
         /// `#[cfg(any(test, feature = "test-support"))]` — so it is reachable ONLY from
         /// genuine test code (the in-crate `#[cfg(test)]` suites AND, via the
-        /// production-unreachable `test-support` feature, the separate
-        /// integration-test binary's `ShapeCacheDb` synthetic-carrier proof
-        /// helpers), and is COMPILE-ABSENT from a plain debug `cargo build` /
-        /// `pnpm run build:lsp` / `pnpm dev-extension` / any release build.
+        /// non-default `test-support` feature, the separate integration-test
+        /// binary's `ShapeCacheDb` synthetic-carrier proof helpers). Per-package
+        /// artifact builds (`pnpm run build:lsp`, napi, wasm) omit it; a
+        /// whole-workspace build compiles it in through the compile-contract
+        /// variant crate's normal dependency. The carrier it builds is stamped
+        /// with no engine, so it unwraps under no authority.
         /// `debug_assertions` is ON in the dev cargo profile, so a
         /// `debug_assertions`-OR gate would expose a capability-free carrier
         /// constructor in ordinary debug builds — the exact reverse-materialization
-        /// laundering the fence forbids. `test-support` is absent from `default`
-        /// and is activated ONLY by `verter_session`'s `[dev-dependencies]`
-        /// self-edge (test / example / bench targets), so this gate makes a planted
-        /// hot `MaterializedOutputTypeExpr::from_type_expr_for_test(..)` in a
-        /// non-test module a COMPILE error in EVERY build profile (debug AND
-        /// release). The fence-shape inventory allows EXACTLY `#[cfg(test)]` /
+        /// laundering the fence forbids. `test-support` is absent from `default`,
+        /// so a planted hot `MaterializedOutputTypeExpr::from_type_expr_for_test(..)`
+        /// in a non-test module fails to compile in every per-package artifact
+        /// build (debug AND release). The fence-shape inventory allows EXACTLY `#[cfg(test)]` /
         /// `#[cfg(any(test, feature = "test-support"))]` as the sanctioned test-only
         /// carrier-accessor gate and BANS `debug_assertions`, so a future
         /// re-widening is caught. Used by the cache + dispatch test harnesses that
@@ -341,6 +383,7 @@ mod carrier {
             Self {
                 node_id,
                 type_expr: OutputTypeExpr(payload::OutputPayload::new(
+                    EngineIdentity::unbound(),
                     MaterializedTypeExpr::exact(type_expr),
                 )),
                 dep_signature,
@@ -352,8 +395,8 @@ mod carrier {
         /// required). Gated `#[cfg(any(test, feature = "test-support"))]` — see
         /// [`Self::from_type_expr_for_test`] for why `debug_assertions` is excluded
         /// (it would re-open the carrier-unwrap hole in ordinary debug builds) and
-        /// why the production-unreachable `test-support` feature is the sanctioned
-        /// way to reach this accessor from the separate integration-test binary.
+        /// why the non-default `test-support` feature is the sanctioned way to
+        /// reach this accessor from the separate integration-test binary.
         /// Delegates to the vault's test-only accessor.
         #[cfg(any(test, feature = "test-support"))]
         pub(crate) fn type_expr_for_test(&self) -> &TypeExpr {
@@ -382,12 +425,13 @@ mod carrier {
 /// by the sink sites that assemble a [`MaterializedOutputTypeExpr`] from a
 /// freshly-computed [`TypeExpr`] rather than from a boundary-method carrier.
 pub(crate) fn wrap_output_type_expr(
-    _authority: &OutputAuthority,
+    authority: &OutputAuthority,
     type_expr: TypeExpr,
 ) -> OutputTypeExpr {
     // A raw freshly-computed `TypeExpr` carries no degradation — seal it with
     // an EXACT (empty) sidecar.
-    OutputTypeExpr::from_raise(
+    OutputTypeExpr::sealed_by(
+        authority,
         crate::project_semantic_dispatch::raise::MaterializedTypeExpr::exact(type_expr),
     )
 }
@@ -400,10 +444,11 @@ pub(crate) fn wrap_output_type_expr(
 ///
 /// [`QueryError`]: crate::semantic_query::QueryError
 pub(crate) fn wrap_degraded_output(
-    _authority: &OutputAuthority,
+    authority: &OutputAuthority,
     reason: crate::semantic_query::QueryError,
 ) -> OutputTypeExpr {
-    OutputTypeExpr::from_raise(
+    OutputTypeExpr::sealed_by(
+        authority,
         crate::project_semantic_dispatch::raise::MaterializedTypeExpr::degraded(reason),
     )
 }

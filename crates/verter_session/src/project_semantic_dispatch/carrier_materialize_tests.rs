@@ -506,7 +506,7 @@ fn from_parts_partial_follows_the_typed_materialised_class() {
     );
     let carrier = MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(raise_miss),
+        OutputTypeExpr::unbound_for_test(raise_miss),
         DepSignature::default(),
         false,
     );
@@ -520,7 +520,7 @@ fn from_parts_partial_follows_the_typed_materialised_class() {
     assert!(miss.has_degradation());
     let carrier = MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(miss),
+        OutputTypeExpr::unbound_for_test(miss),
         DepSignature::default(),
         false,
     );
@@ -543,7 +543,7 @@ fn from_parts_marks_degraded_payload_partial_and_keeps_exact_clean() {
     let degraded = MaterializedTypeExpr::degraded(QueryError::Miss);
     let carrier = MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(degraded),
+        OutputTypeExpr::unbound_for_test(degraded),
         DepSignature::default(),
         false,
     );
@@ -556,7 +556,7 @@ fn from_parts_marks_degraded_payload_partial_and_keeps_exact_clean() {
         MaterializedTypeExpr::exact(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
     let carrier = MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(exact),
+        OutputTypeExpr::unbound_for_test(exact),
         DepSignature::default(),
         false,
     );
@@ -570,7 +570,7 @@ fn from_parts_marks_degraded_payload_partial_and_keeps_exact_clean() {
         MaterializedTypeExpr::exact(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number));
     let carrier = MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(exact),
+        OutputTypeExpr::unbound_for_test(exact),
         DepSignature::default(),
         true,
     );

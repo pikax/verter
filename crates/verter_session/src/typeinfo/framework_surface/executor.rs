@@ -604,6 +604,9 @@ impl ExecutorResolveCtx<'_> {
                 self.ctx,
                 self.dispatch,
                 &request,
+            )
+            .unwrap_or_else(
+                crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
             any_partial |= dtos_read.is_partial();
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);

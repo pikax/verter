@@ -32,9 +32,10 @@ pub use plan::{
     TypeNodeHandle,
 };
 pub use results::{
-    EmitsSurface, ExposeSurface, MacroDtosRead, MacroSurfaceDtos, ModelBinding, ModelSurface,
-    NamedTypeLeaf, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface, NormalizedSurfaces,
-    OptionsSurface, PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
+    EmitsSurface, ExposeSurface, MacroDtosRead, MacroDtosRefusal, MacroSurfaceDtos, ModelBinding,
+    ModelSurface, NamedTypeLeaf, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface,
+    NormalizedSurfaces, OptionsSurface, PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload,
+    ResolvedOutcome,
 };
 
 /// One framework's plan/normalize adapter.

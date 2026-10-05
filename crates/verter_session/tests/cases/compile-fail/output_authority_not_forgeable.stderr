@@ -1,7 +1,5 @@
-error[E0451]: field `engine` of struct `OutputAuthority` is private
+error[E0616]: field `engine` of struct `OutputAuthority` is private
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_forgeable.rs
   |
-  |     OutputAuthority {
-  |     --------------- in this type
-  |         engine: std::sync::Weak::new(),
-  |         ^^^^^^ private field
+  |         engine: other.engine.clone(),
+  |                       ^^^^^^ private field

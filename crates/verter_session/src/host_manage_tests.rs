@@ -5288,6 +5288,7 @@ fn macro_dtos_for_resolved(
         root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     })
+    .expect("the Vue adapter is admitted")
 }
 
 /// Typeinfo macro-surface DTOs for the macro matching `type_name`.

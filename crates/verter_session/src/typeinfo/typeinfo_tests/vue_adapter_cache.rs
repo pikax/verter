@@ -219,7 +219,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     assert_eq!(host.vue_surface_store().len(), 0, "store starts empty");
 
     let request_props = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let first = host.vue_macro_dtos(&request_props);
+    let first = host
+        .vue_macro_dtos(&request_props)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         first.prop_fields().len(),
         2,
@@ -233,7 +235,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
 
     // Warm hit: same key, store does NOT grow, and the returned Arc is the SAME
     // cached value (pointer-equal).
-    let second = host.vue_macro_dtos(&request_props);
+    let second = host
+        .vue_macro_dtos(&request_props)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         host.vue_surface_store().len(),
         1,
@@ -246,7 +250,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
 
     // A DIFFERENT macro (defineEmits) is a DISTINCT cache slot.
     let request_emits = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
-    let emits_dtos = host.vue_macro_dtos(&request_emits);
+    let emits_dtos = host
+        .vue_macro_dtos(&request_emits)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         emits_dtos.emit_fields().len(),
         1,
@@ -266,7 +272,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
         request_edited.root_identity, request_props.root_identity,
         "the content edit changed the .vue's whole_hash"
     );
-    let edited = host.vue_macro_dtos(&request_edited);
+    let edited = host
+        .vue_macro_dtos(&request_edited)
+        .expect("the Vue adapter is admitted");
     let mut edited_names: Vec<&str> = edited
         .prop_fields()
         .iter()
@@ -317,7 +325,9 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // Capture the v1 request (its `root_identity` is v1's whole_hash) and warm
     // the cache for the props macro.
     let stale_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let v1 = host.vue_macro_dtos(&stale_request);
+    let v1 = host
+        .vue_macro_dtos(&stale_request)
+        .expect("the Vue adapter is admitted");
     let mut v1_names: Vec<&str> = v1
         .prop_fields()
         .iter()
@@ -342,7 +352,9 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // Re-query with the STALE request (its `root_identity` is the pre-edit
     // hash). `vue_macro_dtos` must derive `whole_hash` from the LIVE
     // `IndexedReady` and return the v2 props — never the stale v1 entry.
-    let after_edit = host.vue_macro_dtos(&stale_request);
+    let after_edit = host
+        .vue_macro_dtos(&stale_request)
+        .expect("the Vue adapter is admitted");
     let mut after_names: Vec<&str> = after_edit
         .prop_fields()
         .iter()
@@ -391,7 +403,9 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // COLD call with the lying kind. The derived kind (DefineProps) must win:
     // the bundle carries PROPS, not the emits the property-style fallback would
     // fabricate from the props surface.
-    let cold = host.vue_macro_dtos(&lying_request);
+    let cold = host
+        .vue_macro_dtos(&lying_request)
+        .expect("the Vue adapter is admitted");
     let mut cold_props: Vec<&str> = cold
         .prop_fields()
         .iter()
@@ -412,7 +426,9 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // slot (the kind was derived identically) and returns the SAME Arc — the
     // lying call did not poison or fork the slot.
     let truthful_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let truthful = host.vue_macro_dtos(&truthful_request);
+    let truthful = host
+        .vue_macro_dtos(&truthful_request)
+        .expect("the Vue adapter is admitted");
     assert!(
         Arc::ptr_eq(&cold, &truthful),
         "the derived-kind slot is shared; the lying request did not poison a separate slot"
@@ -759,6 +775,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         let fixture_dispatch_0 =
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &partial_request)
+            .expect("the Vue adapter is admitted")
     };
     let partial_len_after = store.len();
 
@@ -796,6 +813,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         let fixture_dispatch_0 =
             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &complete_request)
+            .expect("the Vue adapter is admitted")
     };
     let complete_len_after = store.len();
 

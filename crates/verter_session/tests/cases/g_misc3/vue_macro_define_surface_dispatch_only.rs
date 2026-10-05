@@ -723,13 +723,15 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
     );
 
     // (a) Direct `vue_macro_dtos` (FullMetadata) — the aliased-union surface.
-    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
-        macro_index: 0,
-        macro_kind: AnalyzedMacroKind::DefineProps,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
+            macro_index: 0,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let dto_names: Vec<&str> = dtos
         .prop_fields()
         .iter()
@@ -823,13 +825,15 @@ fn open_conditional_props_root_enumerates_both_branches() {
 
     // (a) Direct `vue_macro_dtos` (FullMetadata) — the macro object
     // surface enumerates BOTH conditional branches' members.
-    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/OpenConditionalProps.vue"),
-        macro_index: 0,
-        macro_kind: AnalyzedMacroKind::DefineProps,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/OpenConditionalProps.vue"),
+            macro_index: 0,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let dto_names: Vec<&str> = dtos
         .prop_fields()
         .iter()

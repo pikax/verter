@@ -68,6 +68,7 @@ fn macro_dtos(
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     })
+    .expect("the Vue adapter is admitted")
 }
 
 fn macro_dtos_fresh_and_warm(

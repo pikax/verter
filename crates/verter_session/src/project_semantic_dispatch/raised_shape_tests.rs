@@ -3268,7 +3268,7 @@ fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
     // … and the payload goes PARTIAL at the choke point (no warm admission).
     let carrier = MaterializedOutputTypeExpr::from_parts(
         Some(node),
-        OutputTypeExpr::from_raise(folded),
+        OutputTypeExpr::unbound_for_test(folded),
         DepSignature::default(),
         false,
     );
@@ -3333,7 +3333,7 @@ fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
     assert!(degraded.has_degradation());
     let carrier = crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr::from_parts(
         None,
-        OutputTypeExpr::from_raise(degraded),
+        OutputTypeExpr::unbound_for_test(degraded),
         DepSignature::default(),
         false,
     );

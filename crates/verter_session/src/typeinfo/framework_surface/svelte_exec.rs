@@ -115,6 +115,13 @@ pub(crate) fn resolve_svelte_surface(
     owner: &str,
     source: SvelteSurfaceSource,
 ) -> ResolvedMacroPayload {
+    // Refuse BEFORE any surface is computed: a host that does not admit the
+    // Svelte adapter has no Svelte surface store.
+    let Some(surfaces) = dispatch.host_attachment().svelte_surfaces() else {
+        return ResolvedOutcome::Unsupported {
+            diagnostics: vec!["the Svelte adapter is not admitted by this host".to_string()],
+        };
+    };
     // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the cache,
     // so the content-addressed key carries the live overlay `whole_hash`. An
     // unloaded owner has no surface and no cache entry.
@@ -141,7 +148,6 @@ pub(crate) fn resolve_svelte_surface(
     // Warm read against the SAME `ctx` view the surface resolves under — a
     // carrier edit (a cross-file dependency the captured `TypeExpr` reaches)
     // invalidates the entry lazily via the recorded fact signature + generation.
-    let surfaces = dispatch.host_attachment().svelte_surfaces();
     if let Some(cached) = crate::framework::surface_store::read_framework_surface(
         surfaces,
         &key,

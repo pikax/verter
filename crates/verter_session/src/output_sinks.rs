@@ -273,3 +273,58 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod carrier_identity_tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use super::{OutputProjector, TestOutputCap};
+    use crate::project_semantic_dispatch::engine_resources::{EngineStores, OutputAuthority};
+    use crate::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+
+    fn foreign_authority() -> OutputAuthority {
+        EngineStores::create(
+            None,
+            verter_session_query::retention::StoreAccount::default(),
+            &Arc::new(AtomicU64::new(0)),
+        )
+        .1
+    }
+
+    /// A carrier the live engine raised does not open under the authority of
+    /// a freshly minted engine — independently of materialization.
+    #[test]
+    #[should_panic(expected = "output authority used to unwrap a carrier from a different engine")]
+    fn foreign_authority_cannot_unwrap_a_live_engine_carrier() {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let node = host
+            .project_type_store()
+            .semantic_graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let carrier = TestOutputCap::new(&dispatch)
+            .materialize_output_type_expr(node)
+            .expect("a live primitive node raises");
+        let foreign = foreign_authority();
+        let _ = carrier.into_type_expr(&foreign);
+    }
+
+    /// A raw payload sealed under a foreign authority does not open under the
+    /// live engine's authority either.
+    #[test]
+    #[should_panic(expected = "output authority used to unwrap a carrier from a different engine")]
+    fn foreign_sealed_payload_cannot_unwrap_under_the_live_authority() {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let foreign = foreign_authority();
+        let sealed = wrap_output_type_expr(
+            &foreign,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        );
+        let cap = TestOutputCap::new(&dispatch);
+        let _ = sealed.into_type_expr(cap.authority());
+    }
+}

@@ -1428,7 +1428,8 @@ fn typeinfo_macro_dtos(
             root_identity,
             level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
         },
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     // Fold a genuine partial surface into the request-result completeness so
     // the enclosing component-meta result's warm promotion is refused.
     read.observe_partial();

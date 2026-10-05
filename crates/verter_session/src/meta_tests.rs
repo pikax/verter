@@ -185,6 +185,7 @@ fn resolved_macro_prop_names(
                 root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             })
+            .expect("the Vue adapter is admitted")
             .prop_fields()
             .iter()
             .map(|p| p.analysis.name.clone())
@@ -18092,19 +18093,19 @@ defineProps<ChildProps>()
         .iter()
         .find(|meta| meta.type_name == "ButtonProps")
         .expect("should resolve ButtonProps");
-    let button_dtos =
-        project
-            .host()
-            .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
-                owner_canonical: std::sync::Arc::from("/src/App.vue"),
-                macro_index: button.macro_index,
-                macro_kind: button.macro_kind,
-                root_identity: project
-                    .host()
-                    .current_or_read_whole_hash("/src/App.vue")
-                    .unwrap_or([0u8; 16]),
-                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-            });
+    let button_dtos = project
+        .host()
+        .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/src/App.vue"),
+            macro_index: button.macro_index,
+            macro_kind: button.macro_kind,
+            root_identity: project
+                .host()
+                .current_or_read_whole_hash("/src/App.vue")
+                .unwrap_or([0u8; 16]),
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     assert!(
         button_dtos
             .prop_fields()

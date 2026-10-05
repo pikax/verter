@@ -382,8 +382,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
     ) -> Option<super::output_materialization::OutputTypeExpr> {
-        self.raise_node_to_type_expr(node)
-            .map(super::output_materialization::OutputTypeExpr::from_raise)
+        self.raise_node_to_type_expr(node).map(|materialized| {
+            super::output_materialization::OutputTypeExpr::from_raise(self, materialized)
+        })
     }
 
     /// Test-only `HotTypeRef`-shaped wrapper over the raise-side shell
@@ -543,7 +544,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .unwrap_or_else(|| MaterializedTypeExpr::degraded(QueryError::Miss));
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced.node_id),
-            OutputTypeExpr::from_raise(type_expr),
+            OutputTypeExpr::from_raise(self, type_expr),
             reduced.dep_signature,
             reduced.result_is_partial,
         )
@@ -597,7 +598,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result_is_partial = state.result_is_partial;
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced),
-            OutputTypeExpr::from_raise(type_expr),
+            OutputTypeExpr::from_raise(self, type_expr),
             state.into_dep_signature(),
             result_is_partial,
         )

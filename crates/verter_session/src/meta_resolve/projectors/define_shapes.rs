@@ -172,7 +172,8 @@ fn define_props_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     // Fold a genuine partial macro surface into the request-result
     // completeness so the enclosing component-meta result is refused warm
     // promotion (the no-poison invariant).
@@ -268,7 +269,8 @@ fn define_emits_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 
@@ -343,7 +345,8 @@ fn define_slots_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 

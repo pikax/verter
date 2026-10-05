@@ -57,7 +57,7 @@ impl EngineStores {
             None => SemanticGraphStore::with_account(store_account),
         });
         let authority = OutputAuthority {
-            engine: Arc::downgrade(&graph),
+            engine: EngineIdentity(Arc::downgrade(&graph)),
         };
         let stores = Self {
             graph,
@@ -87,9 +87,35 @@ impl EngineStores {
 /// engine panics (a composition defect, never a silent cross-engine raise).
 ///
 /// Every sealed output carrier unwraps only with a borrowed authority, so the
-/// reverse boundary stays closed to every holder of query access.
+/// reverse boundary stays closed to every holder of query access. Each carrier
+/// is stamped with the identity of the engine that produced it, and unwrapping
+/// with the authority of any other engine panics: minting a fresh engine never
+/// yields output power over a live one.
 pub struct OutputAuthority {
-    engine: Weak<SemanticGraphStore>,
+    engine: EngineIdentity,
+}
+
+/// The private identity of one engine: a non-owning handle on its semantic
+/// graph, compared by allocation. Sealed carriers carry it so their unwrap can
+/// be checked against the authority; holding one grants nothing.
+#[derive(Clone)]
+pub(crate) struct EngineIdentity(Weak<SemanticGraphStore>);
+
+impl EngineIdentity {
+    /// The identity of the engine `dispatch` reads.
+    pub(super) fn of<C: crate::resolver_core::ResolverCapabilities>(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+    ) -> Self {
+        Self(Arc::downgrade(&dispatch.binding.graph))
+    }
+
+    /// An identity no engine has: a carrier stamped with it unwraps under no
+    /// authority. Used only by test fixtures that assemble carriers without an
+    /// engine.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn unbound() -> Self {
+        Self(Weak::new())
+    }
 }
 
 impl OutputAuthority {
@@ -101,9 +127,25 @@ impl OutputAuthority {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
         assert!(
-            std::ptr::eq(self.engine.as_ptr(), Arc::as_ptr(&dispatch.binding.graph)),
+            std::ptr::eq(self.engine.0.as_ptr(), Arc::as_ptr(&dispatch.binding.graph)),
             "output authority used with a dispatch over a different engine"
         );
+    }
+
+    /// Assert that a sealed carrier stamped with `carrier` was produced by the
+    /// engine this authority was minted for. Checked on EVERY unwrap; one
+    /// pointer comparison.
+    #[inline]
+    pub(super) fn verify_carrier(&self, carrier: &EngineIdentity) {
+        assert!(
+            Weak::ptr_eq(&self.engine.0, &carrier.0),
+            "output authority used to unwrap a carrier from a different engine"
+        );
+    }
+
+    /// The identity a carrier this authority seals is stamped with.
+    pub(super) fn engine(&self) -> &EngineIdentity {
+        &self.engine
     }
 
     /// Plain SHELL raise (no operator reduction): materialize `node` into a

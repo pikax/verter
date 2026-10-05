@@ -588,8 +588,16 @@ impl VerterHost {
     /// from the content-addressed cache. Returns an empty (default) bundle when
     /// the macro surface cannot be resolved — the same "no surface" outcome the
     /// eager rail produced for an unresolvable macro.
-    #[must_use]
-    pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<MacroSurfaceDtos> {
+    ///
+    /// # Errors
+    ///
+    /// [`MacroDtosRefusal`](crate::typeinfo::framework_surface::MacroDtosRefusal)
+    /// when the host does not admit the Vue adapter or the owner is another
+    /// framework's carrier; nothing is computed or cached.
+    pub fn vue_macro_dtos(
+        &self,
+        request: &VueMacroSurfaceRequest,
+    ) -> Result<Arc<MacroSurfaceDtos>, crate::typeinfo::framework_surface::MacroDtosRefusal> {
         // Base-view query-RETURNER. It returns AND content-addressed caches the
         // DTO bundle, so it MUST resolve against a PROVEN-CURRENT snapshot — a
         // non-current execution must never warm the cache. On sustained churn
@@ -597,7 +605,7 @@ impl VerterHost {
         // anything. Overlay-bearing production callers MUST call
         // `vue_macro_dtos_with_ctx` with their active session context.
         let Some(current_view) = crate::typeinfo::current_store_view_for_query(self) else {
-            return Arc::new(MacroSurfaceDtos::default());
+            return Ok(Arc::new(MacroSurfaceDtos::default()));
         };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx =
@@ -605,7 +613,8 @@ impl VerterHost {
         // Base-view returner: hand back the DTO bundle. A partial surface is
         // already refused store admission inside `vue_macro_dtos_with_ctx`;
         // this direct query has no request-result completeness to fold.
-        vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request).dtos
+        vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request)
+            .map(|read| read.dtos)
     }
 }
 
@@ -894,14 +903,22 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
 ///
 /// [`ctx.ensure_indexed_ready_serve`]: crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve
 /// [`FactValidation`]: crate::resolver_core::fact_validation_port::FactValidation
-#[must_use]
 pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
-) -> crate::typeinfo::framework_surface::MacroDtosRead {
+) -> Result<
+    crate::typeinfo::framework_surface::MacroDtosRead,
+    crate::typeinfo::framework_surface::MacroDtosRefusal,
+> {
     use crate::semantic_query::ResultCompleteness;
-    use crate::typeinfo::framework_surface::MacroDtosRead;
+    use crate::typeinfo::framework_surface::{MacroDtosRead, MacroDtosRefusal};
+
+    // Refuse BEFORE any DTO is computed: a host that does not admit the Vue
+    // adapter has no Vue surface store, and no surface is served for it.
+    let Some(surfaces) = dispatch.host_attachment().vue_surfaces() else {
+        return Err(MacroDtosRefusal::VueNotAdmitted);
+    };
 
     // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the
     // cache. The request's `root_identity` (a `whole_hash` hint) and
@@ -918,16 +935,21 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
         // bundle WITHOUT publishing (we have no validated key) keeps the cache
         // free of entries keyed on an unvalidated identity. A default bundle is
         // a COMPLETE empty surface (no fuse tripped), not a partial.
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(MacroSurfaceDtos::default()),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     };
+    // The owner must be a Vue carrier or a plain script; another framework's
+    // carrier or adapter module is refused rather than read as Vue.
+    if !is_vue_compatible_owner(&indexed.file_language) {
+        return Err(MacroDtosRefusal::IncompatibleCarrier);
+    }
     let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(MacroSurfaceDtos::default()),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     };
     let whole_hash = indexed.whole_hash;
     let macro_kind = mac.kind;
@@ -954,7 +976,6 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     // project generation against the live view invalidates the entry lazily on a
     // carrier edit.
     let generation = ctx.current_project_generation();
-    let surfaces = dispatch.host_attachment().vue_surfaces();
     if let Some(cached) = crate::framework::surface_store::read_framework_surface(
         surfaces,
         &key,
@@ -967,10 +988,10 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
         cached.read_set_signature.bubble_via_tls();
         // Only `Complete` bundles ever enter the store (see the cold-compute
         // gate below), so a warm hit is always complete.
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::clone(&cached.dto_bundle),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     }
 
     // Resolve the surface through a request carrying the VALIDATED identity
@@ -1143,12 +1164,12 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     // metadata store (their carrier facts validate against the live
     // view). Return the freshly-computed bundle WITHOUT caching.
     if non_cacheable_read_observed {
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(dtos),
             completeness,
-        };
+        });
     }
-    match finalise {
+    Ok(match finalise {
         // A `Complete` result with a sound fact signature is the ONLY bundle
         // admitted into the store. A `Partial` (budget exhaustion / fatal
         // `QueryError` mid-surface-resolution) is returned but NEVER cached —
@@ -1197,6 +1218,21 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                 completeness,
             }
         }
+    })
+}
+
+/// Whether `language` may own a `.vue` macro surface: a Vue carrier (or Vue
+/// template / adapter module) or a plain script. Another framework's carrier,
+/// template or adapter module is not.
+fn is_vue_compatible_owner(language: &verter_language::FileLanguage) -> bool {
+    let vue = verter_language::FrameworkAdapterId::vue();
+    match language {
+        verter_language::FileLanguage::Script { flavor, .. } => match flavor {
+            verter_language::ScriptFlavor::Plain => true,
+            verter_language::ScriptFlavor::AdapterModule { adapter_id, .. } => *adapter_id == vue,
+        },
+        verter_language::FileLanguage::Framework { adapter_id, .. }
+        | verter_language::FileLanguage::FrameworkTemplate { adapter_id, .. } => *adapter_id == vue,
     }
 }
 

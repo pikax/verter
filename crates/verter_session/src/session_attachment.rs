@@ -54,24 +54,17 @@ impl SessionAttachment {
         }
     }
 
-    /// The Vue adapter's surface DTO store.
-    ///
-    /// Panics only when the Vue adapter is not registered — reaching a Vue
-    /// surface on such a host is a composition defect.
-    pub(crate) fn vue_surfaces(&self) -> &VueSurfaceStore {
-        self.vue_surfaces
-            .as_deref()
-            .expect("the Vue adapter is registered")
+    /// The Vue adapter's surface DTO store; `None` when the host does not
+    /// admit the Vue adapter. Callers refuse the demand instead of computing.
+    pub(crate) fn vue_surfaces(&self) -> Option<&VueSurfaceStore> {
+        self.vue_surfaces.as_deref()
     }
 
-    /// The Svelte adapter's surface DTO store.
-    ///
-    /// Panics only when the Svelte adapter is not registered — reaching a
-    /// Svelte surface on such a host is a composition defect.
-    pub(crate) fn svelte_surfaces(&self) -> &SvelteSurfaceStore {
-        self.svelte_surfaces
-            .as_deref()
-            .expect("the Svelte adapter is registered")
+    /// The Svelte adapter's surface DTO store; `None` when the host does not
+    /// admit the Svelte adapter. Callers refuse the demand instead of
+    /// computing.
+    pub(crate) fn svelte_surfaces(&self) -> Option<&SvelteSurfaceStore> {
+        self.svelte_surfaces.as_deref()
     }
 
     /// The host's inert output lease; only a sealed sink capability opens it.
@@ -110,4 +103,75 @@ pub(crate) trait SessionCapabilities:
 impl<C> SessionCapabilities for C where
     C: crate::resolver_core::ResolverCapabilities<HostAttachment = SessionAttachment>
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::typeinfo::framework_surface::MacroDtosRefusal;
+    use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use crate::types::{HostConfig, UpsertRequest};
+    use crate::VerterHost;
+    use verter_language::FileLanguage;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+
+    fn host_admitting(name: &str) -> VerterHost {
+        VerterHost::new_standalone(HostConfig {
+            framework: crate::framework::FrameworkOptions::admitting_names([name])
+                .expect("the vertical is composed"),
+            ..HostConfig::default()
+        })
+    }
+
+    fn props_request(owner: &str) -> VueMacroSurfaceRequest {
+        VueMacroSurfaceRequest {
+            owner_canonical: Arc::from(owner),
+            macro_index: 0,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        }
+    }
+
+    fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(id.to_string()),
+                input_id: id.to_string(),
+                source: Arc::from(source),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert");
+    }
+
+    /// A host that does not admit the Vue adapter refuses a `.vue` macro DTO
+    /// demand with a typed refusal — never a panic on the absent store and
+    /// never a complete empty bundle.
+    #[test]
+    fn vue_macro_dtos_on_a_host_without_vue_is_a_typed_refusal() {
+        let host = host_admitting("svelte");
+        upsert_ts(
+            &host,
+            "/w/props.ts",
+            "const p = defineProps<{ x: string }>();\n",
+        );
+        assert_eq!(
+            host.vue_macro_dtos(&props_request("/w/props.ts")).err(),
+            Some(MacroDtosRefusal::VueNotAdmitted)
+        );
+    }
+
+    /// The same demand on a Vue-admitting host is served.
+    #[test]
+    fn vue_macro_dtos_on_a_vue_host_is_served() {
+        let host = host_admitting("vue");
+        upsert_ts(
+            &host,
+            "/w/props.ts",
+            "const p = defineProps<{ x: string }>();\n",
+        );
+        assert!(host.vue_macro_dtos(&props_request("/w/props.ts")).is_ok());
+    }
 }
