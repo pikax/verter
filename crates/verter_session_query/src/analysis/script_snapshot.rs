@@ -282,7 +282,7 @@ mod analyzed_macro_serde_tests {
     //! "missing field" error.
     use crate::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, MacroAnchor, MacroAnchorUnsupported, MacroEditAnchors,
-        MemberListAnchor,
+        MemberListAnchor, MemberListAnchorData,
     };
     use std::sync::Arc;
     use verter_span::Span;
@@ -423,10 +423,11 @@ mod analyzed_macro_serde_tests {
         );
     }
 
-    /// A populated anchor round-trips its offset, its emptiness flag, and each
-    /// distinct unsupported reason without collapsing them.
+    /// A populated anchor round-trips its wire data — offset, emptiness flag,
+    /// and each distinct unsupported reason without collapsing them — but the
+    /// decoded anchor is never an edit capability.
     #[test]
-    fn analyzed_macro_serde_roundtrip_preserves_anchor_values() {
+    fn analyzed_macro_serde_roundtrip_preserves_anchor_data_without_edit_capability() {
         let mut m = empty_macro();
         m.edit_anchors = MacroEditAnchors {
             type_literal: MacroAnchor::Available(MemberListAnchor::new(
@@ -443,14 +444,28 @@ mod analyzed_macro_serde_tests {
         );
 
         let back: AnalyzedMacro = serde_json::from_str(&json).unwrap();
-        assert_eq!(m.edit_anchors, back.edit_anchors);
-        let anchor = back
-            .edit_anchors
-            .type_literal
-            .available()
-            .expect("round-trip keeps the available arm");
-        assert_eq!(anchor.insert_offset(), 41);
-        assert!(!anchor.is_empty());
+        assert_eq!(
+            back.edit_anchors.type_literal,
+            MacroAnchor::Decoded(MemberListAnchorData {
+                insert_offset: 41,
+                is_empty: false,
+            }),
+            "the wire data survives decoding"
+        );
+        assert!(
+            back.edit_anchors.type_literal.available().is_none(),
+            "decoding serialized analysis must not yield an edit capability"
+        );
+        assert!(!back.edit_anchors.type_literal.is_available());
+        assert_eq!(
+            back.edit_anchors.type_literal.data(),
+            m.edit_anchors.type_literal.data()
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            json,
+            "re-serializing decoded analysis reproduces the original wire bytes"
+        );
         // Negative: the sibling reason survives distinctly, not collapsed into
         // the `NoTypeArgument` default.
         assert_eq!(

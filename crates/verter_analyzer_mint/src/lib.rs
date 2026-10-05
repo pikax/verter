@@ -14,6 +14,12 @@
 //! (`verter_semantic`) and the record crate whose constructors take the
 //! authority (`verter_session_query`); a consumer such as the session or the
 //! language server cannot mint a record from source-offset arithmetic.
+//!
+//! This is restricted constructor access, not proof of syntax-tree
+//! provenance: a holder of the authority can pass any value, and the records
+//! are correct because the analyzer derives them from syntax nodes. Records
+//! that guard on this authority also implement no `Deserialize`, so decoding
+//! serialized analysis cannot bypass the constructor.
 
 /// Authority to mint a `MemberListAnchor`: the append position of an authored
 /// macro member list, which only the analyzer derives from a live syntax node.

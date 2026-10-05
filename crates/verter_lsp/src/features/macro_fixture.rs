@@ -1,8 +1,9 @@
 //! Test-only fixtures that mint macro analysis through the REAL analyzer.
 //!
 //! Macro edit anchors are minted by `verter_semantic`'s analyzer from live OXC
-//! spans and are not constructible outside that crate (`MemberListAnchor`'s
-//! offset field is private and its constructor is crate-private). A fixture
+//! spans and are not constructible here (`MemberListAnchor`'s fields are
+//! private, its constructor demands a mint authority this crate cannot name,
+//! and it implements no `Deserialize`). A fixture
 //! that hand-wrote an anchor could not discriminate a producer bug, so the
 //! anchor-bearing cases run the real analyzer over fixture source instead.
 

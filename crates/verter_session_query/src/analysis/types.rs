@@ -984,19 +984,39 @@ pub struct AnalyzedEmitField {
     pub tags: Vec<JsdocTag>,
 }
 
+/// Serialized form of a member-list anchor: the closing-delimiter offset of an
+/// authored member list and whether that list is empty.
+///
+/// This is plain wire data. Decoding it yields no edit capability: a decoded
+/// anchor is [`MacroAnchor::Decoded`], which [`MacroAnchor::available`] never
+/// returns as an editable position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberListAnchorData {
+    /// SFC-absolute byte offset of the member list's closing delimiter.
+    pub insert_offset: u32,
+    /// Whether the member list had no members when the anchor was recorded.
+    pub is_empty: bool,
+}
+
 /// The position at which a new member may be appended to an authored member
-/// list, plus whether that list is currently empty.
+/// list, plus whether that list is currently empty — the edit capability the
+/// language server's macro edit paths accept.
 ///
 /// The offset is SFC-ABSOLUTE and always the byte offset of the list's closing
 /// delimiter, so an insertion at this offset lands as the list's LAST member.
 ///
-/// The fields are private and the constructor demands the analyzer-only
-/// [`MemberListAnchorMint`] authority: an edit position for a macro member
-/// list is only ever minted by the analyzer from a live OXC node. A consumer
-/// that wanted to derive one from `span.end - N` arithmetic cannot obtain the
-/// authority without a direct dependency on its crate — it is a compile error,
-/// not a convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The guarantee is RESTRICTED CONSTRUCTOR ACCESS, not proof of syntax-tree
+/// provenance. The fields are private, and the only constructor demands the
+/// [`MemberListAnchorMint`] authority, which a crate can name only through a
+/// direct dependency on its crate; the analyzer is the production holder. A
+/// consumer that wanted to derive an anchor from `span.end - N` arithmetic
+/// cannot obtain the authority, and the type implements no value-producing
+/// trait (`Default`, `Deserialize`) that would bypass the constructor:
+/// serialized anchors decode to [`MemberListAnchorData`] only. A holder of the
+/// authority can still pass any offset, so the analyzer's own derivation from
+/// a member-list node is what makes the offset correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberListAnchor {
     insert_offset: u32,
@@ -1004,8 +1024,8 @@ pub struct MemberListAnchor {
 }
 
 impl MemberListAnchor {
-    /// Mint an anchor from a live OXC node's span. Requires the analyzer-only
-    /// mint authority (see the type docs).
+    /// Construct an anchor. Requires the restricted mint authority (see the
+    /// type docs).
     pub fn new(_mint: MemberListAnchorMint, insert_offset: u32, is_empty: bool) -> Self {
         Self {
             insert_offset,
@@ -1022,6 +1042,14 @@ impl MemberListAnchor {
     /// a consumer must emit).
     pub fn is_empty(&self) -> bool {
         self.is_empty
+    }
+
+    /// The anchor's serialized form.
+    pub fn data(&self) -> MemberListAnchorData {
+        MemberListAnchorData {
+            insert_offset: self.insert_offset,
+            is_empty: self.is_empty,
+        }
     }
 }
 
@@ -1061,13 +1089,49 @@ pub enum MacroAnchorUnsupported {
 ///
 /// Deliberately NOT `Option<u32>`: absence carries a reason, and a consumer
 /// must never substitute an arithmetic fallback for it.
+///
+/// Serialization is lossless on the wire but not on the capability: both
+/// [`Self::Available`] and [`Self::Decoded`] encode as the same `available`
+/// arm, and decoding that arm always yields [`Self::Decoded`]. Deserialized
+/// analysis therefore never carries an edit capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(from = "MacroAnchorWire", into = "MacroAnchorWire")]
 pub enum MacroAnchor {
-    /// The member list is appendable at this anchor.
+    /// The member list is appendable at this constructor-restricted anchor.
     Available(MemberListAnchor),
+    /// Anchor data read back from serialized analysis. It records where the
+    /// anchor was, but is not an edit capability: [`Self::available`] returns
+    /// `None` for it.
+    Decoded(MemberListAnchorData),
     /// No appendable position exists, for this reason.
     Unsupported(MacroAnchorUnsupported),
+}
+
+/// The serialized shape of [`MacroAnchor`].
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MacroAnchorWire {
+    Available(MemberListAnchorData),
+    Unsupported(MacroAnchorUnsupported),
+}
+
+impl From<MacroAnchorWire> for MacroAnchor {
+    fn from(wire: MacroAnchorWire) -> Self {
+        match wire {
+            MacroAnchorWire::Available(data) => Self::Decoded(data),
+            MacroAnchorWire::Unsupported(reason) => Self::Unsupported(reason),
+        }
+    }
+}
+
+impl From<MacroAnchor> for MacroAnchorWire {
+    fn from(anchor: MacroAnchor) -> Self {
+        match anchor {
+            MacroAnchor::Available(anchor) => Self::Available(anchor.data()),
+            MacroAnchor::Decoded(data) => Self::Available(data),
+            MacroAnchor::Unsupported(reason) => Self::Unsupported(reason),
+        }
+    }
 }
 
 impl Default for MacroAnchor {
@@ -1077,10 +1141,20 @@ impl Default for MacroAnchor {
 }
 
 impl MacroAnchor {
-    /// The anchor when one is available.
+    /// The edit-capable anchor when one is available. A decoded anchor is not
+    /// returned.
     pub fn available(&self) -> Option<&MemberListAnchor> {
         match self {
             Self::Available(anchor) => Some(anchor),
+            Self::Decoded(_) | Self::Unsupported(_) => None,
+        }
+    }
+
+    /// The anchor's recorded position, whether edit-capable or decoded.
+    pub fn data(&self) -> Option<MemberListAnchorData> {
+        match self {
+            Self::Available(anchor) => Some(anchor.data()),
+            Self::Decoded(data) => Some(*data),
             Self::Unsupported(_) => None,
         }
     }
@@ -1088,12 +1162,12 @@ impl MacroAnchor {
     /// The typed reason no anchor is available.
     pub fn unsupported_reason(&self) -> Option<MacroAnchorUnsupported> {
         match self {
-            Self::Available(_) => None,
+            Self::Available(_) | Self::Decoded(_) => None,
             Self::Unsupported(reason) => Some(*reason),
         }
     }
 
-    /// Whether this position carries an anchor.
+    /// Whether this position carries an edit-capable anchor.
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Available(_))
     }
