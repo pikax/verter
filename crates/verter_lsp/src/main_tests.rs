@@ -191,8 +191,8 @@ fn plant_canary_engine(
 #[tokio::test]
 async fn configless_workspace_performs_zero_candidate_spawns() {
     let (_temp, root, log) = plant_canary_engine(false);
-    let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
-    let result = try_spawn_tsgo(&root.to_string_lossy(), &client_cell).await;
+    let outbound = Outbound::default();
+    let result = try_spawn_tsgo(&root.to_string_lossy(), &outbound).await;
     let err = match result {
         Ok(_) => panic!("a config-less workspace must fail closed"),
         Err(err) => err,
@@ -215,7 +215,7 @@ async fn configless_workspace_performs_zero_candidate_spawns() {
 #[tokio::test]
 async fn configured_workspace_admits_then_spawns() {
     let (_temp, root, log) = plant_canary_engine(true);
-    let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
+    let outbound = Outbound::default();
     // The claim under test is about the ORDER of admission and resolution, so the
     // ambient environment must not decide the outcome. Derived from the real
     // environment the search space would be whatever engine the host installs: a
@@ -250,7 +250,7 @@ async fn configured_workspace_admits_then_spawns() {
     };
     let result = try_spawn_tsgo_with_request(
         &root.to_string_lossy(),
-        &client_cell,
+        &outbound,
         Some(request),
         tsgo_resilient::OwnedStartAnnouncements::All,
     )

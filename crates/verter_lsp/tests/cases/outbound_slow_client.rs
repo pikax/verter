@@ -27,11 +27,11 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::sync::Notify;
 use tower_lsp_server::jsonrpc::{ErrorCode, Result};
-use tower_lsp_server::ls_types::notification::ShowMessage;
+use tower_lsp_server::ls_types::notification::{LogMessage, ShowMessage};
 use tower_lsp_server::ls_types::request::WorkspaceConfiguration;
 use tower_lsp_server::ls_types::{
-    ConfigurationParams, Diagnostic, InitializeParams, InitializeResult, MessageType,
-    PublishDiagnosticsParams, Range, ShowMessageParams, Uri,
+    ConfigurationParams, Diagnostic, InitializeParams, InitializeResult, LogMessageParams,
+    MessageType, PublishDiagnosticsParams, Range, ShowMessageParams, Uri,
 };
 use tower_lsp_server::{LanguageServer, LspService};
 use verter_lsp::outbound::{ClassBudget, Delivery, Load, Outbound, OutboundBudget};
@@ -205,6 +205,17 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         .send(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
         .await;
 
+    // Stall the writer on the client before anything else is offered: a control
+    // frame larger than the pipe is the first frame it takes, and it cannot
+    // finish writing it while nobody reads. Without it, a writer that had not yet
+    // filled the pipe when the warnings below arrive would rightly write some of
+    // them, and the stalled-state accounting would race the scheduler.
+    let filler = "f".repeat(4 * PIPE_BYTES);
+    outbound.notify_detached::<LogMessage>(LogMessageParams {
+        typ: MessageType::LOG,
+        message: filler.clone(),
+    });
+
     // The edit storm, issued while nobody reads, from one task that owns every
     // publication. Each publication is polled once as it is issued, so every
     // document's offers enter the lane in edit order; one that already resolved
@@ -235,8 +246,8 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         }
     });
 
-    // Every edit is offered. The pipe holds a couple of payloads, so documents
-    // still waiting for the lane prove the writer is stalled on the client.
+    // Every edit is offered behind the stalled writer, so the storm backs the
+    // lane up to its budget and documents wait for it.
     offered.await.expect("the storm offers every edit");
     assert!(
         outbound.load().replaceable.waiting.messages > 0,
@@ -307,7 +318,7 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         .len()
     };
     assert!(
-        stalled.control.retained().messages >= WARNINGS - 1,
+        stalled.control.retained().messages > WARNINGS,
         "every offered control message is still the transport's, and counted: {stalled:?}"
     );
     assert!(
@@ -339,6 +350,7 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
 
     let mut responses: HashMap<u64, Value> = HashMap::new();
     let mut shown = Vec::new();
+    let mut stalling_frames = 0usize;
     let mut diagnostics_before_control = 0usize;
     let mut newest: HashMap<String, (u64, usize)> = HashMap::new();
     let mut final_sets: HashMap<String, Value> = HashMap::new();
@@ -357,6 +369,18 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
             }
             if let Some(id) = message.get("id").and_then(Value::as_u64) {
                 responses.insert(id, message);
+                continue;
+            }
+            if message["method"] == "window/logMessage" {
+                assert!(
+                    responses.is_empty() && shown.is_empty() && newest.is_empty(),
+                    "the frame that stalled the writer is written first"
+                );
+                assert_eq!(
+                    message["params"]["message"], filler,
+                    "the stalling frame is written whole"
+                );
+                stalling_frames += 1;
                 continue;
             }
             if message["method"] == "window/showMessage" {
@@ -417,10 +441,14 @@ async fn a_slow_client_gets_bounded_backlog_prompt_control_and_newest_diagnostic
         large[LARGE_RESULT_ITEMS - 1],
         format!("item-{}", LARGE_RESULT_ITEMS - 1)
     );
+    assert_eq!(
+        stalling_frames, 1,
+        "the stalling frame reaches the client once"
+    );
     assert_eq!(shown, warnings, "control messages keep their order");
 
-    // Only what the transport already held — the pipe and the one frame being
-    // written — can precede the control traffic; the storm's backlog cannot.
+    // The storm's backlog cannot precede the control traffic: only the few
+    // frames the writer takes before the shutdown response exists can.
     assert!(
         diagnostics_before_control <= 4,
         "control waited behind {diagnostics_before_control} diagnostics"
