@@ -10,7 +10,7 @@
 //! shell (registry / cycle / origin-graph predicates, the resolver adapter)
 //! are reached via `super::*`.
 
-use crate::host_manage::{
+use crate::request_observers::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
 };
 use crate::resolver_core::{
@@ -1106,14 +1106,14 @@ impl VerterHost {
                 parts.evaluated_types = Some(evaluated_types);
             }
             {
-                crate::host_manage::component_meta_trace_custom!(
+                crate::request_observers::component_meta_trace_custom!(
                     "semantic_graph_stats",
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
-                    crate::host_manage::component_meta_trace_custom!(
+                    crate::request_observers::component_meta_trace_custom!(
                         "fuse_tripped",
                         format!(
                             "owner={} fuse={} budget={} actual={}",
@@ -1128,7 +1128,7 @@ impl VerterHost {
                 ..Default::default()
             }
         } else {
-            crate::host_manage::component_meta_trace_custom!(
+            crate::request_observers::component_meta_trace_custom!(
                 "semantic_graph_stats",
                 format!(
                     "owner={} registry_materialization=skipped macro_shapes=skipped",
@@ -1157,9 +1157,9 @@ impl VerterHost {
         }
         let append_elapsed = append_start.elapsed();
         let registry_after = parts.resolved_type_registry.len();
-        if crate::host_manage::component_meta_debug_enabled() {
+        if crate::request_observers::component_meta_debug_enabled() {
             let dep_cache_size = self.project_type_store.indexed().len();
-            crate::host_manage::component_meta_debug(format!(
+            crate::request_observers::component_meta_debug(format!(
                 "PROFILE owner={} registry_before={} registry_after={} registry_added={} dep_cache_entries={} append_ms={:.1}",
                 canonical,
                 registry_before,
@@ -1485,7 +1485,7 @@ impl VerterHost {
                 }
             }
         }
-        let debug_enabled = crate::host_manage::component_meta_debug_enabled();
+        let debug_enabled = crate::request_observers::component_meta_debug_enabled();
         let import_refresh_started = debug_enabled.then(Instant::now);
         // §3.4 structural role classification for the seed refresh below: a
         // registry entry whose NAME a type-role-bearing macro consumes
@@ -1567,7 +1567,7 @@ impl VerterHost {
             if let Some(started) = _entry_started {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms >= 5.0 {
-                    crate::host_manage::component_meta_debug(format!(
+                    crate::request_observers::component_meta_debug(format!(
                         "REGISTRY_IMPORT_UPDATE owner={} name={} source={} resolved={} elapsed_ms={:.1}",
                         owner_canonical,
                         entry.name,
@@ -1927,7 +1927,7 @@ impl VerterHost {
                 break;
             }
             let _pending_started =
-                crate::host_manage::component_meta_debug_enabled().then(Instant::now);
+                crate::request_observers::component_meta_debug_enabled().then(Instant::now);
             let PendingComponentMetaRegistryRef {
                 name: type_name,
                 producer_scope: pending_producer_scope,
@@ -1971,8 +1971,8 @@ impl VerterHost {
             {
                 continue;
             }
-            if crate::host_manage::component_meta_debug_enabled() {
-                crate::host_manage::component_meta_debug(format!(
+            if crate::request_observers::component_meta_debug_enabled() {
+                crate::request_observers::component_meta_debug(format!(
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?} route={:?}",
                     owner_canonical,
                     type_name,
@@ -1987,8 +1987,8 @@ impl VerterHost {
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 Some(pending_producer_scope.canonical_id.as_ref()),
             );
-            if crate::host_manage::component_meta_debug_enabled() && !_can_resolve {
-                crate::host_manage::component_meta_debug(format!(
+            if crate::request_observers::component_meta_debug_enabled() && !_can_resolve {
+                crate::request_observers::component_meta_debug(format!(
                     "REGISTRY_SKIP_UNRESOLVABLE owner={} name={} source_hint={:?} exported={:?}",
                     owner_canonical,
                     type_name,
@@ -2003,8 +2003,8 @@ impl VerterHost {
             if pending_producer_scope.canonical_id.as_ref() != owner_canonical {
                 let source_hint = pending_producer_scope.canonical_id.as_ref();
                 if !query_engine.allow_imported_root() {
-                    if crate::host_manage::component_meta_debug_enabled() {
-                        crate::host_manage::component_meta_debug(format!(
+                    if crate::request_observers::component_meta_debug_enabled() {
+                        crate::request_observers::component_meta_debug(format!(
                             "REGISTRY_SKIP_BUDGET owner={} name={}",
                             owner_canonical, type_name,
                         ));
@@ -2013,15 +2013,16 @@ impl VerterHost {
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 let _imported_pending_started =
-                    crate::host_manage::component_meta_debug_enabled().then(Instant::now);
+                    crate::request_observers::component_meta_debug_enabled().then(Instant::now);
                 let _resolved_import = query_engine.resolve_imported_registry_symbol(
                     source_hint,
                     pending_producer_scope.owner,
                     requested_exported_name,
                 );
-                if crate::host_manage::component_meta_debug_enabled() && _resolved_import.is_none()
+                if crate::request_observers::component_meta_debug_enabled()
+                    && _resolved_import.is_none()
                 {
-                    crate::host_manage::component_meta_debug(format!(
+                    crate::request_observers::component_meta_debug(format!(
                         "REGISTRY_IMPORT_MISS owner={} name={} source={} exported={}",
                         owner_canonical, type_name, source_hint, requested_exported_name,
                     ));
@@ -2043,7 +2044,7 @@ impl VerterHost {
                         );
                     }
                     let declaration_started =
-                        crate::host_manage::component_meta_debug_enabled().then(Instant::now);
+                        crate::request_observers::component_meta_debug_enabled().then(Instant::now);
                     let mut declaration =
                         if matches!(pending_route, crate::resolver_core::RouteDemand::Whole) {
                             query_engine.resolve_type_declaration(
@@ -2077,8 +2078,8 @@ impl VerterHost {
                         crate::resolver_core::RouteDemand::MemberPath(path) => path.is_empty(),
                         _ => false,
                     };
-                    if crate::host_manage::component_meta_debug_enabled() {
-                        crate::host_manage::component_meta_debug(format!(
+                    if crate::request_observers::component_meta_debug_enabled() {
+                        crate::request_observers::component_meta_debug(format!(
                             "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_class={:?}",
                             owner_canonical, type_name,
                             imported_registry_alias_should_stay_symbolic(dispatch,
@@ -2141,7 +2142,7 @@ impl VerterHost {
                         continue;
                     }
                     let surface_started =
-                        crate::host_manage::component_meta_debug_enabled().then(Instant::now);
+                        crate::request_observers::component_meta_debug_enabled().then(Instant::now);
                     // Route-scoped registry publication: a non-whole route
                     // publishes the SELECTED one-level topology as a
                     // `Projected(Surface)` fact (member payloads stay lazy
@@ -2186,7 +2187,7 @@ impl VerterHost {
                     if let Some(started) = _pending_started {
                         let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                         if total_elapsed_ms >= 5.0 {
-                            crate::host_manage::component_meta_debug(format!(
+                            crate::request_observers::component_meta_debug(format!(
                                 "REGISTRY_PENDING_IMPORTED owner={} name={} source={} resolved={} resolve_ms={:.1} declaration_ms={:.1} surface_ms={:.1} total_ms={:.1}",
                                 owner_canonical,
                                 type_name,
@@ -2285,8 +2286,8 @@ impl VerterHost {
             let Some(published_locator) = published_locator else {
                 continue;
             };
-            if crate::host_manage::component_meta_debug_enabled() {
-                crate::host_manage::component_meta_debug(format!(
+            if crate::request_observers::component_meta_debug_enabled() {
+                crate::request_observers::component_meta_debug(format!(
                     "REGISTRY_PENDING_LOCAL_SURFACE owner={} name={} route={:?} locator={:?}",
                     owner_canonical, type_name, pending_route, published_locator
                 ));
@@ -2351,7 +2352,7 @@ impl VerterHost {
             if let Some(started) = _pending_started {
                 let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if total_elapsed_ms >= 5.0 {
-                    crate::host_manage::component_meta_debug(format!(
+                    crate::request_observers::component_meta_debug(format!(
                         "REGISTRY_PENDING_LOCAL owner={} name={} declaration_owner={:?} route={:?} total_ms={:.1}",
                         owner_canonical,
                         type_name,
@@ -2362,10 +2363,10 @@ impl VerterHost {
                 }
             }
         }
-        if crate::host_manage::component_meta_debug_enabled()
+        if crate::request_observers::component_meta_debug_enabled()
             && (_loop_materializations > 0 || _loop_iterations > 0)
         {
-            crate::host_manage::component_meta_debug(format!(
+            crate::request_observers::component_meta_debug(format!(
                 "REGISTRY_LOOP owner={} iterations={} materializations={} published={} loop_ms={:.1}",
                 owner_canonical,
                 _loop_iterations,
@@ -2376,7 +2377,7 @@ impl VerterHost {
         }
         let loop_elapsed_ms = _loop_start.elapsed().as_secs_f64() * 1000.0;
         if debug_enabled {
-            crate::host_manage::component_meta_debug(format!(
+            crate::request_observers::component_meta_debug(format!(
                 "PROFILE_PHASES owner={} import_refresh_ms={:.1} public_field_collect_ms={:.1} seed_scan_ms={:.1} loop_ms={:.1}",
                 owner_canonical,
                 import_refresh_elapsed_ms,

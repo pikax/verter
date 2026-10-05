@@ -21,7 +21,9 @@ use crate::resolver_core::{
 use crate::types::*;
 use crate::VerterHost;
 
-use super::{component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom};
+use crate::request_observers::{
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
+};
 
 // Legacy TypeExpr walkers (collect_required_owner_import_names, collect_slot_eval_import_names_*,
 // collect_surface_eval_import_names_*, collect_runtime_value_names_*, etc.) were deleted.

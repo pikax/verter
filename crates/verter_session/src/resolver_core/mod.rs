@@ -1198,7 +1198,7 @@ where
             // observer / accumulator installed on the current
             // thread) are silent — the counter is the authoritative
             // signal.
-            crate::host_manage::push_structured_event(
+            crate::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1213,7 +1213,7 @@ where
             if facts.is_empty() {
                 self.admission_refused
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::host_manage::push_structured_event(
+                crate::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                         cache_kind: Arc::from(cache_kind),
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1270,7 +1270,7 @@ where
         if facts.len() > FACT_SIGNATURE_CAP {
             self.signature_overflow
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::host_manage::push_structured_event(
+            crate::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1281,7 +1281,7 @@ where
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::host_manage::push_structured_event(
+            crate::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                     cache_kind: Arc::from(cache_kind),
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1571,7 +1571,7 @@ where
         let archive_checks = self
             .archive_checks
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        crate::host_manage::push_structured_event(
+        crate::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
                 request_id,
                 cache_kind: Arc::from(cache_kind),

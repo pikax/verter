@@ -182,6 +182,7 @@ mod inference;
 // flow evaluator holds its whole semantic state here — the products ARE
 // the live value path.
 pub(crate) mod flow_products;
+pub mod interior_source;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;

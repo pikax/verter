@@ -397,7 +397,7 @@ fn extract_jsdoc_return_type_member_spans_are_file_coordinates() {
 
 #[test]
 fn jsdoc_block_spans_extend_tag_text_through_continuation_lines() {
-    use super::jsdoc_block_spans_at_offset;
+    use verter_session_query::analysis::jsdoc_spans::jsdoc_block_spans_at_offset;
     // `@deprecated` text continues onto a second line; the tag's text span
     // must cover BOTH lines (pre-fix it stopped at line 1). The description
     // span must still stop before the first tag.

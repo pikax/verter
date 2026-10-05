@@ -19,7 +19,7 @@
 //! `host_methods.rs` impl block keeps calling them via the
 //! shell's `pub(crate) use jsdoc_resolve::*;` re-export.
 
-use crate::host_manage::{component_meta_debug, component_meta_debug_enabled};
+use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
 use crate::resolver_core::ComponentMetaEvalOutputs;
 use crate::types::{FileAnalysisSnapshot, ProjectionMode};
 use crate::VerterHost;

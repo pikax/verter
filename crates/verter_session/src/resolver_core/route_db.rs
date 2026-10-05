@@ -723,7 +723,7 @@ pub(crate) fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        crate::host_manage::push_structured_event(
+        crate::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),

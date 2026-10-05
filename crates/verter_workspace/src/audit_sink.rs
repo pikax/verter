@@ -3,7 +3,7 @@
 //!
 //! The workspace side publishes `VfsReadEvent`s
 //! to every registered [`VfsAuditSink`]. Session-side audit
-//! (`verter_session::component_meta_audit::session_vfs_sink::SessionVfsSink`)
+//! (`verter_session::session_vfs_sink::SessionVfsSink`)
 //! registers one sink per audited request and filters events by
 //! `request_id`.
 

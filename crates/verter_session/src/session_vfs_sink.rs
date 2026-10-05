@@ -28,9 +28,8 @@ use std::sync::{Arc, Weak};
 
 use verter_workspace::audit_sink::{VfsAuditSink, VfsReadEvent};
 
-#[cfg(test)]
-use super::VfsLayer;
-use super::{RequestFootprintAccumulator, VfsReadRecord};
+use crate::component_meta_audit::VfsLayer;
+use crate::component_meta_audit::{RequestFootprintAccumulator, VfsReadRecord};
 
 /// Session-owned VFS audit sink. Filters fan-out events by
 /// `request_id` and forwards matches to the accumulator as
@@ -79,7 +78,7 @@ impl VfsAuditSink for SessionVfsSink {
 
         acc.push_vfs_read(VfsReadRecord {
             canonical_id: Arc::clone(&event.canonical_id),
-            layer: super::vfs_layer_from_workspace(event.layer),
+            layer: crate::session_vfs_sink::vfs_layer_from_workspace(event.layer),
             cache_hit: event.cache_hit,
             bytes_read: event.bytes_read,
             request_id: self.request_id,
@@ -89,13 +88,31 @@ impl VfsAuditSink for SessionVfsSink {
         // flag is on (read via TLS by `current_timing_enabled`). The
         // accumulator stores the ledger entry for `FileAudit` build
         // at request finalisation.
-        acc.push_file_read_timing(super::accumulator::FileReadTiming {
+        acc.push_file_read_timing(crate::component_meta_audit::accumulator::FileReadTiming {
             canonical_id: Arc::clone(&event.canonical_id),
-            layer: super::vfs_layer_from_workspace(event.layer),
+            layer: crate::session_vfs_sink::vfs_layer_from_workspace(event.layer),
             cache_hit: event.cache_hit,
             bytes_read: event.bytes_read,
             read_ns: event.read_ns,
         });
+    }
+}
+
+/// Convert a workspace-side `VfsAuditLayer` into the audit-side
+/// mirror.
+///
+/// Replaces `impl From<verter_workspace::audit_sink::VfsAuditLayer>
+/// for VfsLayer` for the same orphan-rule reason as
+/// [`crate::component_meta_audit::projection_mode_audit_from`].
+#[must_use]
+pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLayer) -> VfsLayer {
+    use verter_workspace::audit_sink::VfsAuditLayer as W;
+    match layer {
+        W::Overlay => VfsLayer::Overlay,
+        W::Snapshot => VfsLayer::Snapshot,
+        W::Disk => VfsLayer::Disk,
+        W::DirIndexNegative => VfsLayer::DirIndexNegative,
+        W::Missing => VfsLayer::Missing,
     }
 }
 

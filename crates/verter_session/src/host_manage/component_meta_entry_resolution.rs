@@ -75,11 +75,11 @@ impl VerterHost {
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );
-        let _ = ctx.install_audit_registration(std::sync::Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let ctx_guard = crate::request_context::RequestContextGuard::install(ctx);
         let sink_registration = accumulator.as_ref().and_then(|acc| {
-            let sink = crate::component_meta_audit::session_vfs_sink::SessionVfsSink::new(
+            let sink = crate::session_vfs_sink::SessionVfsSink::new(
                 request_id,
                 std::sync::Arc::clone(acc),
             );

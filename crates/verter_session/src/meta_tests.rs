@@ -30594,9 +30594,11 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::Member(
-                    "member".into(),
-                )],
+                &[
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(
+                        "member".into(),
+                    )
+                ],
                 "the typed failure names the exact nested member position"
             );
         }
@@ -30639,7 +30641,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::Parameter { ordinal: 0 }],
+                &[crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Parameter { ordinal: 0 }],
             );
         }
         other => panic!("expected InteriorSourceMiss with the parameter path; got {other:?}"),
@@ -30665,7 +30667,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::TupleElement { ordinal: 0 }],
+                &[crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement { ordinal: 0 }],
             );
         }
         other => panic!("expected InteriorSourceMiss with the tuple path; got {other:?}"),
@@ -30696,7 +30698,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::IndexSignatureValue { ordinal: 0 }],
+                &[crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexSignatureValue { ordinal: 0 }],
             );
         }
         other => panic!("expected InteriorSourceMiss with the index-signature path; got {other:?}"),

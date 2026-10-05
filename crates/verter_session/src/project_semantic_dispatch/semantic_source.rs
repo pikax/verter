@@ -172,11 +172,13 @@ pub(crate) struct SourceRaiseContext<'a> {
 /// ([`ProjectSemanticDispatch::raise_semantic_type_source_to_hot_strict`]).
 /// Tracks the live composition path as a stack; the first recorded failure
 /// snapshots the stack into the typed
-/// [`InteriorSourceStep`](crate::meta_resolve::InteriorSourceStep) path the
+/// [`InteriorSourceStep`](crate::project_semantic_dispatch::interior_source::InteriorSourceStep) path the
 /// output error transports, together with its FAILURE KIND.
 #[derive(Default)]
 pub(crate) struct InteriorFailureSink {
-    stack: std::cell::RefCell<Vec<crate::meta_resolve::InteriorSourceStep>>,
+    stack: std::cell::RefCell<
+        Vec<crate::project_semantic_dispatch::interior_source::InteriorSourceStep>,
+    >,
     first_failure: std::cell::RefCell<Option<StrictSourceRaiseFailure>>,
 }
 
@@ -187,7 +189,7 @@ pub(crate) enum StrictSourceRaiseFailure {
     /// A PRESENT interior locator of a composed fact shell FAILED its
     /// dereference (the composition interned the typed miss carrier).
     /// Carries the nested position path from the source root.
-    InteriorMiss(Arc<[crate::meta_resolve::InteriorSourceStep]>),
+    InteriorMiss(Arc<[crate::project_semantic_dispatch::interior_source::InteriorSourceStep]>),
     /// A successfully-raised schema-PRESENT position (a direct source-root
     /// deref or a composed shell's present slot) materializes an
     /// unknown-materializing failure carrier at its ROOT or INTERIOR — the
@@ -197,7 +199,9 @@ pub(crate) enum StrictSourceRaiseFailure {
     /// Proven schema absence never trips this: an ABSENT schema slot of a
     /// composed shell interns the typed miss directly WITHOUT a deref, so
     /// it is never checked — the schema `Option` is the absence proof.
-    UnknownMaterializing(Arc<[crate::meta_resolve::InteriorSourceStep]>),
+    UnknownMaterializing(
+        Arc<[crate::project_semantic_dispatch::interior_source::InteriorSourceStep]>,
+    ),
     /// The ROOT raise produced a typed [`QueryError`] whose disposition is
     /// NOT optional absence — a control sentinel, an unsupported surface, a
     /// typed partial, or a genuine failure. Carried verbatim (an `AliasCycle`
@@ -236,7 +240,7 @@ impl SourceRaiseContext<'_> {
     /// (no-op wrapper when the raise is lenient).
     pub(in crate::project_semantic_dispatch) fn with_interior_step<R>(
         &self,
-        step: crate::meta_resolve::InteriorSourceStep,
+        step: crate::project_semantic_dispatch::interior_source::InteriorSourceStep,
         f: impl FnOnce() -> R,
     ) -> R {
         if let Some(sink) = self.interior_failures {
@@ -378,7 +382,7 @@ impl ProjectSemanticDispatch<'_> {
                             self.raise_required_interior(
                                 &ctx,
                                 &scope,
-                                crate::meta_resolve::InteriorSourceStep::UnionArm {
+                                crate::project_semantic_dispatch::interior_source::InteriorSourceStep::UnionArm {
                                     ordinal: ordinal as u32,
                                 },
                                 || self.raise_leaf_fact(leaf, &ctx),
@@ -939,7 +943,7 @@ impl ProjectSemanticDispatch<'_> {
                 // `.tuple[N]` position (first failure wins); lenient callers
                 // observe the honest `None`.
                 ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::TupleElement {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement {
                         ordinal: ordinal as u32,
                     },
                     || ctx.record_interior_failure(),

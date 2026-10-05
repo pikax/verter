@@ -130,7 +130,7 @@ fn finalise_compute_scope(
     // peek would multiply a single overflowing compute's event and counter
     // across each nesting level.
     if matches!(finalise, FactReadSetFinalise::Overflow) {
-        crate::host_manage::push_structured_event(
+        crate::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                 candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
                 cap: FACT_SIGNATURE_CAP as u32,
@@ -534,7 +534,7 @@ where
     note_basis_recheck(source, &mut read_set);
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
-        crate::host_manage::push_structured_event(
+        crate::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                 candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
                 cap: FACT_SIGNATURE_CAP as u32,

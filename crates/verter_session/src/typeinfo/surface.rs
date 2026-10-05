@@ -643,7 +643,7 @@ impl TypeInfoSurface {
                             .entry(Arc::clone(file))
                             .or_insert_with(|| source_for(file.as_ref()))
                             .clone()?;
-                        let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+                        let spans = verter_session_query::analysis::jsdoc_spans::jsdoc_block_spans_at_offset(
                             source.as_ref(),
                             name_span.span.start,
                         )?;
@@ -711,7 +711,7 @@ where
             .entry(Arc::clone(&anchor.file))
             .or_insert_with(|| source_for(file))
             .clone()?;
-        let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+        let spans = verter_session_query::analysis::jsdoc_spans::jsdoc_block_spans_at_offset(
             source.as_ref(),
             anchor.span.start,
         )?;

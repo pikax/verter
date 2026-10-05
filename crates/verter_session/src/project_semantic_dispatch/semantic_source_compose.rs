@@ -121,7 +121,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         ctx: &SourceRaiseContext<'_>,
         scope: &NodeScopeId,
-        step: crate::meta_resolve::InteriorSourceStep,
+        step: crate::project_semantic_dispatch::interior_source::InteriorSourceStep,
         raise: impl FnOnce() -> Option<HotTypeRef>,
     ) -> SemanticNodeId {
         ctx.with_interior_step(step, || match raise() {
@@ -177,7 +177,7 @@ impl ProjectSemanticDispatch<'_> {
                         self.raise_required_interior(
                             ctx,
                             scope,
-                            crate::meta_resolve::InteriorSourceStep::UnionArm {
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::UnionArm {
                                 ordinal: ordinal as u32,
                             },
                             || self.raise_leaf_fact(leaf, ctx),
@@ -217,7 +217,7 @@ impl ProjectSemanticDispatch<'_> {
                         value: self.raise_required_interior(
                             ctx,
                             scope,
-                            crate::meta_resolve::InteriorSourceStep::Member(
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(
                                 verter_type_expr::facts::FactAuthoredPropertyKey::string(
                                     member.name.as_str(),
                                 ),
@@ -264,7 +264,7 @@ impl ProjectSemanticDispatch<'_> {
                             member.name.as_str(),
                         ),
                         value: ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::Member(
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(
                                 verter_type_expr::facts::FactAuthoredPropertyKey::string(
                                     member.name.as_str(),
                                 ),
@@ -364,7 +364,7 @@ impl ProjectSemanticDispatch<'_> {
                         value: self.raise_required_interior(
                             ctx,
                             &scope,
-                            crate::meta_resolve::InteriorSourceStep::Member(property.key.clone()),
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(property.key.clone()),
                             || {
                                 self.raise_body_slot(&property.ty, ctx.scope_canonical_id)
                                     .at_optional_boundary()
@@ -387,7 +387,7 @@ impl ProjectSemanticDispatch<'_> {
                 }
                 ObjectMemberFact::Method(method) => {
                     let value = ctx.with_interior_step(
-                        crate::meta_resolve::InteriorSourceStep::Member(method.key.clone()),
+                        crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(method.key.clone()),
                         || self.compose_function_fact_node(&method.function, ctx, false),
                     );
                     entries.push(SurfaceEntry::Member(SurfaceMember {
@@ -421,7 +421,7 @@ impl ProjectSemanticDispatch<'_> {
                     call_ordinal += 1;
                     entries.push(SurfaceEntry::CallSignature(
                         ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::CallSignature { ordinal },
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::CallSignature { ordinal },
                             || self.compose_function_fact_node(signature, ctx, false),
                         )
                         .node(),
@@ -432,7 +432,7 @@ impl ProjectSemanticDispatch<'_> {
                     construct_ordinal += 1;
                     entries.push(SurfaceEntry::ConstructSignature(
                         ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::ConstructSignature { ordinal },
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ConstructSignature { ordinal },
                             || self.compose_function_fact_node(signature, ctx, false),
                         )
                         .node(),
@@ -443,13 +443,13 @@ impl ProjectSemanticDispatch<'_> {
                     index_ordinal += 1;
                     entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                         key_type: ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::IndexSignatureKey { ordinal },
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexSignatureKey { ordinal },
                             || self.raise_key_type_shape(&signature.key_type, ctx, &scope),
                         ),
                         value_type: self.raise_required_interior(
                             ctx,
                             &scope,
-                            crate::meta_resolve::InteriorSourceStep::IndexSignatureValue {
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexSignatureValue {
                                 ordinal,
                             },
                             || {
@@ -555,7 +555,9 @@ impl ProjectSemanticDispatch<'_> {
                 value: self.raise_required_interior(
                     ctx,
                     &scope,
-                    crate::meta_resolve::InteriorSourceStep::Member(member.key.clone()),
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Member(
+                        member.key.clone(),
+                    ),
                     || {
                         self.raise_body_slot(&member.ty, ctx.scope_canonical_id)
                             .at_optional_boundary()
@@ -581,7 +583,7 @@ impl ProjectSemanticDispatch<'_> {
             .enumerate()
             .map(|(ordinal, signature)| {
                 ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::CallSignature {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::CallSignature {
                         ordinal: ordinal as u32,
                     },
                     || self.compose_function_fact_node(signature, ctx, false),
@@ -595,7 +597,7 @@ impl ProjectSemanticDispatch<'_> {
             .enumerate()
             .map(|(ordinal, signature)| {
                 ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::ConstructSignature {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ConstructSignature {
                         ordinal: ordinal as u32,
                     },
                     || self.compose_function_fact_node(signature, ctx, false),
@@ -609,7 +611,7 @@ impl ProjectSemanticDispatch<'_> {
             .enumerate()
             .map(|(ordinal, signature)| IndexSignature {
                 key_type: ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::IndexSignatureKey {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexSignatureKey {
                         ordinal: ordinal as u32,
                     },
                     || self.raise_key_type_shape(&signature.key_type, ctx, &scope),
@@ -617,7 +619,7 @@ impl ProjectSemanticDispatch<'_> {
                 value_type: self.raise_required_interior(
                     ctx,
                     &scope,
-                    crate::meta_resolve::InteriorSourceStep::IndexSignatureValue {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexSignatureValue {
                         ordinal: ordinal as u32,
                     },
                     || {
@@ -731,7 +733,7 @@ impl ProjectSemanticDispatch<'_> {
                     Some(slot) => self.raise_required_interior(
                         ctx,
                         &scope,
-                        crate::meta_resolve::InteriorSourceStep::Parameter {
+                        crate::project_semantic_dispatch::interior_source::InteriorSourceStep::Parameter {
                             ordinal: ordinal as u32,
                         },
                         || {
@@ -756,7 +758,7 @@ impl ProjectSemanticDispatch<'_> {
                 let return_type = self.raise_required_interior(
                     ctx,
                     &scope,
-                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ReturnType,
                     || {
                         self.raise_body_slot(locator.slot(), ctx.scope_canonical_id)
                             .at_optional_boundary()
@@ -777,7 +779,7 @@ impl ProjectSemanticDispatch<'_> {
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                 );
                 let return_type = match ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ReturnType,
                     || {
                         self.execute_function_return_source(
                             &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
@@ -820,7 +822,7 @@ impl ProjectSemanticDispatch<'_> {
                     // typed failure.
                     let constraint = param.constraint.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::TypeParamConstraint {
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TypeParamConstraint {
                                 ordinal: ordinal as u32,
                             },
                             || {
@@ -838,7 +840,7 @@ impl ProjectSemanticDispatch<'_> {
                     });
                     let default = param.default.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::TypeParamDefault {
+                            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TypeParamDefault {
                                 ordinal: ordinal as u32,
                             },
                             || {
@@ -924,7 +926,7 @@ impl ProjectSemanticDispatch<'_> {
             .map(|(ordinal, element)| TupleElement {
                 label: element.label.as_deref().map(Arc::from),
                 value: ctx.with_interior_step(
-                    crate::meta_resolve::InteriorSourceStep::TupleElement {
+                    crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement {
                         ordinal: ordinal as u32,
                     },
                     || self.raise_fact_or_locator(&element.ty, ctx, &scope),
@@ -955,7 +957,7 @@ impl ProjectSemanticDispatch<'_> {
         let mut node = self.raise_required_interior(
             ctx,
             &scope,
-            crate::meta_resolve::InteriorSourceStep::IndexedAccessObject,
+            crate::project_semantic_dispatch::interior_source::InteriorSourceStep::IndexedAccessObject,
             || {
                 self.raise_body_slot(&access.object, ctx.scope_canonical_id)
                     .at_optional_boundary()

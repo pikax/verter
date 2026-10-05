@@ -216,7 +216,7 @@ impl VerterHost {
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // Resolve against a PROVEN-CURRENT snapshot (this entry-point
         // returns the value with no outer publish fence). On sustained

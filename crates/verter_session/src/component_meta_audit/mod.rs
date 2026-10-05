@@ -27,7 +27,6 @@ pub mod audit_records_store;
 pub(crate) mod expected_display_snapshots;
 pub mod footprint_miner;
 pub(crate) mod footprint_structural_hash;
-pub(crate) mod session_vfs_sink;
 pub mod structured_event;
 
 #[cfg(test)]
@@ -94,24 +93,6 @@ pub fn projection_mode_audit_from(
         ProjectionMode::Shallow => ProjectionModeAudit::Shallow,
         ProjectionMode::Expanded => ProjectionModeAudit::Expanded,
         ProjectionMode::Skeleton => ProjectionModeAudit::Skeleton,
-    }
-}
-
-/// Convert a workspace-side `VfsAuditLayer` into the audit-side
-/// mirror.
-///
-/// Replaces `impl From<verter_workspace::audit_sink::VfsAuditLayer>
-/// for VfsLayer` for the same orphan-rule reason as
-/// [`projection_mode_audit_from`].
-#[must_use]
-pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLayer) -> VfsLayer {
-    use verter_workspace::audit_sink::VfsAuditLayer as W;
-    match layer {
-        W::Overlay => VfsLayer::Overlay,
-        W::Snapshot => VfsLayer::Snapshot,
-        W::Disk => VfsLayer::Disk,
-        W::DirIndexNegative => VfsLayer::DirIndexNegative,
-        W::Missing => VfsLayer::Missing,
     }
 }
 

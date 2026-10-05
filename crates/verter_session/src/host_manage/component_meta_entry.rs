@@ -20,9 +20,9 @@ use crate::VerterHost;
 use crate::host_test_force::TracerScope;
 
 use super::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_options_fingerprint,
-    extract_component_meta_from_resolved, ComponentMetaOptions,
+    component_meta_options_fingerprint, extract_component_meta_from_resolved, ComponentMetaOptions,
 };
+use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 #[cfg(test)]
 thread_local! {

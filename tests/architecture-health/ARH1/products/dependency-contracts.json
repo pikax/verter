@@ -871,12 +871,12 @@
           "file_artifact_store",
           "global_contributors",
           "graph_walk",
-          "host_manage",
           "intrinsic_registry",
           "loop5_instrumentation",
           "meta_resolve",
           "project_semantic_dispatch",
           "request_context",
+          "request_observers",
           "resolver_core",
           "semantic_query",
           "semantic_query_memo"

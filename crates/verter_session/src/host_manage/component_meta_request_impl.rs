@@ -23,8 +23,8 @@
 use std::sync::Arc;
 
 use crate::fact_signature_helpers::named_fact_tracer;
-use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
+use crate::request_observers::component_meta_trace_custom;
 use crate::resolver_core::{
     ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource,
     SingleflightRole,

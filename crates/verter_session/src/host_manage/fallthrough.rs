@@ -27,9 +27,9 @@ use super::component_meta_extract::{
     collect_required_root_fallthrough_runtime_value_names,
     collect_required_template_runtime_value_names,
 };
-use super::{
+use super::{HostFallthroughResolver, HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS};
+use crate::request_observers::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    HostFallthroughResolver, HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS,
 };
 
 /// Internal carrier bundling a fallthrough cold compute's RESOLUTION with the

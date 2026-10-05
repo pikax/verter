@@ -18370,6 +18370,7 @@ mod trace_laziness_tests {
     use super::*;
     use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_observers::component_meta_trace_custom;
     use std::cell::Cell;
 
     // Counter is per-test (declared inside the test function), not

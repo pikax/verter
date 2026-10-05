@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use super::component_meta_trace_custom;
 use crate::instant::Instant;
+use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {

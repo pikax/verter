@@ -158,7 +158,7 @@ impl VerterHost {
         //    closure body. The `Noop` arm returns when the consumer
         //    filter rejects `RequestKind::Mcp`.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // 4. Install the matching TLS observer. The active arm uses
         //    the real RequestContextGuard so sub-requests spawned by

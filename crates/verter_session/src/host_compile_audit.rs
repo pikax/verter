@@ -584,7 +584,7 @@ impl VerterHost {
             self,
             Arc::clone(&ctx),
         ));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // 6. Capture parent correlation off the RequestContext (sniffed
         //    from the scheduler TLS at construction). A compile issued

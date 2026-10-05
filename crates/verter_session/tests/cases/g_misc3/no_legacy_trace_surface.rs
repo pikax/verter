@@ -273,17 +273,17 @@ fn is_struct_event_alias(text: &str, _line_idx: usize) -> bool {
 #[test]
 fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace() {
     let crates = crates_dir();
-    let host_manage = crates
+    let observers = crates
         .join("verter_session")
         .join("src")
-        .join("host_manage.rs");
-    let text = read_file(&host_manage);
+        .join("request_observers.rs");
+    let text = read_file(&observers);
     // Find the push_structured_event fn body and check it has no
     // stderr/file writes. Visibility is irrelevant to the no-I/O
     // contract; locate by signature suffix only.
     let signature_suffix = " fn push_structured_event(";
     let Some(suffix_offset) = text.find(signature_suffix) else {
-        panic!("push_structured_event not found in host_manage.rs");
+        panic!("push_structured_event not found in request_observers.rs");
     };
     // Walk back to the start of the line so the snippet captures the
     // visibility prefix and the surrounding context (matching the

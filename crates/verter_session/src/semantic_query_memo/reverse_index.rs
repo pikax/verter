@@ -175,7 +175,7 @@ fn register_single_canonical(
     let lock_wait = lock_start
         .map(|t| t.elapsed())
         .unwrap_or(std::time::Duration::ZERO);
-    crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+    crate::request_observers::record_family_map_lock_acquisition(lock_wait);
     map.insert(
         (family.clone(), populated, admission_seq),
         Arc::clone(registered_facts),

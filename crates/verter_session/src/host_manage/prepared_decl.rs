@@ -18,9 +18,9 @@ use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_
 use crate::types::*;
 use crate::VerterHost;
 
-use super::{
+use super::is_raw_import_specifier_id;
+use crate::request_observers::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    is_raw_import_specifier_id,
 };
 
 /// An `IndexedReady` serve plus its publication status — the value-flow

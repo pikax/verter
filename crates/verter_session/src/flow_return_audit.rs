@@ -46,7 +46,7 @@ pub fn record_flow_return_started(canonical_id: &Arc<str>, function_symbol: &Arc
     if !accumulator_installed() {
         return;
     }
-    crate::host_manage::push_structured_event(StructuredAuditEvent::FlowReturnStarted {
+    crate::request_observers::push_structured_event(StructuredAuditEvent::FlowReturnStarted {
         canonical_id: Arc::clone(canonical_id),
         function_symbol: Arc::clone(function_symbol),
     });
@@ -64,18 +64,20 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
     if !accumulator_installed() {
         return;
     }
-    crate::host_manage::push_structured_event(StructuredAuditEvent::FlowSliceBudgetExceeded {
-        axis: match exceeded.axis {
-            verter_session_query::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
-                FlowSliceBudgetAxisTag::SelectedNodes
-            }
-            verter_session_query::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
-                FlowSliceBudgetAxisTag::ValueStates
-            }
+    crate::request_observers::push_structured_event(
+        StructuredAuditEvent::FlowSliceBudgetExceeded {
+            axis: match exceeded.axis {
+                verter_session_query::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
+                    FlowSliceBudgetAxisTag::SelectedNodes
+                }
+                verter_session_query::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
+                    FlowSliceBudgetAxisTag::ValueStates
+                }
+            },
+            limit: exceeded.limit,
+            observed: exceeded.observed,
         },
-        limit: exceeded.limit,
-        observed: exceeded.observed,
-    });
+    );
 }
 
 /// Record one coinductive flow-cycle re-entry hold: bump the
@@ -93,7 +95,7 @@ pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &Arc<str>) {
     if !accumulator_installed() {
         return;
     }
-    crate::host_manage::push_structured_event(StructuredAuditEvent::FlowCycleSentinelHit {
+    crate::request_observers::push_structured_event(StructuredAuditEvent::FlowCycleSentinelHit {
         cycle_id,
         function_symbol: Arc::clone(function_symbol),
     });

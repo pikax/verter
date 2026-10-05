@@ -219,7 +219,7 @@ impl VerterHost {
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
         verter_debug_assert!(ctx.audit_registration.get().is_none());
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let request_start = Instant::now();
         let (outcome, effective_mode) = match registration.as_ref() {

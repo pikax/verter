@@ -53,6 +53,9 @@
 //! imports / reexports / wildcard reexports from the shallow routing
 //! surface, plus the SFC `src=` external requests from the scheduler's
 //! parse snapshot. No resolved canonical is read from a parse artifact.
+use crate::request_route_memo::{
+    ImportRouteObservation, ImportRouteObservationKey, NormalizedCanonical, NormalizedCanonicalKey,
+};
 
 use std::cell::{Cell, RefCell};
 
@@ -121,78 +124,6 @@ fn replay_resolution_witness(observed: &[FactVersionRef]) {
         }
     });
 }
-
-/// What resolving one owner's specifier set observed: whether a resolution
-/// was refused, and every observation the admitted ones recorded, in order.
-#[derive(Debug)]
-pub(crate) struct ImportRouteObservation {
-    refused: bool,
-    observed: Vec<FactVersionRef>,
-}
-
-/// The identity of one witness build within a request: the host, the
-/// owner, the specifier lanes resolved, and the generations a load or an
-/// edit advances, so a build after either resolves again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ImportRouteObservationKey {
-    host: usize,
-    canonical: std::sync::Arc<str>,
-    specifiers: Vec<(
-        String,
-        Option<verter_session_query::resolution::ResolveRequestKind>,
-    )>,
-    load_generation: u64,
-    store_view_epoch: u64,
-}
-
-/// A request's witness builds, so every consumer that roots on an owner's
-/// import-route witness within the request shares one resolution of the
-/// owner's specifiers instead of resolving all of them again (the witness
-/// is rooting evidence: a build that a later change in the request makes
-/// stale fails validation, never answers wrongly). Owned by the
-/// [`crate::request_context::RequestContext`] and dropped with it; bounded
-/// by the owners the request roots on.
-#[derive(Debug, Default)]
-pub(crate) struct ImportRouteObservationMemo(
-    parking_lot::Mutex<
-        rustc_hash::FxHashMap<ImportRouteObservationKey, std::sync::Arc<ImportRouteObservation>>,
-    >,
-);
-
-/// One analysis-canonical normalization a request made: the canonical it
-/// normalized to (`None`: to itself), whether a resolution it drove was
-/// refused, and every observation those resolutions recorded.
-#[derive(Debug)]
-pub(crate) struct NormalizedCanonical {
-    pub(crate) normalized: Option<std::sync::Arc<str>>,
-    pub(crate) refused: bool,
-    observed: Vec<FactVersionRef>,
-}
-
-/// The identity of one normalization within a request: the host, the
-/// canonical, and the generations a load or an edit advances, so a
-/// normalization after either probes again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct NormalizedCanonicalKey {
-    host: usize,
-    canonical: std::sync::Arc<str>,
-    load_generation: u64,
-    store_view_epoch: u64,
-}
-
-/// A request's analysis-canonical normalizations, so every consumer that
-/// normalizes the same canonical in the request shares one run of its
-/// declaration-companion probes (a normalization is rooting evidence
-/// exactly like a witness build: its observations are replayed into the
-/// witness scopes open around each consumer, and a refusal is re-noted).
-/// Owned by the [`crate::request_context::RequestContext`] and dropped
-/// with it; bounded by the canonicals the request normalizes.
-#[derive(Debug, Default)]
-pub(crate) struct NormalizedCanonicalMemo(
-    parking_lot::Mutex<
-        rustc_hash::FxHashMap<NormalizedCanonicalKey, std::sync::Arc<NormalizedCanonical>>,
-    >,
-);
 
 #[cfg(test)]
 thread_local! {

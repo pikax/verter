@@ -10,7 +10,7 @@
 //! passes `view = None`; production paths use `HostComponentMetaResolver`.
 
 use super::frontier_helpers::DirectComponentMetaDeclarationResolver;
-use crate::host_manage::component_meta_trace_custom;
+use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {

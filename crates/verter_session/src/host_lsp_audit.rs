@@ -266,7 +266,7 @@ impl VerterHost {
         match registration.as_ref() {
             AuditRequestRegistration::Noop => LspAuditSession::Noop,
             AuditRequestRegistration::Active(_) => {
-                let _ = ctx.install_audit_registration(Arc::clone(&registration));
+                let _ = ctx.install_audit_registration(registration.clone());
                 let parent_request_id = ctx.parent_request_id;
                 let tls_guard = RequestContextGuard::install(ctx);
                 LspAuditSession::Active(ActiveLspSession {

@@ -122,11 +122,12 @@ pub use crate::host_manage::component_meta_request_impl::{
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
     ResolvedTypeDeclaration, ResolvedTypeRegistryMeta,
 };
+pub use crate::project_semantic_dispatch::interior_source::InteriorSourceStep;
 pub(crate) use output::PublishedCompleteness;
 pub use output::{
     ComponentMetaFailure, ComponentMetaOutput, ComponentMetaOutputError,
     ComponentMetaOutputFailure, ComponentMetaOutputLane, ComponentMetaResolutionOutput,
-    InteriorSourceStep, MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
+    MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
     MaterializedEventOccurrence, MaterializedTypePublication, TerminalTypeDisplay,
 };
 pub(crate) use resolved_state::RegistryMaterialization;

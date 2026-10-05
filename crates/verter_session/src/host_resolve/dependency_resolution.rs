@@ -12,7 +12,7 @@
 //!   `resolve_type_dependency_canonical`, and
 //!   `resolve_type_dependency_canonical_shallow` entry points.
 
-use crate::host_manage::component_meta_trace_custom;
+use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {

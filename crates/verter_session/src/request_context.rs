@@ -622,6 +622,19 @@ pub fn bump_bare_engine_construction() {
     }
 }
 
+/// The host's audit-record finalization for one request.
+///
+/// The audited entry point builds its registration before installing the
+/// request context and plants it through
+/// [`RequestContext::install_audit_registration`]; the inner resolver path
+/// finalizes the request's record through it instead of publishing directly.
+pub trait RequestAuditFinalization: Send + Sync + std::fmt::Debug {
+    /// Store `record` as this request's audit record. Returns `true` on the
+    /// first finalization of an active registration, `false` afterwards or
+    /// when the registration is inactive.
+    fn finalize(&self, record: verter_audit::record::RequestAuditRecord) -> bool;
+}
+
 /// Per-request state. Held as `Arc<RequestContext>` and wrapped into
 /// [`OpaqueRequestContext`] when handed to the scheduler. Also implements
 /// [`verter_audit::AuditObserver`] so the same `Arc` plants into the
@@ -668,8 +681,7 @@ pub struct RequestContext {
     /// [`crate::VerterHost::finalize_request_audit_record`] directly. `None`
     /// when no audited entry-point is in scope (rare — direct callers
     /// of `resolve_component_meta` outside the audited path).
-    pub audit_registration:
-        std::sync::OnceLock<Arc<crate::host_audit_runtime::AuditRequestRegistration>>,
+    pub audit_registration: std::sync::OnceLock<Arc<dyn RequestAuditFinalization>>,
     /// Per-context cold-build counter. Populated by
     /// `execute_cooperative` calling `ctx.record_cache_event(Miss |
     /// ColdBuild)`. Exact per-request even under concurrent audits
@@ -784,15 +796,13 @@ pub struct RequestContext {
     /// thread). A bare counter has no destructor and reaches nothing.
     pub(crate) process_rss_peak_bytes: Arc<AtomicU64>,
     /// The request's import-route witness builds
-    /// ([`crate::host_manage::import_route_witness::ImportRouteObservationMemo`]):
+    /// ([`crate::request_route_memo::ImportRouteObservationMemo`]):
     /// request-scoped, dropped with the context.
-    pub(crate) import_route_observations:
-        crate::host_manage::import_route_witness::ImportRouteObservationMemo,
+    pub(crate) import_route_observations: crate::request_route_memo::ImportRouteObservationMemo,
     /// The request's analysis-canonical normalizations
-    /// ([`crate::host_manage::import_route_witness::NormalizedCanonicalMemo`]):
+    /// ([`crate::request_route_memo::NormalizedCanonicalMemo`]):
     /// request-scoped, dropped with the context.
-    pub(crate) normalized_canonicals:
-        crate::host_manage::import_route_witness::NormalizedCanonicalMemo,
+    pub(crate) normalized_canonicals: crate::request_route_memo::NormalizedCanonicalMemo,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1513,16 +1523,16 @@ impl RequestContext {
     /// tree.
     pub fn install_audit_registration(
         &self,
-        registration: Arc<crate::host_audit_runtime::AuditRequestRegistration>,
-    ) -> Result<(), Arc<crate::host_audit_runtime::AuditRequestRegistration>> {
+        registration: Arc<dyn RequestAuditFinalization>,
+    ) -> Result<(), Arc<dyn RequestAuditFinalization>> {
         self.audit_registration.set(registration)
     }
 
-    /// Bind this request's sole [`crate::InputBasis`]. A second bind is
+    /// Bind this request's sole [`verter_analysis_inputs::InputBasis`]. A second bind is
     /// refused — two bases on one request would be torn snapshot authority.
     pub fn bind_committed_input(
         &self,
-        basis: crate::InputBasis,
+        basis: verter_analysis_inputs::InputBasis,
     ) -> Result<(), verter_session_query::source::input_binding::RequestInputBinding> {
         self.committed_input.set(
             verter_session_query::source::input_binding::RequestInputBinding::from_basis(basis),

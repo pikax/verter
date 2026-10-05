@@ -839,7 +839,7 @@ impl VerterHost {
                 .or_default();
             let profile = profile_ref.value_mut();
             if whole_hash_changed {
-                crate::host_manage::push_cache_drained_at_upsert(
+                crate::request_observers::push_cache_drained_at_upsert(
                     "compile_cache_overrides",
                     &canonical_id,
                 );
@@ -850,7 +850,10 @@ impl VerterHost {
                 session_node.clear_compile_outputs_for_file(profile);
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
-                crate::host_manage::push_cache_drained_at_upsert("compile_slots", &canonical_id);
+                crate::request_observers::push_cache_drained_at_upsert(
+                    "compile_slots",
+                    &canonical_id,
+                );
             }
         }
 
@@ -873,7 +876,7 @@ impl VerterHost {
         if whole_hash_changed {
             self.compile_output_pure_content()
                 .remove_canonical(&canonical_id);
-            crate::host_manage::push_cache_drained_at_upsert(
+            crate::request_observers::push_cache_drained_at_upsert(
                 "compile_output_pure_content",
                 &canonical_id,
             );
@@ -931,7 +934,7 @@ impl VerterHost {
             derived.import_routes.clear();
             derived.evicted = false;
             if drained_derived {
-                crate::host_manage::push_cache_drained_at_upsert(
+                crate::request_observers::push_cache_drained_at_upsert(
                     "derived_raw_cache",
                     &canonical_id,
                 );
@@ -953,7 +956,7 @@ impl VerterHost {
             dep.aliases = alias_set.clone();
             dep.generation = dep.generation.saturating_add(1);
         }
-        crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
+        crate::request_observers::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
 
         write_lock(&self.block_content.state).supersede_owner(&canonical_id);
 
@@ -969,7 +972,10 @@ impl VerterHost {
         // read path; a cross-file consumer's warm entry is revalidated
         // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
-        crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
+        crate::request_observers::push_cache_drained_at_upsert(
+            "semantic_invalidate",
+            &canonical_id,
+        );
         // A content change is the signature kernel's reclamation point: past
         // its record cap the kernel retires its epoch, and a warm read of a
         // retired-epoch value misses and recomputes.
@@ -994,7 +1000,10 @@ impl VerterHost {
         if !defer_workspace_commit {
             self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
         }
-        crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
+        crate::request_observers::push_cache_drained_at_upsert(
+            "workspace_parsed_edges",
+            &canonical_id,
+        );
 
         // Scheduler-tracked canonicals are not artifact-only, but keep the
         // single-file and batch overlay mutations behind host-owned wrappers
@@ -1070,7 +1079,7 @@ impl VerterHost {
         }
         self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
-        crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
+        crate::request_observers::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
         Ok((result, workspace_commit))
     }
 

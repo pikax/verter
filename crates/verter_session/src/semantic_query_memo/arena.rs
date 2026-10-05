@@ -590,7 +590,7 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
                 (existing, false, 0u64)
             } else {
@@ -609,7 +609,7 @@ impl NodeArena {
                 let lock_wait = lock_start
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
-                crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+                crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
                 if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
                     // Another thread beat us to it.
                     (existing, false, 0u64)
@@ -824,7 +824,7 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             for (fingerprint, id) in victims {
                 let Some(bucket) = shard.index.get_mut(&fingerprint) else {
                     continue;
@@ -877,7 +877,7 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             shard.index.retain(|_fingerprint, bucket| {
                 bucket.retain(|(_, scope, _)| match scope {
                     // Invariant: Global scope is never dropped on invalidation.

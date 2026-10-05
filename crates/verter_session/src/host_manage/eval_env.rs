@@ -16,9 +16,9 @@ use crate::types::*;
 use crate::VerterHost;
 
 use super::resolve_eval_dependency_canonical_with;
-use super::{
+use super::{is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes};
+use crate::request_observers::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes,
 };
 
 /// [`VerterHost::component_meta_binding_type_entries`]'s admission result:

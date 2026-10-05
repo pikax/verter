@@ -32,10 +32,8 @@ use crate::types::*;
 use crate::VerterHost;
 use verter_language::FileLanguage;
 
-use super::{
-    component_meta_debug, component_meta_debug_enabled,
-    exact_resolution_uses_type_preferred_target, HostExportGraphResolver,
-};
+use super::{exact_resolution_uses_type_preferred_target, HostExportGraphResolver};
+use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 /// Test-visible record of which resolver context the template-class lane bound
 /// for one invocation of [`VerterHost::build_template_class_semantic_facts`].

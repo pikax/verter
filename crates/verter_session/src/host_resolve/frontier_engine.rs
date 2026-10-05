@@ -22,7 +22,7 @@ use std::sync::Arc;
 use super::frontier_helpers::{
     ordered_wildcard_indices_for_exported_name, RouteShallowStateCache, RoutedShallowServe,
 };
-use crate::host_manage::component_meta_trace_custom;
+use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
 
 /// One node of the layer-ordered wildcard walk.

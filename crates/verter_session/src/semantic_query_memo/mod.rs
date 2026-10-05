@@ -1171,7 +1171,7 @@ impl SemanticGraphStore {
                         let lock_wait = lock_start
                             .map(|t| t.elapsed())
                             .unwrap_or(std::time::Duration::ZERO);
-                        crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+                        crate::request_observers::record_family_map_lock_acquisition(lock_wait);
                         map.drain().collect()
                     }
                     None => {
@@ -1180,7 +1180,7 @@ impl SemanticGraphStore {
                         // shard read is implicit in `remove`. When the
                         // entry was absent there is no inner mutex to
                         // time, so the wait is zero.
-                        crate::host_manage::record_family_map_lock_acquisition(
+                        crate::request_observers::record_family_map_lock_acquisition(
                             std::time::Duration::ZERO,
                         );
                         Vec::new()

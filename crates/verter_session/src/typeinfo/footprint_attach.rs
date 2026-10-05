@@ -51,10 +51,7 @@ impl TypeinfoFootprintScope {
             None
         };
         let sink_handle = accumulator.as_ref().and_then(|acc| {
-            let sink = crate::component_meta_audit::session_vfs_sink::SessionVfsSink::new(
-                request_id,
-                Arc::clone(acc),
-            );
+            let sink = crate::session_vfs_sink::SessionVfsSink::new(request_id, Arc::clone(acc));
             host.workspace().register_audit_sink(sink).ok()
         });
         Self {

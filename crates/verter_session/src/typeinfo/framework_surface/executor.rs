@@ -111,7 +111,7 @@ impl VerterHost {
             self.config.projection_op_budget,
         );
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let request_start = Instant::now();
         let (response, payload) = match registration.as_ref() {

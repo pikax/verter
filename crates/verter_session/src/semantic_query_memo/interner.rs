@@ -92,7 +92,7 @@ impl DepSignatureInterner {
         for w in bucket.iter() {
             if let Some(arc) = w.upgrade() {
                 if arc.iter().eq(normalised.iter()) {
-                    crate::host_manage::record_dep_signature_intern_hit();
+                    crate::request_observers::record_dep_signature_intern_hit();
                     return Arc::clone(&arc) as DepSignature;
                 }
             }

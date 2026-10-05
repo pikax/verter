@@ -4,6 +4,7 @@ pub mod component_meta;
 pub mod fact_projection;
 pub mod field_path;
 pub mod indexed_value;
+pub mod jsdoc_spans;
 pub mod macro_usage;
 pub mod macros;
 pub mod route_inventory;

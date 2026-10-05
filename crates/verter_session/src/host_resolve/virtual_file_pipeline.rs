@@ -1915,7 +1915,7 @@ impl VerterHost {
         // is preserved on the event for telemetry even though the public
         // single-reason projection keeps only the first.
         if actual_mode != classification.requested_mode {
-            crate::host_manage::push_structured_event(
+            crate::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::CompileModeDowngrade {
                     requested: classification.requested_mode.into(),
                     actual: actual_mode.into(),

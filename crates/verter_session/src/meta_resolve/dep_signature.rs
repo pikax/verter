@@ -25,7 +25,7 @@ pub(crate) fn emit_dispatch_dep_signature_facts(
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     if !sig.is_empty() {
-        crate::host_manage::record_dep_signature_merge();
+        crate::request_observers::record_dep_signature_merge();
     }
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);

@@ -618,6 +618,12 @@ pub enum AuditRequestRegistration {
     Noop,
 }
 
+impl crate::request_context::RequestAuditFinalization for AuditRequestRegistration {
+    fn finalize(&self, record: RequestAuditRecord) -> bool {
+        AuditRequestRegistration::finalize(self, record)
+    }
+}
+
 impl AuditRequestRegistration {
     /// Construct a new registration. Reads the audit-config filter
     /// ONCE; if the filter rejects the request's kind, returns the

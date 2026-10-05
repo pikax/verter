@@ -375,6 +375,8 @@ mod public_api_batch_fixed_view_tests;
 pub mod query_host_port;
 mod request_budget;
 pub mod request_context;
+pub mod request_observers;
+pub(crate) mod request_route_memo;
 pub mod resolver_core;
 mod resolver_store;
 #[cfg(test)]
@@ -393,6 +395,7 @@ pub(crate) mod semantic_query_memo;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_runtime;
+pub(crate) mod session_vfs_sink;
 pub mod session_view;
 mod shared;
 pub(crate) mod signature_kernel;

@@ -54,7 +54,7 @@ const DOC_DENY_FILES: &[&str] = &[
     "crates/verter_session/src/component_meta_audit/assertions.rs",
     "crates/verter_session/src/component_meta_audit/audit_records_store.rs",
     "crates/verter_session/src/component_meta_audit/footprint_miner.rs",
-    "crates/verter_session/src/component_meta_audit/session_vfs_sink.rs",
+    "crates/verter_session/src/session_vfs_sink.rs",
     "crates/verter_session/src/component_meta_audit/structured_event.rs",
     "crates/verter_workspace/src/audit_sink.rs",
 ];
