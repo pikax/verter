@@ -367,7 +367,7 @@ impl ActiveInstantiation {
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
-    binding: EngineBinding,
+    binding: EngineBinding<C::MacroMirrors>,
     pub(crate) policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
     pub(super) ctx: &'a dyn ResolverContext<C>,
@@ -4300,7 +4300,7 @@ pub enum BuiltinUtilityResolution {
 /// request ports. Scope is resolved fresh per call, with no host reference or
 /// independent query driver.
 pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities> {
-    resources: &'a EngineBinding,
+    resources: &'a EngineBinding<C::MacroMirrors>,
     ctx: &'a dyn ResolverContext<C>,
 }
 

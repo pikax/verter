@@ -120,7 +120,7 @@ pub(crate) trait ResolverContext<C: ResolverCapabilities>:
     + FactValidation
     + LiveFactValidation<Clocks = C::Clocks>
     + Cancellation
-    + ExecutionSubmission
+    + ExecutionSubmission<MacroMirrors = C::MacroMirrors>
     + HostAttachmentPort<HostAttachment = C::HostAttachment>
 {
 }
@@ -140,6 +140,8 @@ pub trait ResolverCapabilities: 'static {
     /// The composition-owned attachment the host hands out beside the engine.
     /// Opaque to the engine.
     type HostAttachment: ?Sized + 'static;
+    /// The request-retained macro hot-mirror selector an engine binding holds.
+    type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + 'static;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,

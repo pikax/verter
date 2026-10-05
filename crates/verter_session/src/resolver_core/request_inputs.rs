@@ -233,15 +233,15 @@ struct RetainedInputs {
 }
 /// Exact request-selected mirror authority. This fixed operation cannot expose
 /// the retained source, its workers, or any session/cache service.
-pub(crate) struct MacroMirrorSelector {
+pub struct MacroMirrorSelector {
     retained: Arc<parking_lot::RwLock<RetainedInputs>>,
     #[cfg(test)]
     forcing: Arc<crate::host_test_force::TestForceKnobs>,
     #[cfg(test)]
     cold_builds: Arc<std::sync::atomic::AtomicUsize>,
 }
-impl MacroMirrorSelector {
-    pub(crate) fn attachment(
+impl super::request_ports::MacroMirrorSource for MacroMirrorSelector {
+    fn attachment(
         &self,
         identity: &IndexedInputIdentity,
     ) -> Option<crate::structural_carrier_producer::MacroMirrorAttachment> {

@@ -11,8 +11,8 @@ use crate::component_meta_caches::{
     DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
 };
 
-pub struct EngineBinding {
-    pub(super) macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
+pub struct EngineBinding<M> {
+    pub(super) macro_mirrors: M,
     pub(super) observers: EngineObservers,
     pub(super) graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
     pub(super) flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
@@ -26,11 +26,11 @@ pub struct EngineBinding {
     pub(super) mapper_binders: Arc<crate::mapper_binder_registry::MapperBinderRegistry>,
 }
 
-impl EngineBinding {
+impl<M> EngineBinding<M> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         observers: EngineObservers,
-        macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
+        macro_mirrors: M,
         graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
         flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
         intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,

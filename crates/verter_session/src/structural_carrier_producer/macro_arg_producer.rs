@@ -1260,7 +1260,7 @@ struct MacroSlot {
     build_lock: parking_lot::Mutex<()>,
 }
 
-pub(crate) struct MacroMirrorAttachment {
+pub struct MacroMirrorAttachment {
     cells: Arc<OnceLock<Box<[MacroSlot]>>>,
     #[cfg(test)]
     forcing: Arc<crate::host_test_force::TestForceKnobs>,
@@ -1386,10 +1386,13 @@ impl Clone for MacroHotMirror {
 /// range, the macro carries no `parsed_type_argument`, or the type argument
 /// has no faithful unresolved structural representation (a stable negative
 /// cell).
-pub(crate) fn macro_type_arg_hot_ref<D: ExpressionSourceDemand + Clone>(
+pub(crate) fn macro_type_arg_hot_ref<
+    D: ExpressionSourceDemand + Clone,
+    M: crate::resolver_core::request_ports::MacroMirrorSource,
+>(
     ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
-    selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
+    selector: &M,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<MacroHotProduct> {
@@ -1397,10 +1400,13 @@ pub(crate) fn macro_type_arg_hot_ref<D: ExpressionSourceDemand + Clone>(
         .map(|product| product.as_ref().clone())
 }
 
-fn macro_hot_product<D: ExpressionSourceDemand + Clone>(
+fn macro_hot_product<
+    D: ExpressionSourceDemand + Clone,
+    M: crate::resolver_core::request_ports::MacroMirrorSource,
+>(
     ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
-    selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
+    selector: &M,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<Arc<MacroHotProduct>> {

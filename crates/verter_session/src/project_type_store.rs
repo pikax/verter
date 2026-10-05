@@ -1261,7 +1261,9 @@ impl ProjectTypeStore {
         &self,
         observers: crate::project_semantic_dispatch::EngineObservers,
         macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
-    ) -> crate::project_semantic_dispatch::EngineBinding {
+    ) -> crate::project_semantic_dispatch::EngineBinding<
+        crate::resolver_core::request_inputs::MacroMirrorSelector,
+    > {
         crate::project_semantic_dispatch::EngineBinding::new(
             observers,
             macro_mirrors,

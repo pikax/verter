@@ -35,6 +35,7 @@ impl ResolverCapabilities for HostCapabilities {
     type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
     type HostAttachment = crate::session_attachment::SessionAttachment;
+    type MacroMirrors = super::request_inputs::MacroMirrorSelector;
 }
 
 /// Translate the host's configuration into the engine's immutable execution
@@ -487,7 +488,8 @@ impl Cancellation for crate::VerterHost {}
 
 #[cfg(any(test, feature = "test-support"))]
 impl ExecutionSubmission for crate::VerterHost {
-    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding {
+    type MacroMirrors = super::request_inputs::MacroMirrorSelector;
+    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
         self.project_type_store().bind_engine(
             self.engine_observers(),
             self.source_input_leases.macro_selector(
@@ -1067,7 +1069,8 @@ impl<L: RequestBoundLifecycle> ExecutionSubmission for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
-    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding {
+    type MacroMirrors = super::request_inputs::MacroMirrorSelector;
+    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
         self.0.host().project_type_store().bind_engine(
             self.0.host().engine_observers(),
             self.0

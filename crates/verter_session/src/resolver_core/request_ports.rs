@@ -449,8 +449,27 @@ pub trait Cancellation {
     }
 }
 
+/// Selects the macro hot mirror retained behind one observed indexed input.
+///
+/// The host implements it over the request leases that keep each served
+/// artifact alive. An attachment clones the artifact's EXISTING mirror cells
+/// — it never constructs another mirror — so every demand on one artifact
+/// shares one singleflight table. The engine binds the implementation
+/// statically through its request capabilities.
+pub trait MacroMirrorSource {
+    /// The mirror attachment of the artifact `identity` names, when this
+    /// request retains it.
+    fn attachment(
+        &self,
+        identity: &verter_session_query::inputs::indexed::IndexedInputIdentity,
+    ) -> Option<crate::structural_carrier_producer::MacroMirrorAttachment>;
+}
+
 pub trait ExecutionSubmission {
-    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding;
+    /// The macro hot-mirror selector the attached binding holds; a concrete
+    /// capability, so mirror attachment dispatches statically.
+    type MacroMirrors: MacroMirrorSource;
+    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding<Self::MacroMirrors>;
 }
 
 /// The composition-owned state a request's host attaches beside the engine.
