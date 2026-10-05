@@ -78,7 +78,7 @@ use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, Ty
 use crate::decl_lowering::{DeclLoweringService, SnapshotLease};
 use crate::fact_emission::{RouteLens, ShallowLens};
 use crate::meta_provenance::MetaProvenance;
-use crate::resolver_core::shallow_file_state::collect_typeof_roots;
+use crate::typeof_dependencies::collect_typeof_roots;
 use verter_session_query::source::snapshot::SnapshotKey;
 
 pub(crate) mod locator_deref;
@@ -739,7 +739,7 @@ impl DeclBodyMemo {
     /// ambient inventory (per-file scoping). Classified from the canonical id,
     /// so a plain `.ts` / `.js` never reports `true`.
     pub(crate) fn is_rune_module(&self) -> bool {
-        crate::host_resolve::is_svelte_rune_module(&self.rune_module_file_language())
+        crate::rune_ambient::is_svelte_rune_module(&self.rune_module_file_language())
     }
 
     /// Whether the centralized effective lookup may consult the Svelte rune
@@ -1230,10 +1230,10 @@ impl DeclBodyMemo {
         // via the static registry (no host needed) so the lazy memo
         // path stays self-contained.
         if self.svelte_component_runes_mode {
-            crate::host_resolve::merge_rune_ambient_inventory_into_env(&mut env);
+            crate::rune_ambient::merge_rune_ambient_inventory_into_env(&mut env);
         } else {
             let file_language = self.rune_module_file_language();
-            crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
+            crate::rune_ambient::merge_rune_ambient_into_env(&mut env, &file_language);
         }
         // Commit only the REAL env (idempotent — a cold race loses harmlessly).
         self.whole_env.get_or_init(|| Arc::new(env)).clone()
@@ -3297,7 +3297,7 @@ pub(crate) fn fold_flow_body_env_identity(
                 .as_bytes(),
         );
         buf.extend_from_slice(format!("{source_type:?}").as_bytes());
-        crate::hash::hash_16(&buf)
+        crate::source_hash::hash_16(&buf)
     })
 }
 

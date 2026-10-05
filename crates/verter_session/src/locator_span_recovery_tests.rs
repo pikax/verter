@@ -36,7 +36,7 @@ use crate::locator_span_recovery::{
     recover_function_param_span, recover_function_spans, recover_index_signature_spans,
     recover_member_spans, SpanRecoveryError,
 };
-use crate::ParsedEvalProgram;
+use crate::parsed_eval_program::ParsedEvalProgram;
 use verter_session_query::source::snapshot::SnapshotKey;
 
 fn key() -> SnapshotKey {

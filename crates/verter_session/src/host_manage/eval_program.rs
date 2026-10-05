@@ -142,7 +142,7 @@ impl VerterHost {
     /// script-program walk would).
     pub(crate) fn vue_flight_script_program<'a>(
         eval_is_extracted_script: bool,
-        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+        parsed_eval_program: Option<&'a crate::parsed_eval_program::ParsedEvalProgram>,
     ) -> crate::parse::VueScriptProgram<'a> {
         if !eval_is_extracted_script {
             return crate::parse::VueScriptProgram::ParseHere;
@@ -161,7 +161,7 @@ impl VerterHost {
     /// the retained parse instead of re-parsing the same bytes.
     pub(crate) fn framework_flight_script_program<'a>(
         eval_is_extracted_script: bool,
-        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+        parsed_eval_program: Option<&'a crate::parsed_eval_program::ParsedEvalProgram>,
     ) -> crate::parse::FrameworkScriptProgram<'a> {
         if !eval_is_extracted_script {
             return crate::parse::FrameworkScriptProgram::ParseHere;

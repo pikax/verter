@@ -2419,8 +2419,8 @@ fn function_program_index_hash_folds_parse_env_identity() {
     };
     let memo_folded = alpha_of(&index);
 
-    let env_a = crate::hash::hash_16(b"env-a");
-    let env_b = crate::hash::hash_16(b"env-b");
+    let env_a = crate::source_hash::hash_16(b"env-a");
+    let env_b = crate::source_hash::hash_16(b"env-b");
     let refolded_a = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_a2 = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_b = fold_flow_body_env_identity(&index, &env_b, oxc_span::SourceType::ts());

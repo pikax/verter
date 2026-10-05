@@ -528,3 +528,21 @@ fn resolution_only_world_publication_preserves_strict_self_root_authority() {
         "resolution evidence publication cannot change content presence or trackedness",
     );
 }
+
+/// The parse-env flag's version suffix tracks the Svelte rune-prelude
+/// version, so a prelude-surface change invalidates a rune module's stale
+/// inferred exports through `parse_env_hash`. The version constant lives in
+/// `verter_language`, the flag here; this pins them in lockstep.
+#[test]
+fn rune_ambient_parser_flag_tracks_the_prelude_version() {
+    let expected = format!(
+        "svelte-rune-ambient-v{}",
+        verter_language::svelte_rune_ambient::RUNE_AMBIENT_PRELUDE_VERSION
+    );
+    assert_eq!(
+        super::SVELTE_RUNE_AMBIENT_PARSER_FLAG,
+        expected,
+        "the rune-ambient parse-env flag must encode the current RUNE_AMBIENT_PRELUDE_VERSION; \
+         bump the flag suffix when you bump the version"
+    );
+}

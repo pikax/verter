@@ -39,7 +39,7 @@ use std::time::Instant;
 
 use verter_scheduler::stage::Priority;
 
-use crate::hash::hash_16;
+use crate::source_hash::hash_16;
 use crate::types::{
     CompileCacheMode, CompileProfile, CompileRequestFailure, CompileRequestResponse,
     DiagnosticsSnapshot, DowngradeReason, HostDiagnostic, HostError, HostSeverity, UpsertRequest,

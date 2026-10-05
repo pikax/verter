@@ -7,6 +7,8 @@ use verter_session_query::analysis::types::Hash16;
 use rustc_hash::FxHashMap;
 
 use thiserror::Error;
+
+use crate::decl_lowering::DECL_LOWERING_DEFAULT_POOL_SIZE;
 pub use verter_language::FileLanguage;
 
 /// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
@@ -189,7 +191,7 @@ impl CompileCacheMode {
             Self::Content => 0x01,
             Self::Session => 0x02,
         });
-        crate::hash::hash_16(&buf)
+        crate::source_hash::hash_16(&buf)
     }
 }
 
@@ -219,7 +221,7 @@ impl DowngradeReason {
             Self::HasDevLastGood => 0x07,
             Self::CssHashOverridePresent => 0x08,
         });
-        crate::hash::hash_16(&buf)
+        crate::source_hash::hash_16(&buf)
     }
 }
 
@@ -249,7 +251,7 @@ impl SourceMapPolicy {
             Self::External => 0x01,
             Self::None => 0x02,
         });
-        crate::hash::hash_16(&buf)
+        crate::source_hash::hash_16(&buf)
     }
 }
 
@@ -379,7 +381,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.compile_cache_mode.v1:");
         buf.push(0x02);
-        let expected = crate::hash::hash_16(&buf);
+        let expected = crate::source_hash::hash_16(&buf);
         assert_eq!(CompileCacheMode::Session.stable_hash(), expected);
     }
 
@@ -388,7 +390,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.downgrade_reason.v1:");
         buf.push(0x03); // HasModuleAugmentation
-        let expected = crate::hash::hash_16(&buf);
+        let expected = crate::source_hash::hash_16(&buf);
         assert_eq!(
             DowngradeReason::HasModuleAugmentation.stable_hash(),
             expected
@@ -400,7 +402,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.source_map_policy.v1:");
         buf.push(0x00); // Inline
-        let expected = crate::hash::hash_16(&buf);
+        let expected = crate::source_hash::hash_16(&buf);
         assert_eq!(SourceMapPolicy::Inline.stable_hash(), expected);
     }
 
@@ -785,16 +787,6 @@ pub struct PoolPolicy {
     /// resolution.
     pub size: PoolSize,
 }
-
-/// The default decl-lowering pool size — `clamp(available_parallelism / 4,
-/// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
-/// [`HostResourcePolicy::default`] and the decl-lowering service's no-arg
-/// constructor key off, so the two can never drift.
-pub(crate) const DECL_LOWERING_DEFAULT_POOL_SIZE: PoolSize = PoolSize::Fraction {
-    divisor: 4,
-    min: 1,
-    max: 4,
-};
 
 /// Resource policy for a [`VerterHost`](crate::VerterHost): the spawn
 /// timing + sizing of the host-owned worker pools that are NOT required
@@ -4108,7 +4100,7 @@ mod tests {
     #[test]
     fn anchor_revision_from_whole_hash_agrees_with_of_source() {
         let source = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>";
-        let whole_hash = crate::hash::hash_16(source.as_bytes());
+        let whole_hash = crate::source_hash::hash_16(source.as_bytes());
         assert_eq!(
             AnalysisSourceRevision::from_whole_hash(whole_hash),
             AnalysisSourceRevision::of_source(source),

@@ -234,7 +234,7 @@ fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
     buf.extend_from_slice(b"verter.content_mode_profile.v1:");
     buf.extend_from_slice(&CompileCacheMode::Content.stable_hash());
     buf.extend_from_slice(&compile_profile_hash(profile).to_le_bytes());
-    crate::hash::hash_16(&buf)
+    crate::source_hash::hash_16(&buf)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -258,7 +258,9 @@ fn validate_registered_carrier_inputs(
 /// Compiler-crate version hash. Different versions must not share a
 /// content-addressed cache entry.
 fn compiler_version_hash() -> Hash16 {
-    crate::hash::hash_16(concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+    crate::source_hash::hash_16(
+        concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes(),
+    )
 }
 
 /// Deployment version hash for the codegen plugin set. The compile
@@ -266,7 +268,7 @@ fn compiler_version_hash() -> Hash16 {
 /// so the plugin-set identity tracks the crate semantic version in
 /// lockstep with [`compiler_version_hash`].
 fn plugin_versions_hash() -> Hash16 {
-    crate::hash::hash_16(concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+    crate::source_hash::hash_16(concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
 }
 
 /// What a compile request demands of the shared compile result.

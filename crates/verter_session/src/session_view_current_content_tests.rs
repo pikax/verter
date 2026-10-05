@@ -153,7 +153,7 @@ fn host_view_content_hash_is_scheduler_authoritative_not_stale_artifact() {
     let source = view
         .source(canonical)
         .expect("HostView reports source for a live canonical");
-    let source_hash = crate::hash::hash_16(source.as_bytes());
+    let source_hash = crate::source_hash::hash_16(source.as_bytes());
     assert_eq!(
         view_hash, source_hash,
         "HostView::content_hash_for MUST equal the hash of the bytes source() \
@@ -267,7 +267,7 @@ fn overlaid_view_base_fallthrough_content_hash_is_scheduler_authoritative() {
         .expect("the overlay-covered canonical has a content hash");
     assert_eq!(
         overlay_hash,
-        crate::hash::hash_16(b"export const unrelated = 1;\n"),
+        crate::source_hash::hash_16(b"export const unrelated = 1;\n"),
         "the overlay-covered canonical resolves to the overlay source's hash",
     );
 }

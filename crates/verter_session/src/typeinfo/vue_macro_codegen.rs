@@ -181,7 +181,7 @@ pub(crate) fn vue_macro_codegen_schedule_identity_from_compat(
     }
 
     VueMacroCodegenScheduleIdentity {
-        key_hash: crate::hash::hash_16(&key),
+        key_hash: crate::source_hash::hash_16(&key),
         input_pin: VueMacroCodegenInputPin {
             view_epoch: compat.epoch,
             snapshot_pin_id: PinId(compat.validity_fingerprint),

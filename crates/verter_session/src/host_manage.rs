@@ -348,7 +348,7 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
     buf.extend_from_slice(&ComponentMetaOptions::SCHEMA.to_le_bytes());
     buf.push(u8::from(options.compat));
     buf.push(u8::from(options.include_fallthrough));
-    crate::hash::hash_16(&buf)
+    crate::source_hash::hash_16(&buf)
 }
 
 // ---------------------------------------------------------------------------

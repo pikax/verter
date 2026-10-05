@@ -1262,7 +1262,7 @@ impl MetaSession {
                     match overlay {
                         SessionOverlay::Upsert { source } => {
                             let body: Arc<str> = Arc::from(source.as_str());
-                            let hash = crate::hash::hash_16(body.as_bytes());
+                            let hash = crate::source_hash::hash_16(body.as_bytes());
                             overlays.insert(canonical.clone(), body);
                             overlay_hashes.insert(canonical.clone(), hash);
                         }

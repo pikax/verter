@@ -1904,7 +1904,7 @@ fn session_overlay_warm_validation_matrix() {
     // hash of an older overlay source. Distinct from both the current
     // overlay hash and the base hash, so the overlay-stale case is a
     // real stale-version mismatch, not a synthetic sentinel.
-    let stale_overlay_hash = crate::hash::hash_16(
+    let stale_overlay_hash = crate::source_hash::hash_16(
         b"export interface Probe { overlay: boolean; }\nexport const probe = 0;\n",
     );
     assert_ne!(stale_overlay_hash, overlay_hash);

@@ -1659,7 +1659,7 @@ fn pattern_property_key(key: &oxc_ast::ast::PropertyKey<'_>, computed: bool) -> 
             Some(Arc::from(literal.value.as_str()))
         }
         oxc_ast::ast::PropertyKey::NumericLiteral(literal) => Some(Arc::from(
-            crate::semantic_query::index_key::js_number_to_string(literal.value).as_str(),
+            verter_ecma::js_number_to_string(literal.value).as_str(),
         )),
         other => other.as_expression().and_then(literal_member_key),
     }
@@ -1882,7 +1882,7 @@ fn literal_member_key(key: &Expression<'_>) -> Option<Arc<str>> {
         Expression::StringLiteral(literal) if literal.value.starts_with('\u{0}') => None,
         Expression::StringLiteral(literal) => Some(Arc::from(literal.value.as_str())),
         Expression::NumericLiteral(literal) => Some(Arc::from(
-            crate::semantic_query::index_key::js_number_to_string(literal.value).as_str(),
+            verter_ecma::js_number_to_string(literal.value).as_str(),
         )),
         _ => None,
     }

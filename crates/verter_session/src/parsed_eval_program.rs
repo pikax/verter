@@ -6,7 +6,7 @@
 //! the scheduler-bound parse entry for the borrowed lowering input (see
 //! the `no_direct_oxc_parser_calls_outside_scheduler_path` architecture
 //! guard); consumers reach the cell through the crate-root re-export
-//! (`crate::ParsedEvalProgram`).
+//! (`crate::parsed_eval_program::ParsedEvalProgram`).
 
 use std::{cell::OnceCell, rc::Rc, sync::Arc};
 use verter_semantic::analysis::function_program::{

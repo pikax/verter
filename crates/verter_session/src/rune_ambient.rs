@@ -296,25 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn rune_ambient_parser_flag_tracks_the_prelude_version() {
-        // The parse-env flag's version suffix MUST track the rune-prelude
-        // version so a prelude-surface change invalidates a rune module's stale
-        // inferred exports through `parse_env_hash`. The version constant lives
-        // in `verter_language`; the flag lives in `verter_workspace`; this guard
-        // pins them in lockstep.
-        let expected = format!(
-            "svelte-rune-ambient-v{}",
-            verter_language::svelte_rune_ambient::RUNE_AMBIENT_PRELUDE_VERSION
-        );
-        assert_eq!(
-            verter_workspace::SVELTE_RUNE_AMBIENT_PARSER_FLAG,
-            expected,
-            "the rune-ambient parse-env flag must encode the current RUNE_AMBIENT_PRELUDE_VERSION; \
-             bump the flag suffix when you bump the version"
-        );
-    }
-
-    #[test]
     fn user_declarations_are_not_clobbered() {
         // If the module already declares a `$state` (a local shadow / import),
         // the rune ambient must NOT overwrite it.

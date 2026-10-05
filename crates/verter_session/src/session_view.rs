@@ -527,7 +527,7 @@ impl OverlaidView {
         let mut overlay_hashes = FxHashMap::default();
         overlay_hashes.reserve(overlays.len());
         for (canonical, source) in &overlays {
-            let hash = crate::hash::hash_16(source.as_bytes());
+            let hash = crate::source_hash::hash_16(source.as_bytes());
             overlay_hashes.insert(canonical.clone(), hash);
         }
         let env_hashes = base.host_view_env_hashes();
@@ -1369,7 +1369,7 @@ mod tests {
         let mut overlay_hashes: FxHashMap<String, Hash16> = FxHashMap::default();
         overlay_hashes.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 9;"),
+            crate::source_hash::hash_16(b"export const a = 9;"),
         );
         let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
         tombstones.insert("/b.ts".to_string());
@@ -1420,7 +1420,7 @@ mod tests {
         let mut hashes_a: FxHashMap<String, Hash16> = FxHashMap::default();
         hashes_a.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 9;"),
+            crate::source_hash::hash_16(b"export const a = 9;"),
         );
         let view_a = OverlaidViewRef::new(&host, &overlays_a, &hashes_a, &no_tombstones);
         let fp_a = view_a.fingerprint();
@@ -1444,7 +1444,7 @@ mod tests {
         let mut hashes_ab = hashes_a.clone();
         hashes_ab.insert(
             "/b.ts".to_string(),
-            crate::hash::hash_16(b"export const b = 8;"),
+            crate::source_hash::hash_16(b"export const b = 8;"),
         );
         let view_ab = OverlaidViewRef::new(&host, &overlays_ab, &hashes_ab, &no_tombstones);
         let fp_ab = view_ab.fingerprint();
@@ -1480,7 +1480,7 @@ mod tests {
         let mut hashes_a_changed: FxHashMap<String, Hash16> = FxHashMap::default();
         hashes_a_changed.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 777;"),
+            crate::source_hash::hash_16(b"export const a = 777;"),
         );
         let view_a_changed = OverlaidViewRef::new(
             &host,

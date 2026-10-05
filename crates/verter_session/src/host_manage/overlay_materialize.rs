@@ -779,7 +779,7 @@ impl VerterHost {
         // own refusals: a refused one publishes nothing, as a refused parse.
         let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
-            move |program: Option<&crate::ParsedEvalProgram>| {
+            move |program: Option<&crate::parsed_eval_program::ParsedEvalProgram>| {
                 verter_parser::oxc_parse::refusals_within(|| {
                     let owner_table = Arc::new(match program {
                         Some(parsed) => crate::parse::top_level_owner_table(

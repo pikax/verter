@@ -53,7 +53,7 @@ impl ProjectCapabilitySnapshot {
             buf.extend_from_slice(capability.as_str().as_bytes());
             buf.push(0);
         }
-        crate::hash::hash_16(&buf)
+        crate::source_hash::hash_16(&buf)
     }
 }
 

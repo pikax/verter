@@ -284,7 +284,7 @@ fn explicit_overlay_owner_never_reloads_evicted_base_and_uses_overlay_hash() {
     host.evict(owner);
 
     let overlay_source: Arc<str> = Arc::from(OVERLAY);
-    let overlay_hash = crate::hash::hash_16(OVERLAY.as_bytes());
+    let overlay_hash = crate::source_hash::hash_16(OVERLAY.as_bytes());
     let mut overlays = rustc_hash::FxHashMap::default();
     overlays.insert(owner.to_string(), overlay_source);
     let mut overlay_hashes = rustc_hash::FxHashMap::default();

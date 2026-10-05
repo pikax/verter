@@ -67,12 +67,12 @@ use verter_session_query::facts::registry::{
     Fact, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
 
-use crate::hash::hash_16;
 use crate::host_executor::HostSourceData;
 use crate::resolved_import_facts::{
     ResolvedImportClauseEntry, ResolvedImportFacts, ResolvedImportFactsKey, ResolvedSpecifier,
     RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
+use crate::source_hash::hash_16;
 use crate::VerterHost;
 
 impl VerterHost {

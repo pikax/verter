@@ -153,7 +153,7 @@ struct ShardEntry {
     /// `None` records a FATAL parse (panicked) — retained (while leased)
     /// so repeated demands against the same broken content do not
     /// re-parse it.
-    parsed: Option<std::rc::Rc<crate::ParsedEvalProgram>>,
+    parsed: Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>,
     /// The stack refusal of a fatal parse that was refused for want of
     /// stack rather than for its syntax.
     refused: Option<verter_parser::oxc_parse::StackUnavailable>,
@@ -191,11 +191,13 @@ impl SnapshotShard {
             entry.refcount += 1;
             return (false, entry.refused);
         }
-        let (parsed, refused) =
-            match crate::ParsedEvalProgram::parse_outcome(Arc::clone(source), source_type) {
-                Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
-                Err(refused) => (None, refused),
-            };
+        let (parsed, refused) = match crate::parsed_eval_program::ParsedEvalProgram::parse_outcome(
+            Arc::clone(source),
+            source_type,
+        ) {
+            Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
+            Err(refused) => (None, refused),
+        };
         // Charged from SOURCE bytes rather than by walking the arena:
         // the lease path is hot, and an arena walk per acquisition would
         // cost more than the accounting is worth. See
@@ -237,12 +239,16 @@ impl SnapshotShard {
         key: &SnapshotKey,
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
-    ) -> (Option<std::rc::Rc<crate::ParsedEvalProgram>>, bool) {
+    ) -> (
+        Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>,
+        bool,
+    ) {
         if let Some(entry) = self.entries.get(key) {
             return (entry.parsed.clone(), false);
         }
         let parsed =
-            crate::ParsedEvalProgram::parse(Arc::clone(source), source_type).map(std::rc::Rc::new);
+            crate::parsed_eval_program::ParsedEvalProgram::parse(Arc::clone(source), source_type)
+                .map(std::rc::Rc::new);
         (parsed, true)
     }
 
@@ -255,7 +261,7 @@ impl SnapshotShard {
     fn snapshot_leased(
         &self,
         key: &SnapshotKey,
-    ) -> Option<Option<std::rc::Rc<crate::ParsedEvalProgram>>> {
+    ) -> Option<Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>> {
         self.entries.get(key).map(|entry| {
             // Counted on the HIT arm only: a lease miss re-enters the parse
             // rail, so the two are never both charged for one demand.
@@ -576,10 +582,21 @@ impl std::fmt::Debug for DeclLoweringService {
     }
 }
 
+/// The default decl-lowering pool size — `clamp(available_parallelism / 4,
+/// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
+/// [`crate::types::HostResourcePolicy::default`] and the decl-lowering
+/// service's no-arg constructor key off, so the two can never drift.
+pub(crate) const DECL_LOWERING_DEFAULT_POOL_SIZE: verter_execution::pool_size::PoolSize =
+    verter_execution::pool_size::PoolSize::Fraction {
+        divisor: 4,
+        min: 1,
+        max: 4,
+    };
+
 impl DeclLoweringService {
     /// Eager service at the default decl-lowering pool size — workers
     /// spawn at construction. Keyed off the same
-    /// [`crate::types::DECL_LOWERING_DEFAULT_POOL_SIZE`] the default
+    /// [`DECL_LOWERING_DEFAULT_POOL_SIZE`] the default
     /// [`crate::types::HostResourcePolicy`] uses, so the no-arg default and
     /// the resource policy can never drift.
     ///
@@ -590,7 +607,7 @@ impl DeclLoweringService {
     pub(crate) fn new() -> Self {
         Self::new_with(
             /* lazy = */ false,
-            crate::types::DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
+            DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
         )
     }
 
@@ -871,7 +888,7 @@ impl DeclLoweringService {
         job: F,
     ) -> LoweringOutcome<R>
     where
-        F: FnOnce(Option<&crate::ParsedEvalProgram>) -> R + Send + 'static,
+        F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
         R: Send + 'static,
     {
         #[cfg(not(target_arch = "wasm32"))]
@@ -948,7 +965,7 @@ impl DeclLoweringService {
     /// (no host / service re-entry), per the same worker-purity contract.
     pub(crate) fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
     where
-        F: FnOnce(Option<&crate::ParsedEvalProgram>) -> R + Send + 'static,
+        F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
         R: Send + 'static,
     {
         #[cfg(not(target_arch = "wasm32"))]

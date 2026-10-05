@@ -191,6 +191,9 @@ pub mod framework;
 pub mod global_contributors;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
+pub(crate) mod rune_ambient;
+pub(crate) mod source_hash;
+pub(crate) mod typeof_dependencies;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
@@ -366,7 +369,7 @@ pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
-mod parsed_eval_program;
+pub(crate) mod parsed_eval_program;
 /// Portable platform-services boundary: the per-target inventory of
 /// the io/time/scheduling/persistence/process service classes and the
 /// browser-closure dependency guard.
@@ -500,7 +503,6 @@ pub use input_basis::{
     LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError, RetryError,
     RetryOutcome, SnapshotFence, TornSnapshot,
 };
-pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
