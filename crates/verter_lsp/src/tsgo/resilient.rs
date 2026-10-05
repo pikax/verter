@@ -2,12 +2,13 @@
 //!
 //! Establishment, crash recovery, desired-state replay and the serving epoch
 //! live in `verter_type_runtime::provider_hub`; this module only supplies how
-//! one owned dual-surface tsgo engine is spawned and the LSP `Client` bridge.
+//! one owned dual-surface tsgo engine is spawned and the LSP outbound bridge.
 
 use std::sync::Arc;
 
-use tokio::sync::{Notify, OnceCell};
-use tower_lsp_server::Client;
+use tokio::sync::Notify;
+
+use crate::outbound::Outbound;
 
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
@@ -102,7 +103,7 @@ pub enum OwnedStartAnnouncements {
 pub async fn establish_owned(
     tsgo_bin: String,
     root_uri: String,
-    client: Arc<OnceCell<Client>>,
+    client: Outbound,
     max_restarts: u32,
     announcements: OwnedStartAnnouncements,
 ) -> Result<ProviderHub<TsgoOwnedProvider>, TypeProviderError> {

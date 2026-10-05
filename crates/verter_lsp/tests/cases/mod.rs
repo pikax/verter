@@ -18,6 +18,7 @@ mod lsp_audit_tls_propagation;
 mod lsp_component_meta_output_error;
 mod lsp_component_meta_wire_equivalence;
 mod one_parse_per_style_block;
+mod outbound_slow_client;
 mod owned_binding_gate;
 mod position_mapper_strict;
 mod quoted_prop_consumer_mistype_live;

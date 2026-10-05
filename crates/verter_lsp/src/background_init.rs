@@ -8,7 +8,7 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 /// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
 /// Called first in `initialized()` so the extension always sees heartbeats,
 /// even during long background initialization.
-pub(super) fn spawn_heartbeat(client: Client) {
+pub(super) fn spawn_heartbeat(client: Outbound) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -37,7 +37,7 @@ pub(super) struct BackgroundInitArgs {
     pub(super) vite_opts: verter_workspace::ViteConfigOptions,
     pub(super) init_lint_opts: Option<serde_json::Value>,
     pub(super) my_gen: u64,
-    pub(super) client: Client,
+    pub(super) client: Outbound,
     pub(super) type_provider: Option<Arc<dyn TypeProvider>>,
     pub(super) workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,

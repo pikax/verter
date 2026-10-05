@@ -316,9 +316,9 @@ mod tests {
     ) {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
-        tower_lsp_server::LspService::new(move |client| {
+        tower_lsp_server::LspService::new(move |_client| {
             VerterLanguageServer::new(
-                client,
+                crate::outbound::Outbound::default(),
                 LspConfig {
                     host: Arc::clone(&host_for_server),
                     type_provider: None,

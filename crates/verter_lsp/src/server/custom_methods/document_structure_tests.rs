@@ -27,9 +27,9 @@ fn build_service() -> tower_lsp_server::LspService<VerterLanguageServer> {
     let host = Arc::new(verter_session::VerterHost::new_standalone(
         verter_session::HostConfig::default(),
     ));
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             crate::LspConfig {
                 host: Arc::clone(&host),
                 type_provider: None,

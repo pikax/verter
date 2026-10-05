@@ -124,9 +124,9 @@ async fn fixture_for_carrier(
     let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = vfs_workspace.clone();
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
     let host_for_server = Arc::clone(&host);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             crate::LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: type_provider.clone(),
@@ -140,6 +140,7 @@ async fn fixture_for_carrier(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while futures_util::StreamExt::next(&mut socket).await.is_some() {}

@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 use verter_type_runtime::codec::SourceIndex;
 
@@ -62,7 +62,7 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
 }
 
 impl ExtensionTypeProvider<LspTsQueryTransport> {
-    pub fn new(client: Arc<OnceCell<tower_lsp_server::Client>>, workspace_root: &str) -> Self {
+    pub fn new(client: crate::outbound::Outbound, workspace_root: &str) -> Self {
         Self::with_transport(LspTsQueryTransport { client }, workspace_root)
     }
 }

@@ -48,8 +48,15 @@ pub struct DocumentRegistry {
     language_classifier: verter_session::framework::HostLanguageClassifier,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
-    diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
+    /// Shared with the outbound writer, which re-checks a publication's epoch
+    /// against it when it takes the payload.
+    diagnostics_state: Arc<parking_lot::Mutex<diagnostics::DiagnosticsState>>,
     diagnostics_refresh_tx: tokio::sync::broadcast::Sender<DiagnosticsRefresh>,
+    /// The bounded replacement lane every diagnostics publication reaches the
+    /// client through: the transport writer pulls from it, so a slow client
+    /// retains at most one pending payload per document and never receives a
+    /// superseded or cancelled one.
+    diagnostics_outbound: crate::outbound::ReplaceableLane,
     next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
@@ -532,7 +539,29 @@ impl DocumentRegistry {
         )
     }
 
+    /// A registry whose diagnostics go to a lane of its own. Nothing is
+    /// delivered until a transport writer pulls from that lane.
     pub fn new(host: Arc<VerterHost>) -> Self {
+        Self::with_diagnostics_lane(
+            host,
+            crate::outbound::ReplaceableLane::new(
+                crate::outbound::OutboundBudget::DEFAULT.replaceable,
+            ),
+        )
+    }
+
+    /// The lane this registry publishes diagnostics through.
+    #[cfg(test)]
+    pub(crate) fn diagnostics_lane(&self) -> crate::outbound::ReplaceableLane {
+        self.diagnostics_outbound.clone()
+    }
+
+    /// A registry publishing diagnostics through `diagnostics_outbound`, the
+    /// replaceable lane of the server's outbound transport.
+    pub fn with_diagnostics_lane(
+        host: Arc<VerterHost>,
+        diagnostics_outbound: crate::outbound::ReplaceableLane,
+    ) -> Self {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
         let language_classifier = host.language_classifier().clone();
@@ -540,8 +569,11 @@ impl DocumentRegistry {
             host: SharedHost::new(host),
             language_classifier,
             documents: DashMap::new(),
-            diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
+            diagnostics_state: Arc::new(parking_lot::Mutex::new(
+                diagnostics::DiagnosticsState::default(),
+            )),
             diagnostics_refresh_tx,
+            diagnostics_outbound,
             next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
@@ -1149,7 +1181,7 @@ impl DocumentRegistry {
         // A document commit owes the document's TEXT. It does not owe the IDE
         // TSX, and it must not pay for it per keystroke.
         //
-        // `tower-lsp-server` does not spawn a task per notification: `Server::serve`
+        // The serve loop does not spawn a task per notification: `outbound::serve`
         // queues handler futures and polls them INLINE on the serve thread (see
         // `crate::SERVE_THREAD_STACK_BYTES`), and `handle_did_change` runs from
         // entry through this commit without ever pending — an uncontended

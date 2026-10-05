@@ -26,8 +26,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::OnceCell;
-use tower_lsp_server::Client;
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
 use verter_semantic::resolver_core::ConfiguredMembership;
@@ -412,7 +410,7 @@ async fn vue_only_owner_preserves_managed_lsp_mutation_diagnostics() {
     let resilient = verter_lsp::tsgo::resilient::establish_owned(
         tsgo_bin,
         root_uri,
-        Arc::new(OnceCell::<Client>::new()),
+        verter_lsp::outbound::Outbound::default(),
         3,
         verter_lsp::tsgo::resilient::OwnedStartAnnouncements::All,
     )

@@ -6,9 +6,6 @@
 //! of `extension_provider.rs`.
 
 use std::future::Future;
-use std::sync::Arc;
-
-use tokio::sync::OnceCell;
 
 use crate::server::{TsQuery, TsQueryParams};
 use crate::type_provider::protocol::TypeProviderError;
@@ -17,7 +14,7 @@ use crate::type_provider::protocol::TypeProviderError;
 ///
 /// `ExtensionTypeProvider` talks to the VS Code extension host over a single
 /// raw `command + arguments → JSON body` choke point. In production that body
-/// is delivered over a concrete `tower_lsp_server::Client`
+/// is delivered over the server's outbound transport
 /// ([`LspTsQueryTransport`]); tests inject a scripted in-memory transport so the
 /// provider's completion / resolve / diagnostics request envelopes can be
 /// driven headlessly, without a live extension-host `Client`.
@@ -40,11 +37,10 @@ pub trait TsQueryTransport: Send + Sync {
     ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_;
 }
 
-/// Production [`TsQueryTransport`] — forwards each `$/verter/tsQuery` over the
-/// deferred extension-host LSP `Client`.
+/// Production [`TsQueryTransport`] — forwards each `$/verter/tsQuery` to the
+/// extension host over the server's outbound transport.
 pub struct LspTsQueryTransport {
-    /// Deferred LSP client — populated during `LspService::build()`.
-    pub(super) client: Arc<OnceCell<tower_lsp_server::Client>>,
+    pub(super) client: crate::outbound::Outbound,
 }
 
 impl TsQueryTransport for LspTsQueryTransport {
@@ -59,11 +55,7 @@ impl TsQueryTransport for LspTsQueryTransport {
         params: TsQueryParams,
     ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_ {
         async move {
-            let client = self
-                .client
-                .get()
-                .ok_or_else(|| TypeProviderError::new("LSP client not yet initialized"))?;
-            client
+            self.client
                 .send_request::<TsQuery>(params)
                 .await
                 .map_err(|e| TypeProviderError::new(format!("tsQuery failed: {e}")))

@@ -3,7 +3,9 @@ use std::{collections::HashSet, sync::Arc};
 use dashmap::{DashMap, DashSet};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
-use tower_lsp_server::{Client, LanguageServer};
+use tower_lsp_server::LanguageServer;
+
+use crate::outbound::Outbound;
 
 use crate::document_sync_lane::DocumentLaneLease;
 use crate::documents::line_index::LineIndex;
@@ -405,7 +407,9 @@ impl std::ops::Deref for VerterLanguageServer {
 /// session, `Arc`-shared between tower-lsp's request dispatch and any detached
 /// background task the server spawns.
 pub struct ServerCore {
-    client: Client,
+    /// The only route by which the server sends anything to the client: the
+    /// bounded outbound transport.
+    client: Outbound,
     documents: Arc<DocumentRegistry>,
     type_provider: Option<Arc<dyn TypeProvider>>,
     project_sync: Option<ProjectSync>,
@@ -1099,7 +1103,10 @@ impl VerterLanguageServer {
         }
     }
 
-    pub fn new(client: Client, config: LspConfig) -> Self {
+    /// A server that sends everything through `client`, the outbound transport
+    /// its writer ([`crate::outbound::serve`]) drains. Its diagnostics are
+    /// published through that transport's replaceable lane.
+    pub fn new(client: Outbound, config: LspConfig) -> Self {
         let vfs_workspace: Arc<
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
         > = Arc::new(parking_lot::RwLock::new(None));
@@ -1117,7 +1124,10 @@ impl VerterLanguageServer {
 
         let needs_ide_sync = Arc::new(DashSet::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
-        let documents = Arc::new(DocumentRegistry::new(config.host));
+        let documents = Arc::new(DocumentRegistry::with_diagnostics_lane(
+            config.host,
+            client.diagnostics_lane(),
+        ));
         // The one per-document sync-lane registry. Owned by the registry above and
         // read here, so the server and every background writer share ONE lane per
         // open document instead of each holding its own view of it.
@@ -1337,6 +1347,13 @@ impl VerterLanguageServer {
             vfs_ws.as_deref(),
             self.project_sync.as_ref(),
         )
+    }
+}
+
+impl VerterLanguageServer {
+    /// The outbound transport this server sends through.
+    pub fn outbound(&self) -> &Outbound {
+        &self.client
     }
 }
 
