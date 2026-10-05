@@ -54,7 +54,7 @@
 //! reachable reader.
 //!
 //! Every retained snapshot is CHARGED, for as long as it lives, to the one
-//! process-local [`SemanticRetentionAccount`] — the same aggregate byte ceiling
+//! process-local [`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount) — the same aggregate byte ceiling
 //! the semantic caches admit against, so provider-surface bytes and semantic-cache
 //! bytes cannot each claim the ceiling independently. The charge is
 //! [`ChargeClass::Pinned`](verter_session_query::retention::ChargeClass::Pinned):
@@ -74,8 +74,7 @@ use parking_lot::RwLock;
 
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::retention::{
-    RetainedFootprint, RetentionCharge, SemanticRetentionAccount, StoreAccount,
-    ENTRY_OVERHEAD_BYTES,
+    RetainedFootprint, RetentionCharge, StoreAccount, ENTRY_OVERHEAD_BYTES,
 };
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
@@ -537,9 +536,13 @@ impl ProviderSurfaceStore {
     ///
     /// Production always uses [`Self::new`]; this exists so a test can drive and
     /// observe retention deterministically, without the rest of the process's
-    /// occupancy moving underneath its assertions.
+    /// occupancy moving underneath its assertions. Test-only: an isolated
+    /// account can be minted only under test support.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_account(account: Arc<SemanticRetentionAccount>) -> Self {
+    pub fn with_account(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
         Self {
             inner: Arc::new(StoreInner {
                 account: StoreAccount::new(account),
@@ -1202,7 +1205,7 @@ impl ProviderSurfaceStore {
     /// reach past the store to the account.
     #[cfg(test)]
     #[must_use]
-    pub fn account(&self) -> &Arc<SemanticRetentionAccount> {
+    pub fn account(&self) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         self.inner.account.get()
     }
 

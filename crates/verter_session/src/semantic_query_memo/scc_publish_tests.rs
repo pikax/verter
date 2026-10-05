@@ -208,7 +208,9 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         pin_threshold_bytes: usize::MAX,
     };
     let account = SemanticRetentionAccount::new(limits);
-    let store = SemanticGraphStore::with_account(Arc::clone(&account));
+    let store = SemanticGraphStore::with_account(
+        verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
+    );
     let root = store.stage_entry(
         None,
         SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::*;
+use verter_session_query::retention::SemanticRetentionAccount;
 
 const VPATH: &str = "/src/Child.vue.ts";
 const CANONICAL: &str = "/src/Child.vue";

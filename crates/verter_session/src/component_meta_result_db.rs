@@ -337,13 +337,13 @@ impl<P> ComponentMetaResultDb<P> {
     pub(crate) fn with_counters_and_account(
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
-        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            verter_session_query::retention::StoreAccount::new(retention_account),
+            retention_account,
         )
     }
 
@@ -367,7 +367,7 @@ impl<P> ComponentMetaResultDb<P> {
         Self::with_counters_and_account(
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
-            retention_account,
+            verter_session_query::retention::StoreAccount::new(retention_account),
         )
     }
 

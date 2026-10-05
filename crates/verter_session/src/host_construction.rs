@@ -503,11 +503,10 @@ impl VerterHost {
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
         // The workspace's resident request-overlay resolution state charges
-        // the same aggregate account every host store charges.
+        // the process-local account — the same aggregate account every host
+        // store charges.
         workspace_lock.read().install_resolution_retention(Arc::new(
-            verter_session_query::retention::ResolutionRetention(Arc::clone(
-                project_type_store.retention_account(),
-            )),
+            verter_session_query::retention::ResolutionRetention::process_local(),
         ));
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows

@@ -211,7 +211,9 @@ mod tests {
     #[test]
     fn union_views_stay_bounded_and_charged_across_revisions() {
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
-        let store = SemanticGraphStore::with_account(Arc::clone(&account));
+        let store = SemanticGraphStore::with_account(
+            verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
+        );
         let ctx = SemanticContext::production();
         let literal =
             |text: String| store.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));

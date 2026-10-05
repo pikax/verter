@@ -45,9 +45,7 @@ impl VerterHost {
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         workspace.install_resolution_retention(Arc::new(
-            verter_session_query::retention::ResolutionRetention(Arc::clone(
-                self.project_type_store.retention_account(),
-            )),
+            verter_session_query::retention::ResolutionRetention::process_local(),
         ));
         *self.workspace.write() = workspace;
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing

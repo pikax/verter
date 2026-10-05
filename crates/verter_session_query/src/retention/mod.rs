@@ -382,11 +382,18 @@ pub struct SemanticRetentionAccount {
 static PROCESS_LOCAL: OnceLock<Arc<SemanticRetentionAccount>> = OnceLock::new();
 
 impl SemanticRetentionAccount {
-    /// Construct a private account. Production wiring goes through
-    /// [`Self::process_local`]; a private instance exists so tests can
-    /// drive pressure deterministically.
+    /// Construct an isolated account. Test-support only: production code
+    /// obtains the one account through [`Self::process_local`], so a
+    /// production build cannot mint a private byte quota beside the
+    /// aggregate ceiling. An isolated instance exists so tests can drive
+    /// pressure deterministically.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new(limits: RetentionLimits) -> Arc<Self> {
+        Self::build(limits)
+    }
+
+    fn build(limits: RetentionLimits) -> Arc<Self> {
         Arc::new(Self {
             limits,
             admission_lock: parking_lot::Mutex::new(()),
@@ -407,7 +414,7 @@ impl SemanticRetentionAccount {
     /// per-project ceiling multiplication.
     #[must_use]
     pub fn process_local() -> Arc<Self> {
-        Arc::clone(PROCESS_LOCAL.get_or_init(|| Self::new(RetentionLimits::defaults())))
+        Arc::clone(PROCESS_LOCAL.get_or_init(|| Self::build(RetentionLimits::defaults())))
     }
 
     /// The limits this account admits against.
@@ -611,7 +618,9 @@ impl SemanticRetentionAccount {
 /// private account. A per-store account would be exactly the private byte
 /// quota beside the aggregate ceiling that the retention contract forbids:
 /// N stores would admit against N ceilings. A test that needs deterministic
-/// pressure binds its private account explicitly through [`Self::new`].
+/// pressure binds its private account explicitly through [`Self::new`],
+/// which exists only under test support: in a production build every
+/// `StoreAccount` is the process-local account.
 #[derive(Debug, Clone)]
 pub struct StoreAccount(Arc<SemanticRetentionAccount>);
 
@@ -622,8 +631,9 @@ impl Default for StoreAccount {
 }
 
 impl StoreAccount {
-    /// Bind an explicit account. Production hosts thread the project's
-    /// account — which IS the process-local one — through here.
+    /// Bind an explicit isolated account. Test-support only; production
+    /// stores take [`Self::default`], the process-local account.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new(account: Arc<SemanticRetentionAccount>) -> Self {
         Self(account)
@@ -709,7 +719,36 @@ impl Drop for RetentionCharge {
 /// it: each overlay-lane answer and each interned overlay value version is
 /// a [`ChargeClass::Retained`] charge, refused under pressure like any
 /// other warm cache entry (the workspace then serves the answer uncached).
-pub struct ResolutionRetention(pub Arc<SemanticRetentionAccount>);
+///
+/// The bound account is private. Outside test support the only
+/// constructors are [`Self::process_local`] and [`Default`], so this
+/// adapter always charges the one process-local account. That closes only
+/// THIS adapter's construction: the resolution-account trait it implements
+/// is an open provider interface, and any crate may install its own
+/// implementation of it. The single-account policy for resolution state is
+/// therefore upheld by the host installing this adapter, not by the trait.
+pub struct ResolutionRetention(Arc<SemanticRetentionAccount>);
+
+impl ResolutionRetention {
+    /// The adapter over the process-local account.
+    #[must_use]
+    pub fn process_local() -> Self {
+        Self(SemanticRetentionAccount::process_local())
+    }
+
+    /// The adapter over an explicit isolated account. Test-support only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_account(account: Arc<SemanticRetentionAccount>) -> Self {
+        Self(account)
+    }
+}
+
+impl Default for ResolutionRetention {
+    fn default() -> Self {
+        Self::process_local()
+    }
+}
 
 impl crate::retention::resolution_charge::ResolutionRetentionAccount for ResolutionRetention {
     fn reserve_retained(

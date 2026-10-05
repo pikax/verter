@@ -24,7 +24,7 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn with_provenance(
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
-        retention_account: Arc<SemanticRetentionAccount>,
+        retention_account: StoreAccount,
     ) -> Self {
         let mut store = Self::with_account(retention_account);
         store.arena.provenance = Some(Arc::clone(&provenance));
@@ -38,9 +38,9 @@ impl SemanticGraphStore {
     /// one charges the process-local account, so no live memo can grow
     /// without consuming aggregate headroom.
     #[must_use]
-    pub fn with_account(retention_account: Arc<SemanticRetentionAccount>) -> Self {
+    pub fn with_account(retention_account: StoreAccount) -> Self {
         Self {
-            retention_account: StoreAccount::new(retention_account),
+            retention_account,
             ..Default::default()
         }
     }

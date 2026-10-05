@@ -1115,7 +1115,7 @@ impl ProjectTypeStore {
     pub fn new() -> Self {
         Self::build(
             None,
-            verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
@@ -1128,7 +1128,10 @@ impl ProjectTypeStore {
     pub fn with_retention_account(
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
-        Self::build(None, retention_account)
+        Self::build(
+            None,
+            verter_session_query::retention::StoreAccount::new(retention_account),
+        )
     }
 
     /// The aggregate retained-byte account this store's caches charge.
@@ -1150,14 +1153,15 @@ impl ProjectTypeStore {
     pub fn with_provenance(provenance: Arc<crate::meta_provenance::MetaProvenance>) -> Self {
         Self::build(
             Some(provenance),
-            verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
     fn build(
         provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
-        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        store_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
+        let retention_account = Arc::clone(store_account.get());
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
@@ -1174,11 +1178,11 @@ impl ProjectTypeStore {
         let component_meta_results = ComponentMetaResultDb::with_counters_and_account(
             Arc::clone(&counters.component_meta_live),
             Arc::clone(&counters.component_meta_stale_sweeps),
-            Arc::clone(&retention_account),
+            store_account.clone(),
         );
         let semantic_graph = Arc::new(match provenance {
-            Some(prov) => SemanticGraphStore::with_provenance(prov, Arc::clone(&retention_account)),
-            None => SemanticGraphStore::with_account(Arc::clone(&retention_account)),
+            Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
+            None => SemanticGraphStore::with_account(store_account),
         });
         let imported_registry_db =
             ImportedRegistryDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
