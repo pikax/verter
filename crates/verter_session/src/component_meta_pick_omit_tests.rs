@@ -1604,9 +1604,9 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
     };
     use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::{DepSignature, QueryError};
     use crate::VerterHost;
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
     use verter_type_expr::{TypeExpr, UnknownValue};
 
     let host = VerterHost::new_standalone(Default::default());

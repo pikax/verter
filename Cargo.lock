@@ -3936,6 +3936,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "static_assertions",
+ "verter_analysis_inputs",
  "verter_audit",
  "verter_debug_assert",
  "verter_language",

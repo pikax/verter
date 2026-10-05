@@ -73,8 +73,8 @@ use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, Ty
 
 use crate::decl_lowering::{DeclLoweringService, SnapshotLease};
 use crate::fact_emission::{RouteLens, ShallowLens};
+use crate::meta_provenance::MetaProvenance;
 use crate::resolver_core::shallow_file_state::collect_typeof_roots;
-use crate::types::MetaProvenance;
 use verter_session_query::source::snapshot::SnapshotKey;
 
 pub(crate) mod locator_deref;

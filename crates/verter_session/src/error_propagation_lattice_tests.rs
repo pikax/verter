@@ -48,7 +48,7 @@ fn negative_resolved_import_fact() -> FactVersionRef {
             binding: InternedName::from("X"),
             space: SymbolSpace::Type,
             resolved_canonical: Arc::from(
-                crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL,
+                verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL,
             ),
             resolved_source_name: InternedName::from("X"),
         },

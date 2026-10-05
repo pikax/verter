@@ -29,7 +29,7 @@
 //!
 //! - [`RequestStoreView`]: a wrapper that owns the overlay and borrows
 //!   the request-entry [`HostStoreView`]. Implements
-//!   [`crate::resolver_core::StoreView`] with **shadowing-first**
+//!   [`verter_session_query::facts::store_view::StoreView`] with **shadowing-first**
 //!   semantics — if the overlay has a canonical/fact key, the overlay
 //!   value is authoritative and a mismatch is REJECTED (not retried
 //!   against the base view). If the overlay is absent for a key, reads
@@ -38,7 +38,7 @@
 //! ## Identity / epoch contract
 //!
 //! The completion overlay does NOT participate in
-//! [`crate::resolver_core::StoreView::compat_token`]: the wrapper
+//! [`verter_session_query::facts::store_view::StoreView::compat_token`]: the wrapper
 //! reports the base's compat token unchanged. Two concurrent requests
 //! with the same base epoch must still coalesce on singleflight lanes,
 //! while fact signatures distinguish completion states through their
@@ -86,12 +86,12 @@ use crate::file_artifact_store::FileFacts;
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::reuse::ReuseClass;
-use crate::resolver_core::{ResolverHash16, StoreView, StoreViewCompatToken};
 use crate::resolver_store::HostStoreView;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
+use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
 /// Per-request shadowing side maps recording additive loads that the
 /// request-entry [`HostStoreView`] does not track. Keys are retained for
@@ -1307,7 +1307,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
             semantic_imports,
             route_surface,
             ..
-        } = crate::resolver_core::StoreView::aggregate_basis_seed(self.base)
+        } = verter_session_query::facts::store_view::StoreView::aggregate_basis_seed(self.base)
         else {
             return verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched;
         };

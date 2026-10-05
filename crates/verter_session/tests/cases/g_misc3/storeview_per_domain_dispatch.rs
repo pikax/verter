@@ -23,12 +23,12 @@
 //! enum but does NOT widen the trait".
 
 use verter_session::file_artifact_store::InternedName;
-use verter_session::resolver_core::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::fact_cache::{
     FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef,
 };
 use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 /// Test view that returns one of three distinct values depending on

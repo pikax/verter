@@ -990,7 +990,7 @@ fn compat_token_lane_oracle_ignores_additive_generations() {
     // multiple-cold-winner regression this proves closed. The companion test
     // `compat_token_changes_on_external_supersession_without_epoch` proves the
     // oracle still discriminates a REAL external mutation.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
     // Upsert a second file (tracked, not yet materialised). Capture the
@@ -1061,7 +1061,7 @@ fn compat_token_changes_on_external_supersession_without_epoch() {
     // an env-hash-only change IDENTICAL (its epoch did not move) and the two
     // views would wrongly coalesce. The folded `validity_fingerprint`
     // (external-supersession dims) differs, keeping the lanes distinct.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
 
@@ -1114,7 +1114,7 @@ fn compat_token_validity_fingerprint_matches_external_supersession_fingerprint()
     // `HostStoreView` wires the SAME external oracle into the coalescing-lane
     // identity that the promotion fence (`is_stable`) compares, not a partial
     // or constant fingerprint and not the over-strict complete-token fold.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
     let view = host.resolver_store_view_read().into_owned_view();

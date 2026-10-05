@@ -22,9 +22,9 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
-    ShallowFileState,
+    LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowFileState,
 };
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 use verter_session_query::inputs::shallow::{ExportTarget, ExternalSymbolRef};
 use verter_type_expr::facts::{NarrowFrontierBody, NarrowTypeParam};
 use verter_type_expr::locators::{

@@ -111,7 +111,7 @@ pub type AppConfigNoOverrideProofKey = (Arc<str>, Arc<str>);
 ///
 /// The entry carries `fact_dep_signature: Arc<[FactVersionRef]>`
 /// directly: the path-precise fact-signature substrate
-/// ([`crate::resolver_core::StoreView::validates`]) is the sole
+/// ([`verter_session_query::facts::store_view::StoreView::validates`]) is the sole
 /// cache-validity oracle.
 #[derive(Clone)]
 pub struct AppConfigNoOverrideProofEntry {

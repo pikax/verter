@@ -48,12 +48,11 @@ use verter_session_query::facts::{
 };
 
 use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
-use crate::file_artifact_store::{
-    FileFacts, InternedName, InternedSpecifier, ModuleAugmentationFact,
-};
+use crate::file_artifact_store::{FileFacts, InternedName, InternedSpecifier};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::ShallowFileState;
 use verter_session_query::inputs::shallow::ExportTarget;
+use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
 /// The contribution-set / order-sensitive fact family: augmentation
 /// contribution set+order, declaration contribution order, and the
@@ -1134,15 +1133,10 @@ pub(crate) fn augmentation_header_fingerprint(
     hash16_from_pair(digest(0), digest(0x9E37_79B9_7F4A_7C15))
 }
 
-/// Sentinel specifier used inside [`ModuleAugmentationFact`] to
-/// distinguish `declare global { … }` blocks from `declare module
-/// "..." { … }`. The augmentation-index producer maps this back to
-/// `AugmentationTargetKind::GlobalAugmentation`.
-pub const GLOBAL_AUGMENTATION_TAG: &str = "$global";
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
     /// Build the shallow state through the REAL construction path (parse →
     /// header index → service-backed lazy memo) and derive the augmentation

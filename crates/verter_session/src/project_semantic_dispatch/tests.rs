@@ -15729,8 +15729,8 @@ fn reverse_homomorphic_partial_requires_a_decided_positive_property_relation() {
 
 #[test]
 fn reverse_homomorphic_projectionless_templates_reject_control_and_degraded_sources() {
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15789,8 +15789,8 @@ fn reverse_homomorphic_projectionless_templates_reject_control_and_degraded_sour
 
 #[test]
 fn reverse_projection_control_and_degraded_candidates_fail_closed() {
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);

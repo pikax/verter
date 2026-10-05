@@ -518,7 +518,7 @@ impl VerterHost {
             "overlay\u{0}{analysis_canonical_id}\u{0}{lane_hash:02x?}\u{0}{lane_discriminator:02x?}"
         );
         let singleflight = &self.resolver.runtime.indexed_singleflight;
-        let token = crate::resolver_core::StoreViewCompatToken {
+        let token = verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: 0,
             session: None,
             validity_fingerprint: 0,

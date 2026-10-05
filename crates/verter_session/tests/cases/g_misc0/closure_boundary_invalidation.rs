@@ -15,9 +15,10 @@
 
 use rustc_hash::FxHashSet;
 
-use verter_session::resolver_core::{StoreView, StoreViewCompatToken, ValidatedFactCache};
+use verter_session::resolver_core::ValidatedFactCache;
 use verter_session::semantic_query::HashValue;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 /// Synthetic store view: a fact `validates` iff its

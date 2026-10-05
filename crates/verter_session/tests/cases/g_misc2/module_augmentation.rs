@@ -126,7 +126,7 @@ fn wildcard_ambient_archetype_emits_module_augmentation_fact() {
 
 #[test]
 fn global_archetype_emits_module_augmentation_fact_via_global_tag() {
-    use verter_session::fact_emission::GLOBAL_AUGMENTATION_TAG;
+    use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
     let raw = fixture("module_augmentation_global.ts");
     let indexed = build_indexed_with_source(&raw);
     let emission = emit_parse_facts(&indexed);

@@ -41,7 +41,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
         view: &V,
     ) -> Option<Arc<OwnerImportSurface>>
     where
-        V: crate::resolver_core::StoreView + ?Sized,
+        V: verter_session_query::facts::store_view::StoreView + ?Sized,
     {
         let candidate = self
             .db
@@ -70,7 +70,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
         compute: F,
     ) -> Option<Arc<OwnerImportSurface>>
     where
-        V: crate::resolver_core::StoreView + ?Sized,
+        V: verter_session_query::facts::store_view::StoreView + ?Sized,
         F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
             Arc<OwnerImportSurface>,
             Arc<OwnerImportSurface>,

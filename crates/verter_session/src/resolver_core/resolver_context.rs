@@ -85,7 +85,7 @@ impl MaterializeScopeObservation {
     /// `NodeScopeId::File { whole_hash }` and the signature self-root —
     /// a single source, so the two cannot disagree.
     #[inline]
-    pub(crate) fn whole_hash(&self) -> crate::resolver_core::ResolverHash16 {
+    pub(crate) fn whole_hash(&self) -> verter_session_query::facts::store_view::ResolverHash16 {
         self.observed_whole_hash
     }
 }

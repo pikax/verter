@@ -22,7 +22,6 @@
 
 pub(crate) mod admission;
 pub(crate) mod candidate_store;
-pub(crate) mod compile_output_node;
 pub(crate) mod flow_slice_node;
 pub(crate) mod lookup_publish;
 pub(crate) mod node;
@@ -96,8 +95,3 @@ pub(crate) use candidate_store::ReverseIndexedCandidateStore;
 // `host_manage`, `host_lifecycle`, and `host_upsert` route every
 // compile-slot access through the session node's typed methods rather
 // than touching `ProfileState::compile_slots` directly.
-#[allow(unused_imports)]
-pub(crate) use compile_output_node::{
-    CompileOutputNodeFactValidatedSession, CompileOutputNodePureContent,
-    CompileOutputPureContentKey, CompileOutputValue, SessionLookupHit, SessionPublishOutcome,
-};

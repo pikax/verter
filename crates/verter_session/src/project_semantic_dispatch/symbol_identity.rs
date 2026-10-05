@@ -755,7 +755,7 @@ mod tests {
         bare_ref_carrier, file_scope, host, import_type_carrier, upsert_ts,
     };
     use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     fn expected() -> ResolvedSymbolIdentity {
         ResolvedSymbolIdentity {

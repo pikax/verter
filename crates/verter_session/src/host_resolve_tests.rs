@@ -29,7 +29,7 @@ fn profile() -> CompileProfile {
 }
 
 fn parsed_vue_fixture(source: &str) -> Arc<verter_parser::parser::types::ParsedSfc> {
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let artifact = crate::carrier_fixture_tests::publish_carrier_fixture(
         "file:///host-resolve-fixture.vue",
         source,

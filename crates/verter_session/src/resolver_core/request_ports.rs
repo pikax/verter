@@ -429,7 +429,7 @@ pub struct ContributorAnswer {
 /// Header facts and exact artifact identity selected by the established
 /// augmentation self-heal. No fact registry, source worker, or store escapes.
 pub struct AugmenterArtifactAnswer {
-    pub augmentations: Arc<Vec<crate::file_artifact_store::ModuleAugmentationFact>>,
+    pub augmentations: Arc<Vec<verter_session_query::source::augmentation::ModuleAugmentationFact>>,
     pub refreshed_key: Option<verter_session_query::source::artifact_key::FileArtifactKey>,
 }
 

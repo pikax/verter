@@ -48,6 +48,7 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
+use crate::meta_provenance::MetaProvenance;
 
 #[macro_use]
 extern crate verter_debug_assert;
@@ -342,12 +343,14 @@ mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
+pub(crate) mod compile_output_node;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed
 /// `NeedInputs` for unacquired keys, no acquisition capability inside
 /// the seam.
 pub mod input_handoff;
+pub mod meta_provenance;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -482,8 +485,8 @@ use std::sync::Arc;
 pub use id::resolve_external;
 pub use input_basis::{
     commit_workspace_canonical, retry_workspace_wave, CommitError, DirectoryEntry, InputBasis,
-    LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError,
-    RequestInputBinding, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
+    LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError, RetryError,
+    RetryOutcome, SnapshotFence, TornSnapshot,
 };
 pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;
@@ -787,8 +790,8 @@ pub struct VerterHost {
     /// takes locks, so the cost is in the noise.
     pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Per-host relation-engine knobs: the overflow / budget test-injection
-    /// triggers — see [`crate::host_construction::RelationHostKnobs`].
-    pub(crate) relation_knobs: Arc<host_construction::RelationHostKnobs>,
+    /// triggers — see [`crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs`].
+    pub(crate) relation_knobs: Arc<crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`crate::project_semantic_dispatch`]'s
     /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in

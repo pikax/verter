@@ -238,7 +238,7 @@ impl VerterHost {
     /// Inspects `rejected_fact` (the first fact that failed validation
     /// in the most-recent candidate, as returned by
     /// [`crate::resolver_core::ValidatedFactCache::get_if_valid_self_rooted_attributed`])
-    /// and consults [`crate::resolver_core::StoreView::tracks_file`] for the
+    /// and consults [`verter_session_query::facts::store_view::StoreView::tracks_file`] for the
     /// self-root arm to determine WHICH check rejected. Fires
     /// exactly one audit event per call:
     ///
@@ -258,7 +258,7 @@ impl VerterHost {
     ///   itself is decided by `validates_domain_aggregate`, which is
     ///   exhaustive and fail-closed per domain.
     fn attribute_prepared_decl_bundle_rejection(
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         canonical_id: &str,
         rejected_fact: Option<&verter_session_query::facts::fact_cache::FactVersionRef>,
         candidate_count: usize,
@@ -314,7 +314,7 @@ impl VerterHost {
     /// shared cache is not allowed to hold.
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
@@ -333,7 +333,7 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn prepared_decl_bundle_with_reuse_class(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> BundleReuseOutcome {
@@ -354,7 +354,7 @@ impl VerterHost {
     /// before the bundle is handed over.
     fn prepared_decl_bundle_classified(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> (
@@ -1106,7 +1106,7 @@ impl VerterHost {
     /// surface-emptiness, are never retained as a joinable rendezvous.
     fn materialize_prepared_decl_bundle_from_routed_shallow(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         canonical_id: &str,
     ) -> Option<BundleMaterialization> {
         let declaration_file = canonical_id.ends_with(".d.ts")
@@ -1493,7 +1493,7 @@ impl VerterHost {
 
     pub(crate) fn prepared_type_decl_in_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -1575,7 +1575,7 @@ impl VerterHost {
 
     pub(crate) fn prepared_value_decl_in_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -2593,7 +2593,7 @@ impl VerterHost {
         // and re-checks the content-discriminating cache inside the flight,
         // so all callers intentionally coalesce onto one lane per canonical
         // regardless of view — `validity_fingerprint` stays `0`.
-        let token = crate::resolver_core::StoreViewCompatToken {
+        let token = verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: 0,
             session: None,
             validity_fingerprint: 0,
@@ -3214,7 +3214,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         session_view: Option<&dyn crate::session_view::SessionView>,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
         let shallow = self.shallow_file_state(owner_canonical)?;
@@ -3528,7 +3528,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         session_view: Option<&dyn crate::session_view::SessionView>,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {

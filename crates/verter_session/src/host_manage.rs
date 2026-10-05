@@ -11,11 +11,12 @@ use crate::instant::Instant;
 use crate::resolver_core::{
     fallthrough_cache_key, DynamicRootCandidate, ExportGraphResolver, ExportSurface,
     FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings, StoreView,
+    FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings,
     ValueDeclIdentity,
 };
 use crate::types::*;
 use crate::VerterHost;
+use verter_session_query::facts::store_view::StoreView;
 
 // ──────────────────────────────────────────────────────────────────────────
 // private sub-modules under `host_manage/`. Public

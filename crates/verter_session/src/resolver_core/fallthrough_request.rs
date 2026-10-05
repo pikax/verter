@@ -5,9 +5,10 @@ use crate::request_context::ColdComputeCompletenessScope;
 use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
     RequestRunResult, RequestSource, ResolverContext, SingleflightGroup, StableExecutionValue,
-    StableRequestExecutor, StoreView,
+    StableRequestExecutor,
 };
 use crate::semantic_query::ResultCompleteness;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Owner-minted evidence that a stable fallthrough result was computed inside
 /// the request driver's cacheability scope. Only the request driver can
@@ -513,8 +514,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{SingleflightRole, StoreViewCompatToken};
+    use crate::resolver_core::SingleflightRole;
     use std::cell::Cell;
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     /// Shared tracer host for request-driver unit-test hosts. The driver, not
     /// the test caller, still opens and owns every scope.

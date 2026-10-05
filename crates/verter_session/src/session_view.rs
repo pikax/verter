@@ -1142,13 +1142,13 @@ fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
 ///
 /// `provenance` counts each FULL computation (the collect + sort + hash
 /// body, NOT the empty short-circuit) on the owning host via
-/// [`crate::types::MetaProvenance::overlay_set_fingerprint_full_computations`],
+/// [`crate::meta_provenance::MetaProvenance::overlay_set_fingerprint_full_computations`],
 /// so both the per-batch O(1) memoization AND the zero-cost analysis-only
 /// path are mechanically observable.
 fn overlay_set_fingerprint(
     overlay_hashes: &FxHashMap<String, Hash16>,
     tombstones: Option<&std::collections::HashSet<String>>,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> u64 {
     if overlay_hashes.is_empty() && tombstones.is_none_or(std::collections::HashSet::is_empty) {
         return 0;

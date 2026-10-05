@@ -29,7 +29,6 @@ use crate::locator_identity::{
     semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ProjectIdentityDim,
     ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
 };
-use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::operand::{
     authored_anchor, known_segment_to_path_segment, AuthoredSemanticOperand,
     ForceProjectionSegment, ForcedSemanticOperand, OperandBinderIdentity, OperandSplitEnv,
@@ -44,6 +43,7 @@ use crate::semantic_query::{
 };
 use verter_session_query::facts::fact_cache::ParseEnvHash;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 use super::{ProjectSemanticDispatch, SemanticOperandAuthority};
 

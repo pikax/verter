@@ -169,8 +169,8 @@ mod tests {
     use crate::resolver_core::component_meta_query_engine::{
         semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     };
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::SemanticQueryValueTag;
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     /// Every `QueryError` variant, so the classification pins cannot silently
     /// miss a variant added later (the matches are exhaustive at the call

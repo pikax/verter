@@ -160,7 +160,7 @@ mod tests {
                 binding: InternedName::from("X"),
                 space: SymbolSpace::Type,
                 resolved_canonical: Arc::from(
-                    crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL,
+                    verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL,
                 ),
                 resolved_source_name: InternedName::from("X"),
             },

@@ -27,10 +27,11 @@ use std::sync::Arc;
 use crate::id::canonicalize_id;
 use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
-use crate::types::{
-    HostMetricsSnapshot, HostRetentionSnapshot, MetaProvenance, MetaProvenanceSnapshot,
-};
 use crate::VerterHost;
+use crate::{
+    meta_provenance::{MetaProvenance, MetaProvenanceSnapshot},
+    types::{HostMetricsSnapshot, HostRetentionSnapshot},
+};
 
 impl VerterHost {
     /// Swap the workspace backing this host.
@@ -484,7 +485,7 @@ impl VerterHost {
     pub fn clear_compile_cache(&self) {
         // ProfileState (D48 — compile_cache_db): per-profile compile
         // outputs are flushed through the typed session node.
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         for mut entry in self.compile_cache().iter_mut() {
             session_node.clear_compile_outputs_for_file(&mut entry);
         }
@@ -1067,7 +1068,8 @@ impl VerterHost {
         // outputs. ProfileState has no `evicted` flag; the eviction
         // marker lives on DerivedRawState.
         if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();
             // Clearing `latest_diagnostics` is a diagnostics change that moves

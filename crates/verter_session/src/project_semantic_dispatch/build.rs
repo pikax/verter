@@ -5707,7 +5707,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: shape_attribution.clone(),
-                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                    key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
                     lane: verter_session_query::facts::FactLane::Semantic,
@@ -5898,7 +5898,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
                             resolve_rel(augmenter_canonical.as_ref(), fact.specifier.as_ref())
                         } else { None };
-                        if !crate::file_artifact_store::augmenter_matches_target(
+                        if !verter_session_query::source::augmentation::augmenter_matches_target(
                             fact,
                             &key,
                             relative.as_deref(),
@@ -5942,8 +5942,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // A `declare global` augmenter is indexed under the global tag;
                         // its retained body lives in the GLOBAL augmentation scope, not
                         // in a module scope named after the tag.
-                        let is_global =
-                            spec.as_str() == crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
+                        let is_global = spec.as_str()
+                            == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
                         let scope_kind = if is_global {
                             AugmentationScopeKind::Global
                         } else {
@@ -6487,7 +6487,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: attribution.to_owned(),
-                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                    key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
                     lane: verter_session_query::facts::FactLane::Semantic,

@@ -464,9 +464,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 5
             )
             .is_some()
@@ -476,9 +478,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 6
             )
             .is_none()
@@ -541,9 +545,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &neighbour,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_some(),
@@ -553,9 +559,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &version_key("/a.vue", 8, 1),
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_some()
@@ -564,9 +572,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &version_key("/a.vue", 5, 0),
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_none()
@@ -591,7 +601,7 @@ mod tests {
                 crate::project_semantic_dispatch::memo::read_framework_surface(
                     &store,
                     &disk,
-                    |facts| crate::resolver_core::StoreView::validates_fact_signature(
+                    |facts| verter_session_query::facts::store_view::StoreView::validates_fact_signature(
                         &live_view, facts
                     ),
                     0
@@ -605,9 +615,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &disk,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_some()
@@ -662,9 +674,11 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &stale,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_none(),
@@ -678,9 +692,9 @@ mod tests {
     }
 
     struct RejectingStoreView;
-    impl crate::resolver_core::StoreView for RejectingStoreView {
-        fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-            crate::resolver_core::StoreViewCompatToken {
+    impl verter_session_query::facts::store_view::StoreView for RejectingStoreView {
+        fn compat_token(&self) -> verter_session_query::facts::store_view::StoreViewCompatToken {
+            verter_session_query::facts::store_view::StoreViewCompatToken {
                 epoch: 0,
                 session: None,
                 validity_fingerprint: 0,
@@ -728,10 +742,12 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &RejectingStoreView,
-                    facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &RejectingStoreView,
+                        facts,
+                    )
+                },
                 5
             )
             .is_none()
@@ -743,10 +759,12 @@ mod tests {
             crate::project_semantic_dispatch::memo::read_framework_surface(
                 &store,
                 &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &permissive,
-                    facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &permissive,
+                        facts,
+                    )
+                },
                 5
             )
             .is_some()

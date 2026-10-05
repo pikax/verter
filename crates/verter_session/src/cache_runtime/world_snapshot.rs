@@ -39,8 +39,9 @@
 
 #![allow(dead_code)]
 
-use crate::resolver_core::{ResolverContext, StoreViewCompatToken};
+use crate::resolver_core::ResolverContext;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::store_view::StoreViewCompatToken;
 
 /// Newtype wrapper around the session id used to scope an overlay.
 ///
@@ -243,11 +244,11 @@ mod tests {
     //! crate's `for_tests` module. Construction uses struct-literal
     //! syntax directly.
     use super::*;
-    use crate::resolver_core::StoreViewCompatToken;
     use crate::types::HostConfig;
     use crate::VerterHost;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     fn token(epoch: u64, session: Option<u64>) -> StoreViewCompatToken {
         StoreViewCompatToken {
@@ -548,7 +549,7 @@ mod tests {
 
         // `compat_token` reads through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`
         // — verify by re-reading directly and comparing.
-        let expected_token = crate::resolver_core::StoreView::compat_token(
+        let expected_token = verter_session_query::facts::store_view::StoreView::compat_token(
             &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
         );
         assert_eq!(

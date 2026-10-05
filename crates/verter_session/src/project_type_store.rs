@@ -1006,7 +1006,7 @@ pub struct ProjectTypeStore {
     /// the env-hash dimensions). The fact-validated `Session` mode uses
     /// the per-profile [`compile_cache_db`](Self::compile_cache_db)
     /// instead, so the two cache families are disjoint by construction.
-    compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
+    compile_output_pure_content: crate::compile_output_node::CompileOutputNodePureContent,
     /// The demand-sliced flow substrate's home: the
     /// once-per-content-version `FunctionFlowGraphStore` plus the
     /// content-addressed `FlowSliceHashNode` / `FlowSliceLoweredBodyNode`
@@ -1138,14 +1138,14 @@ impl ProjectTypeStore {
     }
 
     /// Construct a store wired to the host's
-    /// [`MetaProvenance`](crate::types::MetaProvenance) so the embedded
+    /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the embedded
     /// [`SemanticGraphStore`] reports its contention instrumentation
     /// counters through the shared provenance surface. Test-only
     /// `ProjectTypeStore::new()` callers stay uninstrumented
     /// (semantic-graph stats remain visible through their own
     /// `stats_snapshot` surface).
     #[must_use]
-    pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
+    pub fn with_provenance(provenance: Arc<crate::meta_provenance::MetaProvenance>) -> Self {
         Self::build(
             Some(provenance),
             verter_session_query::retention::SemanticRetentionAccount::process_local(),
@@ -1153,7 +1153,7 @@ impl ProjectTypeStore {
     }
 
     fn build(
-        provenance: Option<Arc<crate::types::MetaProvenance>>,
+        provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         let counters = ProjectTypeStoreCounters::default();
@@ -1209,7 +1209,8 @@ impl ProjectTypeStore {
             shape_cache_db: Arc::new(shape_cache_db),
             app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
-            compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
+            compile_output_pure_content:
+                crate::compile_output_node::CompileOutputNodePureContent::new(),
             flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
@@ -1371,7 +1372,7 @@ impl ProjectTypeStore {
     /// [`crate::types::CompileCacheMode::Content`] requests.
     pub(crate) fn compile_output_pure_content(
         &self,
-    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+    ) -> &crate::compile_output_node::CompileOutputNodePureContent {
         &self.compile_output_pure_content
     }
 

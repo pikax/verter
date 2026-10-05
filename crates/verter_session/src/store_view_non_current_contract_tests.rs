@@ -48,9 +48,9 @@
 //! `warm_validation_entry_points_require_current_store_view`,
 //! `resolver_store_view_into_owned_view_is_allowlisted`).
 
-use crate::resolver_core::StoreView;
 use std::sync::Arc;
 use std::time::Duration;
+use verter_session_query::facts::store_view::StoreView;
 
 use crate::resolver_store::HostStoreView;
 use crate::types::{FileLanguage, UpsertRequest};

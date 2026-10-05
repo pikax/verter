@@ -17,8 +17,11 @@
 use std::sync::Arc;
 
 use crate::semantic_query::ProjectionMode;
-use crate::types::{HostConfig, MetaProvenanceSnapshot, UpsertRequest};
 use crate::VerterHost;
+use crate::{
+    meta_provenance::MetaProvenanceSnapshot,
+    types::{HostConfig, UpsertRequest},
+};
 
 fn make_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -276,7 +279,7 @@ fn concurrent_cold_resolves_collapse() {
 
     // The base lane identity is the bare canonical (the overlay lane
     // carries the "overlay\0" prefix — collision-free by construction).
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -834,7 +837,7 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
         // Deterministic admission (no wall clock): a bare-`run` leader
         // mid-compute holds the leader-only baseline of 2 strong refs on
         // the lane; the committed follower adds its own clone.
-        let token = crate::resolver_core::StoreViewCompatToken {
+        let token = verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: 0,
             session: None,
             validity_fingerprint: 0,
@@ -1094,7 +1097,7 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
         }));
     }
 
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -1635,7 +1638,7 @@ fn concurrent_overlay_materialise_collapses() {
     let lane_discriminator = view.overlay_artifact_discriminator(canonical);
     let lane_key =
         format!("overlay\u{0}{canonical}\u{0}{lane_hash:02x?}\u{0}{lane_discriminator:02x?}");
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -1861,7 +1864,7 @@ fn route_fact_producer_matches_validator_snapshot() {
             canonical,
             verter_session_query::facts::fact_cache::DerivedFactKind::Route,
         );
-        let validator = crate::resolver_core::StoreView::derived_hash_for(
+        let validator = verter_session_query::facts::store_view::StoreView::derived_hash_for(
             &view,
             canonical,
             verter_session_query::facts::fact_cache::DerivedFactKind::Route,
@@ -1926,7 +1929,7 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
          canonical",
     );
     // … but carries no Route derived hash for it.
-    let validator = crate::resolver_core::StoreView::derived_hash_for(
+    let validator = verter_session_query::facts::store_view::StoreView::derived_hash_for(
         &view,
         plain,
         verter_session_query::facts::fact_cache::DerivedFactKind::Route,
@@ -2538,7 +2541,7 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
 fn lazy_sfc_analysis_workers_count_their_structure_parse() {
     use std::sync::atomic::Ordering;
 
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let source = "<script setup lang=\"ts\">const a: number = 1;</script>\n\
                   <template><div>{{ a }}</div></template>\n\
                   <style>.x { color: red; }</style>\n";
@@ -3038,7 +3041,7 @@ fn owner_import_surface_from_fenced_route_walk_is_served_but_not_admitted() {
 fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
 
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/owner.ts";
@@ -3147,7 +3150,7 @@ fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
 fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
 
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/surface_empty_owner.ts";
@@ -3244,7 +3247,7 @@ fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
 /// than declining every miss.
 #[test]
 fn unfenced_surface_empty_miss_stays_a_joinable_rendezvous() {
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/surface_empty_owner.ts";

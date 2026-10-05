@@ -33,8 +33,8 @@
 
 use crate::file_artifact_store::FileArtifactKeySource;
 use crate::resolver_core::request_ports::IndexedInputs;
-use crate::resolver_core::StoreView;
 use std::sync::Arc;
+use verter_session_query::facts::store_view::StoreView;
 
 use crate::resolver_core::{
     CanonicalCompletionOverlay, HostResolverContext, SessionResolverContext,
@@ -484,8 +484,9 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
 /// and the warm-hit `ResolvedImportFactsDb` lookup succeeds.
 #[test]
 fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical() {
-    use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView, StoreView};
+    use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView};
     use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
+    use verter_session_query::facts::store_view::StoreView;
     // `ResolverStore` is intentionally absent here — the test exercises
     // the wrapper validator directly via `validates_fact_signature`
     // and does not need the store-mutation surface.
@@ -752,8 +753,9 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
 /// remembered; a new request starts empty.
 #[test]
 fn a_request_validates_a_shared_receipt_once() {
-    use crate::resolver_core::{RequestStoreView, StoreView};
+    use crate::resolver_core::RequestStoreView;
     use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _) = small_host_with_one_script();
     let base = host.resolver_store_view_read().into_owned_view();

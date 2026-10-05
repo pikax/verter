@@ -501,7 +501,7 @@ impl VerterHost {
             )
         };
         let current = self.resolver_store_view_read().current()?;
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         // The view is borrowed ONCE for the whole signature. Re-borrowing
         // it per fact opened the widest straddle window in the tree: a
         // concurrent writer could move state between two facts of the
@@ -2172,7 +2172,8 @@ impl VerterHost {
         // split). The compile-output slots are cleared through the
         // typed session node.
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut cc);
         }
         if let Some(mut derived) = self.derived_raw_cache().get_mut(&canonical) {
@@ -2220,7 +2221,7 @@ impl VerterHost {
         for owner in &dependents {
             if let Some(mut cc) = self.compile_cache().get_mut(owner) {
                 let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                 session_node.clear_compile_outputs_for_file(&mut cc);
             }
             if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {

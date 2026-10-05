@@ -62,11 +62,11 @@ use crate::meta::MetaProject;
 use crate::resolver_core::{
     run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaCacheLookup,
     ComponentMetaRequestHost, RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole,
-    StoreView,
 };
 use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_session_query::facts::store_view::StoreView;
 
 const NODE_COUNT_GROWTH_LIMIT: f64 = 1.20;
 

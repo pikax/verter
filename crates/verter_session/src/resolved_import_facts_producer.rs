@@ -57,6 +57,7 @@
 //! Arch-guard
 //! `crates/verter_session/tests/cases/g_misc1/lib_env_hash_excluded_from_resolved_import_facts.rs`
 //! pins this absence.
+use verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL;
 
 use std::sync::Arc;
 
@@ -73,13 +74,6 @@ use crate::resolved_import_facts::{
     RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use crate::VerterHost;
-
-/// Sentinel canonical placed on a negative
-/// [`FactKey::ResolvedImportClause`] entry so the fact key stays
-/// non-`Option` while remaining distinguishable from any real
-/// canonical path. The NUL bytes prevent collision with any
-/// filesystem path on every platform Verter supports.
-pub(crate) const UNRESOLVED_SENTINEL: &str = "\0unresolved\0";
 
 impl VerterHost {
     /// Production producer for

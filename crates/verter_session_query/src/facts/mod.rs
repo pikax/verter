@@ -25,6 +25,7 @@ pub mod route;
 pub mod route_closure;
 pub mod route_facts;
 pub mod runtime_schema;
+pub mod store_view;
 pub mod symbol;
 pub mod version;
 

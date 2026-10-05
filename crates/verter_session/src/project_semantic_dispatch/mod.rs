@@ -59,7 +59,7 @@ use verter_session_query::type_solver::builtin::BuiltinUtility;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
-use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, NodeScopeId,
     OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode, PropertyKey,
@@ -68,6 +68,7 @@ use crate::semantic_query::{
     SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::{Acquired, ReadCapture, SemanticGraphStore};
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 use verter_type_expr::PrimitiveName;
 
 // Module tree. The sub-modules are `pub(crate)` so external callers see only
@@ -189,6 +190,7 @@ pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
 pub(crate) mod relation_excess;
+pub(crate) mod relation_knobs;
 pub(crate) mod relation_predicates;
 pub(crate) mod relation_variance;
 mod return_equation;
@@ -3571,7 +3573,7 @@ fn finalise_traced_build_output<T>(
     ctx: &dyn crate::resolver_core::ResolverContext,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
     // Gates the `ShallowDiagnostic::SignatureOverflow` walker diagnostic
     // below: `true` ONLY when this exact cold build is the direct build for

@@ -77,7 +77,7 @@ fn session_slot_present(host: &VerterHost) -> bool {
     host.compile_cache()
         .get(OWNER)
         .map(|cc| {
-            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new()
+            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
                 .peek_signature(&cc, profile_hash)
                 .is_some()
         })

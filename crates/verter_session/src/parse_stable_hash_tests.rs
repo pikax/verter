@@ -20,9 +20,9 @@ use oxc_span::SourceType;
 use super::compute_parse_stable_hash;
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::decl_lowering::DeclLoweringService;
+use crate::meta_provenance::MetaProvenance;
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::ShallowFileState;
-use crate::types::MetaProvenance;
 use verter_session_query::source::snapshot::SnapshotKey;
 
 /// Build the canonical `IndexedReady` for `source` through the REAL

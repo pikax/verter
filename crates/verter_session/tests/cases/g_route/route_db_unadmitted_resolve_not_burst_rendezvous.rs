@@ -77,7 +77,7 @@ const LEADER_AND_SIBLING_PIN_INFLIGHT_REFS: usize = 3;
 /// fails loudly rather than blocking the suite forever.
 fn wait_for_route_follower_admitted<V>(db: &RouteDb, provider: &str, name: &str, view: &V)
 where
-    V: verter_session::resolver_core::StoreView + ?Sized,
+    V: verter_session_query::facts::store_view::StoreView + ?Sized,
 {
     let deadline = Instant::now() + Duration::from_secs(10);
     while db.test_route_inflight_strong_count(&rk(provider, name), view)

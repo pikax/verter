@@ -16,9 +16,9 @@
 use verter_language::FileLanguage;
 
 use crate::framework::public_contract::ComponentContractAvailability;
-use crate::resolver_core::StoreView as _;
 use crate::types::{CompileProfile, PublicApiMode, PublicApiProjectionError, TscResponse};
 use crate::VerterHost;
+use verter_session_query::facts::store_view::StoreView as _;
 
 /// Opaque proof that a structured component contract was projected from one
 /// admitted component-meta result and one separately-cacheable output

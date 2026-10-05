@@ -1,7 +1,8 @@
 use crate::resolver_core::{
     run_stable_request, RequestRunResult, ResolutionNodeKey, SingleflightGroup,
-    StableExecutionValue, StableRequestExecutor, StoreView,
+    StableExecutionValue, StableRequestExecutor,
 };
+use verter_session_query::facts::store_view::StoreView;
 
 /// By-value result of the owner-scoped component-meta cold computation.
 /// `cache_refusal` is orthogonal to typed completeness: the value remains
@@ -463,10 +464,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{
-        RequestSource, ResolutionNodeKind, StoreViewCompatToken, TraversalLens,
-    };
+    use crate::resolver_core::{RequestSource, ResolutionNodeKind, TraversalLens};
     use std::cell::Cell;
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     /// Validation-trivial view: the executor's stability gate now reads
     /// `current_view_supersession_fingerprint()` from the HOST, not the

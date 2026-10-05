@@ -11,10 +11,11 @@ use std::sync::Arc;
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
     prepared_decl::PreparedDeclBundle, route_db::RouteDb, FallthroughNodeKey, ResolutionNodeKey,
-    ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView, ValidatedFactAdmission,
+    ResolverCounters, SingleflightGroup, StableExecutionValue, ValidatedFactAdmission,
     ValidatedFactCache,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// View fingerprints per (document, mode) whose component-meta states the
 /// runtime keeps: the current one and the one before it.
@@ -101,7 +102,7 @@ where
         ),
     >
     where
-        TView: crate::resolver_core::StoreView + ?Sized,
+        TView: verter_session_query::facts::store_view::StoreView + ?Sized,
     {
         self.cache
             .get_if_valid_self_rooted_attributed(key, view, self_root_canonicals)

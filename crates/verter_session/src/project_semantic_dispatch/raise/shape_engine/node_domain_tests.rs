@@ -25,8 +25,8 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
             name: std::sync::Arc::from("FixtureIntrinsic"),
         },
         QueryError::BudgetExceeded(
-            crate::resolver_core::shallow_file_state::BudgetExceededFailure {
-                domain: crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
+            verter_session_query::inputs::budget::BudgetExceededFailure {
+                domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                 limit: 1,
                 actual: 2,
                 context: "opaque-sentinel summary fixture".to_string(),

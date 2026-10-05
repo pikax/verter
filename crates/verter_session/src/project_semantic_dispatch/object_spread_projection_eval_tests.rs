@@ -789,7 +789,7 @@ fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
             QueryResult::Error(crate::semantic_query::QueryError::BudgetExceeded(failure)) => {
                 assert_eq!(
                     failure.domain,
-                    crate::resolver_core::BudgetDomain::ProjectionOperation
+                    verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation
                 );
             }
             other => panic!("attempt {attempt}: expected typed budget partial, got {other:?}"),

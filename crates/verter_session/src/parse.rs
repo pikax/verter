@@ -338,7 +338,7 @@ pub(crate) fn carrier_parse_snapshot(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<(
     ParseSnapshot,
     Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
@@ -374,7 +374,7 @@ pub(crate) fn carrier_snapshot_from_artifact(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Option<(ParseSnapshot, Arc<str>)> {
     let eval_source = catalog_eval_source(artifact, source)?;
@@ -397,7 +397,7 @@ pub(crate) fn carrier_snapshot_from_eval_source(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
     eval_source: &str,
 ) -> Option<ParseSnapshot> {
@@ -784,7 +784,7 @@ fn build_svelte_snapshot_from_eval_source(
     source: &str,
     eval_source: &str,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     script_program: FrameworkScriptProgram<'_>,
     script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
@@ -1218,7 +1218,7 @@ pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> (
     ParseSnapshot,
     Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
@@ -1245,7 +1245,7 @@ pub(crate) fn parse_vue_snapshot(
 #[cfg(test)]
 pub(crate) fn build_vue_parse_artifact_from_source(
     source: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Arc<verter_compiler::framework_common::FrameworkParseArtifact> {
     crate::carrier_fixture_tests::publish_carrier_fixture(
         "file:///fixture.vue",
@@ -1484,7 +1484,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     parsed: &ParsedSfc,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     eval_source: &str,
     script_program: VueScriptProgram<'_>,
     script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
@@ -2324,7 +2324,7 @@ fn build_vue_script_outputs(
     eval_source: &str,
     needs_exports: bool,
     needs_script_analysis: bool,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> VueScriptOutputs {
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
@@ -2391,7 +2391,7 @@ fn build_vue_script_outputs(
 #[cfg(test)]
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
@@ -2405,7 +2405,7 @@ pub(crate) fn build_script_analysis_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
     eval_source: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
     let outputs = build_vue_script_outputs(
         parsed,
@@ -2433,7 +2433,7 @@ pub(crate) fn build_script_analysis_from_parsed(
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
@@ -2449,7 +2449,7 @@ pub(crate) fn build_style_analyses_from_source(
 pub(crate) fn build_script_analysis_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
     let artifact = framework_parse?;
     let eval_source = catalog_eval_source(artifact, source)?;
@@ -2463,7 +2463,7 @@ pub(crate) fn build_style_analyses_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
     canonical_id: &str,
-    _provenance: &crate::types::MetaProvenance,
+    _provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
     framework_parse.map_or_else(Vec::new, |artifact| {
         build_style_analyses_from_inventory(
@@ -2487,7 +2487,7 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     source: &str,
     _analysis_scope: verter_semantic::analysis::AnalysisScope,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     eval_source: &str,
     script_program: FrameworkScriptProgram<'_>,
     script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
@@ -2544,7 +2544,7 @@ pub(crate) fn compile_template_data(
     compile_source: &str,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     reuse_carrier_parse: bool,
-    _provenance: &crate::types::MetaProvenance,
+    _provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct>
 {
     let adapter_id = file_language.adapter_id()?;
@@ -2720,7 +2720,7 @@ pub(crate) fn parse_non_sfc_snapshot(
     canonical_id: &str,
     source: &str,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> ParseSnapshot {
     // A full OXC program parse outside the `parse_eval_program` funnel —
     // counted on its own provenance rail (it is not a carrier parse and
@@ -3028,7 +3028,7 @@ mod tests {
             canonical_id,
             source,
             analysis_scope,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
             .expect("a Vue carrier artifact carries a ParsedSfc")
@@ -3044,7 +3044,7 @@ mod tests {
             canonical_id,
             source,
             file_language,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
     }
 
@@ -3344,7 +3344,7 @@ const view = <div className="card">hello</div>
             "Comp.vue",
             source,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let inventory_ids = artifact
             .inventory()
@@ -3974,7 +3974,7 @@ watch(count, (value, oldValue) => {
             source,
             AnalysisScope::LSP,
             &verter_language::FileLanguage::svelte(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("registered Svelte carrier");
         let styles = snapshot.style_analyses;
@@ -4061,7 +4061,7 @@ watch(count, (value, oldValue) => {
             source,
             AnalysisScope::LSP,
             &verter_language::FileLanguage::svelte(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("svelte carrier dispatch yields a snapshot");
         assert_eq!(snapshot.style_analyses.len(), 1);
@@ -4212,7 +4212,7 @@ onMounted(() => { console.log('mounted') })
     fn catalog_miss_script_analysis_refuses_empty_snapshot() {
         let source =
             "<script setup lang=\"ts\">const n = 1;</script>\n<template><div /></template>";
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         assert!(
             catalog_eval_source(artifact.as_ref(), source).is_some(),
@@ -4247,7 +4247,7 @@ onMounted(() => { console.log('mounted') })
             "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
             "<template><Child :foo=\"n\" /></template>",
         );
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let hit = compile_template_data(
@@ -4303,7 +4303,7 @@ onMounted(() => { console.log('mounted') })
             "<script setup lang=\"ts\">import Other from './Other.vue'</script>\n",
             "<template><Other :bar=\"m\" /></template>",
         );
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source_a, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let mixed = compile_template_data(
@@ -4337,7 +4337,7 @@ onMounted(() => { console.log('mounted') })
     #[test]
     fn compile_template_data_script_only_is_empty_success_not_refusal() {
         let source = "<script setup lang=\"ts\">const n = 1;</script>";
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let hit = compile_template_data(

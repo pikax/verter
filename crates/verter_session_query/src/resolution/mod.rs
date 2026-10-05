@@ -46,6 +46,7 @@ mod source_id_resolution;
 pub mod store_view_identity;
 mod top_level_resolution;
 mod tsconfig_paths_resolution;
+pub mod unresolved;
 
 pub use crate::resolution::ambient_symbol_hit::AmbientSymbolHit;
 pub use crate::resolution::attempt_outcome::{

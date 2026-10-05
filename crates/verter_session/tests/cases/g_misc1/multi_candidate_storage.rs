@@ -21,8 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use verter_session::resolver_core::{StoreView, StoreViewCompatToken, ValidatedFactCache};
+use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 #[derive(Debug)]
 struct TestView {

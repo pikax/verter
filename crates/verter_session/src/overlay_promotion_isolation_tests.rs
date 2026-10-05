@@ -42,9 +42,9 @@
 use std::sync::Arc;
 
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::StoreView;
 use crate::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::DerivedFactKind;
+use verter_session_query::facts::store_view::StoreView;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const TYPEDEFS_DTS: &str = r#"export interface Outer {

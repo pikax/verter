@@ -190,7 +190,7 @@ pub struct HostStageExecutor {
     /// once per Vue SFC structure parse so the cold-build dedup
     /// counters observe scheduler-stage parses (rayon workers have no
     /// capture-token TLS).
-    pub provenance: Arc<crate::types::MetaProvenance>,
+    pub provenance: Arc<crate::meta_provenance::MetaProvenance>,
     pub source_authority:
         Arc<verter_language::registered_source_authority::RegisteredSourceAuthority>,
     pub grammar_authority: Arc<verter_language::carrier_grammar::CarrierGrammarAuthority>,
@@ -210,7 +210,7 @@ impl HostStageExecutor {
     pub fn new(
         config: HostConfig,
         workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-        provenance: Arc<crate::types::MetaProvenance>,
+        provenance: Arc<crate::meta_provenance::MetaProvenance>,
         source_authority: Arc<
             verter_language::registered_source_authority::RegisteredSourceAuthority,
         >,

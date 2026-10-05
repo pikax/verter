@@ -453,7 +453,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     let ctx: &dyn ResolverContext = &host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
-        !crate::resolver_core::StoreView::tracks_file(&view, never_loaded),
+        !verter_session_query::facts::store_view::StoreView::tracks_file(&view, never_loaded),
         "fixture invariant: the probe canonical must be untracked by the live \
          store view — otherwise the lazy/strict arms are indistinguishable",
     );
@@ -504,7 +504,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     let ctx: &dyn ResolverContext = &host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
-        crate::resolver_core::StoreView::tracks_file(&view, canonical),
+        verter_session_query::facts::store_view::StoreView::tracks_file(&view, canonical),
         "fixture invariant: the loaded canonical must be tracked by the live \
          store view",
     );

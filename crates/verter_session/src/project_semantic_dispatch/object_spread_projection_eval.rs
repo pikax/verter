@@ -4,7 +4,6 @@ use verter_type_expr::{ExcessPropertyOrigin, MemberVisibility, ObjectMethodKind}
 
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
-use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::object_spread_projection::evaluator_support;
 use crate::semantic_query::{
     AuthoredAccessorEffect, AuthoredMethodEffect, AuthoredPropertyEffect, AuthoredPropertyKey,
@@ -15,6 +14,7 @@ use crate::semantic_query::{
     PropertyKey, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, SurfaceMember,
 };
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 const DISTRIBUTION_CAP: usize = 1024;
 const SPREAD_DEPTH_CAP: usize = 8;

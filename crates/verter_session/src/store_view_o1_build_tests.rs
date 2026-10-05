@@ -30,10 +30,10 @@
 use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
-use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_scheduler::stage::Priority;
+use verter_session_query::facts::store_view::StoreView;
 
 const DEP_ID: &str = "/proj/dep.ts";
 const DEP_SRC: &str = "export const d = 1\nexport interface D { x: number }\n";

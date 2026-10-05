@@ -22,7 +22,7 @@ fn make_project_with_config(config: HostConfig) -> Arc<MetaProject> {
     MetaProject::new(VerterHost::new_standalone(config))
 }
 
-fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
+fn provenance(project: &MetaProject) -> crate::meta_provenance::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }
 

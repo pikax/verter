@@ -26,10 +26,11 @@ use verter_session_query::facts::SymbolSpace;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::file_artifact_store::{
-    AugmentationTargetKind, FileArtifacts, InternedName, InternedSpecifier, GLOBAL_AUGMENTATION_TAG,
+    AugmentationTargetKind, FileArtifacts, InternedName, InternedSpecifier,
 };
 use crate::project_type_store::IndexedReady;
 use verter_session_query::source::artifact_key::FileArtifactKey;
+use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
 #[cfg(test)]
 mod ac1_tests;
@@ -615,7 +616,7 @@ pub fn collect_file_contributions(
 fn collect_from_indexed(
     key: &FileArtifactKey,
     indexed: &IndexedReady,
-    augmentations: &[crate::file_artifact_store::ModuleAugmentationFact],
+    augmentations: &[verter_session_query::source::augmentation::ModuleAugmentationFact],
     parse_stable_hash: Hash16,
 ) -> FileContributionRecord {
     let module_kind = classify_module_kind(indexed);

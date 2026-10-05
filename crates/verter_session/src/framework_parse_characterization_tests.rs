@@ -997,7 +997,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             source,
             verter_semantic::analysis::AnalysisScope::LSP,
             &FileLanguage::vue(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("Vue carrier dispatch yields a snapshot");
         let alloc_b = oxc_allocator::Allocator::new();
@@ -1082,7 +1082,7 @@ fn rehoused_carrier_artifact_stamps_exact_parse_key() {
         source,
         verter_semantic::analysis::AnalysisScope::LSP,
         &FileLanguage::vue(),
-        &crate::types::MetaProvenance::default(),
+        &crate::meta_provenance::MetaProvenance::default(),
     )
     .expect("Vue carrier dispatch yields a snapshot");
     let language = FileLanguage::vue();

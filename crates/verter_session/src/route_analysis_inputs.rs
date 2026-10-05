@@ -31,9 +31,8 @@ use verter_semantic::analysis::{
     ROUTER_CONFIG_CANDIDATES,
 };
 
-use crate::input_basis::{
-    DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation, RequestInputBinding,
-};
+use crate::input_basis::{DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation};
+use verter_session_query::source::input_binding::RequestInputBinding;
 
 /// Builds the complete `RouteAnalysisInputs` snapshot for `project_root`.
 ///

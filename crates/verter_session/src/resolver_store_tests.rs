@@ -5,7 +5,7 @@
 use crate::resolver_store::HostStoreView;
 use rustc_hash::FxHashMap;
 
-use crate::resolver_core::StoreView;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Files loaded as dependencies DURING resolution (after the store view
 /// snapshot was taken) are not tracked in `whole_hashes`. The validated
@@ -730,10 +730,10 @@ mod route_surface_hash_memo {
 
 mod syntactic_route_interface_fact {
     use super::route_surface_hash::routed_state;
-    use crate::resolver_core::StoreView;
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
+    use verter_session_query::facts::store_view::StoreView;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };

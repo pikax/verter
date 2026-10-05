@@ -980,7 +980,7 @@ fn scheduler_key_is_content_free_but_input_pin_moves_across_edit() {
 
 #[test]
 fn scheduler_identity_isolates_exact_demand_and_session() {
-    use crate::resolver_core::StoreViewCompatToken;
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     let base = StoreViewCompatToken {
         epoch: 7,

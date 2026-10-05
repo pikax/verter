@@ -986,7 +986,7 @@ impl VerterHost {
                     // closure. Omitting it would serve a stale slot and
                     // return `Ok(())` without recompiling.
                     let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                     if let Some(hit) = session_node.lookup(
                         &cc,
                         profile_hash,
@@ -1056,7 +1056,7 @@ impl VerterHost {
     /// through to cold recompute.
     ///
     /// This is the validator closure passed to
-    /// [`crate::cache_runtime::CompileOutputNodeFactValidatedSession::lookup`].
+    /// [`crate::compile_output_node::CompileOutputNodeFactValidatedSession::lookup`].
     /// The node owns the warm-hit gate: it refuses an overflowed
     /// carrier and short-circuits an empty fact rail (where the
     /// upstream `semantic_hash` / override-hash pre-filter is the sole
@@ -1081,7 +1081,7 @@ impl VerterHost {
         signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         let view = current_view.view();
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         view.validates_fact_signature(&signature.facts)
     }
 
@@ -1132,7 +1132,7 @@ impl VerterHost {
         // (`StoreViewRead::ReturnOnly`) can never serve a sound warm hit,
         // so `acquire_view` yields `None` there and the predicate reports
         // "not warm" — the consumer would route through cold recompute.
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         session_node
             .lookup(
                 &cc,
@@ -1167,7 +1167,7 @@ impl VerterHost {
     ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         self.compile_cache()
             .get(&canonical)
             .and_then(|cc| session_node.peek_signature(&cc, profile_hash))
@@ -1188,7 +1188,7 @@ impl VerterHost {
         canonical_id: &str,
         content_hash: Hash16,
         profile: &CompileProfile,
-    ) -> crate::cache_runtime::CompileOutputPureContentKey {
+    ) -> crate::compile_output_node::CompileOutputPureContentKey {
         let env = self.host_view_env_hashes_for(canonical_id);
         let project_identity = self.host_view_project_identity_for(canonical_id).0;
         // Source-map emission policy projected from the profile. The
@@ -1200,7 +1200,7 @@ impl VerterHost {
         } else {
             SourceMapPolicy::None
         };
-        crate::cache_runtime::CompileOutputPureContentKey {
+        crate::compile_output_node::CompileOutputPureContentKey {
             canonical_id: Arc::from(canonical_id),
             content_hash,
             parse_env_hash: env.parse_env_hash,
@@ -1500,7 +1500,8 @@ impl VerterHost {
             /// post-compile live re-read would stamp old-input bytes
             /// under a new-current identity. `None` for `Session` /
             /// `Stateless`.
-            content_publish_stamp: Option<(crate::cache_runtime::CompileOutputPureContentKey, u64)>,
+            content_publish_stamp:
+                Option<(crate::compile_output_node::CompileOutputPureContentKey, u64)>,
             /// Exact compiler block-content projection captured with the owner
             /// snapshot. Publish revalidates this after the cold compute so a
             /// concurrent supplied apply or external/owner publication cannot
@@ -1611,7 +1612,7 @@ impl VerterHost {
                 // never builds a workspace snapshot.
                 let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
                     let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                     session_node.peek_last_good(cc, profile_hash, |sig| {
                         #[cfg(test)]
                         crate::resolver_store::record_compile_warm_validation_view_read();
@@ -1749,7 +1750,8 @@ impl VerterHost {
                     // requests a store-view root capture.
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
-                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new(
+                            );
                         session_node
                             .lookup(
                                 cc,
@@ -2145,17 +2147,18 @@ impl VerterHost {
         // The last-good rail belongs to the PRODUCED arm only: a refusal committed
         // no output, so there is nothing to remember as last-good, and the
         // conversion cannot smuggle one in.
-        let compile_output_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
-            captured_semantic_hash,
-            content_override_hash,
-            profile.svelte_css_hash_override.as_deref().map(Arc::from),
-            compiled_products.to_cached(if stale {
-                fallback_last_good.clone()
-            } else {
-                None
-            }),
-            diagnostics.clone(),
-        );
+        let compile_output_value =
+            crate::compile_output_node::CompileOutputValue::from_compile_record(
+                captured_semantic_hash,
+                content_override_hash,
+                profile.svelte_css_hash_override.as_deref().map(Arc::from),
+                compiled_products.to_cached(if stale {
+                    fallback_last_good.clone()
+                } else {
+                    None
+                }),
+                diagnostics.clone(),
+            );
 
         // The `latest_diagnostics` + generation bump runs for EVERY mode
         // so compile errors / warnings surface regardless of caching.
@@ -2279,7 +2282,8 @@ impl VerterHost {
                         && matches!(compiled_products, CompiledProducts::Produced { .. });
                     if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
                         let session_node =
-                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new(
+                            );
                         session_node.publish(
                             &mut cc,
                             profile_hash,
@@ -2549,7 +2553,8 @@ impl VerterHost {
                 return None;
             }
             let cc = self.compile_cache().get(&canonical)?;
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             let tsx = session_node.peek_tsx(&cc, profile_hash)?;
             Some(IdeResponse {
                 code: tsx.code.clone(),

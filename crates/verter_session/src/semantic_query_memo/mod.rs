@@ -360,7 +360,7 @@ pub struct SemanticGraphStore {
     /// `None` for test-default stores constructed via `Default`.
     /// Used by `execute_cooperative` to bucket owner vs joiner paths
     /// and held time on `MetaProvenance`.
-    provenance: Option<Arc<crate::types::MetaProvenance>>,
+    provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
     /// The aggregate retained-byte account every candidate this memo
     /// publishes charges.
     ///
@@ -986,7 +986,7 @@ impl SemanticGraphStore {
     }
 
     /// Public read accessor for the shared
-    /// [`crate::types::MetaProvenance`] handle the store was constructed
+    /// [`crate::meta_provenance::MetaProvenance`] handle the store was constructed
     /// with. Returns `None` for `Default`-built stores (test-default
     /// path); host-built stores always return `Some`.
     /// `meta_resolve::slot_binding_graph` reaches the
@@ -994,7 +994,7 @@ impl SemanticGraphStore {
     /// threading a `&VerterHost` reference through every helper
     /// signature.
     #[must_use]
-    pub fn provenance(&self) -> Option<&Arc<crate::types::MetaProvenance>> {
+    pub fn provenance(&self) -> Option<&Arc<crate::meta_provenance::MetaProvenance>> {
         self.provenance.as_ref()
     }
 
@@ -2713,7 +2713,7 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, verter_session_query::analysi
 // `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
 // this body.
 pub(crate) fn semantic_graph_read_set_signature(
-    view: &dyn crate::resolver_core::StoreView,
+    view: &dyn verter_session_query::facts::store_view::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
     traced_facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
 ) -> Result<

@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::StoreView;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
+use verter_session_query::facts::store_view::StoreView;
 
 const FLOW_SOURCE: &str = "export function alpha(n: number) {\n\
      \x20 if (n <= 0) return 0;\n\

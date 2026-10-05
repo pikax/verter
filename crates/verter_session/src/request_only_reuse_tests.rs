@@ -37,8 +37,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::resolver_core::resolver_context::NonCacheableReadReason;
-use crate::resolver_core::StoreView;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::store_view::StoreView;
 
 fn upsert(host: &VerterHost, path: &str, source: &str) {
     let _ = host

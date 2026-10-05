@@ -1427,7 +1427,7 @@ fn owner_import_route_witness_is_side_effect_free() {
     );
     for fact in &witness_before_dep {
         assert!(
-            crate::resolver_core::StoreView::validates(&view_before_dep, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view_before_dep, fact),
             "precondition: {fact:?} must validate against the view it was captured from"
         );
     }
@@ -1498,9 +1498,9 @@ fn owner_import_route_witness_is_side_effect_free() {
     // entry rooted on the pre-appearance witness stops validating.
     let view_after_dep = host.resolver_store_view_read().into_owned_view();
     assert!(
-        witness_before_dep
-            .iter()
-            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after_dep, fact)),
+        witness_before_dep.iter().any(|fact| {
+            !verter_session_query::facts::store_view::StoreView::validates(&view_after_dep, fact)
+        }),
         "the pre-appearance witness must stop validating once the \
          previously-unresolvable ./theme resolves. Witness: \
          {witness_before_dep:?}"
@@ -1733,7 +1733,7 @@ fn import_route_witness_covers_caller_pushed_unauthored_specifiers() {
     );
     for fact in &witness {
         assert!(
-            crate::resolver_core::StoreView::validates(&view_before, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view_before, fact),
             "precondition: {fact:?} must validate against the view it was captured from"
         );
     }
@@ -1746,9 +1746,12 @@ fn import_route_witness_covers_caller_pushed_unauthored_specifiers() {
 
     let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        witness
-            .iter()
-            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        witness.iter().any(
+            |fact| !verter_session_query::facts::store_view::StoreView::validates(
+                &view_after,
+                fact
+            )
+        ),
         "the witness must stop validating once the caller-pushed specifier's \
          target disappears. Witness: {witness:?}"
     );
@@ -2178,7 +2181,7 @@ defineProps<Props>()
         .expect("a tracked transitive owner must produce a rootable witness");
     for fact in &witness {
         assert!(
-            crate::resolver_core::StoreView::validates(&view, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view, fact),
             "the captured store view must validate the transitive owner's \
              import-route witness fact {fact:?}"
         );
@@ -11231,7 +11234,7 @@ fn bindingless_import_surface_reresolves_after_target_appears() {
     let view_before = host.resolver_store_view_read().into_owned_view();
     for fact in &witness_before {
         assert!(
-            crate::resolver_core::StoreView::validates(&view_before, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view_before, fact),
             "precondition: {fact:?} must validate against the view it was captured from"
         );
     }
@@ -11246,9 +11249,9 @@ fn bindingless_import_surface_reresolves_after_target_appears() {
     );
     let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        witness_before
-            .iter()
-            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        witness_before.iter().any(|fact| {
+            !verter_session_query::facts::store_view::StoreView::validates(&view_after, fact)
+        }),
         "the pre-appearance witness must stop validating — otherwise a consumer \
          rooted on it warm-serves the miss forever. Witness: {witness_before:?}"
     );
@@ -11303,7 +11306,7 @@ fn import_route_witness_moves_when_a_positive_retargets() {
     );
     for fact in &witness_before {
         assert!(
-            crate::resolver_core::StoreView::validates(&view_before, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view_before, fact),
             "precondition: {fact:?} must validate against the view it was captured from"
         );
     }
@@ -11318,9 +11321,9 @@ fn import_route_witness_moves_when_a_positive_retargets() {
 
     let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        witness_before
-            .iter()
-            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        witness_before.iter().any(|fact| {
+            !verter_session_query::facts::store_view::StoreView::validates(&view_after, fact)
+        }),
         "STALE POSITIVE ROUTE WITNESS: the appearance of the higher-priority \
          .d.ts companion must invalidate the pre-retarget witness — otherwise \
          dependents warm-validate against the retargeted route forever. \
@@ -12043,7 +12046,7 @@ fn caller_pushed_route_retarget_is_witnessed_not_artifact_staled() {
     );
     for fact in &witness {
         assert!(
-            crate::resolver_core::StoreView::validates(&view_before, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view_before, fact),
             "precondition: {fact:?} must validate against the view it was captured from"
         );
     }
@@ -12069,9 +12072,12 @@ fn caller_pushed_route_retarget_is_witnessed_not_artifact_staled() {
     );
     let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        witness
-            .iter()
-            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        witness.iter().any(
+            |fact| !verter_session_query::facts::store_view::StoreView::validates(
+                &view_after,
+                fact
+            )
+        ),
         "a caller-pushed route RETARGET must invalidate the owner's witness — \
          that is where the currency the deleted artifact stamp used to carry \
          now lives. Witness: {witness:?}"
@@ -14880,7 +14886,7 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
         .expect("a materialised barrel must produce a rootable import-route witness");
     for fact in &witness {
         assert!(
-            crate::resolver_core::StoreView::validates(&view, fact),
+            verter_session_query::facts::store_view::StoreView::validates(&view, fact),
             "captured store views must validate the owner's import-route \
              witness fact {fact:?} against their captured resolution world, \
              without reconstructing the old structural shadow path",

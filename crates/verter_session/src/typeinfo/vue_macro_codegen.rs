@@ -33,7 +33,7 @@ use crate::locator_identity::BroadRuntimeSubjectLocator;
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{ResolverContext, StoreViewCompatToken};
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     BroadRuntimeKind, ExecutionAbort, PartialReasonSet, PathSegment, ProjectionMode,
     ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId,
@@ -48,6 +48,7 @@ use verter_scheduler::dag::PinId;
 use verter_scheduler::scheduler::{ScopedCacheNodeError, ScopedCacheNodeRequest};
 use verter_scheduler::stage::Priority;
 use verter_semantic::type_info::{MacroSemanticLane, ObservedMacroSurface, ObservedSurfaceMember};
+use verter_session_query::facts::store_view::StoreViewCompatToken;
 use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 mod runtime;

@@ -1481,7 +1481,8 @@ impl super::ProjectSemanticDispatch<'_> {
             for record in facts.augmentation_contributions.iter() {
                 let specifier = match &record.scope_kind {
                     AugmentationScopeKind::Global => {
-                        crate::fact_emission::GLOBAL_AUGMENTATION_TAG.to_string()
+                        verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
+                            .to_string()
                     }
                     AugmentationScopeKind::Module(specifier) => specifier.clone(),
                 };
@@ -1514,7 +1515,8 @@ impl super::ProjectSemanticDispatch<'_> {
                 let (scope_kind_tag, specifier) = match &block.scope {
                     AugmentationScopeKind::Global => (
                         verter_session_query::facts::AugmentationScopeKindTag::Global,
-                        crate::fact_emission::GLOBAL_AUGMENTATION_TAG.to_string(),
+                        verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
+                            .to_string(),
                     ),
                     AugmentationScopeKind::Module(specifier) => (
                         verter_session_query::facts::AugmentationScopeKindTag::Module,
@@ -1721,13 +1723,13 @@ impl<'a, P: Send + Sync>
     MemoRead<
         'a,
         crate::component_meta_result_db::ComponentMetaResultDb<P>,
-        &'a crate::MetaProvenance,
+        &'a crate::meta_provenance::MetaProvenance,
     >
 {
     pub(crate) fn for_result(
         db: &'a crate::component_meta_result_db::ComponentMetaResultDb<P>,
         facts: &'a dyn FactValidation,
-        observations: &'a crate::MetaProvenance,
+        observations: &'a crate::meta_provenance::MetaProvenance,
     ) -> Self {
         Self {
             db,
@@ -1740,7 +1742,7 @@ impl<'a, P: Send + Sync>
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
-        let bump_miss = |observations: &crate::MetaProvenance| {
+        let bump_miss = |observations: &crate::meta_provenance::MetaProvenance| {
             observations
                 .component_meta_result_cache_misses
                 .fetch_add(1, Ordering::Relaxed);
@@ -1803,7 +1805,9 @@ impl<'a, P: Send + Sync>
     }
 }
 
-pub(crate) fn record_component_meta_result_miss(observations: &crate::MetaProvenance) {
+pub(crate) fn record_component_meta_result_miss(
+    observations: &crate::meta_provenance::MetaProvenance,
+) {
     observations
         .component_meta_result_cache_misses
         .fetch_add(1, Ordering::Relaxed);
@@ -1949,7 +1953,7 @@ impl super::ProjectSemanticDispatch<'_> {
         crate::component_meta_result_db::ComponentMetaResultDb<
             crate::component_meta_result_db::CachedComponentMetaResult,
         >,
-        &crate::MetaProvenance,
+        &crate::meta_provenance::MetaProvenance,
     > {
         MemoRead::for_result(
             self.binding.component_meta_results.as_ref(),

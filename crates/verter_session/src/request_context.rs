@@ -1176,7 +1176,8 @@ pub struct RequestContext {
     pub dep_canonical_memo: parking_lot::Mutex<rustc_hash::FxHashMap<String, String>>,
     /// Sole committed input for this request. Bound once by
     /// [`Self::bind_committed_input`] before semantic work.
-    committed_input: std::sync::OnceLock<crate::input_basis::RequestInputBinding>,
+    committed_input:
+        std::sync::OnceLock<verter_session_query::source::input_binding::RequestInputBinding>,
 }
 
 /// Identity tuple for the mapped-member materialization
@@ -1522,14 +1523,17 @@ impl RequestContext {
     pub fn bind_committed_input(
         &self,
         basis: crate::InputBasis,
-    ) -> Result<(), crate::input_basis::RequestInputBinding> {
-        self.committed_input
-            .set(crate::input_basis::RequestInputBinding::from_basis(basis))
+    ) -> Result<(), verter_session_query::source::input_binding::RequestInputBinding> {
+        self.committed_input.set(
+            verter_session_query::source::input_binding::RequestInputBinding::from_basis(basis),
+        )
     }
 
     /// Bound committed input, if [`Self::bind_committed_input`] has run.
     #[must_use]
-    pub fn committed_input(&self) -> Option<&crate::input_basis::RequestInputBinding> {
+    pub fn committed_input(
+        &self,
+    ) -> Option<&verter_session_query::source::input_binding::RequestInputBinding> {
         self.committed_input.get()
     }
 

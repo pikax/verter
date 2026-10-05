@@ -23,7 +23,7 @@
 //! The two boundary files that ARE allowed to name these symbols:
 //!  - `crates/verter_session/src/types.rs` — the four gateway helpers
 //!    plus the field declaration (the encapsulation boundary).
-//!  - `crates/verter_session/src/cache_runtime/compile_output_node.rs`
+//!  - `crates/verter_session/src/compile_output_node.rs`
 //!    — the typed node, the only caller of the gateway helpers.
 //!
 //! Discipline mirrors `no_carrier_verdict_db.rs`:

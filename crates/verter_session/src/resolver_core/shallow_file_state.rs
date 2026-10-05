@@ -188,44 +188,6 @@ pub struct ResolutionCounters {
     pub builder_expansion_steps: u64,
 }
 
-/// Structured failure when a budget is exceeded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BudgetExceededFailure {
-    /// Which budget domain was exceeded.
-    pub domain: BudgetDomain,
-    /// The budget limit that was hit.
-    pub limit: usize,
-    /// Actual count at the time of failure.
-    pub actual: u64,
-    /// Context about what was being resolved when the budget tripped.
-    pub context: String,
-}
-
-/// Which resolution domain hit its budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BudgetDomain {
-    LocalClosure,
-    Frontier,
-    BuilderExpansion,
-    ProjectionOperation,
-    SolverResolveSteps,
-    SolverArenaNodes,
-    SolverInstantiationDepth,
-    /// The bytes a connected semantic demand reserves before it constructs a
-    /// type.
-    ConstructionBytes,
-}
-
-impl std::fmt::Display for BudgetExceededFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "BUDGET_EXCEEDED({:?}): limit={}, actual={}, context={}",
-            self.domain, self.limit, self.actual, self.context
-        )
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Local symbol closure
 // ---------------------------------------------------------------------------
@@ -329,13 +291,13 @@ impl ShallowFileState {
     }
 
     /// [`Self::service_backed_for_test_at`] additionally handing back the
-    /// memo's [`crate::types::MetaProvenance`] counters so lazy-demand
+    /// memo's [`crate::meta_provenance::MetaProvenance`] counters so lazy-demand
     /// tests can assert HOW MANY bodies lowered / programs parsed.
     #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_with_provenance_for_test(
         canonical: &str,
         source: &str,
-    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
+    ) -> (Arc<Self>, Arc<crate::meta_provenance::MetaProvenance>) {
         Self::service_backed_core_for_test(canonical, source, None, None)
     }
 
@@ -371,7 +333,7 @@ impl ShallowFileState {
         source: &str,
         whole_hash: Option<Hash16>,
         statement_owners: Option<&[TopLevelOwnerId]>,
-    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
+    ) -> (Arc<Self>, Arc<crate::meta_provenance::MetaProvenance>) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
@@ -403,7 +365,7 @@ impl ShallowFileState {
         let route_inventory = Arc::new(shallow_index.routes);
         let eval_source: Arc<str> = Arc::from(source);
         let whole_hash = whole_hash.unwrap_or_else(|| crate::hash::hash_16(source.as_bytes()));
-        let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
         let memo = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
             verter_session_query::source::snapshot::SnapshotKey {
                 canonical: Arc::from(canonical),

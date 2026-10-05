@@ -479,9 +479,9 @@ fn textual_fault(message: String) -> (GraphQueryError, Option<String>) {
 /// operation fuse onto solver resolve steps) would misreport WHAT
 /// tripped to every graph consumer.
 fn budget_domain(
-    domain: crate::resolver_core::shallow_file_state::BudgetDomain,
+    domain: verter_session_query::inputs::budget::BudgetDomain,
 ) -> Option<wire::BudgetDomain> {
-    use crate::resolver_core::shallow_file_state::BudgetDomain as Session;
+    use verter_session_query::inputs::budget::BudgetDomain as Session;
     match domain {
         Session::LocalClosure => Some(wire::BudgetDomain::LocalClosure),
         Session::Frontier => Some(wire::BudgetDomain::Frontier),
@@ -497,10 +497,8 @@ fn budget_domain(
 /// domains with no wire variant, so the textual arm still names WHAT
 /// tripped). Exhaustive by construction: a new domain fails to compile
 /// until it is labeled or mapped.
-fn budget_domain_label(
-    domain: crate::resolver_core::shallow_file_state::BudgetDomain,
-) -> &'static str {
-    use crate::resolver_core::shallow_file_state::BudgetDomain as Session;
+fn budget_domain_label(domain: verter_session_query::inputs::budget::BudgetDomain) -> &'static str {
+    use verter_session_query::inputs::budget::BudgetDomain as Session;
     match domain {
         Session::LocalClosure => "local closure",
         Session::Frontier => "frontier",
@@ -624,8 +622,8 @@ fn graph_payload(
 mod tests {
     use super::*;
     use crate::host_resolve_type_audit::TypeResolutionRequestError;
-    use crate::resolver_core::shallow_file_state::BudgetDomain as SessionBudgetDomain;
-    use crate::semantic_query::BudgetExceededFailure;
+    use verter_session_query::inputs::budget::BudgetDomain as SessionBudgetDomain;
+    use verter_session_query::inputs::budget::BudgetExceededFailure;
 
     #[test]
     fn a_projection_operation_budget_fault_never_aliases_a_closed_wire_domain() {

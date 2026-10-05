@@ -784,8 +784,8 @@ mod query_error_raise_routing {
     use std::sync::Arc;
 
     use crate::project_semantic_dispatch::semantic_source::SourceRaiseOutcome;
-    use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::{QueryError, SemanticNodeId, SemanticQueryValueTag};
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     /// Stand-in carrier minting: returns a fixed node id so the test can
     /// observe WHETHER the routing asked for a carrier at all.

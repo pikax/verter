@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use crate::resolver_core::{
     FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext, ResolverCounters,
-    ResolverDiagnostic, StoreView, ValidatedFactCache,
+    ResolverDiagnostic, ValidatedFactCache,
 };
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 #[derive(Debug, Clone)]
 pub enum FallthroughNodeValue {

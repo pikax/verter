@@ -379,7 +379,7 @@ fn budgeted_split_publish_eviction_does_not_self_deadlock() {
             let store_inner = Arc::clone(&store_w);
             let flight_key = crate::cache_runtime::node::QueryFlightKey {
                 key: n,
-                compat_token: crate::resolver_core::StoreViewCompatToken {
+                compat_token: verter_session_query::facts::store_view::StoreViewCompatToken {
                     epoch: 0,
                     session: None,
                     validity_fingerprint: 0,
@@ -487,7 +487,7 @@ fn publish_fence_spans_publish_core_through_evict_deferred() {
         }));
         let flight_key = crate::cache_runtime::node::QueryFlightKey {
             key: 1u32,
-            compat_token: crate::resolver_core::StoreViewCompatToken {
+            compat_token: verter_session_query::facts::store_view::StoreViewCompatToken {
                 epoch: 0,
                 session: None,
                 validity_fingerprint: 0,

@@ -33,9 +33,9 @@ use super::singleflight::{
 };
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
-use crate::resolver_core::StoreViewCompatToken;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+use verter_session_query::facts::store_view::StoreViewCompatToken;
 
 /// Per-compute context threaded into a node's `compute` / `validate`.
 ///

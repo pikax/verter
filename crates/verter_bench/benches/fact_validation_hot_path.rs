@@ -30,7 +30,7 @@ use verter_session::semantic_query::HashValue;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
-fn make_view() -> impl verter_session::resolver_core::StoreView {
+fn make_view() -> impl verter_session_query::facts::store_view::StoreView {
     verter_session::resolver_core::PermissiveStoreView
 }
 

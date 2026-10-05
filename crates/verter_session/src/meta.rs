@@ -1104,7 +1104,9 @@ impl MetaSession {
     }
 
     /// Return provenance counters for this session's host.
-    pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
+    pub fn get_provenance(
+        &self,
+    ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;
         Ok(self.project.host.provenance_snapshot())
     }

@@ -21,7 +21,7 @@ use verter_language::registered_source_authority::{
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
-use crate::types::MetaProvenance;
+use crate::meta_provenance::MetaProvenance;
 use persistence::{
     CarrierStableUnitStore, InMemoryStableUnitStore, RetainedStableUnit, StableUnitKey,
 };

@@ -88,7 +88,7 @@ pub enum TypeResolutionRequestError {
         name: Arc<str>,
     },
     /// The resolver hit one of its structured safety rails.
-    BudgetExceeded(crate::semantic_query::BudgetExceededFailure),
+    BudgetExceeded(verter_session_query::inputs::budget::BudgetExceededFailure),
     /// The completion fence exhausted its retry budget.
     UnstableState {
         /// Number of retry attempts the fence made before giving up.
@@ -548,9 +548,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
 #[cfg(test)]
 mod request_error_classification_tests {
     use super::TypeResolutionRequestError;
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::QueryError;
     use std::sync::Arc;
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     fn budget_failure() -> BudgetExceededFailure {
         BudgetExceededFailure {

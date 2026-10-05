@@ -105,11 +105,11 @@ impl VerterHost {
     /// opt-in.
     #[must_use]
     pub(crate) fn owner_has_module_augmentation_dependency(&self, canonical: &str) -> bool {
-        use crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
         use crate::file_artifact_store::{
             AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
         };
         use verter_session_query::facts::registry::{InternedGlobPattern, InternedSpecifier};
+        use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
         let store = self.project_type_store.indexed();
         let env = self.host_view_env_hashes_for(canonical);
@@ -541,7 +541,7 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn compile_output_pure_content(
         &self,
-    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+    ) -> &crate::compile_output_node::CompileOutputNodePureContent {
         self.project_type_store.compile_output_pure_content()
     }
 

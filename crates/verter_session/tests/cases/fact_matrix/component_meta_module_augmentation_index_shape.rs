@@ -12,10 +12,11 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::resolver_core::{PermissiveStoreView, StoreView};
+use verter_session::resolver_core::PermissiveStoreView;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::{FactVersionRef, RouteSurfaceFactRef};
 use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {

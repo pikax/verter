@@ -22,12 +22,12 @@ use crate::resolver_core::component_meta_query_engine::{
     semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_OBJECT_SURFACE,
     SEMANTIC_SURFACE_MEMBER,
 };
-use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
     HotTypeRef, NodeScopeId, PrimitiveKind, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
     SyntheticBindingId, TupleElement, ValueRootKey,
 };
 use crate::VerterHost;
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 fn assert_send_sync<T: Send + Sync>() {}
 

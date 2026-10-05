@@ -32,6 +32,7 @@
 use verter_session_query::flow::policy::{
     ClassExpressionClause, FlowGap, FlowReturnPolicy, NullabilityPolicy,
 };
+use verter_session_query::inputs::budget::BudgetExceededFailure;
 
 use std::sync::Arc;
 
@@ -53,7 +54,7 @@ pub use verter_type_expr::LiteralValue;
 // Reuse the existing structured failure shape from the resolver — there is no
 // second failure-domain type in this rewrite.
 pub use crate::locator_identity::SlotEnvIdentity;
-pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
+
 pub use verter_session_query::facts::fact_cache::ParseEnvHash;
 
 /// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
@@ -10975,9 +10976,8 @@ mod tests {
                 name: Arc::from("I"),
             },
             QueryError::BudgetExceeded(
-                crate::resolver_core::shallow_file_state::BudgetExceededFailure {
-                    domain:
-                        crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
+                verter_session_query::inputs::budget::BudgetExceededFailure {
+                    domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                     limit: 1,
                     actual: 2,
                     context: "hash-fixture".to_string(),

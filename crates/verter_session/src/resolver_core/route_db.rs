@@ -19,12 +19,13 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_session_query::facts::registry::SymbolSpace;
 
-use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
+use crate::file_artifact_store::ProjectIdentity;
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{SingleflightGroup, StoreView, ValidatedFactCache};
+use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Substrate version for the route/barrel resolution algorithm. A bump
 /// invalidates every `RouteNameKey` / `BarrelSurfaceKey` slot by changing
@@ -117,51 +118,6 @@ impl BarrelSurfaceKey {
             resolve_env_hash,
             lib_env_hash,
             resolver_version: ROUTE_DB_RESOLVER_VERSION,
-        }
-    }
-}
-
-/// Build the parse-domain `FactKey::ModuleAugmentationIndexShape`
-/// payload an augmentation-index consumer observes for the queried
-/// target — the sole `RouteSurface` fact shape. The parallel optional
-/// fields hold the concrete target value; the `target_kind_tag`
-/// discriminates.
-pub(crate) fn build_module_augmentation_index_shape_fact_key(
-    target: &AugmentationTargetKind,
-) -> verter_session_query::facts::FactKey {
-    use verter_session_query::facts::registry::AugmentationTargetKindTag;
-    match target {
-        AugmentationTargetKind::ExternalSpecifier(spec) => {
-            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-                external_specifier: Some(spec.clone()),
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                external_specifier: None,
-                resolved_relative_canonical: Some(Arc::clone(canon)),
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(pat) => {
-            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: Some(pat.clone()),
-            }
-        }
-        AugmentationTargetKind::GlobalAugmentation => {
-            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
         }
     }
 }
@@ -816,8 +772,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{StoreView, StoreViewCompatToken};
     use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
     #[derive(Debug)]
     struct TestView {

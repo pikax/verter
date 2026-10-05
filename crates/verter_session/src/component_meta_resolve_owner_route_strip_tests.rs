@@ -40,11 +40,11 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::StoreView;
 use crate::types::{FileLanguage, HostConfig, ProjectionMode, UpsertRequest};
 use crate::VerterHost;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// `/src/types.ts` — a cross-file dep imported by the owner. Its export
 /// route is a genuine cross-file route dependency of the owner's

@@ -11,7 +11,7 @@ use super::{family::MemoEntry, SemanticGraphStore};
 
 impl SemanticGraphStore {
     /// Construct a store wired to the host's
-    /// [`MetaProvenance`](crate::types::MetaProvenance) so the
+    /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the
     /// underlying [`NodeArena`] and `execute_cooperative` path record
     /// contention-instrumentation counters. Test-only direct
     /// constructions use [`Self::new`] / [`Self::default`]
@@ -23,7 +23,7 @@ impl SemanticGraphStore {
     /// `arena: NodeArena` in production code.
     #[must_use]
     pub fn with_provenance(
-        provenance: Arc<crate::types::MetaProvenance>,
+        provenance: Arc<crate::meta_provenance::MetaProvenance>,
         retention_account: Arc<SemanticRetentionAccount>,
     ) -> Self {
         let mut store = Self::with_account(retention_account);

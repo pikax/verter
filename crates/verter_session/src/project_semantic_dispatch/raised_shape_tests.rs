@@ -52,13 +52,13 @@ use super::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta_query_engine::{
     type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
 };
-use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey, MapperKind, NodeScopeId,
     OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryValueTag, SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 // Host-taking shims over the dispatch-taking node-domain decision API.
 //

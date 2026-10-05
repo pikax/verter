@@ -222,7 +222,7 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn resolve_named_type_export_target_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {

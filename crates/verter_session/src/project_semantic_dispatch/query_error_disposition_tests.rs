@@ -10,11 +10,11 @@ use std::sync::Arc;
 use verter_type_expr::{ClosedLiteralDomainUnresolvedReason, ReactiveWrapperUnresolvedReason};
 
 use super::{classify_query_error, query_error_disposition, QueryErrorDisposition};
-use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     RecoveryBasis, SemanticQueryValueTag,
 };
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 fn budget_failure() -> BudgetExceededFailure {
     BudgetExceededFailure {

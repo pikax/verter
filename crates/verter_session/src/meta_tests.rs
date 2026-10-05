@@ -1,10 +1,11 @@
 use super::*;
-use crate::resolver_core::{ResolverStore, StoreView};
+use crate::resolver_core::ResolverStore;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+use verter_session_query::facts::store_view::StoreView;
 use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr, UnknownValue};
 
 fn published_type(
@@ -844,7 +845,7 @@ fn store_view_compat_token_matches_snapshot_epoch_and_external_supersession_fing
     let expected_fingerprint = view.validation_token_for_tests().lane_fingerprint();
     assert_eq!(
         view.compat_token(),
-        crate::resolver_core::StoreViewCompatToken {
+        verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: view.mutation_epoch(),
             session: None,
             validity_fingerprint: expected_fingerprint,
@@ -10360,7 +10361,7 @@ defineProps<{
 // ===========================================================================
 
 /// Helper to read the provenance counters from a MetaProject's host.
-fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
+fn provenance(project: &MetaProject) -> crate::meta_provenance::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }
 

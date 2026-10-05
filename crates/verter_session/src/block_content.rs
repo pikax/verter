@@ -1945,7 +1945,8 @@ impl VerterHost {
         }
         drop(state);
         if let Some(mut compile_cache) = self.compile_cache().get_mut(&canonical_id) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut compile_cache);
         }
         self.compile_output_pure_content()

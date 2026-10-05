@@ -68,7 +68,7 @@ fn view_validates(view: &HostStoreView, witness: &ReadSetSignature) -> bool {
     witness
         .facts
         .iter()
-        .all(|fact| crate::resolver_core::StoreView::validates(view, fact))
+        .all(|fact| verter_session_query::facts::store_view::StoreView::validates(view, fact))
 }
 
 /// Whether ANY fact of `witness` is a resolution-currency fact. Guards the
@@ -171,9 +171,9 @@ fn a_view_with_no_captured_world_validates_no_resolution_fact() {
         .collect();
 
     assert!(
-        resolution_facts
-            .iter()
-            .all(|fact| !crate::resolver_core::StoreView::validates(&uncaptured, fact)),
+        resolution_facts.iter().all(|fact| {
+            !verter_session_query::facts::store_view::StoreView::validates(&uncaptured, fact)
+        }),
         "a view that captured no resolution world must fail closed on every \
          resolution fact rather than accept it optimistically"
     );

@@ -58,8 +58,8 @@ fn cancelled_and_budget_map_to_closed_incomplete_reasons() {
         QueryOutcome::Incomplete(IncompleteReason::Cancelled)
     ));
     let budget = QueryResult::<u8>::Error(QueryError::BudgetExceeded(
-        crate::resolver_core::BudgetExceededFailure {
-            domain: crate::resolver_core::BudgetDomain::ProjectionOperation,
+        verter_session_query::inputs::budget::BudgetExceededFailure {
+            domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
             context: "outcome-map".into(),

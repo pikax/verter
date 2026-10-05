@@ -51,11 +51,12 @@ use crate::fact_signature_helpers::{
     named_cacheability_scope, named_fact_tracer, ReadSetSignatureExt as _,
 };
 use crate::framework::registry::FrameworkRegistration;
-use crate::resolver_core::{ResolverContext, StoreView};
+use crate::resolver_core::ResolverContext;
 use crate::VerterHost;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Producer-minted exact script facts.
 ///

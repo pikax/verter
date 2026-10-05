@@ -729,7 +729,7 @@ impl VerterHost {
     pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
@@ -816,7 +816,7 @@ impl VerterHost {
     pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {

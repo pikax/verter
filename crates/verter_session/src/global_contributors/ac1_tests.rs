@@ -3,14 +3,13 @@
 use std::sync::Arc;
 
 use super::classify_module_kind;
-use crate::file_artifact_store::{
-    AugmentationTargetKind, FileArtifactStore, GLOBAL_AUGMENTATION_TAG,
-};
+use crate::file_artifact_store::{AugmentationTargetKind, FileArtifactStore};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::ShallowFileState;
 use verter_session_query::inputs::contributors::{
     is_automatic_lib_canonical, ContributorOrigin, FileModuleKind,
 };
+use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
 fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     let state = ShallowFileState::service_backed_for_test_at(canonical, source);

@@ -846,7 +846,7 @@ impl VerterHost {
             }
             if changes.changed && changes.semantic_changed {
                 let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                 session_node.clear_compile_outputs_for_file(profile);
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;

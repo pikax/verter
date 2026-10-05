@@ -8,9 +8,10 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_session::resolver_core::{PermissiveStoreView, StoreView, StoreViewCompatToken};
+use verter_session::resolver_core::PermissiveStoreView;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {

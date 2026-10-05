@@ -25,6 +25,7 @@ currency_probe = []
 # structurally by the resolve-graph closure guard in
 # `tests/cases/dependency_closure_guard.rs`.
 [dependencies]
+verter_analysis_inputs = { path = "../verter_analysis_inputs" }
 verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
 verter_language = { path = "../verter_language" }

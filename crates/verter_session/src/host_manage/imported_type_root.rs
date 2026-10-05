@@ -54,7 +54,7 @@ impl VerterHost {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolve_imported_type_root_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
@@ -165,7 +165,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         session_view: Option<&dyn crate::session_view::SessionView>,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
@@ -185,7 +185,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         session_view: Option<&dyn crate::session_view::SessionView>,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (

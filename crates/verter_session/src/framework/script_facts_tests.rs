@@ -5,9 +5,10 @@
 //! fact-signature overflow).
 
 use super::*;
-use crate::resolver_core::{PermissiveStoreView, StoreView, StoreViewCompatToken};
+use crate::resolver_core::PermissiveStoreView;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 /// This module's tests belong here, not to any evidence suite's floor.
 ///

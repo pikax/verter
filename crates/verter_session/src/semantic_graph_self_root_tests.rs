@@ -44,7 +44,7 @@ use std::sync::Arc;
 use verter_session_query::facts::{FactKey, FactLane};
 
 use crate::fact_signature_helpers::ReadSetSignatureExt;
-use crate::resolver_core::{ResolverContext, StoreView, StoreViewCompatToken};
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
@@ -52,6 +52,7 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::{semantic_graph_read_set_signature, SemanticGraphStore};
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::{
     fact_cache::FactVersionRef,
     fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
@@ -2709,7 +2710,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 /// validator (`validates_self_root_whole_hash`) then rejects an entry
 /// *self-rooted* on the deleted file — correct. But a plain cross-file
 /// `FileWholeHash` dependency fact routes through
-/// [`crate::resolver_core::StoreView::validates`], whose `FileWholeHash`
+/// [`verter_session_query::facts::store_view::StoreView::validates`], whose `FileWholeHash`
 /// arm keeps the lazy `None => true` "untracked → optimistically
 /// accept" rule (cross-file permissiveness). A tombstoned canonical,
 /// removed from `whole_hashes`, looks UNTRACKED to that arm — so a

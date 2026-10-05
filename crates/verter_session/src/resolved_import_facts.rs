@@ -56,8 +56,9 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
-use crate::resolver_core::{StoreView, ValidatedFactCache};
+use crate::resolver_core::ValidatedFactCache;
 use verter_session_query::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
 
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};

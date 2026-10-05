@@ -1359,7 +1359,7 @@ pub struct PreparedDeclBundle {
     /// entry on the bundle's declaring file reads this — an OBSERVED
     /// identity captured when the bundle was materialised, never a
     /// current-content re-read at the consumer's signature-build time.
-    pub owner_whole_hash: crate::resolver_core::ResolverHash16,
+    pub owner_whole_hash: verter_session_query::facts::store_view::ResolverHash16,
     pub prepared_type_decls: PreparedTypeDeclCache,
     pub prepared_value_decls: PreparedValueDeclCache,
     /// The dep_edges snapshot used to build this bundle.

@@ -36,12 +36,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 
-use super::admission::{
+use crate::cache_runtime::admission::{
     CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
     PublishCoreOutcome, PublishOutcome,
 };
-use super::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
-use super::singleflight::InflightTable;
+use crate::cache_runtime::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
+use crate::cache_runtime::singleflight::InflightTable;
 use crate::types::{
     CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, ProfileState, VirtualNodeKind,
 };

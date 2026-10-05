@@ -2642,7 +2642,7 @@ impl VerterHost {
         // a base reader (view_fingerprint == 0) cannot observe an
         // overlay-derived entry.
         // cached_resolved_meta lives on DerivedRawState (D48 split).
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
         if cached.state.completeness.is_partial() {
@@ -3050,7 +3050,7 @@ impl VerterHost {
         current_view: &crate::resolver_store::CurrentHostStoreView,
         canonical: &str,
     ) -> Option<Vec<u8>> {
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         let view = current_view.view();
         // cached_meta_payload lives on DerivedRawState (D48 split).
         let entry = self.derived_raw_cache().get(canonical)?;
@@ -3143,7 +3143,10 @@ impl VerterHost {
             return false;
         };
         let view = current.view();
-        crate::resolver_core::StoreView::validates_fact_signature(view, fact_versions)
+        verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+            view,
+            fact_versions,
+        )
     }
 
     pub(crate) fn append_dependency_fact_versions(

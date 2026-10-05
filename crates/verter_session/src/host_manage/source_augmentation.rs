@@ -62,7 +62,7 @@ impl<'a> AugmentationRequestDriver<'a> {
                 } else {
                     None
                 };
-                if crate::file_artifact_store::augmenter_matches_target(
+                if verter_session_query::source::augmentation::augmenter_matches_target(
                     fact,
                     key,
                     relative.as_deref(),

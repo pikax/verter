@@ -194,7 +194,7 @@ impl OwnerImportSurfaceDb {
     /// — a `bump_project_generation_and_evict` racing a cold publish
     /// can otherwise strand a stale surface.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn get_with_view<V: crate::resolver_core::StoreView + ?Sized>(
+    pub fn get_with_view<V: verter_session_query::facts::store_view::StoreView + ?Sized>(
         &self,
         host: &crate::VerterHost,
         owner: &str,

@@ -1274,8 +1274,9 @@ fn synth_augmenter_artifacts_for_specifier(
     specifier: &str,
     parse_stable_hash: Hash16,
 ) -> Arc<FileArtifacts> {
-    use super::{FileFacts, ModuleAugmentationFact};
+    use super::FileFacts;
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     Arc::new(FileArtifacts {
         indexed: synth_indexed(0xA9),
@@ -1413,8 +1414,9 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     // next probe warm-hits a stale augmenter set.
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
+    use super::{AugmenterEntry, AugmenterSet};
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();
     let key = relative_dep_target_key();
@@ -1655,8 +1657,9 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
     // augmenter's contribution to the effective surface even though the
     // declared specifier is the same.
     let changed = {
-        use super::{FileFacts, ModuleAugmentationFact};
+        use super::FileFacts;
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -1810,8 +1813,9 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     // are unchanged, but the fact multiset governs which index rows the
     // augmenter contributes to, so a fact change must still invalidate.
     let diff_facts = {
-        use super::{FileFacts, ModuleAugmentationFact};
+        use super::FileFacts;
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -1832,8 +1836,9 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     );
 
     let diff_owner = {
-        use super::{FileFacts, ModuleAugmentationFact};
+        use super::FileFacts;
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -2522,7 +2527,8 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     use smallvec::{smallvec, SmallVec};
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 
-    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
+    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();
     let target = relative_dep_target_key();

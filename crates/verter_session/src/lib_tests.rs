@@ -23,7 +23,7 @@ fn parse_vue_snapshot(
         canonical_id,
         source,
         analysis_scope,
-        &crate::types::MetaProvenance::default(),
+        &crate::meta_provenance::MetaProvenance::default(),
     );
     let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
         .expect("a Vue carrier artifact carries a ParsedSfc")
@@ -3274,13 +3274,13 @@ const count = ref(0)
             "/src/App.vue",
             v1,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let (p2, _) = crate::parse::parse_vue_snapshot(
             "/src/App.vue",
             v2,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         assert_eq!(
             p1.semantic_hash, p2.semantic_hash,

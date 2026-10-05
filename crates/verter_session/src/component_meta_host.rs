@@ -688,7 +688,7 @@ impl ComponentMetaSession {
     /// Get provenance counters for observability.
     pub fn get_provenance(
         &self,
-    ) -> Result<crate::types::MetaProvenanceSnapshot, ComponentMetaHostError> {
+    ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, ComponentMetaHostError> {
         self.inner
             .get_provenance()
             .map_err(ComponentMetaHostError::from)

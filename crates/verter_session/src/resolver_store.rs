@@ -124,7 +124,7 @@ thread_local! {
     /// three compile warm-validation sites (`ensure_compiled`,
     /// `compile_slot_is_warm`, the `get_virtual_file` Session arm): each
     /// threads the read through the `acquire_view` callback that
-    /// [`crate::cache_runtime::CompileOutputNodeFactValidatedSession::lookup`]
+    /// [`crate::compile_output_node::CompileOutputNodeFactValidatedSession::lookup`]
     /// invokes ONLY after its cheap slot-present + carrier + hash
     /// predicates pass, and bumps this counter inside that callback.
     ///
@@ -1166,7 +1166,7 @@ impl SourceEnvIdentity {
 
 #[derive(Debug, Clone)]
 pub struct HostStoreView {
-    compat_token: crate::resolver_core::StoreViewCompatToken,
+    compat_token: verter_session_query::facts::store_view::StoreViewCompatToken,
     mutation_epoch: u64,
     session_id: Option<u64>,
     /// `Arc`-shared immutable snapshot. Cloning a [`HostStoreView`] is a
@@ -1232,7 +1232,7 @@ pub struct HostStoreView {
 impl Default for HostStoreView {
     fn default() -> Self {
         Self {
-            compat_token: crate::resolver_core::StoreViewCompatToken {
+            compat_token: verter_session_query::facts::store_view::StoreViewCompatToken {
                 epoch: 0,
                 session: None,
                 validity_fingerprint: 0,
@@ -2438,7 +2438,7 @@ impl HostStoreView {
             // Interim placeholder — `compute_compat_token()` below recomputes
             // the lane identity (including `validity_fingerprint`) once the
             // view's snapshot + generations are in place.
-            compat_token: crate::resolver_core::StoreViewCompatToken {
+            compat_token: verter_session_query::facts::store_view::StoreViewCompatToken {
                 epoch: snapshot_epoch,
                 session: session_id,
                 validity_fingerprint: 0,
@@ -2564,7 +2564,7 @@ impl HostStoreView {
                         function,
                         flow_body_stable_hash,
                     } => {
-                        if crate::resolver_core::StoreView::validates_program_analysis_domain(
+                        if verter_session_query::facts::store_view::StoreView::validates_program_analysis_domain(
                             self, fact,
                         ) {
                             None
@@ -2621,7 +2621,7 @@ impl HostStoreView {
             verter_session_query::facts::fact_cache::FactVersionRef::DomainGeneration(
                 aggregate,
             ) => {
-                if crate::resolver_core::StoreView::validates(self, fact) {
+                if verter_session_query::facts::store_view::StoreView::validates(self, fact) {
                     None
                 } else {
                     Some(format!(
@@ -2631,7 +2631,7 @@ impl HostStoreView {
                 }
             }
             verter_session_query::facts::fact_cache::FactVersionRef::StrictSelfRootWorld(world) => {
-                if crate::resolver_core::StoreView::validates(self, fact) {
+                if verter_session_query::facts::store_view::StoreView::validates(self, fact) {
                     None
                 } else {
                     Some(format!("StrictSelfRootWorld rejected expected={world:?}"))
@@ -2648,8 +2648,10 @@ impl HostStoreView {
         }
     }
 
-    fn compute_compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-        crate::resolver_core::StoreViewCompatToken {
+    fn compute_compat_token(
+        &self,
+    ) -> verter_session_query::facts::store_view::StoreViewCompatToken {
+        verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: self.mutation_epoch,
             session: self.session_id,
             // Fold the EXTERNAL-supersession dimensions into the lane
@@ -2699,7 +2701,7 @@ impl HostStoreView {
     }
 
     /// Overlay-aware variant of
-    /// [`crate::resolver_core::StoreView::validates_resolve_imports_domain`]:
+    /// [`verter_session_query::facts::store_view::StoreView::validates_resolve_imports_domain`]:
     /// composes the `ResolvedImportFactsKey` against the supplied
     /// `content_hash` rather than the view's own tracked whole hash. Used
     /// by [`crate::resolver_core::RequestStoreView`] when a canonical
@@ -3024,8 +3026,8 @@ fn augmentation_target_kind_from_shape(
     }
 }
 
-impl crate::resolver_core::StoreView for HostStoreView {
-    fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
+impl verter_session_query::facts::store_view::StoreView for HostStoreView {
+    fn compat_token(&self) -> verter_session_query::facts::store_view::StoreViewCompatToken {
         self.compat_token
     }
 
@@ -3131,16 +3133,16 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // validators (which return `false` by trait default;
             // per-domain producers override).
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(p) => {
-                crate::resolver_core::StoreView::validates_parse_domain(self, p)
+                verter_session_query::facts::store_view::StoreView::validates_parse_domain(self, p)
             }
             verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(r) => {
-                crate::resolver_core::StoreView::validates_resolve_imports_domain(self, r)
+                verter_session_query::facts::store_view::StoreView::validates_resolve_imports_domain(self, r)
             }
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(r) => {
-                crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
+                verter_session_query::facts::store_view::StoreView::validates_route_surface_domain(self, r)
             }
             verter_session_query::facts::fact_cache::FactVersionRef::ProgramAnalysis(fact) => {
-                crate::resolver_core::StoreView::validates_program_analysis_domain(self, fact)
+                verter_session_query::facts::store_view::StoreView::validates_program_analysis_domain(self, fact)
             }
             // Contributor source-env identity fact — routes to the
             // strict per-arm validator (differing / missing /
@@ -3151,7 +3153,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 parse_env_hash,
                 parse_key,
                 file_language_id,
-            } => crate::resolver_core::StoreView::validates_file_source_env(
+            } => verter_session_query::facts::store_view::StoreView::validates_file_source_env(
                 self,
                 canonical_id,
                 *parse_env_hash,
@@ -3184,7 +3186,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 self.strict_self_root_world_identity() == Some(*world)
             }
             verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
-                receipt.all_leaves(|leaf| crate::resolver_core::StoreView::validates(self, leaf))
+                receipt.all_leaves(|leaf| verter_session_query::facts::store_view::StoreView::validates(self, leaf))
             }
         }
     }
@@ -3201,7 +3203,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         &self,
         canonical_id: &str,
         kind: verter_session_query::facts::fact_cache::DerivedFactKind,
-    ) -> Option<crate::resolver_core::ResolverHash16> {
+    ) -> Option<verter_session_query::facts::store_view::ResolverHash16> {
         HostStoreView::derived_hash(self, canonical_id, kind)
     }
 
@@ -3220,7 +3222,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
     fn validates_self_root_whole_hash(
         &self,
         canonical_id: &str,
-        hash: &crate::resolver_core::ResolverHash16,
+        hash: &verter_session_query::facts::store_view::ResolverHash16,
     ) -> bool {
         match self.whole_hash(canonical_id).as_ref() {
             Some(current) => current == hash,

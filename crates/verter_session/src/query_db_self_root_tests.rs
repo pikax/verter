@@ -9,14 +9,14 @@
 //! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
 //! — so a keyed canonical that is untracked by the live store view
 //! rejects the entry instead of riding the lazy
-//! [`crate::resolver_core::StoreView::validates`] "untracked file →
+//! [`verter_session_query::facts::store_view::StoreView::validates`] "untracked file →
 //! optimistically accept" rule.
 //!
 //! ## Discrimination model
 //!
 //! The central fact-signature helpers already prepend a self-root
 //! `FileWholeHash` for the keyed canonical. The lazy
-//! [`crate::resolver_core::StoreView::validates`] already rejects a
+//! [`verter_session_query::facts::store_view::StoreView::validates`] already rejects a
 //! **tracked** `FileWholeHash` whose hash mismatches current content
 //! (`Some(current) => current == hash`). So a same-canonical content
 //! edit where the file stays tracked is already detected by the lazy
@@ -69,11 +69,11 @@ use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
     MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration, ResolverContext,
-    StoreView,
 };
 use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// A self-root `FileWholeHash` byte pattern for a planted (untracked)
 /// entry. Distinct from any real content hash.

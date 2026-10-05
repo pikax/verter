@@ -22,7 +22,9 @@ pub(super) fn specifier_for(
 ) -> InternedSpecifier {
     use verter_session_query::declarations::AugmentationScopeKind;
     match scope {
-        AugmentationScopeKind::Global => InternedSpecifier::from(super::GLOBAL_AUGMENTATION_TAG),
+        AugmentationScopeKind::Global => InternedSpecifier::from(
+            verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG,
+        ),
         AugmentationScopeKind::Module(spec) => InternedSpecifier::from(spec.as_str()),
     }
 }

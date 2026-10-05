@@ -5,7 +5,7 @@
 //! rail is `Arc<[FactVersionRef]>` — the cold-compute observation set
 //! the producer recorded. It is the sole cache-validity rail. Warm-hit
 //! reads call [`validate_fact_signature`] which walks every fact
-//! through the current [`crate::resolver_core::StoreView`] snapshot; a
+//! through the current [`verter_session_query::facts::store_view::StoreView`] snapshot; a
 //! single mismatch returns `false` and the warm hit misses, falling
 //! through to cold recompute.
 //!
@@ -72,10 +72,11 @@ use std::sync::Arc;
 use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
 use crate::cache_runtime::NonAdmissionReason;
-use crate::resolver_core::{ResolverContext, StoreView};
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{DepSignature, DepVersion};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ParseFactRef},
     fact_read_set::{FactReadSet, FactReadSetFinalise, FACT_SIGNATURE_CAP},
@@ -882,7 +883,7 @@ pub(crate) fn validate_fact_signature(
 /// its own keyed canonical (the signature shape produced by the three
 /// central fact-signature helpers above). [`validate_fact_signature`]
 /// alone routes a `FileWholeHash` through the lazy
-/// [`crate::resolver_core::StoreView::validates`] rule, whose
+/// [`verter_session_query::facts::store_view::StoreView::validates`] rule, whose
 /// untracked-file arm optimistically accepts: that is correct for a
 /// cross-file *dependency* fact (loaded after the view snapshot) but
 /// wrong for a *self-root*, where an untracked keyed canonical means
@@ -891,7 +892,7 @@ pub(crate) fn validate_fact_signature(
 /// `self_root_canonicals` is the explicit self-root-vs-dependency
 /// distinction: a `FileWholeHash` whose canonical is listed is a
 /// self-root and routes through the strict
-/// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`];
+/// [`verter_session_query::facts::store_view::StoreView::validates_self_root_whole_hash`];
 /// every other fact (including a `FileWholeHash` for a non-listed
 /// cross-file dependency) routes through the lazy `validates`, so
 /// cross-file lazy permissiveness is preserved. Empty signatures
@@ -969,7 +970,7 @@ pub(crate) fn bubble_fact_signature_via_tls(signature: &[FactVersionRef]) {
 ///   observed parse facts exist.
 /// * The emitted **`ParseFactRef.canonical_id`** stays the RAW owner the
 ///   caller passed. The parse-domain validator
-///   ([`crate::resolver_core::StoreView::validates_parse_domain`]) keys
+///   ([`verter_session_query::facts::store_view::StoreView::validates_parse_domain`]) keys
 ///   the per-file `FileFacts` snapshot by the canonical the view tracks:
 ///   an overlay-bearing canonical is re-rooted in
 ///   [`crate::resolver_store::HostStoreView::with_session_overlay`] under
@@ -1434,11 +1435,11 @@ impl ReadSetSignatureExt for ReadSetSignature {
     ///
     /// Returns `true` only when `facts` validates. Any `FileWholeHash`
     /// for a listed self-root canonical routes through the strict
-    /// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`]
+    /// [`verter_session_query::facts::store_view::StoreView::validates_self_root_whole_hash`]
     /// (an untracked or hash-mismatched self-root fails); every other
     /// fact — including a `FileWholeHash` for a non-listed cross-file
     /// dependency — keeps the lazy
-    /// [`crate::resolver_core::StoreView::validates`] permissiveness.
+    /// [`verter_session_query::facts::store_view::StoreView::validates`] permissiveness.
     /// An overflow carrier always fails; an empty carrier with no
     /// self-roots validates vacuously.
     ///
@@ -1465,7 +1466,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// **discriminate by view** for `self_root_canonicals` — i.e.
     /// whether the carrier carries at least one self-root fact that the
     /// strict validator routes through
-    /// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`].
+    /// [`verter_session_query::facts::store_view::StoreView::validates_self_root_whole_hash`].
     ///
     /// `validate_with_self_roots` only rejects a cross-view reuse when a
     /// `FileWholeHash` whose canonical is listed in
@@ -1548,7 +1549,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// fact-rooted-cacheable ONLY when the resolver recorded the negative
     /// resolved-import fact — a `ResolvedImportClause` / `ResolvedReexportBinding`
     /// whose `resolved_canonical` is the
-    /// [`UNRESOLVED_SENTINEL`](crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL).
+    /// [`UNRESOLVED_SENTINEL`](verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL).
     /// When the reference later resolves, the producer records a real
     /// canonical, the fact's hash shifts, and the warm read misses. A
     /// POSITIVE `ResolveImports` fact must NOT qualify — it carries no
@@ -1570,7 +1571,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
                 },
             ) => {
                 resolved_canonical.as_ref()
-                    == crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL
+                    == verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL
             }
             _ => false,
         })

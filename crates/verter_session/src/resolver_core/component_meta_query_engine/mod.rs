@@ -198,7 +198,7 @@ pub(crate) fn engine_fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     type_name: &str,
-    observed_hash: crate::resolver_core::ResolverHash16,
+    observed_hash: verter_session_query::facts::store_view::ResolverHash16,
 ) -> verter_session_query::facts::fact_cache::SignatureAdmission {
     crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
@@ -264,7 +264,7 @@ pub(crate) struct ObservedPreparedTypeDecl {
     /// value and the fact signature root on this one version, and it
     /// is view-correct because the bundle is fetched through the
     /// view-aware `prepared_decl_bundle` accessor.
-    pub(crate) whole_hash: crate::resolver_core::ResolverHash16,
+    pub(crate) whole_hash: verter_session_query::facts::store_view::ResolverHash16,
 }
 
 /// Build the fact signature for a `MaterializeMemoDb` entry.

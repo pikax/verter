@@ -867,7 +867,6 @@
         "crateInternal": [
           "cache_runtime",
           "component_meta_audit",
-          "fact_emission",
           "fact_signature_helpers",
           "file_artifact_store",
           "global_contributors",
@@ -1002,7 +1001,6 @@
         "crateInternal": [
           "locator_identity",
           "project_semantic_dispatch",
-          "resolver_core",
           "signature_kernel",
           "semantic_query",
           "semantic_query_memo"

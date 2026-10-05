@@ -20,7 +20,7 @@
 //! (created once per top-level request, threaded into every resolver
 //! context the request builds, dropped with the request) and is keyed by
 //! `(canonical, world)` with the
-//! [`StoreViewCompatToken`](crate::resolver_core::StoreViewCompatToken)
+//! [`StoreViewCompatToken`](verter_session_query::facts::store_view::StoreViewCompatToken)
 //! on the entry:
 //!
 //! - the world (`Base` / `Overlay(content hash)`) keeps the two
@@ -44,9 +44,10 @@ use rustc_hash::FxHashMap;
 
 use crate::resolver_core::request_store_view::BundleMemoWorld;
 use crate::resolver_core::reuse::ReuseClass;
-use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext, StoreView};
+use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext};
 use crate::session_view::{OverlaidView, SessionView};
 use crate::{HostConfig, VerterHost};
+use verter_session_query::facts::store_view::StoreView;
 
 const OWNER: &str = "/proj/owner.ts";
 const DEP: &str = "/proj/dep.ts";
@@ -418,7 +419,7 @@ fn external_supersession_between_snapshots_misses_memo() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     {
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         assert_ne!(
             store_view_1.compat_token(),
             store_view_2.compat_token(),
@@ -507,7 +508,7 @@ fn resolution_retarget_between_snapshots_misses_memo() {
             token_1.resolution_fact_generation, token_2.resolution_fact_generation,
             "fixture invariant: the retarget must mint a resolution fact version"
         );
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         assert_ne!(
             store_view_1.compat_token(),
             store_view_2.compat_token(),

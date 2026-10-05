@@ -24,6 +24,7 @@
 //! alpha-normalised decl skeleton; `augmentation_index` is populated
 //! lazily. See `/type-cache-architecture`.
 use verter_session_query::source::artifact_key::{FileArtifactKey, BASE_PARSE_ENV_HASH};
+use verter_session_query::source::augmentation::{ModuleAugmentationFact, GLOBAL_AUGMENTATION_TAG};
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -199,32 +200,6 @@ impl FileFacts {
 }
 
 // ── ModuleAugmentationFact ──
-
-/// A single `declare module "<specifier>" { ... }` block emitted by the
-/// parser during shallow analysis.
-///
-/// The type is defined here; the shallow walk populates it.
-/// Augmenting declarations are stitched into the consumer's merged
-/// declaration surface for that specifier.
-///
-/// Fields:
-///
-/// - `specifier` — the syntactic specifier inside `declare module "X" {}`.
-/// - `owner` — the lexical top-level owner that authored the declaration.
-/// - `augmented_name` — the name of an augmented binding inside the block.
-/// - `space` — which symbol space the augmented binding occupies.
-/// - `augmented_member_shape_fingerprint` — alpha-normalised fingerprint
-///   over the augmenting block's member set; used to detect
-///   when an augmenter's contribution to the effective surface changes
-///   without changing the augmenter set itself.
-#[derive(Debug, Clone)]
-pub struct ModuleAugmentationFact {
-    pub specifier: InternedSpecifier,
-    pub owner: TopLevelOwnerId,
-    pub augmented_name: InternedName,
-    pub space: SymbolSpace,
-    pub augmented_member_shape_fingerprint: Hash16,
-}
 
 // ── AugmentationTargetKey / AugmentationTargetKind ──
 
@@ -3548,44 +3523,6 @@ impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
         self.remove(canonical_id);
         let after = self.len();
         before.saturating_sub(after)
-    }
-}
-
-/// Special marker the parse-domain emission uses for `declare global
-/// { ... }` blocks (see `fact_emission::GLOBAL_AUGMENTATION_TAG`).
-/// Duplicated here to keep the matcher free-standing of fact_emission.
-pub(crate) const GLOBAL_AUGMENTATION_TAG: &str = "$global";
-
-/// Classify an owned augmentation fact against a target. Relative resolution is
-/// supplied by the request owner; this predicate performs no source work.
-pub(crate) fn augmenter_matches_target(
-    fact: &ModuleAugmentationFact,
-    target_key: &AugmentationTargetKey,
-    resolved_relative_canonical: Option<&str>,
-) -> bool {
-    use verter_session_query::resolution::is_relative_specifier;
-    let specifier: &str = fact.specifier.as_ref();
-    match &target_key.target {
-        AugmentationTargetKind::ExternalSpecifier(target_spec) => {
-            // Bare external: not relative, not wildcard, not global.
-            let is_relative = is_relative_specifier(specifier);
-            let is_wildcard = specifier.contains('*');
-            let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
-            !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
-        }
-        AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
-            if !is_relative_specifier(specifier) {
-                return false;
-            }
-            match resolved_relative_canonical {
-                Some(resolved) => resolved == target_canon.as_ref(),
-                None => false,
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(target_pattern) => {
-            specifier.contains('*') && specifier == target_pattern.as_ref()
-        }
-        AugmentationTargetKind::GlobalAugmentation => specifier == GLOBAL_AUGMENTATION_TAG,
     }
 }
 

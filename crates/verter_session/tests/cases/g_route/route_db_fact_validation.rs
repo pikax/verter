@@ -13,11 +13,10 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_session::resolver_core::{
-    BarrelRouteSurface, RouteDb, RouteResult, StoreView, StoreViewCompatToken,
-};
+use verter_session::resolver_core::{BarrelRouteSurface, RouteDb, RouteResult};
 use verter_session::VerterHost;
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(

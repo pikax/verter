@@ -1094,9 +1094,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 // ---------------------------------------------------------------------------
 
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::QueryError;
 use crate::typeinfo::resolve_named_symbol::classify_dispatch_error;
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 fn sample_budget_failure() -> BudgetExceededFailure {
     BudgetExceededFailure {

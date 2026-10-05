@@ -2,12 +2,12 @@
 //! the view nor the canonical-completion overlay can escape to a caller.
 
 use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
-use super::{ResolverHash16, StoreView, StoreViewCompatToken};
 use std::collections::BTreeSet;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef,
 };
+use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
 pub trait FactValidation {
     fn current_external_supersession_fingerprint(&self) -> u64;

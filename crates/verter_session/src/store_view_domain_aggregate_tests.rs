@@ -26,10 +26,10 @@ use verter_session_query::facts::fact_cache::{
     DomainGenerationFact, SessionOverlayFingerprint, ViewPopulation,
 };
 
-use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 fn host_with_a_file() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
