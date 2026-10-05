@@ -5,10 +5,9 @@ use std::sync::Arc;
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::resolver_context::{
-    RequestBoundAdapter, RequestBoundLifecycle, ResolverContext,
-};
+use crate::resolver_core::resolver_context::ResolverContext;
 use crate::resolver_store::HostStoreView;
 
 pub struct HostRequestLifecycle<'a> {

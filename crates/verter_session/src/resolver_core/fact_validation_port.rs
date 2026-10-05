@@ -1,7 +1,7 @@
 //! Request-bound validation port. Answers are owned validity records; neither
 //! the view nor the canonical-completion overlay can escape to a caller.
 
-use super::resolver_context::{RequestBoundAdapter, RequestBoundLifecycle};
+use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use super::{ResolverHash16, StoreView, StoreViewCompatToken};
 use std::collections::BTreeSet;
 use verter_session_query::facts::fact_cache::{

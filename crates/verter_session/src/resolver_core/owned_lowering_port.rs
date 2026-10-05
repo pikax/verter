@@ -1,8 +1,8 @@
 //! The source-worker boundary. Retained ASTs stay on their worker; every
 //! answer crosses the request boundary as owned IR or a typed refusal.
 
+use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use super::request_ports::OwnedLowering;
-use super::resolver_context::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey;
 use std::sync::Arc;
 use verter_session_query::flow::{

@@ -6,10 +6,9 @@ use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::resolver_context::{
-    MaterializeScopeObservation, RequestBoundAdapter, RequestBoundLifecycle, ResolverContext,
-};
+use crate::resolver_core::resolver_context::{MaterializeScopeObservation, ResolverContext};
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_store::HostStoreView;
 use crate::session_view::SessionView;
@@ -271,7 +270,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        crate::resolver_core::resolver_context::type_route_answer(
+        crate::resolver_core::request_bound::type_route_answer(
             self.inner.resolve_type_dependency_canonical_in(
                 self.resolution_overlay(),
                 owner_canonical,

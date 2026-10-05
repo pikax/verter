@@ -40,6 +40,7 @@ pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 mod owned_lowering_port;
+pub(crate) mod request_bound;
 pub(crate) mod request_ports;
 pub(crate) mod request_store_view;
 pub(crate) mod resolver_context;
