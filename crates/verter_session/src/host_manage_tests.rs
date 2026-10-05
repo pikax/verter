@@ -82,7 +82,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
 fn template_class_facts_for(
     host: &VerterHost,
     canonical: &str,
-) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts {
+) -> crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts {
     let source = host
         .scheduler
         .try_get_source(canonical)
@@ -103,12 +103,12 @@ fn template_class_facts_for(
         canonical,
         data.parse.whole_hash,
         Arc::clone(&source.source),
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+        crate::host_manage::template_class_facts::TemplateClassScriptInputs {
             macros: &data.parse.script_analysis.macros,
             bindings: &data.parse.script_analysis.bindings,
         },
         &raw,
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+        crate::host_manage::template_class_facts::TemplateClassPublicationScope::BasePublishable,
     )
 }
 

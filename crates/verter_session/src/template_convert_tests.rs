@@ -700,7 +700,7 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
     let revision_a: verter_session_query::analysis::types::Hash16 = [1; 16];
     let revision_b: verter_session_query::analysis::types::Hash16 = [2; 16];
 
-    let facts: crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts =
+    let facts: crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts =
         verter_session_query::analysis::template_class_facts::TemplateClassSemanticFacts::new(
             std::sync::Arc::from(CANONICAL),
             revision_a,

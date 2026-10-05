@@ -488,7 +488,7 @@ pub(crate) struct CompileEntryProducts {
     pub(crate) template_analysis:
         Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     pub(crate) template_class_admission:
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
+        crate::host_manage::template_class_facts::TemplateClassCacheAdmission,
 }
 
 /// A compile transaction that fail-closed on the runtime surface it was asked
@@ -2064,7 +2064,7 @@ impl VerterHost {
                 },
                 refusal.diagnostics,
                 false,
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
+                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
             ),
             Err(diagnostics) => {
                 let publication_fence = self.block_content.admission_fence.lock();
@@ -2105,7 +2105,7 @@ impl VerterHost {
                             },
                             diagnostics,
                             true,
-                            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
+                            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::refused(),
                         )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
@@ -3434,7 +3434,7 @@ impl VerterHost {
 
         // Convert raw template data into analysis types when available.
         let mut template_class_admission =
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable();
         let template_analysis = products.template_facts().map(|facts_product| {
             let (analysis, admission) = self.template_analysis_from_facts(snapshot, facts_product);
             template_class_admission = admission;
@@ -3461,7 +3461,7 @@ impl VerterHost {
         facts_product: &verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct,
     ) -> (
         verter_session_query::analysis::template::TemplateAnalysisSnapshot,
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
+        crate::host_manage::template_class_facts::TemplateClassCacheAdmission,
     ) {
         // Build script import pairs for component â†’ source resolution
         let all_imports =
@@ -3470,7 +3470,7 @@ impl VerterHost {
             &snapshot.canonical_id,
             snapshot.whole_hash,
             Arc::clone(&snapshot.source),
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+            crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                 macros: &snapshot.script_macros,
                 bindings: &snapshot.script_bindings,
             },
@@ -3478,7 +3478,7 @@ impl VerterHost {
             // The compile lane's bytes attestation: an override layer is a
             // fenced input, plain snapshot bytes are store-published. The
             // seed-currentness half is composed inside the wrapper.
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+            crate::host_manage::template_class_facts::TemplateClassPublicationScope::BasePublishable,
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
             &facts,
@@ -3487,7 +3487,9 @@ impl VerterHost {
         )
         .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
         let template_class_admission =
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::from_facts(&facts);
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::from_facts(
+                &facts,
+            );
         let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
             &snapshot.script_macros,
             snapshot.script_macro_usage.as_ref(),

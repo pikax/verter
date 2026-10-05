@@ -20,8 +20,9 @@ use std::sync::Arc;
 use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::{
-    PropCallableRoleUnresolvedReason, ReactiveWrapperImportProvenance, ReactiveWrapperRole,
-    ReactiveWrapperUnresolvedReason, ResolutionProvenance, ResolvedSymbolIdentity, TopLevelOwnerId,
+    ClosedLiteralDomainUnresolvedReason, PropCallableRoleUnresolvedReason,
+    ReactiveWrapperImportProvenance, ReactiveWrapperRole, ReactiveWrapperUnresolvedReason,
+    ResolutionProvenance, ResolvedSymbolIdentity, TopLevelOwnerId,
 };
 
 use super::query_error_disposition::classify_query_error;
@@ -35,10 +36,10 @@ use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
 /// names, the terminal identity the graph demand must confirm, and the complete
 /// authored route provenance to publish once it does.
 #[derive(Debug, Clone)]
-pub(super) struct WrapperCandidate {
-    pub(super) role: ReactiveWrapperRole,
-    pub(super) symbol: ResolvedSymbolIdentity,
-    pub(super) provenance: ReactiveWrapperImportProvenance,
+pub(crate) struct WrapperCandidate {
+    pub(crate) role: ReactiveWrapperRole,
+    pub(crate) symbol: ResolvedSymbolIdentity,
+    pub(crate) provenance: ReactiveWrapperImportProvenance,
 }
 
 /// The exact route gate: the composed route must terminate at a PACKAGE-BACKED
@@ -46,7 +47,7 @@ pub(super) struct WrapperCandidate {
 /// alone is insufficient — a workspace file that spells `vue` as its terminal
 /// import source, or a package-backed export named `Ref` reached through a
 /// non-`vue` edge, both fail closed here.
-pub(super) fn wrapper_candidate_for_route(
+pub(crate) fn wrapper_candidate_for_route(
     ctx: &dyn ResolverContext,
     route: super::symbol_identity::ResolvedReferenceRoute,
 ) -> Option<WrapperCandidate> {
@@ -243,11 +244,51 @@ pub(crate) fn wrapper_role_for_sole_value_signature_return(
     }
 }
 
+/// Shared with the template-class fact builder so the identity-partial →
+/// typed-reason mapping has exactly one owner.
+pub(crate) fn unresolved_reasons_from_identity(
+    reason: PropCallableRoleUnresolvedReason,
+) -> (
+    ClosedLiteralDomainUnresolvedReason,
+    ReactiveWrapperUnresolvedReason,
+) {
+    match reason {
+        PropCallableRoleUnresolvedReason::AnalysisUnavailable => (
+            ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+            ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+        ),
+        PropCallableRoleUnresolvedReason::MissingDependency => (
+            ClosedLiteralDomainUnresolvedReason::MissingDependency,
+            ReactiveWrapperUnresolvedReason::MissingDependency,
+        ),
+        PropCallableRoleUnresolvedReason::Cycle => (
+            ClosedLiteralDomainUnresolvedReason::Cycle,
+            ReactiveWrapperUnresolvedReason::Cycle,
+        ),
+        PropCallableRoleUnresolvedReason::BudgetExceeded => (
+            ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
+            ReactiveWrapperUnresolvedReason::BudgetExceeded,
+        ),
+        PropCallableRoleUnresolvedReason::WorkLimitExceeded => (
+            ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded,
+            ReactiveWrapperUnresolvedReason::WorkLimitExceeded,
+        ),
+        PropCallableRoleUnresolvedReason::Unsupported => (
+            ClosedLiteralDomainUnresolvedReason::Unsupported,
+            ReactiveWrapperUnresolvedReason::Unsupported,
+        ),
+        PropCallableRoleUnresolvedReason::Fault => (
+            ClosedLiteralDomainUnresolvedReason::Fault,
+            ReactiveWrapperUnresolvedReason::Fault,
+        ),
+    }
+}
+
 /// The wrapper half of the shared identity-partial reason mapping.
 fn wrapper_reason_from_identity(
     reason: PropCallableRoleUnresolvedReason,
 ) -> ReactiveWrapperUnresolvedReason {
-    super::template_class_facts::unresolved_reasons_from_identity(reason).1
+    unresolved_reasons_from_identity(reason).1
 }
 
 #[cfg(test)]

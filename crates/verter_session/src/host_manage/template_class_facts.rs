@@ -12,17 +12,18 @@ use verter_session_query::analysis::types::{AnalyzedBinding, AnalyzedMacro, Anal
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadPosition};
 use verter_type_expr::{
-    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, DeclBindingKey,
-    PropCallableRoleUnresolvedReason, ReactiveWrapperRole, ReactiveWrapperUnresolvedReason,
-    ResolutionExactness, TopLevelOwnerId,
+    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, DeclBindingKey, ReactiveWrapperRole,
+    ReactiveWrapperUnresolvedReason, ResolutionExactness, TopLevelOwnerId,
 };
 
-use super::evaluate::StructuralFactDemandOutcome;
-use super::query_error_disposition::classify_query_error;
-use super::reactive_wrapper::{wrapper_candidate_for_route, WrapperCandidate};
-use super::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
-use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
-use super::ProjectSemanticDispatch;
+use crate::project_semantic_dispatch::evaluate::StructuralFactDemandOutcome;
+use crate::project_semantic_dispatch::query_error_disposition::classify_query_error;
+use crate::project_semantic_dispatch::reactive_wrapper::{
+    unresolved_reasons_from_identity, wrapper_candidate_for_route, WrapperCandidate,
+};
+use crate::project_semantic_dispatch::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
+use crate::project_semantic_dispatch::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::{RequestBoundResolverContext, ResolverContext};
 use crate::resolver_store::ColdSeedHostStoreView;
 use crate::semantic_query::{
@@ -856,46 +857,6 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
         _ => ClosedTypeFact::LeafUnion(Arc::from(leaves.into_boxed_slice())),
     };
     Some(SemanticTypeSource::Closed(fact))
-}
-
-/// Shared with the sibling [`super::reactive_wrapper`] demand entry so the
-/// identity-partial → typed-reason mapping has exactly one owner.
-pub(super) fn unresolved_reasons_from_identity(
-    reason: PropCallableRoleUnresolvedReason,
-) -> (
-    ClosedLiteralDomainUnresolvedReason,
-    ReactiveWrapperUnresolvedReason,
-) {
-    match reason {
-        PropCallableRoleUnresolvedReason::AnalysisUnavailable => (
-            ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
-            ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
-        ),
-        PropCallableRoleUnresolvedReason::MissingDependency => (
-            ClosedLiteralDomainUnresolvedReason::MissingDependency,
-            ReactiveWrapperUnresolvedReason::MissingDependency,
-        ),
-        PropCallableRoleUnresolvedReason::Cycle => (
-            ClosedLiteralDomainUnresolvedReason::Cycle,
-            ReactiveWrapperUnresolvedReason::Cycle,
-        ),
-        PropCallableRoleUnresolvedReason::BudgetExceeded => (
-            ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
-            ReactiveWrapperUnresolvedReason::BudgetExceeded,
-        ),
-        PropCallableRoleUnresolvedReason::WorkLimitExceeded => (
-            ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded,
-            ReactiveWrapperUnresolvedReason::WorkLimitExceeded,
-        ),
-        PropCallableRoleUnresolvedReason::Unsupported => (
-            ClosedLiteralDomainUnresolvedReason::Unsupported,
-            ReactiveWrapperUnresolvedReason::Unsupported,
-        ),
-        PropCallableRoleUnresolvedReason::Fault => (
-            ClosedLiteralDomainUnresolvedReason::Fault,
-            ReactiveWrapperUnresolvedReason::Fault,
-        ),
-    }
 }
 
 fn unresolved_reasons_from_partial(

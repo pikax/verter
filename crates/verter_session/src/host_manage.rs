@@ -59,6 +59,7 @@ pub(crate) mod prepared_decl;
 pub(crate) mod source_augmentation;
 pub(crate) mod source_owner_import;
 pub(crate) mod source_request;
+pub(crate) mod template_class_facts;
 
 // §11c.5 re-export block — preserves `crate::host_manage::populate_*` /
 // `crate::host_manage::extract_*` paths used by `meta.rs`,

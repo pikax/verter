@@ -937,7 +937,7 @@ type ClosedClassMembers = std::sync::Arc<[std::sync::Arc<str>]>;
 
 impl TemplateClassDomainIndex {
     pub(crate) fn from_semantic_facts(
-        facts: &crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts,
+        facts: &crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts,
         expected_canonical: &str,
         expected_whole_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Self> {

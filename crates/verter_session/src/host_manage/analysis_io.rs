@@ -133,13 +133,10 @@ impl VerterHost {
         canonical: &str,
         whole_hash: verter_session_query::analysis::types::Hash16,
         source: Arc<str>,
-        script: crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs<
-            '_,
-        >,
+        script: crate::host_manage::template_class_facts::TemplateClassScriptInputs<'_>,
         raw: &verter_compiler::compile::template_data::RawTemplateData,
-        scope: crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope,
-    ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
-    {
+        scope: crate::host_manage::template_class_facts::TemplateClassPublicationScope,
+    ) -> crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts {
         let current_key = self.authoritative_current_artifact_key(canonical);
         if scope.is_base_publishable()
             && current_key.as_ref().is_some_and(|key| {
@@ -166,13 +163,8 @@ impl VerterHost {
                     request_bound: ctx.is_request_bound(),
                 });
             }
-            return crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
-                &ctx,
-                canonical,
-                whole_hash,
-                script,
-                raw,
-                scope,
+            return crate::host_manage::template_class_facts::build_template_class_semantic_facts(
+                &ctx, canonical, whole_hash, script, raw, scope,
             );
         }
 
@@ -198,7 +190,7 @@ impl VerterHost {
                 request_bound: ctx.is_request_bound(),
             });
         }
-        crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+        crate::host_manage::template_class_facts::build_template_class_semantic_facts(
             &ctx, canonical, whole_hash, script, raw, scope,
         )
     }
@@ -234,7 +226,7 @@ impl VerterHost {
             canonical,
             whole_hash,
             Arc::clone(source),
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+            crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                 macros: &script_analysis.macros,
                 bindings: &script_analysis.bindings,
             },
@@ -242,8 +234,8 @@ impl VerterHost {
             // This builder's only caller is the content-override lane
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+            crate::host_manage::template_class_facts::TemplateClassPublicationScope::Fenced(
+                crate::host_manage::template_class_facts::TemplateClassFenceReason::SessionOverlay,
             ),
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
@@ -376,7 +368,7 @@ impl VerterHost {
                 canonical,
                 whole_hash,
                 Arc::clone(&source),
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                     macros: &snapshot.macros,
                     bindings: &snapshot.bindings,
                 },
@@ -387,10 +379,10 @@ impl VerterHost {
                 // point attests `false` for its own overlay bytes. The
                 // seed-currentness half is composed inside the wrapper.
                 if store_published {
-                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable
+                    crate::host_manage::template_class_facts::TemplateClassPublicationScope::BasePublishable
                 } else {
-                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
-                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+                    crate::host_manage::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::host_manage::template_class_facts::TemplateClassFenceReason::SessionOverlay,
                     )
                 },
             );
@@ -429,7 +421,10 @@ impl VerterHost {
                     // This lane compiles with default `CodegenOptions`
                     // — no parse-affecting profile options reach it.
                     default_extraction: true,
-                    template_class_signature: crate::project_semantic_dispatch::template_class_facts::complete_dependency_signature(&facts),
+                    template_class_signature:
+                        crate::host_manage::template_class_facts::complete_dependency_signature(
+                            &facts,
+                        ),
                 },
             );
         }

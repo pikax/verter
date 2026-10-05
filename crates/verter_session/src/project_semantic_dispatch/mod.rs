@@ -218,7 +218,6 @@ pub(crate) mod semantic_source_leaf_facts;
 mod signature_instantiation;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
-pub(crate) mod template_class_facts;
 mod template_relation;
 pub(crate) mod walk;
 
